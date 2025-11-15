@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+
+# Tail Azure web app logs based on environment alias
+
+ENV="$1"
+
+case "$ENV" in
+  dev|dev2)
+    az webapp log tail --name app-developer-payi-dev2-westus3 --resource-group rg-payi-dev2-westus3
+    ;;
+  qa|qa2)
+    az webapp log tail --name app-developer-payi-qa2-westus3 --resource-group rg-payi-qa2-westus3
+    ;;
+  staging|stg|staging2)
+    az webapp log tail --name app-developer-payi-stg-centralus --resource-group rg-payi-stg-centralus
+    ;;
+  prod)
+    az webapp log tail --name app-developer-payi-prod-centralus --resource-group rg-payi-prod-centralus
+    ;;
+  *)
+    echo "Unknown environment: $ENV"
+    echo "Usage: tail <env>"
+    echo "Available environments: dev, qa, staging, prod"
+    exit 1
+    ;;
+esac
