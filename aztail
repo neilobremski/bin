@@ -19,7 +19,7 @@ case "$ENV" in
     ;;
   *)
     echo "Unknown environment: $ENV"
-    echo "Usage: tail <env>"
+    echo "Usage: aztail <env>"
     echo "Available environments: dev, qa, staging, prod"
     exit 1
     ;;
