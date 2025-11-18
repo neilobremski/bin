@@ -1,0 +1,5 @@
+#!/bin/bash
+# strip-color - remove ANSI color codes from input
+# Usage: command | strip-color
+
+sed 's/\x1b\[[0-9;]*m//g'

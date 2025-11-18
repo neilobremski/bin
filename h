@@ -34,5 +34,9 @@ fi
 
 color_code="${colors[$color]:-31}"
 
-# Highlight the pattern with the specified color
-sed -E "s/$pattern/\x1b[${color_code}m&\x1b[0m/g"
+# Set GREP_COLORS to use the specified color
+# Format: mt=color_code where mt is the matched text color
+export GREP_COLORS="mt=${color_code}"
+
+# Use grep to highlight the pattern (matches line if pattern exists, shows all lines)
+grep --color=always -E "$pattern|$"
