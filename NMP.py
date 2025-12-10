@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 NMP.py - Neil's Manual Proxy
 
@@ -287,7 +288,7 @@ def load_folder_config():
       'sent': {...}
       }
   """
-  nmp_base = os.getenv('NMP_BASE')
+  nmp_base = os.getenv('NMP_BASE') or default_NMP_BASE()
   if not nmp_base:
     print('ERROR: NMP_BASE is not set.')
     sys.exit(1)
@@ -406,6 +407,12 @@ def serialize_data(data):
     # If JSON serialization fails, convert to string
     return str(data), 'string'
 
+
+def default_NMP_BASE():
+  """Use $HOME/Downloads/nmp/"""
+  path = os.path.join(os.path.expanduser('~'), 'Downloads', 'nmp')
+  os.makedirs(path, exist_ok=True)
+  return path
 
 def deserialize_data(data, data_type):
   """
@@ -596,6 +603,7 @@ def process_server_request(file_path, remote_server, sent_folder, inbox_folder, 
     # 3. Make the request to the remote server
     print(f"Server: {method} {url}", file=sys.stderr)
     if curl_executor:
+      print(f"Server: Using curl template executor.", file=sys.stderr)
       curl_response = curl_executor.execute(
         method=method,
         url=url,
@@ -721,7 +729,7 @@ def run_server(folder_config):
 
 if __name__ == "__main__":
   load_dotenv()
-  parser = argparse.ArgumentParser(description="NMP: NMP folderized proxy client/server.")
+  parser = argparse.ArgumentParser(description="NMP: Neil's Manual Proxy aka folderized client/server.")
   mode_group = parser.add_mutually_exclusive_group(required=True)
   mode_group.add_argument('--client', action='store_true', help='Run as HTTP file proxy (client mode)')
   mode_group.add_argument('--server', action='store_true', help='Run as batch processor/relay (server mode)')
