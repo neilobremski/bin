@@ -1,0 +1,32 @@
+#!/bin/bash
+
+if can-use-mps; then
+  export SUNO_ENABLE_MPS=True
+  echo "MPS is available, enabling SUNO_ENABLE_MPS"
+else
+  echo "MPS not available, running without SUNO_ENABLE_MPS"
+fi
+
+# find "bark" repo under ~/repos or ~/
+if [ -d "$HOME/repos/bark" ]; then
+  BARK_DIR="$HOME/repos/bark"
+elif [ -d "$HOME/bark" ]; then
+  BARK_DIR="$HOME/bark"
+else
+  echo "Bark repository not found under ~/repos or ~/"
+  exit 1
+fi
+
+# show help if --help is passed
+for arg in "$@"; do
+    if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+        echo "Usage: $0 [bark options]"
+        echo "Example: $0 --text 'Hello world' --output_filename hello.wav"
+        exit 0
+    fi
+done
+
+# activate virtual environment and run bark with SUNO_ENABLE_MPS if set
+echo "Bark directory: $BARK_DIR"
+source "$BARK_DIR/venv/bin/activate"
+python -m bark "$@"
