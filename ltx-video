@@ -1,0 +1,124 @@
+#!/bin/bash
+
+# ltx-video: Wrapper script for generating videos with LTX-Video
+# Usage: ltx-video [options] [prompt text...] [output.mp4]
+# Options starting with - or -- are passed to inference.py
+# File paths are used as reference images
+# Text arguments become the prompt
+# Last argument ending in .mp4 is the output filename
+
+set -e
+
+# Determine LTX-Video repo location
+if [ -d "$HOME/repos/LTX-Video" ]; then
+  LTX_DIR="$HOME/repos/LTX-Video"
+elif [ -d "$HOME/LTX-Video" ]; then
+  LTX_DIR="$HOME/LTX-Video"
+else
+  echo "Error: LTX-Video repository not found in $HOME/repos/LTX-Video or $HOME/LTX-Video"
+  exit 1
+fi
+
+# Default parameters
+MODEL="ltxv-2b-0.9.8-distilled"
+NUM_FRAMES=73  # 3 seconds at 24 FPS (8*9 + 1)
+FRAME_RATE=24
+HEIGHT=480
+WIDTH=704
+OUTPUT_FILE=""
+PROMPT=""
+NEGATIVE_PROMPT=""
+REFERENCE_IMAGE=""
+EXTRA_ARGS=()
+
+# Parse arguments
+for arg in "$@"; do
+  # Check if it's the last argument and ends with .mp4
+  if [ "$arg" = "${@: -1}" ] && [[ "$arg" == *.mp4 ]]; then
+    OUTPUT_FILE="$arg"
+  # Check if it starts with single dash (negative prompt)
+  elif [[ "$arg" =~ ^-[^-].* ]]; then
+    # Remove leading dash and add to negative prompt
+    NEGATIVE_TEXT="${arg#-}"
+    if [ -z "$NEGATIVE_PROMPT" ]; then
+      NEGATIVE_PROMPT="$NEGATIVE_TEXT"
+    else
+      NEGATIVE_PROMPT="$NEGATIVE_PROMPT, $NEGATIVE_TEXT"
+    fi
+  # Check if it starts with double dash (option)
+  elif [[ "$arg" =~ ^--.+ ]]; then
+    EXTRA_ARGS+=("$arg")
+  # Check if it's an existing file (reference image)
+  elif [ -f "$arg" ]; then
+    REFERENCE_IMAGE="$arg"
+  # Otherwise it's part of the prompt
+  else
+    if [ -z "$PROMPT" ]; then
+      PROMPT="$arg"
+    else
+      PROMPT="$PROMPT $arg"
+    fi
+  fi
+done
+
+# Generate default output filename if not specified
+if [ -z "$OUTPUT_FILE" ]; then
+  TIMESTAMP=$(date +"%Y-%m-%d-%H%M%S")
+  OUTPUT_FILE="${TIMESTAMP}-ltx-video.mp4"
+fi
+
+# Create temporary directory for inference output
+TEMP_DIR=$(mktemp -d)
+echo "Temporary output directory: $TEMP_DIR"
+
+# Activate venv if present
+if [ -d "$LTX_DIR/venv" ]; then
+  source "$LTX_DIR/venv/bin/activate"
+fi
+
+# Build command
+CMD=(python "$LTX_DIR/inference.py")
+CMD+=(--pipeline_config "$LTX_DIR/configs/${MODEL}.yaml")
+CMD+=(--height "$HEIGHT")
+CMD+=(--width "$WIDTH")
+CMD+=(--num_frames "$NUM_FRAMES")
+CMD+=(--frame_rate "$FRAME_RATE")
+CMD+=(--output_path "$TEMP_DIR")
+
+# Add prompt if provided
+if [ -n "$PROMPT" ]; then
+  CMD+=(--prompt "$PROMPT")
+fi
+
+# Add negative prompt if provided
+if [ -n "$NEGATIVE_PROMPT" ]; then
+  CMD+=(--negative_prompt "$NEGATIVE_PROMPT")
+fi
+
+# Add reference image if provided
+if [ -n "$REFERENCE_IMAGE" ]; then
+  CMD+=(--conditioning_media_paths "$REFERENCE_IMAGE")
+  CMD+=(--conditioning_start_frames 0)
+fi
+
+# Add extra arguments
+if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
+  CMD+=("${EXTRA_ARGS[@]}")
+fi
+
+# Execute
+echo "Running: ${CMD[*]}"
+"${CMD[@]}"
+
+# Find the generated video file and move it
+GENERATED_VIDEO=$(find "$TEMP_DIR" -name "*.mp4" -type f | head -n 1)
+
+if [ -n "$GENERATED_VIDEO" ]; then
+  mv "$GENERATED_VIDEO" "$OUTPUT_FILE"
+  echo "Video saved to: $OUTPUT_FILE"
+  # Clean up temp directory
+  rm -rf "$TEMP_DIR"
+else
+  echo "Error: No video file generated in $TEMP_DIR"
+  exit 1
+fi
