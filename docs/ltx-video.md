@@ -14,8 +14,14 @@ ltx-video image.jpg "zoom out slowly"
 # Custom output filename
 ltx-video "spinning cube" cube.mp4
 
+# Use a different model
+ltx-video --model ltxv-13b-0.9.8-distilled "high quality video"
+
 # Override defaults
 ltx-video --num_frames 121 "longer video of a sunset"
+
+# Show help and available models
+ltx-video --help
 ```
 
 ## Usage
@@ -23,6 +29,15 @@ ltx-video --num_frames 121 "longer video of a sunset"
 ```bash
 ltx-video [options] [prompt text...] [output.mp4]
 ```
+
+## Getting Help
+
+Run `ltx-video --help` or `ltx-video -h` to see:
+- Usage syntax and argument parsing rules
+- Default parameters
+- Examples
+- Available wrapper and inference options
+- List of available models on your system
 
 ## Argument Parsing
 
@@ -47,6 +62,28 @@ The script intelligently parses arguments:
 - **Duration**: 73 frames (3 seconds at 24 FPS)
 - **Frame Rate**: 24 FPS
 - **GPU**: Automatically detects and uses MPS (macOS) or CUDA (Windows/Linux)
+
+## Wrapper Options
+
+These options are handled by the ltx-video wrapper script itself (not passed to inference.py):
+
+### Model Selection (`--model` / `-m`)
+
+Select a different model configuration:
+
+```bash
+# Use the 13B distilled model for higher quality
+ltx-video --model ltxv-13b-0.9.8-distilled "cinematic landscape"
+
+# Short form
+ltx-video -m ltxv-13b-0.9.8-distilled "cinematic landscape"
+```
+
+Available models (run `ltx-video --help` to see your installed models):
+- `ltxv-2b-0.9.8-distilled` - Default, fastest, lowest VRAM
+- `ltxv-13b-0.9.8-distilled` - Higher quality, more VRAM
+- `ltxv-13b-0.9.8-dev` - Highest quality, most VRAM
+- FP8 variants (e.g., `ltxv-2b-0.9.8-distilled-fp8`) - Even lower VRAM
 
 ## Examples
 

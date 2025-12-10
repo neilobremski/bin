@@ -9,6 +9,83 @@
 
 set -e
 
+# Determine LTX-Video repo location early (for help to show available models)
+if [ -d "$HOME/repos/LTX-Video" ]; then
+  LTX_DIR="$HOME/repos/LTX-Video"
+elif [ -d "$HOME/LTX-Video" ]; then
+  LTX_DIR="$HOME/LTX-Video"
+else
+  LTX_DIR=""
+fi
+
+# Show help if requested
+show_help() {
+  cat << 'EOF'
+ltx-video - Generate videos using LTX-Video
+
+USAGE
+  ltx-video [options] [prompt text...] [output.mp4]
+
+ARGUMENT PARSING
+  Text arguments       Concatenated with spaces to form the prompt
+  -text                Single dash: added to negative prompt (things to avoid)
+  --option             Double dash: passed directly to inference.py
+  file.jpg             Existing file: used as reference image (image-to-video)
+  output.mp4           Last argument ending in .mp4: output filename
+                       Default: YYYY-MM-DD-HHMMSS-ltx-video.mp4
+
+DEFAULT PARAMETERS
+  Model:       ltxv-2b-0.9.8-distilled
+  Resolution:  480x704
+  Duration:    73 frames (3 seconds at 24 FPS)
+  Frame Rate:  24 FPS
+
+EXAMPLES
+  ltx-video "a cat playing with yarn"
+  ltx-video image.jpg "zoom out slowly"
+  ltx-video "spinning cube" cube.mp4
+  ltx-video "beautiful landscape" -people -buildings
+  ltx-video --num_frames 121 "longer video of a sunset"
+  ltx-video --model ltxv-13b-0.9.8-distilled "high quality video"
+
+WRAPPER OPTIONS
+  --model MODEL        Select model config (see AVAILABLE MODELS below)
+  -m MODEL             Short form of --model
+
+INFERENCE OPTIONS (passed to inference.py)
+  --num_frames NUM     Number of frames (must be 8*N + 1: 9, 17, 25, 49, 73, 121)
+  --height HEIGHT      Video height in pixels (must be divisible by 32)
+  --width WIDTH        Video width in pixels (must be divisible by 32)
+  --seed SEED          Random seed for reproducibility
+  --offload_to_cpu     Enable CPU offloading for lower VRAM usage
+
+EOF
+
+  # List available models if LTX_DIR is found
+  if [ -n "$LTX_DIR" ] && [ -d "$LTX_DIR/configs" ]; then
+    echo "AVAILABLE MODELS"
+    for config in "$LTX_DIR/configs"/*.yaml; do
+      name=$(basename "$config" .yaml)
+      if [ "$name" = "ltxv-2b-0.9.8-distilled" ]; then
+        echo "  $name (default)"
+      else
+        echo "  $name"
+      fi
+    done
+    echo ""
+  fi
+
+  echo "For full documentation, see: ~/bin/docs/ltx-video.md"
+  exit 0
+}
+
+# Check for --help
+for arg in "$@"; do
+  if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+    show_help
+  fi
+done
+
 # Determine LTX-Video repo location
 if [ -d "$HOME/repos/LTX-Video" ]; then
   LTX_DIR="$HOME/repos/LTX-Video"
@@ -31,10 +108,54 @@ NEGATIVE_PROMPT=""
 REFERENCE_IMAGE=""
 EXTRA_ARGS=()
 
-# Parse arguments
-for arg in "$@"; do
+# ============================================================
+# PASS 1: Process wrapper options and build filtered args list
+# ============================================================
+FILTERED_ARGS=()
+SKIP_NEXT=false
+ARGS=("$@")
+
+for i in "${!ARGS[@]}"; do
+  if [ "$SKIP_NEXT" = true ]; then
+    SKIP_NEXT=false
+    continue
+  fi
+  
+  arg="${ARGS[$i]}"
+  next_arg="${ARGS[$((i+1))]:-}"
+  
+  # Wrapper option: --model / -m
+  if [ "$arg" = "--model" ] || [ "$arg" = "-m" ]; then
+    if [ -n "$next_arg" ]; then
+      MODEL="$next_arg"
+      SKIP_NEXT=true
+    else
+      echo "Error: $arg requires a model name"
+      exit 1
+    fi
+  # Add more wrapper options here in the future
+  # elif [ "$arg" = "--some-option" ]; then
+  #   ...
+  else
+    # Not a wrapper option, keep it for pass 2
+    FILTERED_ARGS+=("$arg")
+  fi
+done
+
+# ============================================================
+# PASS 2: Process remaining arguments
+# ============================================================
+# Get last element (Bash 3.2 compatible - no negative indexing)
+FILTERED_COUNT=${#FILTERED_ARGS[@]}
+if [ "$FILTERED_COUNT" -gt 0 ]; then
+  LAST_ARG="${FILTERED_ARGS[$((FILTERED_COUNT-1))]}"
+else
+  LAST_ARG=""
+fi
+
+for arg in "${FILTERED_ARGS[@]}"; do
   # Check if it's the last argument and ends with .mp4
-  if [ "$arg" = "${@: -1}" ] && [[ "$arg" == *.mp4 ]]; then
+  if [ "$arg" = "$LAST_ARG" ] && [[ "$arg" == *.mp4 ]]; then
     OUTPUT_FILE="$arg"
   # Check if it starts with single dash (negative prompt)
   elif [[ "$arg" =~ ^-[^-].* ]]; then
@@ -45,7 +166,7 @@ for arg in "$@"; do
     else
       NEGATIVE_PROMPT="$NEGATIVE_PROMPT, $NEGATIVE_TEXT"
     fi
-  # Check if it starts with double dash (option)
+  # Check if it starts with double dash (option for inference.py)
   elif [[ "$arg" =~ ^--.+ ]]; then
     EXTRA_ARGS+=("$arg")
   # Check if it's an existing file (reference image)
