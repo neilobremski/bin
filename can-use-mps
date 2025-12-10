@@ -1,0 +1,43 @@
+#!/bin/bash
+
+# can-use-mps: Check if MPS (Metal Performance Shaders) is available on this system
+# Exit 0 if MPS is usable, exit 1 otherwise
+# Silent by default, use -v or --verbose for details
+
+VERBOSE=false
+for arg in "$@"; do
+  if [ "$arg" = "-v" ] || [ "$arg" = "--verbose" ]; then
+    VERBOSE=true
+  fi
+done
+
+# MPS is only available on macOS
+if [ "$(uname)" != "Darwin" ]; then
+  if [ "$VERBOSE" = true ]; then
+    echo "MPS not available (not macOS)"
+  fi
+  exit 1
+fi
+
+# Check for Apple Silicon or AMD GPU with Metal support
+# system_profiler gives us GPU info on macOS
+GPU_INFO=$(system_profiler SPDisplaysDataType 2>/dev/null)
+
+if echo "$GPU_INFO" | grep -qi "Apple M"; then
+  if [ "$VERBOSE" = true ]; then
+    echo "MPS is available (Apple Silicon)"
+    echo "$GPU_INFO" | grep -E "Chipset Model:|Total Number of Cores:" | head -4
+  fi
+  exit 0
+elif echo "$GPU_INFO" | grep -qi "Metal"; then
+  if [ "$VERBOSE" = true ]; then
+    echo "MPS is available (Metal-capable GPU)"
+    echo "$GPU_INFO" | grep -E "Chipset Model:|Metal:" | head -4
+  fi
+  exit 0
+else
+  if [ "$VERBOSE" = true ]; then
+    echo "MPS not available (no Metal-capable GPU found)"
+  fi
+  exit 1
+fi

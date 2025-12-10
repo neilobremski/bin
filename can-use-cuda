@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# can-use-cuda: Check if CUDA is available on this system
+# Exit 0 if CUDA is usable, exit 1 otherwise
+# Silent by default, use -v or --verbose for details
+
+VERBOSE=false
+for arg in "$@"; do
+  if [ "$arg" = "-v" ] || [ "$arg" = "--verbose" ]; then
+    VERBOSE=true
+  fi
+done
+
+# Check for NVIDIA GPU and drivers
+if command -v nvidia-smi &> /dev/null; then
+  if nvidia-smi &> /dev/null; then
+    if [ "$VERBOSE" = true ]; then
+      echo "CUDA is available"
+      nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
+    fi
+    exit 0
+  else
+    if [ "$VERBOSE" = true ]; then
+      echo "nvidia-smi found but failed to query GPU"
+    fi
+    exit 1
+  fi
+else
+  if [ "$VERBOSE" = true ]; then
+    echo "CUDA not available (nvidia-smi not found)"
+  fi
+  exit 1
+fi

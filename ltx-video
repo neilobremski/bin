@@ -18,6 +18,85 @@ else
   LTX_DIR=""
 fi
 
+# Install function
+do_install() {
+  echo "=== LTX-Video Installation ==="
+  
+  # Determine install location
+  if [ -d "$HOME/repos" ]; then
+    INSTALL_DIR="$HOME/repos"
+  else
+    INSTALL_DIR="$HOME"
+  fi
+  
+  TARGET_DIR="$INSTALL_DIR/LTX-Video"
+  
+  # Clone if not already present
+  if [ -d "$TARGET_DIR" ]; then
+    echo "LTX-Video repo already exists at $TARGET_DIR"
+    echo "Pulling latest changes..."
+    cd "$TARGET_DIR"
+    git pull
+  else
+    echo "Cloning LTX-Video to $TARGET_DIR..."
+    git clone https://github.com/Lightricks/LTX-Video.git "$TARGET_DIR"
+    cd "$TARGET_DIR"
+  fi
+  
+  # Create venv if it doesn't exist
+  if [ -d "$TARGET_DIR/venv" ]; then
+    echo "Virtual environment already exists"
+  else
+    echo "Creating Python virtual environment..."
+    python3 -m venv "$TARGET_DIR/venv"
+  fi
+  
+  # Activate venv
+  source "$TARGET_DIR/venv/bin/activate"
+  
+  # Upgrade pip
+  echo "Upgrading pip..."
+  pip install --upgrade pip
+  
+  # Install base dependencies from the package
+  echo "Installing LTX-Video package with inference dependencies..."
+  cd "$TARGET_DIR"
+  pip install -e '.[inference]'
+  
+  # Detect GPU backend and reinstall PyTorch if needed for CUDA
+  echo "Detecting GPU backend..."
+  
+  if can-use-cuda; then
+    echo "CUDA detected - reinstalling PyTorch with CUDA support..."
+    # Uninstall CPU-only PyTorch that may have been installed
+    pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
+    # Install PyTorch with CUDA 11.8 support
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+  elif can-use-mps; then
+    echo "MPS (Apple Silicon) detected - PyTorch already has MPS support"
+    # MPS support is built into the standard PyTorch for macOS, no reinstall needed
+  else
+    echo "No GPU detected - using CPU-only PyTorch"
+    # The default PyTorch from pip install -e '.[inference]' works for CPU
+  fi
+  
+  echo ""
+  echo "=== Installation Complete ==="
+  echo "LTX-Video installed at: $TARGET_DIR"
+  echo "Virtual environment: $TARGET_DIR/venv"
+  echo ""
+  echo "You can now run: ltx-video \"your prompt here\""
+  
+  exit 0
+}
+
+# Check for --install flag
+for arg in "$@"; do
+  if [ "$arg" = "--install" ]; then
+    do_install
+  fi
+done
+
 # Show help if requested
 show_help() {
   cat << 'EOF'
@@ -49,6 +128,7 @@ EXAMPLES
   ltx-video --model ltxv-13b-0.9.8-distilled "high quality video"
 
 WRAPPER OPTIONS
+  --install            Install/update LTX-Video repo, create venv, install dependencies
   --model MODEL        Select model config (see AVAILABLE MODELS below)
   -m MODEL             Short form of --model
 
