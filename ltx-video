@@ -180,10 +180,10 @@ fi
 
 # Default parameters
 MODEL="ltxv-2b-0.9.8-distilled"
-NUM_FRAMES=73  # 3 seconds at 24 FPS (8*9 + 1)
-FRAME_RATE=24
-HEIGHT=480
-WIDTH=704
+NUM_FRAMES=${NUM_FRAMES:-73}  # 3 seconds at 24 FPS (8*9 + 1)
+FRAME_RATE=${FRAME_RATE:-24}
+HEIGHT=${HEIGHT:-480}
+WIDTH=${WIDTH:-704}
 OUTPUT_FILE=""
 PROMPT=""
 NEGATIVE_PROMPT=""
@@ -279,13 +279,43 @@ if [ -d "$LTX_DIR/venv" ]; then
   source "$LTX_DIR/venv/bin/activate"
 fi
 
+# Check if height, width, num_frames, or frame_rate were passed in INFERENCE_ARGS
+# If so, don't add them again (let the user's values take precedence)
+HAS_HEIGHT=false
+HAS_WIDTH=false
+HAS_NUM_FRAMES=false
+HAS_FRAME_RATE=false
+
+for arg in "${INFERENCE_ARGS[@]}"; do
+  if [ "$arg" = "--height" ]; then
+    HAS_HEIGHT=true
+  elif [ "$arg" = "--width" ]; then
+    HAS_WIDTH=true
+  elif [ "$arg" = "--num_frames" ]; then
+    HAS_NUM_FRAMES=true
+  elif [ "$arg" = "--frame_rate" ]; then
+    HAS_FRAME_RATE=true
+  fi
+done
+
 # Build command
 CMD=(python "$LTX_DIR/inference.py")
 CMD+=(--pipeline_config "$LTX_DIR/configs/${MODEL}.yaml")
-CMD+=(--height "$HEIGHT")
-CMD+=(--width "$WIDTH")
-CMD+=(--num_frames "$NUM_FRAMES")
-CMD+=(--frame_rate "$FRAME_RATE")
+
+# Only add defaults if not already specified in INFERENCE_ARGS
+if [ "$HAS_HEIGHT" = false ]; then
+  CMD+=(--height "$HEIGHT")
+fi
+if [ "$HAS_WIDTH" = false ]; then
+  CMD+=(--width "$WIDTH")
+fi
+if [ "$HAS_NUM_FRAMES" = false ]; then
+  CMD+=(--num_frames "$NUM_FRAMES")
+fi
+if [ "$HAS_FRAME_RATE" = false ]; then
+  CMD+=(--frame_rate "$FRAME_RATE")
+fi
+
 CMD+=(--output_path "$TEMP_DIR")
 
 # Add prompt if provided
