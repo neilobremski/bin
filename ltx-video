@@ -188,7 +188,7 @@ OUTPUT_FILE=""
 PROMPT=""
 NEGATIVE_PROMPT=""
 REFERENCE_IMAGES=()
-EXTRA_ARGS=()
+INFERENCE_ARGS=()
 
 # ============================================================
 # PASS 1: Process wrapper options and build filtered args list
@@ -250,7 +250,7 @@ for arg in "${FILTERED_ARGS[@]}"; do
     fi
   # Check if it starts with double dash (option for inference.py)
   elif [[ "$arg" =~ ^--.+ ]]; then
-    EXTRA_ARGS+=("$arg")
+    INFERENCE_ARGS+=("$arg")
   # Check if it's an existing file (reference image)
   elif [ -f "$arg" ]; then
     REFERENCE_IMAGES+=("$arg")
@@ -333,8 +333,8 @@ if [ ${#REFERENCE_IMAGES[@]} -gt 0 ]; then
 fi
 
 # Add extra arguments
-if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
-  CMD+=("${EXTRA_ARGS[@]}")
+if [ ${#INFERENCE_ARGS[@]} -gt 0 ]; then
+  CMD+=("${INFERENCE_ARGS[@]}")
 fi
 
 # Execute with timing
