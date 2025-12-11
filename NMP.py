@@ -222,6 +222,8 @@ class CurlTemplateExecutor:
     result = subprocess.run(rendered, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
       raise RuntimeError(f"Curl template failed (exit {result.returncode}): {result.stderr or result.stdout}")
+    print(f"Curl stderr: {result.stderr}", file=sys.stderr)
+    print(f"Curl stdout: {result.stdout}", file=sys.stderr)
 
     output = (result.stdout or '').strip() + (result.stderr or '').strip()
     status_code, status_text, parsed_headers, body = self._parse_curl_output(output)
@@ -249,7 +251,7 @@ class CurlTemplateExecutor:
       if not line or line in {'*', '<', '>'}:
         continue
 
-      if line.startswith('* '):  # debug print
+      if line.startswith('* ') or line.startswith('} [') or line.startswith('{ ['):  # debug print
         debug_lines.append(line)
         print(f"DEBUG: {line}", file=sys.stderr)
         continue
@@ -483,15 +485,11 @@ def run_client(folder_config, port=19790, cache_picky=False):
       key_lower = key.lower()
       if key_lower in hash_headers or key_lower.startswith('x-') or key_lower.startswith('xproxy-'):
         allowed_headers[key] = value
-      else:
-        print(f"Skipping header for hash: {key}", file=sys.stderr)
     server_headers = {}
     for key, value in request.headers.items():
       key_lower = key.lower()
       if key_lower in pass_headers or key_lower.startswith('x-') or key_lower.startswith('xproxy-'):
         server_headers[key] = value
-      else:
-        print(f"Skipping header for server: {key}", file=sys.stderr)
 
     # Serialize body
     raw_data = request.get_data()
