@@ -137,7 +137,7 @@ class CurlTemplateExecutor:
     Build curl command options from request parameters.
     Returns a string of curl options.
     """
-    opts = []
+    opts = ['-v']  # Add verbose for response headers and status
     
     # Method
     if method.upper() != 'GET':
@@ -197,7 +197,7 @@ class CurlTemplateExecutor:
       data: Optional request body (str, bytes)
 
     Returns:
-      dict with keys: status_code, status_text, headers, body, raw_output
+      dict with keys: status_code, status_text, headers, body
     """
     headers = headers or {}
     data = data or ''
@@ -218,58 +218,70 @@ class CurlTemplateExecutor:
     for key, value in replacements.items():
       rendered = rendered.replace(f"{{{{{key}}}}}", value)
 
+    print(f"Executing curl template for {method} {url}:\n```sh\n{rendered}\n```\n", file=sys.stderr)
     result = subprocess.run(rendered, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
       raise RuntimeError(f"Curl template failed (exit {result.returncode}): {result.stderr or result.stdout}")
 
-    output = (result.stdout or '').strip()
+    output = (result.stdout or '').strip() + (result.stderr or '').strip()
     status_code, status_text, parsed_headers, body = self._parse_curl_output(output)
+    print(f"Curl response: {status_code} {status_text}, headers: {parsed_headers.keys()}", file=sys.stderr)
     return {
       'status_code': status_code,
       'status_text': status_text,
       'headers': parsed_headers,
       'body': body,
-      'raw_output': output
     }
 
   def _parse_curl_output(self, output):
     """
-    Try to extract status, headers, and body from curl output.
-    If no HTTP status line is present, default to 200 with the full output as body.
+    Try to extract status, headers, and body from curl stderr.
+    If no HTTP status line is present, default to 204
     """
     status_code = None
     status_text = ''
     headers = {}
+    debug_lines = []
     body_lines = []
-    parsing_headers = False
 
     for line in output.splitlines():
-      if line.startswith('HTTP/'):
+      line = line.strip()  # remove \r
+      if not line or line in {'*', '<', '>'}:
+        continue
+
+      if line.startswith('* '):  # debug print
+        debug_lines.append(line)
+        print(f"DEBUG: {line}", file=sys.stderr)
+        continue
+
+      if line.startswith('> '):  # request header
+        debug_lines.append(line)
+        continue
+
+      if line.startswith('< HTTP/'):
         # Reset for the last response block (handles redirects)
-        parts = line.split(None, 3)
-        status_code = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
-        status_text = parts[2] if len(parts) > 2 else ''
-        headers = {}
-        body_lines = []
-        parsing_headers = True
+        parts = line.split(" ", 3)
+        status_code = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+        status_text = parts[3] if len(parts) > 3 else ''
+        print(f"STATUS: {status_code} {status_text}", file=sys.stderr)
         continue
 
-      if parsing_headers:
-        if not line.strip():
-          parsing_headers = False
-          continue
-        if ':' in line:
-          key, value = line.split(':', 1)
-          headers[key.strip()] = value.strip()
+      if line.startswith('< '):  # response header
+        line = line[2:]  # strip leading '< '
+        header_name = line.split(':', 1)[0].strip().lower()
+        header_value = line.split(':', 1)[1].strip() if ':' in line else ''
+        headers[header_name] = header_value
+        print(f"HEADER: {header_name}: {header_value}", file=sys.stderr)
         continue
 
+      # Anything else is body
+      print(f"BODY: {line}", file=sys.stderr)
       body_lines.append(line)
 
     if status_code is None:
-      status_code = 200
+      status_code = 204
 
-    body = '\n'.join(body_lines).strip('\n')
-    return status_code, status_text, headers, body
+    return status_code, status_text, headers, '\n'.join(body_lines)
 
 
 def load_folder_config():
@@ -328,6 +340,7 @@ def load_folder_config():
 
 # Global variables for header handling
 HASH_HEADERS = ['content-type']  # Headers used for cache key generation
+HASH_HEADERS_PICKY = ['authorization', 'xproxy-api-key', 'api-key']  # Additional headers for picky caching
 PASS_HEADERS = ['content-type', 'authorization']  # Headers passed to server
 
 # --- Helper Functions ---
@@ -461,20 +474,24 @@ def run_client(folder_config, port=19790, cache_picky=False):
     # Separate headers for hashing vs passing to server
     hash_headers = HASH_HEADERS.copy()
     if cache_picky:
-      hash_headers.append('authorization')
+      hash_headers.extend(HASH_HEADERS_PICKY)
     pass_headers = PASS_HEADERS.copy()
 
     # Filter headers
     allowed_headers = {}
     for key, value in request.headers.items():
       key_lower = key.lower()
-      if key_lower in hash_headers or key_lower.startswith('x-'):
+      if key_lower in hash_headers or key_lower.startswith('x-') or key_lower.startswith('xproxy-'):
         allowed_headers[key] = value
+      else:
+        print(f"Skipping header for hash: {key}", file=sys.stderr)
     server_headers = {}
     for key, value in request.headers.items():
       key_lower = key.lower()
-      if key_lower in pass_headers or key_lower.startswith('x-'):
+      if key_lower in pass_headers or key_lower.startswith('x-') or key_lower.startswith('xproxy-'):
         server_headers[key] = value
+      else:
+        print(f"Skipping header for server: {key}", file=sys.stderr)
 
     # Serialize body
     raw_data = request.get_data()
@@ -614,7 +631,6 @@ def process_server_request(file_path, remote_server, sent_folder, inbox_folder, 
       response_status_code = curl_response.get('status_code', 200)
       response_status_text = curl_response.get('status_text', '')
       response_headers = curl_response.get('headers', {})
-      response_raw_output = curl_response.get('raw_output')
     else:
       response = requests.request(
           method=method,
@@ -627,7 +643,6 @@ def process_server_request(file_path, remote_server, sent_folder, inbox_folder, 
       response_status_code = response.status_code
       response_status_text = response.reason
       response_headers = dict(response.headers)
-      response_raw_output = None
     
     # 4. Construct the full response object
     finished_at = datetime.now(timezone.utc)
@@ -649,8 +664,6 @@ def process_server_request(file_path, remote_server, sent_folder, inbox_folder, 
       'payload': response_payload,
       'type': response_type
     }
-    if response_raw_output is not None:
-      request_data['response']['raw_output'] = response_raw_output
 
     # Update stats with detailed timing information
     if 'stats' not in request_data:
