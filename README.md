@@ -10,3 +10,4 @@ These are my common command-line utilities. Install by `source`'ing `install.sh`
 | `h` | Highlight text patterns in color by piping ([docs](docs/h.md)) |
 | `install.sh` | Add ~/bin directory to PATH |
 | `ltx-video` | Generate videos using LTX-Video (2B model, 3s @ 24fps default) ([docs](docs/ltx-video.md)) |
+| `NMP.py` | [Neil's Manual Proxy](docs/NMP.md) |

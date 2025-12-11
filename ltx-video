@@ -110,6 +110,7 @@ ARGUMENT PARSING
   -text                Single dash: added to negative prompt (things to avoid)
   --option             Double dash: passed directly to inference.py
   file.jpg             Existing file: used as reference image (image-to-video)
+                       Multiple images are auto-distributed across frames
   output.mp4           Last argument ending in .mp4: output filename
                        Default: YYYY-MM-DD-HHMMSS-ltx-video.mp4
 
@@ -122,6 +123,7 @@ DEFAULT PARAMETERS
 EXAMPLES
   ltx-video "a cat playing with yarn"
   ltx-video image.jpg "zoom out slowly"
+  ltx-video start.jpg end.jpg "morph between images"
   ltx-video "spinning cube" cube.mp4
   ltx-video "beautiful landscape" -people -buildings
   ltx-video --num_frames 121 "longer video of a sunset"
@@ -185,7 +187,7 @@ WIDTH=704
 OUTPUT_FILE=""
 PROMPT=""
 NEGATIVE_PROMPT=""
-REFERENCE_IMAGE=""
+REFERENCE_IMAGES=()
 EXTRA_ARGS=()
 
 # ============================================================
@@ -251,7 +253,7 @@ for arg in "${FILTERED_ARGS[@]}"; do
     EXTRA_ARGS+=("$arg")
   # Check if it's an existing file (reference image)
   elif [ -f "$arg" ]; then
-    REFERENCE_IMAGE="$arg"
+    REFERENCE_IMAGES+=("$arg")
   # Otherwise it's part of the prompt
   else
     if [ -z "$PROMPT" ]; then
@@ -296,10 +298,38 @@ if [ -n "$NEGATIVE_PROMPT" ]; then
   CMD+=(--negative_prompt "$NEGATIVE_PROMPT")
 fi
 
-# Add reference image if provided
-if [ -n "$REFERENCE_IMAGE" ]; then
-  CMD+=(--conditioning_media_paths "$REFERENCE_IMAGE")
-  CMD+=(--conditioning_start_frames 0)
+# Add reference images if provided
+# Multiple images are distributed evenly across the frame range
+if [ ${#REFERENCE_IMAGES[@]} -gt 0 ]; then
+  NUM_IMAGES=${#REFERENCE_IMAGES[@]}
+  
+  # Calculate evenly distributed frame positions (spanning first to last frame)
+  # For N images across F frames: position[i] = i * (F-1) / (N-1)
+  # Examples:
+  #   1 image, 25 frames: frame 0
+  #   2 images, 25 frames: frames 0, 24
+  #   3 images, 25 frames: frames 0, 12, 24
+  #   4 images, 25 frames: frames 0, 8, 16, 24
+  FRAME_POSITIONS=()
+  i=0
+  while [ $i -lt $NUM_IMAGES ]; do
+    if [ $NUM_IMAGES -eq 1 ]; then
+      FRAME_POS=0
+    else
+      # Calculate position: i * (NUM_FRAMES - 1) / (NUM_IMAGES - 1)
+      # Using integer division, spans from frame 0 to last frame
+      FRAME_POS=$(( i * (NUM_FRAMES - 1) / (NUM_IMAGES - 1) ))
+    fi
+    FRAME_POSITIONS+=("$FRAME_POS")
+    i=$((i + 1))
+  done
+  
+  echo "Reference images: ${REFERENCE_IMAGES[*]}"
+  echo "Frame positions: ${FRAME_POSITIONS[*]}"
+  
+  # Pass as space-separated arguments (not comma-separated)
+  CMD+=(--conditioning_media_paths "${REFERENCE_IMAGES[@]}")
+  CMD+=(--conditioning_start_frames "${FRAME_POSITIONS[@]}")
 fi
 
 # Add extra arguments
@@ -307,9 +337,12 @@ if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
   CMD+=("${EXTRA_ARGS[@]}")
 fi
 
-# Execute
+# Execute with timing
 echo "Running: ${CMD[*]}"
+START_TIME=$(date +%s)
 "${CMD[@]}"
+END_TIME=$(date +%s)
+ELAPSED=$((END_TIME - START_TIME))
 
 # Find the generated video file and move it
 GENERATED_VIDEO=$(find "$TEMP_DIR" -name "*.mp4" -type f | head -n 1)
@@ -317,6 +350,7 @@ GENERATED_VIDEO=$(find "$TEMP_DIR" -name "*.mp4" -type f | head -n 1)
 if [ -n "$GENERATED_VIDEO" ]; then
   mv "$GENERATED_VIDEO" "$OUTPUT_FILE"
   echo "Video saved to: $OUTPUT_FILE"
+  echo "Generation time: ${ELAPSED} seconds"
   # Clean up temp directory
   rm -rf "$TEMP_DIR"
 else
