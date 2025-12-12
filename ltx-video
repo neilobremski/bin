@@ -280,21 +280,24 @@ if [ -d "$LTX_DIR/venv" ]; then
 fi
 
 # Check if height, width, num_frames, or frame_rate were passed in INFERENCE_ARGS
-# If so, don't add them again (let the user's values take precedence)
 HAS_HEIGHT=false
 HAS_WIDTH=false
 HAS_NUM_FRAMES=false
 HAS_FRAME_RATE=false
 
 for arg in "${INFERENCE_ARGS[@]}"; do
-  if [ "$arg" = "--height" ]; then
+  # CHANGED: Use pattern matching to catch both "--arg" and "--arg=value"
+  if [[ "$arg" == --height* ]]; then
     HAS_HEIGHT=true
-  elif [ "$arg" = "--width" ]; then
+  elif [[ "$arg" == --width* ]]; then
     HAS_WIDTH=true
-  elif [ "$arg" = "--num_frames" ]; then
+  elif [[ "$arg" == --num_frames* ]]; then
     HAS_NUM_FRAMES=true
-  elif [ "$arg" = "--frame_rate" ]; then
+  elif [[ "$arg" == --frame_rate* ]]; then
     HAS_FRAME_RATE=true
+  elif [[ "$arg" == --offload_to_cpu* ]]; then
+     # Optional: You might want to detect this to auto-skip defaults if needed
+     :
   fi
 done
 
