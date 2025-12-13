@@ -12,6 +12,13 @@ fi
 echo "Neil's Bin: $NEIL_BIN"
 export PATH="$NEIL_BIN:$PATH"
 
+# Check if /usr/lib/wsl/lib exists (WSL2 GPU support) and make sure it's in PATH
+# (Necessary for cron jobs to access GPU on WSL2)
+if [ -d "/usr/lib/wsl/lib" ] && [[ ":$PATH:" != *":/usr/lib/wsl/lib:"* ]]; then
+  echo "Adding /usr/lib/wsl/lib to PATH for WSL2 GPU support"
+  export PATH="/usr/lib/wsl/lib:$PATH"
+fi
+
 # If $HOME/repos exists then `git pull` each repository
 if [ -d "$HOME/repos" ]; then
   for repo in "$HOME/repos"/*; do
