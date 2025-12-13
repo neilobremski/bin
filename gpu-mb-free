@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Output megabytes of free GPU memory, if available
+
+# CUDA GPU memory usage via nvidia-smi
+if can-use-cuda; then
+  nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits
+  exit 0
+fi
+
+# MPS uses unified memory management, so report total/used/free memory
+if can-use-mps; then
+    vm_stat | awk -v ps=$(pagesize) '/Pages free/ {free=$3} /Pages inactive/ {inactive=$3} END { printf "%.0f", (free+inactive)*ps/1024/1024 }'
+    exit 0
+fi
+
+# No GPU memory info available
+echo "0"
+exit 1
