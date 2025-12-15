@@ -29,3 +29,7 @@ if [ -d "$HOME/repos" ]; then
   done
   wait  # Wait for all background git pull processes to finish
 fi
+
+# Update Neil's Bin Here repo
+pushd $NEIL_BIN; git pull; popd
+
