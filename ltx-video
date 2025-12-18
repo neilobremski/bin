@@ -116,7 +116,7 @@ ARGUMENT PARSING
 
 DEFAULT PARAMETERS
   Model:       ltxv-2b-0.9.8-distilled
-  Resolution:  480x704
+  Resolution:  854x480
   Duration:    73 frames (3 seconds at 24 FPS)
   Frame Rate:  24 FPS
 
@@ -180,10 +180,10 @@ fi
 
 # Default parameters
 MODEL="ltxv-2b-0.9.8-distilled"
-NUM_FRAMES=${NUM_FRAMES:-73}  # 3 seconds at 24 FPS (8*9 + 1)
+NUM_FRAMES=${NUM_FRAMES:-121}  # 5 seconds at 24 FPS (5*24 + 1)
 FRAME_RATE=${FRAME_RATE:-24}
 HEIGHT=${HEIGHT:-480}
-WIDTH=${WIDTH:-704}
+WIDTH=${WIDTH:-832}
 OUTPUT_FILE=""
 PROMPT=""
 NEGATIVE_PROMPT=""
