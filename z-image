@@ -7,10 +7,90 @@
 
 set -e
 
+# Install function
+do_install() {
+  echo "=== Z-Image Installation ==="
+  
+  # Determine install location
+  if [ -d "$HOME/repos" ]; then
+    INSTALL_DIR="$HOME/repos"
+  else
+    INSTALL_DIR="$HOME"
+  fi
+  
+  TARGET_DIR="$INSTALL_DIR/Z-Image"
+  
+  # Clone if not already present
+  if [ -d "$TARGET_DIR" ]; then
+    echo "Z-Image repo already exists at $TARGET_DIR"
+    echo "Pulling latest changes..."
+    cd "$TARGET_DIR"
+    git pull
+  else
+    echo "Cloning Z-Image to $TARGET_DIR..."
+    git clone https://github.com/Tongyi-MAI/Z-Image.git "$TARGET_DIR"
+    cd "$TARGET_DIR"
+  fi
+  
+  # Create venv if it doesn't exist
+  if [ -d "$TARGET_DIR/venv" ]; then
+    echo "Virtual environment already exists"
+  else
+    echo "Creating Python virtual environment..."
+    python3 -m venv "$TARGET_DIR/venv"
+  fi
+  
+  # Activate venv
+  source "$TARGET_DIR/venv/bin/activate"
+  
+  # Upgrade pip
+  echo "Upgrading pip..."
+  pip install --upgrade pip
+  
+  # Install diffusers from source (required for Z-Image support)
+  echo "Installing diffusers from source (required for Z-Image)..."
+  pip install git+https://github.com/huggingface/diffusers
+  
+  # Install PyTorch with appropriate backend
+  echo "Detecting GPU backend..."
+  
+  if command -v can-use-cuda &> /dev/null && can-use-cuda; then
+    echo "CUDA detected - installing PyTorch with CUDA support..."
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+  elif command -v can-use-mps &> /dev/null && can-use-mps; then
+    echo "MPS (Apple Silicon) detected - PyTorch already has MPS support"
+    pip install torch torchvision
+  else
+    echo "No GPU detected - using CPU-only PyTorch"
+    pip install torch torchvision
+  fi
+  
+  # Install other dependencies
+  echo "Installing additional dependencies..."
+  pip install transformers accelerate loguru
+  
+  echo ""
+  echo "=== Installation Complete ==="
+  echo "Z-Image installed at: $TARGET_DIR"
+  echo "Virtual environment: $TARGET_DIR/venv"
+  echo ""
+  echo "You can now run: z-image \"your prompt here\""
+  
+  exit 0
+}
+
+# Check for --install flag
+for arg in "$@"; do
+  if [ "$arg" = "--install" ]; then
+    do_install
+  fi
+done
+
 # Check if Z-Image repo exists
 ZIMAGE_DIR="$HOME/repos/Z-Image"
 if [ ! -d "$ZIMAGE_DIR" ]; then
   echo "Error: Z-Image repository not found at $ZIMAGE_DIR"
+  echo "Run: z-image --install"
   exit 1
 fi
 
@@ -122,8 +202,8 @@ def main():
   compile = False
   
   # Get dimensions from environment or use defaults
-  width = int(os.environ.get('WIDTH', '1024'))
-  height = int(os.environ.get('HEIGHT', '1024'))
+  width = int(os.environ.get('WIDTH') or '1024')
+  height = int(os.environ.get('HEIGHT') or '1024')
   num_inference_steps = 8
   guidance_scale = 0.0
   seed = None
