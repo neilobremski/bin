@@ -1,0 +1,174 @@
+#!/bin/bash
+
+# z-image: Wrapper script for generating images with Z-Image
+# Usage: z-image [options] prompt text
+# Options starting with - or -- are passed to Python script
+# Text arguments without dashes become the prompt
+
+set -e
+
+# Check if Z-Image repo exists
+ZIMAGE_DIR="$HOME/repos/Z-Image"
+if [ ! -d "$ZIMAGE_DIR" ]; then
+  echo "Error: Z-Image repository not found at $ZIMAGE_DIR"
+  exit 1
+fi
+
+# Default parameters
+OUTPUT_FILE=""
+PROMPT=""
+WIDTH=""
+HEIGHT=""
+EXTRA_ARGS=()
+
+# Parse arguments
+SKIP_NEXT=false
+ARGS=("$@")
+
+for i in "${!ARGS[@]}"; do
+  if [ "$SKIP_NEXT" = true ]; then
+    SKIP_NEXT=false
+    continue
+  fi
+  
+  arg="${ARGS[$i]}"
+  next_arg="${ARGS[$((i+1))]:-}"
+  
+  # Handle --output or -o flag
+  if [ "$arg" = "--output" ] || [ "$arg" = "-o" ]; then
+    if [ -n "$next_arg" ]; then
+      OUTPUT_FILE="$next_arg"
+      SKIP_NEXT=true
+    else
+      echo "Error: $arg requires a filename"
+      exit 1
+    fi
+  # Handle --width flag
+  elif [ "$arg" = "--width" ]; then
+    if [ -n "$next_arg" ]; then
+      WIDTH="$next_arg"
+      SKIP_NEXT=true
+    else
+      echo "Error: --width requires a value"
+      exit 1
+    fi
+  # Handle --height flag
+  elif [ "$arg" = "--height" ]; then
+    if [ -n "$next_arg" ]; then
+      HEIGHT="$next_arg"
+      SKIP_NEXT=true
+    else
+      echo "Error: --height requires a value"
+      exit 1
+    fi
+  # Handle --16:9 shortcut (dimensions must be divisible by 16)
+  elif [ "$arg" = "--16:9" ]; then
+    WIDTH="1920"
+    HEIGHT="1088"
+  # Check if it starts with a dash (option to pass through)
+  elif [[ "$arg" =~ ^-.+ ]]; then
+    EXTRA_ARGS+=("$arg")
+  # Otherwise it's part of the prompt
+  else
+    if [ -z "$PROMPT" ]; then
+      PROMPT="$arg"
+    else
+      PROMPT="$PROMPT $arg"
+    fi
+  fi
+done
+
+# Generate default output filename if not specified
+if [ -z "$OUTPUT_FILE" ]; then
+  TIMESTAMP=$(date +"%Y-%m-%d-%H-%M-%S")
+  OUTPUT_FILE="z-image-${TIMESTAMP}.png"
+fi
+
+# Activate venv
+if [ -d "$ZIMAGE_DIR/venv" ]; then
+  source "$ZIMAGE_DIR/venv/bin/activate"
+else
+  echo "Error: Virtual environment not found at $ZIMAGE_DIR/venv"
+  echo "Run: cd $ZIMAGE_DIR && python3 -m venv venv && source venv/bin/activate && pip install -e ."
+  exit 1
+fi
+
+# Create temporary Python script to run inference
+TEMP_SCRIPT=$(mktemp)
+cat > "$TEMP_SCRIPT" << 'EOFPYTHON'
+import os
+import sys
+import warnings
+import torch
+
+warnings.filterwarnings("ignore")
+
+# Add Z-Image src to path
+sys.path.insert(0, os.path.join(os.environ['ZIMAGE_DIR'], 'src'))
+
+from utils import AttentionBackend, ensure_model_weights, load_from_local_dir, set_attention_backend
+from zimage import generate
+
+def main():
+  prompt = os.environ.get('PROMPT', '')
+  output_file = os.environ.get('OUTPUT_FILE', 'output.png')
+  
+  if not prompt:
+    print("Error: No prompt provided")
+    sys.exit(1)
+  
+  model_path = ensure_model_weights(os.path.join(os.environ['ZIMAGE_DIR'], "ckpts/Z-Image-Turbo"), verify=False)
+  dtype = torch.bfloat16
+  compile = False
+  
+  # Get dimensions from environment or use defaults
+  width = int(os.environ.get('WIDTH', '1024'))
+  height = int(os.environ.get('HEIGHT', '1024'))
+  num_inference_steps = 8
+  guidance_scale = 0.0
+  seed = None
+  attn_backend = os.environ.get("ZIMAGE_ATTENTION", "_native_flash")
+  
+  # Device selection
+  if torch.cuda.is_available():
+    device = "cuda"
+  elif torch.backends.mps.is_available():
+    device = "mps"
+  else:
+    device = "cpu"
+  
+  # Load models
+  components = load_from_local_dir(model_path, device=device, dtype=dtype, compile=compile)
+  set_attention_backend(attn_backend)
+  
+  # Generate image
+  generator = torch.Generator(device).manual_seed(seed) if seed is not None else None
+  images = generate(
+    prompt=prompt,
+    **components,
+    height=height,
+    width=width,
+    num_inference_steps=num_inference_steps,
+    guidance_scale=guidance_scale,
+    generator=generator,
+  )
+  
+  images[0].save(output_file)
+  print(f"\nImage saved to: {output_file}")
+
+if __name__ == "__main__":
+  main()
+EOFPYTHON
+
+# Export variables for Python script
+export ZIMAGE_DIR
+export PROMPT
+export OUTPUT_FILE
+export WIDTH
+export HEIGHT
+
+# Run the Python script
+python "$TEMP_SCRIPT"
+
+# Clean up
+rm "$TEMP_SCRIPT"
