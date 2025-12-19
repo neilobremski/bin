@@ -1,0 +1,107 @@
+#!/bin/bash
+
+# audioldm: Wrapper script for generating audio with AudioLDM
+# Usage: audioldm [options] prompt text
+# Options starting with - or -- are passed to audioldm script
+# Text arguments without dashes become the prompt
+
+set -e
+
+# Check if AudioLDM repo exists
+AUDIOLDM_DIR="$HOME/repos/AudioLDM"
+if [ ! -d "$AUDIOLDM_DIR" ]; then
+  echo "Error: AudioLDM repository not found at $AUDIOLDM_DIR"
+  exit 1
+fi
+
+# Default parameters
+OUTPUT_FILE=""
+PROMPT=""
+EXTRA_ARGS=()
+
+# Parse arguments
+SKIP_NEXT=false
+ARGS=("$@")
+
+for i in "${!ARGS[@]}"; do
+  if [ "$SKIP_NEXT" = true ]; then
+    SKIP_NEXT=false
+    continue
+  fi
+  
+  arg="${ARGS[$i]}"
+  next_arg="${ARGS[$((i+1))]:-}"
+  
+  # Handle --output or -o flag
+  if [ "$arg" = "--output" ] || [ "$arg" = "-o" ]; then
+    if [ -n "$next_arg" ]; then
+      OUTPUT_FILE="$next_arg"
+      SKIP_NEXT=true
+    else
+      echo "Error: $arg requires a filename"
+      exit 1
+    fi
+  # Check if it starts with a dash (option to pass through)
+  elif [[ "$arg" =~ ^-.+ ]]; then
+    EXTRA_ARGS+=("$arg")
+  # Otherwise it's part of the prompt
+  else
+    if [ -z "$PROMPT" ]; then
+      PROMPT="$arg"
+    else
+      PROMPT="$PROMPT $arg"
+    fi
+  fi
+done
+
+# Generate default output filename if not specified
+if [ -z "$OUTPUT_FILE" ]; then
+  TIMESTAMP=$(date +"%Y-%m-%d-%H-%M-%S")
+  OUTPUT_FILE="audioldm-${TIMESTAMP}.wav"
+fi
+
+# Check if prompt is provided
+if [ -z "$PROMPT" ]; then
+  echo "Error: No prompt provided"
+  exit 1
+fi
+
+# Activate venv if present
+if [ -d "$AUDIOLDM_DIR/venv" ]; then
+  source "$AUDIOLDM_DIR/venv/bin/activate"
+else
+  echo "Warning: Virtual environment not found at $AUDIOLDM_DIR/venv"
+  echo "Attempting to use system-installed audioldm..."
+fi
+
+# Create temporary output directory
+TEMP_DIR=$(mktemp -d)
+
+# Build command
+CMD=(python "$AUDIOLDM_DIR/bin/audioldm")
+CMD+=(--text "$PROMPT")
+CMD+=(--save_path "$TEMP_DIR")
+
+# Add extra arguments
+if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
+  CMD+=("${EXTRA_ARGS[@]}")
+fi
+
+# Run the command
+echo "Generating audio with prompt: $PROMPT"
+"${CMD[@]}"
+
+# Find the generated audio file and move it to the desired location
+GENERATED_AUDIO=$(find "$TEMP_DIR" -name "*.wav" -type f | head -n 1)
+
+if [ -n "$GENERATED_AUDIO" ]; then
+  mv "$GENERATED_AUDIO" "$OUTPUT_FILE"
+  echo ""
+  echo "Audio saved to: $OUTPUT_FILE"
+  # Clean up temp directory
+  rm -rf "$TEMP_DIR"
+else
+  echo "Error: No audio file generated in $TEMP_DIR"
+  rm -rf "$TEMP_DIR"
+  exit 1
+fi
