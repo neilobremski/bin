@@ -1,0 +1,38 @@
+#!/bin/bash
+
+# Determine which model to use
+if [ -z "$OLLAMA_MODEL" ]; then
+  # Get first model from ollama list
+  MODEL=$(ollama list | tail -n +2 | head -n 1 | awk '{print $1}')
+  
+  if [ -z "$MODEL" ]; then
+    echo "Error: No models found. Run 'ollama pull <model>' to download a model." >&2
+    exit 1
+  fi
+else
+  MODEL="$OLLAMA_MODEL"
+fi
+
+# Collect all non-flag arguments as prompt parts
+PROMPT_PARTS=()
+FLAGS=()
+
+for arg in "$@"; do
+  if [[ "$arg" == -* ]]; then
+    FLAGS+=("$arg")
+  else
+    PROMPT_PARTS+=("$arg")
+  fi
+done
+
+# Concatenate prompt parts
+PROMPT="${PROMPT_PARTS[*]}"
+
+# Run ollama with the model and prompt
+if [ -z "$PROMPT" ]; then
+  # Interactive mode if no prompt provided
+  ollama run "${FLAGS[@]}" "$MODEL"
+else
+  # Single query mode
+  ollama run "${FLAGS[@]}" "$MODEL" "$PROMPT"
+fi
