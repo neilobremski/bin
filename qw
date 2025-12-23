@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+
+# qw: Quick AI - Omni-tool for AI-based generation
+# Routes to appropriate tool based on file extension or explicit tool name
+
+set -e
+
+# Map extension to tool (bash 3.2 compatible)
+get_tool_for_ext() {
+  case "$1" in
+    mp4) echo "ltx-video" ;;
+    wav) echo "audioldm" ;;
+    txt) echo "llama" ;;
+    png|jpg|jpeg) echo "z-image" ;;
+    *) echo "" ;;
+  esac
+}
+
+# Show help
+show_help() {
+  cat << 'EOF'
+qw - Quick AI omni-tool for AI-based generation
+
+USAGE
+  qw [tool|extension] [options] prompt...
+  qw output.ext [options] prompt...
+
+ROUTING
+  Tool is determined by:
+  1. Explicit tool name as first arg (llama, audioldm, ltx-video, z-image)
+  2. File extension in first arg (test.mp4 → ltx-video)
+  3. Extension keyword (mp4, wav, txt, png → corresponding tool)
+
+TOOL MAPPINGS
+  mp4          → ltx-video    (video generation)
+  wav          → audioldm     (sound effects)
+  txt          → llama        (text/LLM)
+  png/jpg      → z-image      (image generation)
+
+COMMON OPTIONS
+  -s, --seed SEED        Random seed for reproducibility
+  -w, --width WIDTH      Output width in pixels
+  -h, --height HEIGHT    Output height in pixels
+  -o, --output FILE      Output filename
+  -m, --model MODEL      Model name/config
+
+  Other options prefixed with - or -- are passed to the underlying tool.
+
+PROMPT HANDLING
+  - All non-option arguments are concatenated as the prompt
+  - If an argument matches an existing FILE, that file is used as input
+  - To use a filename literally in prompt, quote it: "myfile.jpg"
+
+EXAMPLES
+  qw test.mp4 the sun explodes
+  qw mp4 -o explosion.mp4 --seed 42 the sun explodes
+  qw ltx-video "cinematic zoom out of earth"
+  qw wav distant thunder rumbling
+  qw explosion.wav --seed 123 large explosion
+  qw txt what is the meaning of life
+  qw image.png a serene mountain landscape
+  qw png --width 1920 --height 1080 cyberpunk cityscape
+
+EOF
+  exit 0
+}
+
+# Check for help
+for arg in "$@"; do
+  if [ "$arg" = "--help" ]; then
+    show_help
+  fi
+done
+
+# Need at least one argument
+if [ $# -eq 0 ]; then
+  echo "Error: No arguments provided"
+  echo "Usage: qw [tool|extension] [options] prompt..."
+  echo "Run 'qw --help' for more information"
+  exit 1
+fi
+
+# Determine tool from first argument
+FIRST_ARG="$1"
+TOOL=""
+OUTPUT_FILE=""
+START_INDEX=1
+
+# Check if first arg is a known tool name
+case "$FIRST_ARG" in
+  llama|audioldm|ltx-video|z-image)
+    TOOL="$FIRST_ARG"
+    START_INDEX=2
+    ;;
+  *)
+    # Check if it contains a dot (potential filename)
+    if [[ "$FIRST_ARG" == *.* ]]; then
+      # Extract extension
+      EXT="${FIRST_ARG##*.}"
+      EXT="$(echo "$EXT" | tr '[:upper:]' '[:lower:]')"  # Convert to lowercase
+      
+      # Look up tool from extension
+      TOOL="$(get_tool_for_ext "$EXT")"
+      if [ -n "$TOOL" ]; then
+        OUTPUT_FILE="$FIRST_ARG"
+        START_INDEX=2
+      fi
+    else
+      # Maybe it's just an extension keyword (mp4, wav, txt, png)
+      EXT="$(echo "$FIRST_ARG" | tr '[:upper:]' '[:lower:]')"
+      TOOL="$(get_tool_for_ext "$EXT")"
+      if [ -n "$TOOL" ]; then
+        START_INDEX=2
+      fi
+    fi
+    ;;
+esac
+
+# If we still don't have a tool, assume first arg is part of prompt
+# and default to llama (text generation)
+if [ -z "$TOOL" ]; then
+  TOOL="llama"
+  START_INDEX=1
+fi
+
+# Build arguments to pass to tool
+TOOL_ARGS=()
+PROMPT_PARTS=()
+SKIP_NEXT=false
+
+# Process remaining arguments
+ARGS=("$@")
+for i in $(seq $START_INDEX $#); do
+  if [ "$SKIP_NEXT" = true ]; then
+    SKIP_NEXT=false
+    continue
+  fi
+  
+  arg="${ARGS[$((i-1))]}"
+  next_arg="${ARGS[$i]:-}"
+  
+  # Common options that we understand
+  case "$arg" in
+    -s|--seed|-w|--width|-h|--height|-o|--output|-m|--model)
+      TOOL_ARGS+=("$arg")
+      if [ -n "$next_arg" ]; then
+        TOOL_ARGS+=("$next_arg")
+        SKIP_NEXT=true
+      fi
+      ;;
+    -*)
+      # Any other option starting with dash
+      TOOL_ARGS+=("$arg")
+      ;;
+    *)
+      # Check if it's an existing file
+      if [ -f "$arg" ]; then
+        # It's a file - pass as-is to tool (they handle files)
+        PROMPT_PARTS+=("$arg")
+      else
+        # It's text - part of prompt
+        PROMPT_PARTS+=("$arg")
+      fi
+      ;;
+  esac
+done
+
+# Add output file if we determined one
+if [ -n "$OUTPUT_FILE" ]; then
+  TOOL_ARGS+=(-o "$OUTPUT_FILE")
+fi
+
+# Combine tool args and prompt
+FINAL_ARGS=("${TOOL_ARGS[@]}" "${PROMPT_PARTS[@]}")
+
+# Execute the appropriate tool
+case "$TOOL" in
+  llama)
+    exec ~/bin/llama "${FINAL_ARGS[@]}"
+    ;;
+  audioldm)
+    exec ~/bin/audioldm "${FINAL_ARGS[@]}"
+    ;;
+  ltx-video)
+    exec ~/bin/ltx-video "${FINAL_ARGS[@]}"
+    ;;
+  z-image)
+    exec ~/bin/z-image "${FINAL_ARGS[@]}"
+    ;;
+  *)
+    echo "Error: Unknown tool '$TOOL'"
+    exit 1
+    ;;
+esac

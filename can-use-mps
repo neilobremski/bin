@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # can-use-mps: Check if MPS (Metal Performance Shaders) is available on this system
 # Exit 0 if MPS is usable, exit 1 otherwise

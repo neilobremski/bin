@@ -2,6 +2,10 @@
 
 These are my common command-line utilities. Install by `source`'ing `install.sh` after cloning.
 
+## Note on Shebangs
+
+All bash scripts use `#!/usr/bin/env bash` instead of `#!/bin/bash`. This allows the scripts to use a newer version of bash if installed (e.g., via Homebrew on macOS) rather than being forced to use the system's outdated bash 3.2.57.
+
 ## Commands
 
 | Command | Description |

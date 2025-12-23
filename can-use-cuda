@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # can-use-cuda: Check if CUDA is available on this system
 # Exit 0 if CUDA is usable, exit 1 otherwise

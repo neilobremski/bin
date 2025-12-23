@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 if can-use-mps; then
   export SUNO_ENABLE_MPS=True

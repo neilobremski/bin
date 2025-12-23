@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # z-image: Wrapper script for generating images with Z-Image
 # Usage: z-image [options] prompt text

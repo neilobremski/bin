@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # strip-color - remove ANSI color codes from input
 # Usage: command | strip-color
 

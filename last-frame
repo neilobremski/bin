@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Script to extract the last frame from a video file using ffmpeg
 # Usage: last-frame <video_file> [--output|-o <output_file>]

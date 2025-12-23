@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Determine which model to use
 if [ -z "$OLLAMA_MODEL" ]; then

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # ltx-video: Wrapper script for generating videos with LTX-Video
 # Usage: ltx-video [options] [prompt text...] [output.mp4]

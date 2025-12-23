@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # audioldm: Wrapper script for generating audio with AudioLDM
 # Usage: audioldm [options] prompt text

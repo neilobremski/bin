@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # h - highlight text patterns in color
 # Usage: command | h pattern [color]
 # Example: cat file.log | h ERROR red
