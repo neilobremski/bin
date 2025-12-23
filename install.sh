@@ -19,17 +19,29 @@ if [ -d "/usr/lib/wsl/lib" ] && [[ ":$PATH:" != *":/usr/lib/wsl/lib:"* ]]; then
   export PATH="/usr/lib/wsl/lib:$PATH"
 fi
 
-# If $HOME/repos exists then `git pull` each repository
-if [ -d "$HOME/repos" ]; then
-  for repo in "$HOME/repos"/*; do
-    if [ -d "$repo/.git" ]; then
-      echo "Updating $repo"
-      git -C "$repo" pull &
-    fi
-  done
-  wait  # Wait for all background git pull processes to finish
+# Set NEILS_BIN_CACHE to ~/.cache/neil/bin and create it if it doesn't exist
+export NEILS_BIN_CACHE="$HOME/.cache/neil/bin"
+if [ ! -d "$NEILS_BIN_CACHE" ]; then
+  echo "Creating $NEILS_BIN_CACHE"
+  mkdir -p "$NEILS_BIN_CACHE"
 fi
 
-# Update Neil's Bin Here repo
-pushd $NEIL_BIN; git pull; popd
+# Update git repos if $NEILS_BIN_CACHE/git-check is more than 24 hours old
+if [ ! -f "$NEILS_BIN_CACHE/git-check" ] || [ $(find "$NEILS_BIN_CACHE/git-check" -mmin +1440) ]; then
+  echo "Updating git repositories..."
+  touch "$NEILS_BIN_CACHE/git-check"
 
+  # If $NEILS_BIN_CACHE/repos exists then `git pull` each repository
+  if [ -d "$NEILS_BIN_CACHE/repos" ]; then
+    for repo in "$NEILS_BIN_CACHE/repos"/*; do
+      if [ -d "$repo/.git" ]; then
+        echo "Updating $repo"
+        git -C "$repo" pull &
+      fi
+    done
+    wait  # Wait for all background git pull processes to finish
+  fi
+
+  # Update Neil's Bin Here repo
+  pushd $NEIL_BIN; git pull; popd
+fi
