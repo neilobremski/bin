@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# py-json-tool - pretty-print JSON via python3 -m json.tool
+# Usage: command | py-json-tool [options]
+# Example: curl -s https://api.example.com/data | py-json-tool
+
+python3 -m json.tool "$@"

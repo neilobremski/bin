@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Runs every time a new shell is opened to setup *Neil's Bin Here*
 
 # Add the parent directory of this script to PATH
 # Detect if running in zsh or bash
@@ -9,7 +10,7 @@ else
 fi
 
 # Add Neil's Bin Here to PATH
-echo "Neil's Bin: $NEIL_BIN"
+echo "Neil's Bin Here: $NEIL_BIN/README.md (common scripts and tools)"
 export PATH="$NEIL_BIN:$PATH"
 
 # Check if /usr/lib/wsl/lib exists (WSL2 GPU support) and make sure it's in PATH

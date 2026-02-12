@@ -16,3 +16,4 @@ All bash scripts use `#!/usr/bin/env bash` instead of `#!/bin/bash`. This allows
 | `install.sh` | Add ~/bin directory to PATH |
 | `ltx-video` | Generate videos using LTX-Video (2B model, 3s @ 24fps default) ([docs](docs/ltx-video.md)) |
 | `NMP.py` | [Neil's Manual Proxy](docs/NMP.md) |
+| `py-json-tool` | Pretty-print and validate JSON via Python ([docs](docs/py-json-tool.md)) |
