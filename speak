@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+#
+# speak - Cross-platform text-to-speech
+#
+# Usage:
+#   speak "Hello, world"
+#   echo "Hello, world" | speak
+#
+
+set -euo pipefail
+
+is_wsl() {
+  [[ -f /proc/version ]] && grep -qi microsoft /proc/version
+}
+
+speak_text() {
+  local text="$1"
+
+  # macOS
+  if command -v say &>/dev/null; then
+    say "$text"
+  # Linux: Speech Dispatcher
+  elif command -v spd-say &>/dev/null; then
+    spd-say --wait "$text"
+  # Linux: espeak-ng / espeak
+  elif command -v espeak-ng &>/dev/null; then
+    espeak-ng "$text"
+  elif command -v espeak &>/dev/null; then
+    espeak "$text"
+  # WSL: PowerShell speech synthesizer
+  elif is_wsl && command -v powershell.exe &>/dev/null; then
+    powershell.exe -Command "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('$text')"
+  else
+    echo "speak: no text-to-speech engine found" >&2
+    echo "Install one of: say (macOS), spd-say, espeak-ng, espeak" >&2
+    exit 1
+  fi
+}
+
+if [[ $# -gt 0 ]]; then
+  speak_text "$*"
+else
+  text="$(cat)"
+  if [[ -n "$text" ]]; then
+    speak_text "$text"
+  fi
+fi
