@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+#
+# payi-ingest - Send ingest requests to the Pay-i API
+#
+# Usage:
+#   payi-ingest <application> [--xproxy-* "value"] [json]
+#   echo '{"category":"system.openai",...}' | payi-ingest <application> [--xproxy-* "value"]
+#
+# The <application> argument selects a config file from ~/.payi-ingest/.
+# Each config file should set PAYI_API_URL and PAYI_API_KEY:
+#
+#   # ~/.payi-ingest/my-app
+#   PAYI_API_URL="https://localhost:3011"
+#   PAYI_API_KEY="sk-..."
+#
+# JSON payload is the last non-flag argument, or piped via stdin.
+#
+# Any --xproxy-* flag maps to an xProxy-* HTTP header. For example:
+#   --xproxy-UseCase-Name "my-uc"    → xProxy-UseCase-Name: my-uc
+#   --xproxy-User-ID "alice"         → xProxy-User-ID: alice
+#
+# Examples:
+#   payi-ingest my-app '{"category":"system.openai","resource":"gpt-4o","units":{"text":{"input":100,"output":50}}}'
+#   cat payload.json | payi-ingest my-app --xproxy-UseCase-Name "classify"
+#
+
+set -euo pipefail
+
+CONFIG_DIR="$HOME/.payi-ingest"
+
+usage() {
+  sed -n '3,/^$/s/^# \?//p' "$0" >&2
+  if [[ -d "$CONFIG_DIR" ]]; then
+    echo "Available applications:" >&2
+    ls "$CONFIG_DIR" 2>/dev/null | sed 's/^/  /' >&2
+  fi
+  exit 1
+}
+
+[[ $# -lt 1 ]] && usage
+
+app="$1"
+shift
+
+config="$CONFIG_DIR/$app"
+if [[ ! -f "$config" ]]; then
+  echo "payi-ingest: unknown application '$app'" >&2
+  if [[ -d "$CONFIG_DIR" ]]; then
+    echo "Available applications:" >&2
+    ls "$CONFIG_DIR" 2>/dev/null | sed 's/^/  /' >&2
+  fi
+  exit 1
+fi
+
+source "$config"
+
+if [[ -z "${PAYI_API_URL:-}" ]]; then
+  echo "payi-ingest: PAYI_API_URL not set in $config" >&2
+  exit 1
+fi
+if [[ -z "${PAYI_API_KEY:-}" ]]; then
+  echo "payi-ingest: PAYI_API_KEY not set in $config" >&2
+  exit 1
+fi
+
+# Parse --xproxy-* flags and collect the JSON payload
+headers=()
+json=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --xproxy-*)
+      header_name="${1#--}"
+      header_name="xProxy-${header_name#xproxy-}"
+      if [[ $# -lt 2 ]]; then
+        echo "payi-ingest: missing value for $1" >&2
+        exit 1
+      fi
+      headers+=(-H "$header_name: $2")
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      ;;
+    *)
+      json="$1"
+      shift
+      ;;
+  esac
+done
+
+# Read from stdin if no JSON argument
+if [[ -z "$json" ]]; then
+  if [[ -t 0 ]]; then
+    echo "payi-ingest: no JSON payload (pass as argument or pipe to stdin)" >&2
+    exit 1
+  fi
+  json="$(cat)"
+fi
+
+exec curl -sk -X POST "${PAYI_API_URL}/api/v1/ingest" \
+  -H "Content-Type: application/json" \
+  -H "xProxy-api-key: $PAYI_API_KEY" \
+  "${headers[@]}" \
+  -d "$json"
