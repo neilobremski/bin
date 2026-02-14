@@ -1,6 +1,6 @@
 # az-wi-comment
 
-Add a Markdown-formatted comment to an Azure DevOps work item.
+Add a Markdown-formatted comment with optional inline images to an Azure DevOps work item.
 
 ## Prerequisites
 
@@ -26,8 +26,42 @@ az-wi-comment 5060 --org https://dev.azure.com/myorg --project myproj "comment"
 |------|---------|-------------|
 | `--org <url>` | `https://dev.azure.com/pay-i` | Azure DevOps organization URL |
 | `--project <name>` | `pay-i` | Project name |
+| `--image <path>` | | Upload image and append to comment (repeatable) |
 
 The comment text is the final positional argument, or piped via stdin.
+
+## Inline Images
+
+There are two ways to include images in comments:
+
+### 1. Markdown image syntax with local paths (auto-uploaded)
+
+Any `![alt](path)` in the comment text where `path` is an existing local file will be automatically uploaded to Azure DevOps and the path replaced with the attachment URL:
+
+```bash
+az-wi-comment 5060 '![Screenshot of bug](./screenshots/bug.png)
+
+The samples pane is missing KPI values.'
+```
+
+The script detects local file paths (anything that isn't `http://` or `https://`), uploads them via the [Attachments API](https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/attachments/create?view=azure-devops-rest-7.1), and replaces the path in-place. URLs are left untouched.
+
+### 2. `--image` flag (appended to end)
+
+Use `--image` to upload an image and append it to the end of the comment. Can be repeated for multiple images:
+
+```bash
+az-wi-comment 5060 --image before.png --image after.png "Fixed the layout bug."
+```
+
+Each image is appended as `![filename](url)` after the comment text.
+
+### How image upload works
+
+1. The image binary is uploaded via `POST /_apis/wit/attachments?fileName=name.png` with `Content-Type: application/octet-stream`
+2. Azure DevOps returns a permanent attachment URL containing a GUID
+3. The URL is embedded in the comment using standard markdown image syntax: `![alt](url)`
+4. The image renders inline in the work item discussion — no need to formally attach it to the work item
 
 ## How It Works
 
@@ -40,7 +74,7 @@ The `az boards work-item update --discussion` flag escapes Markdown (turning `**
 ]
 ```
 
-The `multilineFieldsFormat/System.History` operation tells Azure DevOps to store the comment as Markdown rather than HTML. This feature was added to the REST API in 2025 but is not yet supported by the `az boards` CLI.
+The `multilineFieldsFormat/System.History` operation tells Azure DevOps to store the comment as Markdown rather than HTML. This feature was [added to the REST API in 2025](https://github.com/Azure/azure-devops-cli-extension/issues/1473) but is not yet supported by the `az boards` CLI.
 
 ## Output
 
@@ -52,7 +86,7 @@ az-wi-comment 5060 "Fixed in commit abc123" | jq '{id: .id, rev: .rev}'
 
 ## Tips
 
-Post a multi-line comment with a heredoc:
+Post a multi-line comment with a heredoc and inline screenshot:
 
 ```bash
 az-wi-comment 5060 "$(cat <<'EOF'
@@ -61,7 +95,15 @@ az-wi-comment 5060 "$(cat <<'EOF'
 - Instance with all KPIs: shows all three
 - Instance with missing KPIs: only shows the one that was reported
 
+![Samples pane](./screenshots/missing-kpis.png)
+
 Agree this needs an N/A indicator.
 EOF
 )"
 ```
+
+## References
+
+- [Attachments - Create REST API](https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/attachments/create?view=azure-devops-rest-7.1) — upload images
+- [Markdown Support Arrives for Work Items](https://devblogs.microsoft.com/devops/markdown-support-arrives-for-work-items/) — multilineFieldsFormat
+- [CLI Markdown support request (GitHub #1473)](https://github.com/Azure/azure-devops-cli-extension/issues/1473) — REST API workaround
