@@ -1,54 +1,30 @@
+---
+name: payi-ingest
+description: Sends ingest/telemetry requests to the Pay-i API with xProxy headers. Use when posting usage data or telemetry to Pay-i.
+allowed-tools: Bash(payi-ingest *)
+---
+
 # payi-ingest
 
-Send ingest requests to the Pay-i API using per-application config profiles.
+Send ingest requests to the Pay-i API. Thin wrapper around `payi` targeting `post /api/v1/ingest`.
 
 ## Usage
 
 ```bash
-payi-ingest <application> [--xproxy-* "value"] [json]
-echo '{"category":"system.openai",...}' | payi-ingest <application> [--xproxy-* "value"]
+payi-ingest <application> [--header value] [-param value] [json]
+echo '{"category":"system.openai",...}' | payi-ingest <application>
 ```
+
+Running with no arguments shows usage and lists available applications (via `payi`).
 
 ## Parameters
 
 - `application` - Name of a config profile in `~/.payi-ingest/` (required)
-- `--xproxy-* "value"` - Any number of xProxy headers (optional)
+- `--key value` - HTTP header (e.g., `--xProxy-UseCase-Name "name"`) — passed through to `payi`
+- `-key value` - Query string parameter — passed through to `payi`
 - `json` - JSON payload as the last positional argument, or piped via stdin
 
-## Configuration
-
-Each application gets its own file in `~/.payi-ingest/`. The file is sourced as bash and must set:
-
-| Variable | Description |
-|----------|-------------|
-| `PAYI_API_URL` | Full base URL with protocol (e.g., `https://localhost:3011`) |
-| `PAYI_API_KEY` | Application API key |
-
-### Setup
-
-```bash
-mkdir -p ~/.payi-ingest
-
-cat > ~/.payi-ingest/my-app <<'EOF'
-PAYI_API_URL="https://localhost:3011"
-PAYI_API_KEY="sk-payi-app-..."
-EOF
-```
-
-Running with no arguments or an unknown application name lists available profiles.
-
-## xProxy Headers
-
-Any `--xproxy-*` flag is mapped to an `xProxy-*` HTTP header. The `xProxy-api-key` header is always sent from `PAYI_API_KEY` in the config.
-
-| Flag | Header |
-|------|--------|
-| `--xproxy-UseCase-Name "name"` | `xProxy-UseCase-Name: name` |
-| `--xproxy-UseCase-ID "id"` | `xProxy-UseCase-ID: id` |
-| `--xproxy-UseCase-Step "step"` | `xProxy-UseCase-Step: step` |
-| `--xproxy-User-ID "user"` | `xProxy-User-ID: user` |
-| `--xproxy-Limit-IDs "id1,id2"` | `xProxy-Limit-IDs: id1,id2` |
-| `--xproxy-Account-Name "acct"` | `xProxy-Account-Name: acct` |
+See `payi` for configuration setup and the full argument reference.
 
 ## Examples
 
@@ -62,22 +38,16 @@ payi-ingest my-app '{"category":"system.openai","resource":"gpt-4o","units":{"te
 
 ```bash
 payi-ingest my-app \
-  --xproxy-UseCase-Name "ticket-classification" \
-  --xproxy-UseCase-ID "tc-001" \
-  --xproxy-User-ID "agent-alice" \
+  --xProxy-UseCase-Name "ticket-classification" \
+  --xProxy-UseCase-ID "tc-001" \
+  --xProxy-User-ID "agent-alice" \
   '{"category":"system.openai","resource":"gpt-4o-mini","units":{"text":{"input":200,"output":50}},"end_to_end_latency_ms":320}'
 ```
 
 ### Pipe JSON from a file
 
 ```bash
-cat payload.json | payi-ingest my-app --xproxy-UseCase-Name "summarize"
-```
-
-### Pretty-print the response
-
-```bash
-payi-ingest my-app '{"category":"system.anthropic","resource":"claude-3-5-sonnet","units":{"text":{"input":500,"output":200}}}' | py-json-tool
+cat payload.json | payi-ingest my-app --xProxy-UseCase-Name "summarize"
 ```
 
 ## JSON Payload Reference
@@ -85,7 +55,7 @@ payi-ingest my-app '{"category":"system.anthropic","resource":"claude-3-5-sonnet
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `category` | string | yes | Provider category with `system.` prefix (e.g., `system.openai`) |
-| `resource` | string | no | Model name (e.g., `gpt-4o`, `claude-3-5-sonnet`) |
+| `resource` | string | no | Model name (e.g., `gpt-4o`, `claude-sonnet-4-5-20250929`) |
 | `units` | object | yes | Token counts, keyed by type (e.g., `{"text": {"input": N, "output": N}}`) |
 | `event_timestamp` | string | no | ISO 8601 timestamp (defaults to now; future up to 5 min) |
 | `end_to_end_latency_ms` | int | no | Total request latency in milliseconds |

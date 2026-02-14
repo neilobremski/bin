@@ -1,3 +1,9 @@
+---
+name: az-pr-dump
+description: Dumps Azure DevOps PRs to JSON (metadata, threads, iterations). Use when analyzing PR comments, reviewers, or iteration history.
+allowed-tools: Bash(az-pr-dump *)
+---
+
 # az-pr-dump
 
 Dump an Azure DevOps Pull Request to structured JSON, including metadata, iterations, and all comment threads.

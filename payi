@@ -3,7 +3,7 @@
 # payi - General-purpose Pay-i API client
 #
 # Usage:
-#   payi <application> [verb] <path> [--key value ...] [json]
+#   payi <application> [verb] <path> [--header value] [-param value] [json]
 #   echo '{"score":0.95}' | payi <application> put /api/v1/some/path
 #
 # The <application> argument selects a config file from ~/.payi-ingest/.
@@ -12,12 +12,16 @@
 # HTTP verb (get, post, put, patch, delete) is auto-detected from args.
 # Defaults to GET when no body, POST when a body is present.
 #
-# Any --key value pairs are added as query string parameters.
+# --key value pairs are sent as HTTP headers (key: value).
+# -key value pairs are added as query string parameters (?key=value).
 # JSON payload is the last non-flag argument or piped via stdin.
 #
+# Run with no arguments to list configured applications.
+#
 # Examples:
-#   payi my-app /api/v1/resources --category system.anthropic
-#   payi my-app put /api/v1/use_cases/instances/uc/id1/kpis/score '{"score":0.95}'
+#   payi my-app /api/v1/categories
+#   payi my-app /api/v1/categories/system.anthropic/resources -limit 100
+#   payi my-app post /api/v1/ingest --xProxy-UseCase-Name test '{"json":true}'
 #   echo '{}' | payi my-app post /api/v1/some/endpoint
 #
 
@@ -25,17 +29,35 @@ set -euo pipefail
 
 CONFIG_DIR="$HOME/.payi-ingest"
 
-usage() {
-  sed -n '3,/^$/s/^# \?//p' "$0" >&2
+list_apps() {
   if [ -d "$CONFIG_DIR" ]; then
     echo "Available applications:" >&2
-    ls "$CONFIG_DIR" 2>/dev/null | sed 's/^/  /' >&2
+    for f in "$CONFIG_DIR"/*; do
+      [ -f "$f" ] || continue
+      name="$(basename "$f")"
+      first="$(head -1 "$f")"
+      if [[ "$first" == \#* ]]; then
+        printf "  %-14s %s\n" "$name" "$first" >&2
+      else
+        printf "  %s\n" "$name" >&2
+      fi
+    done
   fi
+}
+
+usage() {
+  sed -n '3,/^$/s/^# \?//p' "$0" >&2
+  list_apps
   exit 1
 }
 
 to_lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 to_upper() { echo "$1" | tr '[:lower:]' '[:upper:]'; }
+
+if [ $# -eq 0 ]; then
+  list_apps
+  exit 0
+fi
 
 [ $# -lt 2 ] && usage
 
@@ -45,10 +67,7 @@ shift
 config="$CONFIG_DIR/$app"
 if [ ! -f "$config" ]; then
   echo "payi: unknown application '$app'" >&2
-  if [ -d "$CONFIG_DIR" ]; then
-    echo "Available applications:" >&2
-    ls "$CONFIG_DIR" 2>/dev/null | sed 's/^/  /' >&2
-  fi
+  list_apps
   exit 1
 fi
 
@@ -63,10 +82,11 @@ if [ -z "${PAYI_API_KEY:-}" ]; then
   exit 1
 fi
 
-# Parse args: verb, path, query params, json body
+# Parse args: verb, path, headers, query params, json body
 verb=""
 path=""
 query_string=""
+headers=()
 json=""
 
 while [ $# -gt 0 ]; do
@@ -76,11 +96,23 @@ while [ $# -gt 0 ]; do
       verb="$arg_lower"
       shift
       ;;
-    --help|-h)
+    --help)
       usage
       ;;
     --*)
       key="${1#--}"
+      if [ $# -lt 2 ]; then
+        echo "payi: missing value for $1" >&2
+        exit 1
+      fi
+      headers+=(-H "$key: $2")
+      shift 2
+      ;;
+    -h)
+      usage
+      ;;
+    -*)
+      key="${1#-}"
       if [ $# -lt 2 ]; then
         echo "payi: missing value for $1" >&2
         exit 1
@@ -137,8 +169,10 @@ if [ -n "$json" ]; then
   exec curl -sk -X "$verb_upper" "$url" \
     -H "xProxy-api-key: $PAYI_API_KEY" \
     -H "Content-Type: application/json" \
+    ${headers[@]+"${headers[@]}"} \
     -d "$json"
 else
   exec curl -sk -X "$verb_upper" "$url" \
-    -H "xProxy-api-key: $PAYI_API_KEY"
+    -H "xProxy-api-key: $PAYI_API_KEY" \
+    ${headers[@]+"${headers[@]}"}
 fi

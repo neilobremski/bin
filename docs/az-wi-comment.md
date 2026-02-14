@@ -1,3 +1,9 @@
+---
+name: az-wi-comment
+description: Posts Markdown comments with inline images to Azure DevOps work items. Use when adding comments or screenshots to ADO work items.
+allowed-tools: Bash(az-wi-comment *)
+---
+
 # az-wi-comment
 
 Add a Markdown-formatted comment with optional inline images to an Azure DevOps work item.

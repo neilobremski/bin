@@ -1,3 +1,9 @@
+---
+name: py-json-tool
+description: Pretty-prints and validates JSON from stdin or files. Use when formatting or validating JSON output.
+allowed-tools: Bash(py-json-tool *)
+---
+
 # py-json-tool
 
 Pretty-print and validate JSON from stdin or files using Python's built-in `json.tool` module.

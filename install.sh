@@ -27,6 +27,39 @@ if [ ! -d "$NEILS_BIN_CACHE" ]; then
   mkdir -p "$NEILS_BIN_CACHE"
 fi
 
+# Install Claude Code skills (symlink docs as skills)
+if [ -d "$HOME/.claude" ]; then
+  SKILLS_HASH=$(ls "$NEIL_BIN/docs/"*.md 2>/dev/null | sort | shasum | cut -d' ' -f1)
+  SKILLS_CACHE="$NEILS_BIN_CACHE/skills-hash"
+  if [ ! -f "$SKILLS_CACHE" ] || [ "$(cat "$SKILLS_CACHE" 2>/dev/null)" != "$SKILLS_HASH" ]; then
+    echo "Updating Claude Code skills..."
+    # Remove stale skill symlinks
+    for skill_dir in "$HOME/.claude/skills/"*/; do
+      if [ -L "$skill_dir/SKILL.md" ]; then
+        target=$(readlink "$skill_dir/SKILL.md")
+        if [[ "$target" == "$NEIL_BIN/docs/"* ]] && [ ! -f "$target" ]; then
+          echo "  Removing stale skill: $(basename "$skill_dir")"
+          rm -rf "$skill_dir"
+        fi
+      fi
+    done
+    # Create/update symlinks for each doc
+    for doc in "$NEIL_BIN/docs/"*.md; do
+      name=$(basename "$doc" .md)
+      # Only install docs with YAML frontmatter (first line is ---)
+      if [ "$(head -1 "$doc")" != "---" ]; then
+        continue
+      fi
+      # Lowercase the name for consistency (NMP → nmp)
+      name_lower=$(echo "$name" | tr '[:upper:]' '[:lower:]')
+      skill_dir="$HOME/.claude/skills/$name_lower"
+      mkdir -p "$skill_dir"
+      ln -sf "$doc" "$skill_dir/SKILL.md"
+    done
+    echo "$SKILLS_HASH" > "$SKILLS_CACHE"
+  fi
+fi
+
 # Update git repos if $NEILS_BIN_CACHE/git-check is more than 24 hours old
 if [ ! -f "$NEILS_BIN_CACHE/git-check" ] || [ $(find "$NEILS_BIN_CACHE/git-check" -mmin +1440) ]; then
   echo "Updating git repositories..."

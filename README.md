@@ -21,3 +21,9 @@ All bash scripts use `#!/usr/bin/env bash` instead of `#!/bin/bash`. This allows
 | `payi-ingest` | Send ingest requests to the Pay-i API (per-app configs in `~/.payi-ingest/`) ([docs](docs/payi-ingest.md)) |
 | `py-json-tool` | Pretty-print and validate JSON via Python ([docs](docs/py-json-tool.md)) |
 | `speak` | Cross-platform text-to-speech (macOS `say`, `spd-say`, `espeak`, WSL PowerShell) |
+
+## Claude Code Skills
+
+When `install.sh` detects Claude Code (`~/.claude`), it automatically installs each
+documented tool as a [skill](https://docs.anthropic.com/en/docs/claude-code/skills).
+Use `/az-pr-dump`, `/payi`, etc. in Claude Code to get tool-aware assistance.
