@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# az-wi-comment — Add a markdown comment to an Azure DevOps work item.
+#
+# Usage:
+#     az-wi-comment <work-item-id> [--org <url>] [--project <name>] "markdown text"
+#     echo "markdown text" | az-wi-comment <work-item-id> [--org <url>] [--project <name>]
+#
+# Examples:
+#     az-wi-comment 5060 "Bug confirmed — missing KPIs not shown."
+#     az-wi-comment 5060 --org https://dev.azure.com/pay-i --project pay-i "comment"
+#     cat findings.md | az-wi-comment 5060
+#
+# Defaults: --org https://dev.azure.com/pay-i  --project pay-i
+#
+# Uses the PATCH work item REST API with multilineFieldsFormat to ensure
+# comments are stored as Markdown (not HTML). The az CLI --discussion flag
+# escapes markdown, so we bypass it and call the API directly.
+
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+    sed -n '2,/^$/s/^# *//p' "$0"
+    exit 1
+fi
+
+WORK_ITEM_ID="$1"; shift
+
+ORG="https://dev.azure.com/pay-i"
+PROJECT="pay-i"
+COMMENT=""
+
+# Parse --flags and collect the final positional arg as comment text
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --org)     ORG="$2"; shift 2 ;;
+        --project) PROJECT="$2"; shift 2 ;;
+        --)        shift; break ;;
+        --*)       echo "Unknown option: $1" >&2; exit 1 ;;
+        *)
+            if [[ $# -eq 1 ]]; then
+                COMMENT="$1"; shift
+            else
+                echo "Unexpected argument: $1" >&2; exit 1
+            fi
+            ;;
+    esac
+done
+
+# Remaining args after -- (if any) joined as comment
+if [[ $# -gt 0 ]]; then
+    COMMENT="$*"
+fi
+
+# Fall back to stdin if no comment text given
+if [[ -z "$COMMENT" ]]; then
+    if [[ -t 0 ]]; then
+        echo "Error: no comment text provided and stdin is a terminal." >&2
+        exit 1
+    fi
+    COMMENT="$(cat)"
+fi
+
+# Get a bearer token for Azure DevOps
+PAT=$(az account get-access-token \
+    --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+    --query accessToken -o tsv 2>/dev/null)
+
+if [[ -z "$PAT" ]]; then
+    echo "Error: could not obtain access token. Run 'az login' first." >&2
+    exit 1
+fi
+
+# Extract org name from URL for the API path
+# ORG is like https://dev.azure.com/pay-i
+API_URL="${ORG}/${PROJECT}/_apis/wit/workItems/${WORK_ITEM_ID}?api-version=7.1-preview.3"
+
+# Build JSON PATCH body: set System.History + mark it as Markdown
+BODY=$(jq -n --arg txt "$COMMENT" '[
+    {"op": "add", "path": "/fields/System.History", "value": $txt},
+    {"op": "add", "path": "/multilineFieldsFormat/System.History", "value": "Markdown"}
+]')
+
+exec curl -s -X PATCH "$API_URL" \
+    -H "Authorization: Bearer $PAT" \
+    -H "Content-Type: application/json-patch+json" \
+    -d "$BODY"

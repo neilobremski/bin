@@ -11,6 +11,7 @@ All bash scripts use `#!/usr/bin/env bash` instead of `#!/bin/bash`. This allows
 | Command | Description |
 |---------|-------------|
 | `az-pr-dump` | Dump an Azure DevOps Pull Request (metadata, threads, iterations) to JSON ([docs](docs/az-pr-dump.md)) |
+| `az-wi-comment` | Add a Markdown-formatted comment to an Azure DevOps work item ([docs](docs/az-wi-comment.md)) |
 | `aztail` | Tail Azure web app logs by environment alias (dev, qa, staging, prod) |
 | `h` | Highlight text patterns in color by piping ([docs](docs/h.md)) |
 | `install.sh` | Add ~/bin directory to PATH |
