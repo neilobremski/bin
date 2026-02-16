@@ -88,6 +88,16 @@ def fetch_iterations(org, project, repo, pr_id):
     return data.get("value", [])
 
 
+def fetch_work_items(org, project, repo, pr_id):
+    """Fetch work items linked to a PR."""
+    data = az_invoke(
+        "git", "pullRequestWorkItems",
+        {"repositoryId": repo, "project": project, "pullRequestId": str(pr_id)},
+        org,
+    )
+    return data.get("value", [])
+
+
 def simplify_thread(thread):
     """Distill a thread down to the useful fields."""
     ctx = thread.get("threadContext")
@@ -177,6 +187,7 @@ def main():
     pr = fetch_pr(org, project, repo, pr_id)
     threads = fetch_threads(org, project, repo, pr_id)
     iterations = fetch_iterations(org, project, repo, pr_id)
+    work_items = fetch_work_items(org, project, repo, pr_id)
 
     output = {
         "pullRequest": simplify_pr(pr),
@@ -190,6 +201,13 @@ def main():
             for it in iterations
         ],
         "threads": [simplify_thread(t) for t in threads],
+        "workItems": [
+            {
+                "id": wi.get("id"),
+                "url": wi.get("url"),
+            }
+            for wi in work_items
+        ],
     }
 
     json.dump(output, sys.stdout, indent=2)
