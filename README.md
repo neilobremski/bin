@@ -10,6 +10,7 @@ All bash scripts use `#!/usr/bin/env bash` instead of `#!/bin/bash`. This allows
 
 | Command | Description |
 |---------|-------------|
+| `az-pr-describe` | Set the description of an Azure DevOps Pull Request with markdown ([docs](docs/az-pr-describe.md)) |
 | `az-pr-dump` | Dump an Azure DevOps Pull Request (metadata, threads, iterations) to JSON ([docs](docs/az-pr-dump.md)) |
 | `az-wi-comment` | Add a Markdown comment with inline images to an Azure DevOps work item ([docs](docs/az-wi-comment.md)) |
 | `aztail` | Tail Azure web app logs by environment alias (dev, qa, staging, prod) |
