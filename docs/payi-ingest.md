@@ -19,7 +19,7 @@ Running with no arguments shows usage and lists available applications (via `pay
 
 ## Parameters
 
-- `application` - Name of a config profile in `~/.payi-ingest/` (required)
+- `application` - Name of a config profile in `./.payi-ingest/` or `~/.payi-ingest/` (required)
 - `--key value` - HTTP header (e.g., `--xProxy-UseCase-Name "name"`) — passed through to `payi`
 - `-key value` - Query string parameter — passed through to `payi`
 - `json` - JSON payload as the last positional argument, or piped via stdin

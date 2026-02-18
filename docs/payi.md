@@ -18,7 +18,7 @@ echo '{"score":0.95}' | payi <application> put /api/v1/some/path
 
 ## Parameters
 
-- `application` - Name of a config profile in `~/.payi-ingest/` (required)
+- `application` - Name of a config profile in `./.payi-ingest/` or `~/.payi-ingest/` (required)
 - `verb` - HTTP method: get, post, put, patch, delete (optional; defaults to GET without body, POST with body)
 - `path` - API path starting with `/` (required)
 - `--key value` - HTTP header (`key: value`) — repeatable
@@ -27,7 +27,15 @@ echo '{"score":0.95}' | payi <application> put /api/v1/some/path
 
 ## Configuration
 
-Each application gets a file in `~/.payi-ingest/`. If the first line starts with `#`, it is shown as a description when listing apps.
+Each application gets a config file in `./.payi-ingest/` (project-local, checked first) or `~/.payi-ingest/` (global). Local profiles take precedence over global ones with the same name. If the first line starts with `#`, it is shown as a description when listing apps.
+
+Set `PAYI_CONFIG_DIR` to override both directories with a single custom location.
+
+| Priority | Location | When |
+|---|---|---|
+| 1 | `$PAYI_CONFIG_DIR/<app>` | Only when env var is set (replaces both) |
+| 2 | `./.payi-ingest/<app>` | Project-local (current working directory) |
+| 3 | `~/.payi-ingest/<app>` | Global (home directory) |
 
 ```bash
 # ~/.payi-ingest/my-app
@@ -41,9 +49,9 @@ Running with no arguments lists available applications:
 ```
 $ payi
 Available applications:
-  my-app         # Production Pay-i instance
-  staging        # Staging environment
-  local
+  my-app         (local)  # Project-specific instance
+  staging        (global) # Staging environment
+  prod           (global) # Production Pay-i instance
 ```
 
 ## Common API calls

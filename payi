@@ -6,7 +6,9 @@
 #   payi <application> [verb] <path> [--header value] [-param value] [json]
 #   echo '{"score":0.95}' | payi <application> put /api/v1/some/path
 #
-# The <application> argument selects a config file from ~/.payi-ingest/.
+# The <application> argument selects a config file from ./.payi-ingest/
+# (project-local) or ~/.payi-ingest/ (global). Local profiles take
+# precedence. Set PAYI_CONFIG_DIR to override both with a single directory.
 # Each config file should set PAYI_API_URL and PAYI_API_KEY.
 #
 # HTTP verb (get, post, put, patch, delete) is auto-detected from args.
@@ -27,21 +29,72 @@
 
 set -euo pipefail
 
-CONFIG_DIR="$HOME/.payi-ingest"
+GLOBAL_CONFIG_DIR="$HOME/.payi-ingest"
+LOCAL_CONFIG_DIR=".payi-ingest"
+
+resolve_config() {
+  local app="$1"
+  if [ -n "${PAYI_CONFIG_DIR:-}" ]; then
+    echo "$PAYI_CONFIG_DIR/$app"
+  elif [ -f "$LOCAL_CONFIG_DIR/$app" ]; then
+    echo "$LOCAL_CONFIG_DIR/$app"
+  else
+    echo "$GLOBAL_CONFIG_DIR/$app"
+  fi
+}
 
 list_apps() {
-  if [ -d "$CONFIG_DIR" ]; then
-    echo "Available applications:" >&2
-    for f in "$CONFIG_DIR"/*; do
+  if [ -n "${PAYI_CONFIG_DIR:-}" ]; then
+    if [ -d "$PAYI_CONFIG_DIR" ]; then
+      echo "Available applications:" >&2
+      for f in "$PAYI_CONFIG_DIR"/*; do
+        [ -f "$f" ] || continue
+        name="$(basename "$f")"
+        first="$(head -1 "$f")"
+        if [[ "$first" == \#* ]]; then
+          printf "  %-14s %s\n" "$name" "$first" >&2
+        else
+          printf "  %s\n" "$name" >&2
+        fi
+      done
+    fi
+    return
+  fi
+
+  local -A seen
+  local lines=()
+
+  if [ -d "$LOCAL_CONFIG_DIR" ]; then
+    for f in "$LOCAL_CONFIG_DIR"/*; do
       [ -f "$f" ] || continue
       name="$(basename "$f")"
+      seen["$name"]=1
       first="$(head -1 "$f")"
       if [[ "$first" == \#* ]]; then
-        printf "  %-14s %s\n" "$name" "$first" >&2
+        lines+=("$(printf "  %-14s %-9s %s" "$name" "(local)" "$first")")
       else
-        printf "  %s\n" "$name" >&2
+        lines+=("$(printf "  %-14s %s" "$name" "(local)")")
       fi
     done
+  fi
+
+  if [ -d "$GLOBAL_CONFIG_DIR" ]; then
+    for f in "$GLOBAL_CONFIG_DIR"/*; do
+      [ -f "$f" ] || continue
+      name="$(basename "$f")"
+      [ -n "${seen[$name]+x}" ] && continue
+      first="$(head -1 "$f")"
+      if [[ "$first" == \#* ]]; then
+        lines+=("$(printf "  %-14s %-9s %s" "$name" "(global)" "$first")")
+      else
+        lines+=("$(printf "  %-14s %s" "$name" "(global)")")
+      fi
+    done
+  fi
+
+  if [ ${#lines[@]} -gt 0 ]; then
+    echo "Available applications:" >&2
+    printf '%s\n' "${lines[@]}" >&2
   fi
 }
 
@@ -64,7 +117,7 @@ fi
 app="$1"
 shift
 
-config="$CONFIG_DIR/$app"
+config="$(resolve_config "$app")"
 if [ ! -f "$config" ]; then
   echo "payi: unknown application '$app'" >&2
   list_apps
