@@ -18,8 +18,6 @@ All bash scripts use `#!/usr/bin/env bash` instead of `#!/bin/bash`. This allows
 | `install.sh` | Add ~/bin directory to PATH |
 | `ltx-video` | Generate videos using LTX-Video (2B model, 3s @ 24fps default) ([docs](docs/ltx-video.md)) |
 | `NMP.py` | [Neil's Manual Proxy](docs/NMP.md) |
-| `payi` | General-purpose Pay-i API client (per-app configs in `./.payi-ingest/` or `~/.payi-ingest/`) ([docs](docs/payi.md)) |
-| `payi-ingest` | Send ingest requests to the Pay-i API (per-app configs in `./.payi-ingest/` or `~/.payi-ingest/`) ([docs](docs/payi-ingest.md)) |
 | `py-json-tool` | Pretty-print and validate JSON via Python ([docs](docs/py-json-tool.md)) |
 | `speak` | Cross-platform text-to-speech (macOS `say`, `spd-say`, `espeak`, WSL PowerShell) |
 
