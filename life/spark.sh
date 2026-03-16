@@ -64,8 +64,7 @@ for dir in "${ORGAN_DIRS[@]}"; do
   if [[ -f "$dir/organ.json" ]]; then
     cadence=$(sed -n 's/.*"cadence"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$dir/organ.json" | head -1)
     if [[ -n "$cadence" ]] && [[ -f "$dir/.spark.last" ]]; then
-      last=$(cat "$dir/.spark.last")
-      last_epoch=$(date -d "$last" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$last" +%s 2>/dev/null || echo 0)
+      last_epoch=$(cat "$dir/.spark.last")
       now_epoch=$(date +%s)
       elapsed=$(( (now_epoch - last_epoch) / 60 ))
       if [[ $elapsed -lt $cadence ]]; then
@@ -79,6 +78,6 @@ for dir in "${ORGAN_DIRS[@]}"; do
   log "$name: launching"
   nohup "$dir/live.sh" >> "$dir/.spark.log" 2>&1 &
   echo $! > "$dir/.spark.pid"
-  date -u +"%Y-%m-%dT%H:%M:%S" > "$dir/.spark.last"
+  date +%s > "$dir/.spark.last"
   log "$name: started (PID $!)"
 done

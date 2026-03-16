@@ -36,7 +36,7 @@ The spark manages these files inside each organ directory:
 | File | Purpose |
 |------|---------|
 | `.spark.pid` | PID of the running organ (singleton check) |
-| `.spark.last` | ISO timestamp of last launch (cadence check) |
+| `.spark.last` | Epoch seconds of last launch (cadence check) |
 | `.spark.log` | stdout/stderr from the organ |
 
 ## Example organ.json
