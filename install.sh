@@ -79,3 +79,9 @@ if [ ! -f "$NEILS_BIN_CACHE/git-check" ] || [ $(find "$NEILS_BIN_CACHE/git-check
   # Update Neil's Bin Here repo
   pushd $NEIL_BIN; git pull; popd
 fi
+
+# Life spark
+if [ -f "$NEIL_BIN/life/spark.sh" ]; then
+  echo "Life Spark available: $NEIL_BIN/life/spark.sh"
+  echo "  Install to cron: * * * * * $NEIL_BIN/life/spark.sh"
+fi
