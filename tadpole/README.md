@@ -1,18 +1,16 @@
 # Tadpole
 
-The simplest possible organism. A test harness for the life system (spark).
+The simplest possible organism. A living test for the life system.
 
 ## Structure
 
-- `organs.conf` — lists organs to spark (one per line)
-- `organs/heart/` — a single organ that increments a beat counter
-- `lifetime.sh` — integration test that runs the tadpole through its lifecycle
+- `life.conf` — organism config (`ORGANS=organs/heart`)
+- `organs/heart/` — beats, writes `health.txt`
+- `lifetime.sh` — 5 integration tests
 
 ## Usage
 
 ```bash
-./lifetime.sh [path/to/spark.sh]
+./lifetime.sh              # uses ../life/spark.sh
+./lifetime.sh /path/to/spark.sh   # custom spark
 ```
-
-Defaults to `../life/spark.sh`. Tests that spark finds organs, respects cadence,
-and the heart beats on schedule.
