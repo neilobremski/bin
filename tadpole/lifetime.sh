@@ -252,21 +252,19 @@ else
   fail "circulatory system should have files, got: $circ_files"
 fi
 
-# Tail should have stimulus with a ref
-if grep -q "ref:" "$TAIL/stimulus.txt" 2>/dev/null; then
-  pass "tail received stimulus with circulatory reference"
-else
-  fail "tail should have ref: in stimulus, got: $(cat "$TAIL/stimulus.txt" 2>/dev/null || echo 'empty')"
-fi
-
-# Spark the tail — it should retrieve the payload
-"$SPARK"
-sleep 1
-
+# Tail may have already consumed stimulus (both ran in same cycle).
+# Check health.txt for proof of payload retrieval.
 if grep -q "^ok swimming (payload:" "$TAIL/health.txt" 2>/dev/null; then
-  pass "tail retrieved payload from circulatory system"
+  pass "tail retrieved payload via circulatory reference"
 else
-  fail "tail should have payload, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"
+  # Tail hasn't run yet — spark it
+  "$SPARK"
+  sleep 1
+  if grep -q "^ok swimming (payload:" "$TAIL/health.txt" 2>/dev/null; then
+    pass "tail retrieved payload via circulatory reference"
+  else
+    fail "tail should have payload, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"
+  fi
 fi
 
 # Dedup: put identical content twice, should not create a new file

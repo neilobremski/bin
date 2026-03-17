@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""gas — CLI for the GAS Bridge. Pure Python, no dependencies beyond stdlib.
+
+Usage: gas <action> [key=value ...]
+
+Examples:
+  gas info
+  gas gmail.search query="is:unread" count=5
+  gas drive.list query="title contains 'circ-'" count=3
+  gas drive.upload name=test.txt data_base64=$(base64 -w0 file.txt)
+  gas drive.download id=1abc...
+
+Reads BRIDGE_URL and BRIDGE_KEY from environment or from files:
+  $KNOBERT_LIB/gas-bridge-url.txt and $KNOBERT_LIB/gas-bridge-key.txt
+"""
+import json, os, sys, urllib.request
+
+def read_secret(name, env_var):
+    val = os.environ.get(env_var, "")
+    if val:
+        return val
+    lib = os.environ.get("KNOBERT_LIB", os.path.expanduser("~/knobert/lib"))
+    path = os.path.join(lib, name)
+    if os.path.exists(path):
+        return open(path).read().strip()
+    return ""
+
+url = read_secret("gas-bridge-url.txt", "BRIDGE_URL")
+key = read_secret("gas-bridge-key.txt", "BRIDGE_KEY")
+
+if not url or not key:
+    print("error: BRIDGE_URL and BRIDGE_KEY required", file=sys.stderr)
+    sys.exit(1)
+
+if len(sys.argv) < 2:
+    print("Usage: gas <action> [key=value ...]", file=sys.stderr)
+    sys.exit(1)
+
+action = sys.argv[1]
+payload = {"action": action, "key": key}
+
+for arg in sys.argv[2:]:
+    k, _, v = arg.partition("=")
+    # Auto-detect types
+    if v.isdigit():
+        payload[k] = int(v)
+    elif v in ("true", "false"):
+        payload[k] = v == "true"
+    else:
+        payload[k] = v
+
+data = json.dumps(payload).encode()
+req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = resp.read().decode()
+        # Pretty-print if terminal, raw if piped
+        if sys.stdout.isatty():
+            try:
+                print(json.dumps(json.loads(body), indent=2))
+            except json.JSONDecodeError:
+                print(body)
+        else:
+            print(body)
+except urllib.error.HTTPError as e:
+    print(json.dumps({"error": f"HTTP {e.code}", "body": e.read().decode()[:200]}))
+    sys.exit(1)
+except Exception as e:
+    print(json.dumps({"error": str(e)}))
+    sys.exit(1)

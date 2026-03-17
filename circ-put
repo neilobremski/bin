@@ -5,13 +5,11 @@
 # Usage: circ-put <file>
 #        echo "data" | circ-put -
 #
-# Backends (set CIRC_BACKEND):
-#   local  — filesystem at CIRC_DIR (default: ~/.life/circ)
-#   drive  — Google Drive via GAS bridge
+# Backends: local (filesystem) always used as staging.
+# If BRIDGE_KEY is set, also uploads to Google Drive via gas CLI.
 
 set -euo pipefail
 
-BACKEND="${CIRC_BACKEND:-local}"
 LOCAL_DIR="${CIRC_DIR:-$HOME/.life/circ}"
 
 if [ $# -lt 1 ]; then
@@ -30,30 +28,20 @@ fi
 
 hash=$(sha256sum "$input" | cut -c1-16)
 
-case "$BACKEND" in
-  local)
-    mkdir -p "$LOCAL_DIR"
-    [ -f "$LOCAL_DIR/$hash" ] || cp "$input" "$LOCAL_DIR/$hash"
-    ;;
+# Always store locally (fast, works offline)
+mkdir -p "$LOCAL_DIR"
+[ -f "$LOCAL_DIR/$hash" ] || cp "$input" "$LOCAL_DIR/$hash"
 
-  drive)
-    python3 -c "
-import sys, base64
-sys.path.insert(0, '${KNOBERT_LIB:-$HOME/knobert/lib}')
-from gas_bridge import GASBridge
-bridge = GASBridge()
-# Check if already uploaded
-existing = bridge._call('drive.list', query=\"name = 'circ-$hash'\", count=1)
-if existing.get('files'):
-    sys.exit(0)  # already exists, dedup
-with open('$input', 'rb') as f:
-    data = base64.b64encode(f.read()).decode()
-mime = '$(file -b --mime-type "$input" 2>/dev/null || echo application/octet-stream)'
-bridge._call('drive.upload', name='circ-$hash', mimeType=mime, data_base64=data)
-" 2>/dev/null
-    ;;
-
-  *) echo "error: unknown CIRC_BACKEND=$BACKEND" >&2; exit 1 ;;
-esac
+# If GAS bridge is configured, also upload to Drive (distributed access)
+if [ -n "${BRIDGE_KEY:-}" ] || [ -f "${KNOBERT_LIB:-$HOME/knobert/lib}/gas-bridge-key.txt" ]; then
+  if command -v gas >/dev/null 2>&1; then
+    # Check if already on Drive
+    existing=$(gas drive.list "query=title = 'circ-$hash'" count=1 2>/dev/null || echo '{}')
+    if ! echo "$existing" | grep -q "circ-$hash"; then
+      data_b64=$(base64 -w0 "$input")
+      gas drive.upload "name=circ-$hash" "data_base64=$data_b64" >/dev/null 2>&1 || true
+    fi
+  fi
+fi
 
 echo "$hash"
