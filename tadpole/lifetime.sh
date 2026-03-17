@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # lifetime.sh — Run the tadpole through its entire lifecycle.
-# Proves the life system works: spark finds life.conf, respects cadence,
-# enforces singleton via flock, and the heart beats on schedule.
+# Proves: spark finds life.conf, respects cadence, enforces singleton,
+# and the heart beats on schedule.
 #
 # Usage: ./lifetime.sh [path/to/spark.sh]
-#        Default: looks for ../life/spark.sh relative to this script.
 
 set -euo pipefail
 
@@ -16,28 +15,25 @@ if [ ! -x "$SPARK" ]; then
   exit 1
 fi
 
-# --- Helpers ---
 TESTS=0; PASSED=0; FAILED=0
-
 pass() { TESTS=$((TESTS+1)); PASSED=$((PASSED+1)); echo "ok $TESTS - $1"; }
 fail() { TESTS=$((TESTS+1)); FAILED=$((FAILED+1)); echo "not ok $TESTS - $1"; }
 
-# --- Setup: copy tadpole to a temp dir ---
+# --- Setup: copy tadpole to temp dir ---
 TDIR=$(mktemp -d)
 trap 'rm -rf "$TDIR"' EXIT
 cp -r "$SCRIPT_DIR/organs" "$SCRIPT_DIR/life.conf" "$TDIR/"
-
 HEART="$TDIR/organs/heart"
 
-# --- Test 1: First heartbeat (spark discovers life.conf from cwd) ---
+# --- Test 1: First heartbeat ---
 cd "$TDIR"
 "$SPARK"
 sleep 1
 
-if [ -f "$HEART/health.json" ]; then
-  pass "health.json created after first spark"
+if [ -f "$HEART/health.txt" ]; then
+  pass "health.txt created after first spark"
 else
-  fail "health.json not found after first spark"
+  fail "health.txt not found after first spark"
 fi
 
 if [ -f "$HEART/beats.count" ] && [ "$(cat "$HEART/beats.count")" = "1" ]; then
@@ -47,7 +43,7 @@ else
 fi
 
 # --- Test 2: Cadence blocks immediate re-spark ---
-sleep 1  # let flock release from backgrounded subshell
+sleep 1
 "$SPARK" > "$TDIR/spark-out.txt" 2>&1 || true
 sleep 1
 
@@ -59,7 +55,6 @@ fi
 
 # --- Test 3: Expired cadence allows re-spark ---
 echo $(($(date +%s) - 600)) > "$HEART/.spark.last"
-
 "$SPARK"
 sleep 1
 
@@ -69,17 +64,13 @@ else
   fail "expected beats=2 after cadence expiry, got: $(cat "$HEART/beats.count")"
 fi
 
-# --- Test 4: health.json structure ---
-if grep -q '"status":"ok"' "$HEART/health.json" && \
-   grep -q '"organ":"heart"' "$HEART/health.json" && \
-   grep -q '"beats":2' "$HEART/health.json" && \
-   grep -q '"ts":' "$HEART/health.json"; then
-  pass "health.json has correct structure (status, organ, beats, ts)"
+# --- Test 4: health.txt format ---
+if grep -q "^ok " "$HEART/health.txt"; then
+  pass "health.txt starts with ok"
 else
-  fail "health.json missing expected fields: $(cat "$HEART/health.json")"
+  fail "health.txt should start with ok, got: $(cat "$HEART/health.txt")"
 fi
 
-# --- Summary ---
 echo ""
 echo "# $PASSED/$TESTS passed"
 [ "$FAILED" -gt 0 ] && exit 1

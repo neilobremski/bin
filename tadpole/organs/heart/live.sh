@@ -2,20 +2,14 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-COUNT_FILE="$DIR/beats.count"
-HEALTH_FILE="$DIR/health.json"
 
-# Read current beat count (0 if first beat)
+# Increment beat counter
 beats=0
-[ -f "$COUNT_FILE" ] && beats=$(cat "$COUNT_FILE")
+[ -f "$DIR/beats.count" ] && beats=$(cat "$DIR/beats.count")
 beats=$((beats + 1))
+echo "$beats" > "$DIR/beats.count"
 
-# Write beat count
-echo "$beats" > "$COUNT_FILE"
-
-# Write health
-cat > "$HEALTH_FILE" <<EOF
-{"status":"ok","ts":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","organ":"heart","beats":$beats}
-EOF
+# Report health (plain text: first word = status)
+echo "ok beat $beats" > "$DIR/health.txt"
 
 echo "heart beat #$beats" >&2
