@@ -1,87 +1,41 @@
 # Life Spark
 
-A cron-based heartbeat that launches "organs" — autonomous processes that do work on their own schedule. Pure bash, no dependencies beyond coreutils.
-
-The spark is deliberately dumb: read config, find organs, check cadence, enforce singleton, launch. All intelligence lives in the organs themselves.
+A cron-based heartbeat that launches organs. Pure bash, no dependencies beyond coreutils.
 
 ## Quick Start
 
-Create a `life.conf` in your organism directory:
-
 ```bash
-ORGANS=organs/brain:organs/memory
-```
+# 1. Create life.conf in your organism directory
+echo "ORGANS=organs/heart" > life.conf
 
-Run the spark:
-
-```bash
-cd my-organism
+# 2. Run the spark
 /path/to/life/spark.sh
+
+# 3. Install to cron for continuous heartbeat
+#    * * * * * cd /path/to/organism && /path/to/life/spark-cron.sh
 ```
 
-Install to cron for a continuous heartbeat:
+## How It Works
 
-```
-* * * * * cd /path/to/my-organism && /path/to/life/spark-cron.sh
-```
+| Concept | One-liner |
+|---------|-----------|
+| **life.conf** | Sourceable shell file. `ORGANS` (colon-separated) plus any env vars organs need. |
+| **Organ** | A directory with an executable `live.sh`. That's it. |
+| **Cadence** | Optional `organ.json` with `{"cadence": N}` (minutes). No file = every cycle. |
+| **Singleton** | Spark enforces via `flock` in `~/.life/locks/`. Organs don't manage locking. |
+| **Health** | Optional `health.txt`. First word = status (`ok`, `degraded`, `error`). |
+| **Stimulus** | Optional `stimulus.txt`. Lines appended by the nervous system, read by the organ. |
+| **Logs** | `spark-cron.sh` logs to `~/.life/spark/YYYY-MM-DD.log` (7-day retention). |
 
-`spark-cron.sh` wraps `spark.sh` with daily log rotation (`~/.life/spark-YYYY-MM-DD.log`, 7-day retention).
+## Textbook
 
-## life.conf
+Full specifications live in [life/textbook/](textbook/):
 
-A sourceable shell file. The spark sources it before launching organs, so all variables become environment for every organ process.
+- [spark.md](textbook/spark.md) — Layer 0 algorithm, life.conf, flock singleton
+- [layers.md](textbook/layers.md) — The 3-layer model (Spark → Spinal Cord → Organs)
+- [organ-contract.md](textbook/organ-contract.md) — What an organ must provide
+- [stimulus.md](textbook/stimulus.md) — How signals reach organs
 
-```bash
-# life.conf — organism configuration
-ORGANS=organs/brain:organs/memory:organs/research
+## Tadpole
 
-# Optional: these become environment variables available to all organs
-MQTT_HOST=broker.example.com
-MQTT_USER=myuser
-BRIDGE_KEY=fe68bcea-xxxx-xxxx-xxxx
-```
-
-`ORGANS` is colon-separated paths (relative to the conf file's directory, or absolute).
-
-**Discovery order:** argument > working directory > home directory.
-
-## Organ Contract
-
-An organ is a directory with an executable `live.sh`. That's the only requirement.
-
-| File | Required | Purpose |
-|------|----------|---------|
-| `live.sh` | Yes | Entry point (must be executable) |
-| `organ.json` | No | Cadence configuration |
-| `health.txt` | No | Status reporting (first word: `ok`, `degraded`, or `error`) |
-
-The spark manages:
-
-| File | Purpose |
-|------|---------|
-| `.spark.last` | Epoch seconds of last launch (cadence check) |
-| `.spark.log` | stdout/stderr from the organ |
-
-Singleton is enforced by the spark via `flock` — not by the organ. Lock files live at `~/.life/locks/<organ-name>.lock`.
-
-## Cadence
-
-`organ.json` optionally sets how often an organ runs:
-
-```json
-{
-  "cadence": 5
-}
-```
-
-Minutes between launches. If omitted (or no `organ.json`), the organ runs every spark cycle.
-
-## Health Reporting
-
-Organs can optionally write `health.txt` to report status. The spark does not read this — it's for monitoring and immune system use.
-
-```
-ok processed 42 items
-```
-
-The first word is the status (`ok`, `degraded`, or `error`). Everything after is a human-readable message. The file's modification time serves as the timestamp.
+The [tadpole](../tadpole/) is a minimal test organism with a single heart organ. Run `tadpole/lifetime.sh` to verify the life system works end-to-end.
