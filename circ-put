@@ -33,7 +33,7 @@ mkdir -p "$LOCAL_DIR"
 [ -f "$LOCAL_DIR/$hash" ] || cp "$input" "$LOCAL_DIR/$hash"
 
 # If GAS bridge is configured, also upload to Drive (distributed access)
-if [ -n "${BRIDGE_KEY:-}" ] || [ -f "${KNOBERT_LIB:-$HOME/knobert/lib}/gas-bridge-key.txt" ]; then
+if [ -n "${BRIDGE_KEY:-}" ] || [ -f "${GAS_LIB:-$HOME/lib}/gas-bridge-key.txt" ]; then
   if command -v gas >/dev/null 2>&1; then
     # Check if already on Drive
     existing=$(gas drive.list "query=title = 'circ-$hash'" count=1 2>/dev/null || echo '{}')

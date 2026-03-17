@@ -11,7 +11,7 @@ Examples:
   gas drive.download id=1abc...
 
 Reads BRIDGE_URL and BRIDGE_KEY from environment or from files:
-  $KNOBERT_LIB/gas-bridge-url.txt and $KNOBERT_LIB/gas-bridge-key.txt
+  $GAS_LIB/gas-bridge-url.txt and $GAS_LIB/gas-bridge-key.txt
 """
 import json, os, sys, urllib.request
 
@@ -19,7 +19,7 @@ def read_secret(name, env_var):
     val = os.environ.get(env_var, "")
     if val:
         return val
-    lib = os.environ.get("KNOBERT_LIB", os.path.expanduser("~/knobert/lib"))
+    lib = os.environ.get("GAS_LIB", os.path.expanduser("~/lib"))
     path = os.path.join(lib, name)
     if os.path.exists(path):
         return open(path).read().strip()
