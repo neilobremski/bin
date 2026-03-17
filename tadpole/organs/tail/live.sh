@@ -21,8 +21,8 @@ if [ -n "$stimulus" ]; then
 
   # If stimulus has a circulatory reference, retrieve the payload
   payload=""
-  if echo "$stimulus" | grep -q "ref:"; then
-    ref=$(echo "$stimulus" | grep -o 'ref:[^ ]*' | head -1 | cut -d: -f2)
+  if echo "$stimulus" | grep -q "circ:"; then
+    ref=$(echo "$stimulus" | grep -o 'circ:[^ ]*' | head -1 | cut -d: -f2)
     if [ -n "$ref" ] && command -v circ-get >/dev/null 2>&1; then
       payload=$(circ-get "$ref" 2>/dev/null || echo "")
     fi

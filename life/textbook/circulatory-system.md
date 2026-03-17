@@ -9,10 +9,10 @@ An organ stores a payload and gets back a content-addressed reference (SHA-256 h
 ```bash
 # Organ A: store a payload
 ref=$(echo "meal digested" | circ-put -)
-echo "food ref:$ref" >> organs/tail/stimulus.txt
+echo "food circ:$ref" >> organs/tail/stimulus.txt
 
 # Organ B: retrieve the payload
-ref=$(grep -o 'ref:[^ ]*' stimulus.txt | cut -d: -f2)
+ref=$(grep -o 'circ:[^ ]*' stimulus.txt | cut -d: -f2)
 payload=$(circ-get "$ref")
 ```
 
@@ -36,9 +36,9 @@ Organs don't know which backend is active. They call `circ-put` and `circ-get` â
 A stimulus line can carry both signal and data reference:
 
 ```
-food ref:a1b2c3d4e5f6a7b8
-voicemail ref:9f8e7d6c5b4a3210
-email from neil subject:Deploy ref:fc87f26abfde0f84
+food circ:a1b2c3d4e5f6a7b8
+voicemail circ:9f8e7d6c5b4a3210
+email from neil subject:Deploy circ:fc87f26abfde0f84
 ```
 
 The signal is immediate (text line). The payload is deferred (retrieved on demand). This keeps stimulus.txt small and fast while supporting arbitrarily large payloads.

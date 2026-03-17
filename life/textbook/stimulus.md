@@ -8,7 +8,7 @@ Append a line:
 
 ```bash
 echo "wake" >> organs/brain/stimulus.txt
-echo "email from neil ref:abc123" >> organs/brain/stimulus.txt
+echo "email from neil circ:abc123" >> organs/brain/stimulus.txt
 ```
 
 Short writes (under 4096 bytes) with `>>` are effectively atomic on Linux. Multiple writers can safely append without locking.
@@ -39,8 +39,8 @@ Whatever the organ needs. The format is up to the writer and the organ. Examples
 
 ```
 wake
-email from neil subject:Deploy check ref:a1b2c3d4
-sms from +1234567890 ref:e5f6a7b8
+email from neil subject:Deploy check circ:a1b2c3d4
+sms from +1234567890 circ:e5f6a7b8
 health-alert phone offline 5 min
 check calendar
 ```
@@ -48,8 +48,8 @@ check calendar
 For payloads too large for a text line (email bodies, attachments, voice memos), the line carries a reference to the circulatory system:
 
 ```
-email from neil subject:Tiger Claw ref:circ/2026-03-17/a1b2c3d4
-voicemail ref:circ/2026-03-17/redmond-middle-school-14
+email from neil subject:Tiger Claw circ:circ/2026-03-17/a1b2c3d4
+voicemail circ:circ/2026-03-17/redmond-middle-school-14
 ```
 
 The organ retrieves the payload from the circulatory system using the reference. The stimulus line is just the signal — small, fast, appendable.
