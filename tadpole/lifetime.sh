@@ -180,6 +180,48 @@ else
 fi
 
 # ===================================================================
+#  PART 4: Immune system (lymph node)
+#  Scans organ health, detects issues, cleans overflows.
+# ===================================================================
+
+cd "$TDIR"
+LYMPH="$TDIR/organs/lymph"
+
+# Reset cadences so lymph can fire
+echo $(($(date +%s) - 600)) > "$LYMPH/.spark.last"
+"$SPARK"
+sleep 1
+
+if [ -f "$LYMPH/health.txt" ] && grep -q "^ok" "$LYMPH/health.txt"; then
+  pass "lymph node reports healthy"
+else
+  fail "lymph should report ok, got: $(cat "$LYMPH/health.txt" 2>/dev/null || echo 'missing')"
+fi
+
+# Inject a sick organ: write "error" to heart's health.txt
+echo "error cardiac arrest" > "$HEART/health.txt"
+echo $(($(date +%s) - 600)) > "$LYMPH/.spark.last"
+"$SPARK"
+sleep 1
+
+if grep -q "degraded" "$LYMPH/health.txt" && grep -q "heart:error" "$LYMPH/health.txt"; then
+  pass "lymph node detected sick organ"
+else
+  fail "lymph should detect heart:error, got: $(cat "$LYMPH/health.txt" 2>/dev/null)"
+fi
+
+# Inject stimulus overflow: 200 lines into tail
+for i in $(seq 1 200); do echo "noise $i" >> "$TAIL/stimulus.txt"; done
+STALE_SECONDS=9999 MAX_STIMULUS_LINES=50 "$TDIR/organs/lymph/live.sh" 2>/dev/null
+stim_lines=$(wc -l < "$TAIL/stimulus.txt")
+
+if [ "$stim_lines" -le 50 ]; then
+  pass "lymph node truncated stimulus overflow ($stim_lines lines)"
+else
+  fail "lymph should truncate to 50 lines, got: $stim_lines"
+fi
+
+# ===================================================================
 echo ""
 echo "# $PASSED/$TESTS passed"
 [ "$FAILED" -gt 0 ] && exit 1

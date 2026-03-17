@@ -16,9 +16,11 @@ if [ -z "$output" ]; then
 fi
 
 routed=0
+dropped=0
+dropped_names=""
+
 while IFS= read -r line; do
   [ -z "$line" ] && continue
-  # -v format: "tadpole/organ payload here"
   topic="${line%% *}"
   message="${line#* }"
   organ="${topic##*/}"
@@ -29,8 +31,14 @@ while IFS= read -r line; do
     routed=$((routed + 1))
     echo "ganglion: $topic → $organ" >&2
   else
+    dropped=$((dropped + 1))
+    dropped_names="${dropped_names}${organ} "
     echo "ganglion: no organ '$organ' for topic $topic — dropped" >&2
   fi
 done <<< "$output"
 
-echo "ok routed $routed" > "$DIR/health.txt"
+if [ "$dropped" -gt 0 ]; then
+  echo "degraded routed $routed dropped $dropped: $dropped_names" > "$DIR/health.txt"
+else
+  echo "ok routed $routed" > "$DIR/health.txt"
+fi

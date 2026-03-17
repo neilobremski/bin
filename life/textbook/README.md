@@ -17,6 +17,8 @@ Everything is shell. No JSON. No parsing. Just `source` and `echo`.
 | [organ-contract.md](organ-contract.md) | The organ interface |
 | [stimulus.md](stimulus.md) | Per-organ stimulus (plain text lines) |
 | [nervous-system.md](nervous-system.md) | MQTT signals between organs |
+| [immune-system.md](immune-system.md) | Health monitoring and cleanup |
+| [future.md](future.md) | Deferred ideas and non-goals |
 
 ## Terminology
 
@@ -24,6 +26,7 @@ Everything is shell. No JSON. No parsing. Just `source` and `echo`.
 |------|---------|
 | **Organ** | Autonomous component with an executable `live.sh` |
 | **Muscle** | Executes but does not think. No autonomy. |
-| **Ganglion** | Organ that routes MQTT signals into per-organ `stimulus.txt` |
+| **Ganglion** | Routes MQTT signals into per-organ `stimulus.txt` |
+| **Lymph Node** | Scans organ health, cleans overflows, emits summary |
 | **life.conf** | Sourceable shell config. `ORGANS` plus environment. |
 | **organ.conf** | Sourceable shell config per organ. `CADENCE` plus organ-specific vars. |
