@@ -1,48 +1,72 @@
 # Life Spark
 
-A cron-based heartbeat that launches "organs" — autonomous processes that do work on their own schedule. Pure bash, no dependencies beyond coreutils. Works on Linux, macOS, and WSL.
+A cron-based heartbeat that launches "organs" — autonomous processes that do work on their own schedule. Pure bash, no dependencies beyond coreutils.
 
-The spark is deliberately dumb: discover organs, check if they're due, launch them. All intelligence lives in the organs themselves.
+The spark is deliberately dumb: read config, find organs, check cadence, enforce singleton, launch. All intelligence lives in the organs themselves.
 
-## Install to Cron
+## Quick Start
 
-The easiest way: put an `organs.conf` in your home directory and source `install.sh`. It will install the cron job automatically. Or manually:
+Create a `life.conf` in your organism directory:
+
+```bash
+ORGANS=organs/brain:organs/memory
+```
+
+Run the spark:
+
+```bash
+cd my-organism
+/path/to/life/spark.sh
+```
+
+Install to cron for a continuous heartbeat:
 
 ```
-* * * * * /path/to/life/spark-cron.sh
+* * * * * cd /path/to/my-organism && /path/to/life/spark-cron.sh
 ```
 
-`spark-cron.sh` wraps `spark.sh` with daily log rotation (`~/.organs/spark-YYYY-MM-DD.log`, 7-day retention).
+`spark-cron.sh` wraps `spark.sh` with daily log rotation (`~/.life/spark-YYYY-MM-DD.log`, 7-day retention).
 
-## Configuring Organs
+## life.conf
 
-The spark discovers organ directories in priority order:
+A sourceable shell file. The spark sources it before launching organs, so all variables become environment for every organ process.
 
-1. **Argument** — pass a manifest file path: `spark.sh /path/to/manifest.conf`
-2. **Environment** — set `ORGANS` as colon-separated paths (like `PATH`): `ORGANS=/opt/brain:/opt/eyes spark.sh`
-3. **Working directory** — `organs.conf` in the current directory (`cd my-organism && spark.sh`)
-4. **Home manifest** — `~/organs.conf` (same format — ideal for machine-wide config with zero args)
+```bash
+# life.conf — organism configuration
+ORGANS=organs/brain:organs/memory:organs/research
 
-If no organs are found, the spark logs a message and exits cleanly.
+# Optional: these become environment variables available to all organs
+MQTT_HOST=broker.example.com
+MQTT_USER=myuser
+BRIDGE_KEY=fe68bcea-xxxx-xxxx-xxxx
+```
+
+`ORGANS` is colon-separated paths (relative to the conf file's directory, or absolute).
+
+**Discovery order:** argument > working directory > home directory.
 
 ## Organ Contract
 
-An organ is a directory containing:
+An organ is a directory with an executable `live.sh`. That's the only requirement.
 
 | File | Required | Purpose |
 |------|----------|---------|
 | `live.sh` | Yes | Entry point (must be executable) |
-| `organ.json` | No | Configuration (currently: cadence) |
+| `organ.json` | No | Cadence configuration |
+| `health.txt` | No | Status reporting (first word: `ok`, `degraded`, or `error`) |
 
-The spark manages these files inside each organ directory:
+The spark manages:
 
 | File | Purpose |
 |------|---------|
-| `.spark.pid` | PID of the running organ (singleton check) |
 | `.spark.last` | Epoch seconds of last launch (cadence check) |
 | `.spark.log` | stdout/stderr from the organ |
 
-## Example organ.json
+Singleton is enforced by the spark via `flock` — not by the organ. Lock files live at `~/.life/locks/<organ-name>.lock`.
+
+## Cadence
+
+`organ.json` optionally sets how often an organ runs:
 
 ```json
 {
@@ -50,26 +74,14 @@ The spark manages these files inside each organ directory:
 }
 ```
 
-The `cadence` field is an integer number of minutes between launches. If omitted (or no `organ.json` exists), the organ runs every time the spark fires.
+Minutes between launches. If omitted (or no `organ.json`), the organ runs every spark cycle.
 
-## Zero Organs
+## Health Reporting
 
-If no organs are configured, the spark exits cleanly with code 0. This is by design — you can install the cron job first, then add organs later.
+Organs can optionally write `health.txt` to report status. The spark does not read this — it's for monitoring and immune system use.
 
-## health.json (optional)
-
-Organs can write a `health.json` file in their directory to report their status. The spark does not read this file (yet) — it's a contract for future monitoring / immune system use.
-
-```json
-{
-  "status": "ok",
-  "ts": "2026-03-16T12:00:00-07:00",
-  "message": "processed 42 items"
-}
+```
+ok processed 42 items
 ```
 
-| Field | Type | Values |
-|-------|------|--------|
-| `status` | string | `ok`, `degraded`, or `down` |
-| `ts` | string | ISO-8601 timestamp |
-| `message` | string | Optional human-readable note |
+The first word is the status (`ok`, `degraded`, or `error`). Everything after is a human-readable message. The file's modification time serves as the timestamp.

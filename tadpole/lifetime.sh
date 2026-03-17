@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lifetime.sh — Run the tadpole through its entire lifecycle.
-# Proves the life system works: spark finds organs, respects cadence,
-# and the heart beats on schedule.
+# Proves the life system works: spark finds life.conf, respects cadence,
+# enforces singleton via flock, and the heart beats on schedule.
 #
 # Usage: ./lifetime.sh [path/to/spark.sh]
 #        Default: looks for ../life/spark.sh relative to this script.
@@ -25,14 +25,14 @@ fail() { TESTS=$((TESTS+1)); FAILED=$((FAILED+1)); echo "not ok $TESTS - $1"; }
 # --- Setup: copy tadpole to a temp dir ---
 TDIR=$(mktemp -d)
 trap 'rm -rf "$TDIR"' EXIT
-cp -r "$SCRIPT_DIR/organs" "$SCRIPT_DIR/organs.conf" "$TDIR/"
+cp -r "$SCRIPT_DIR/organs" "$SCRIPT_DIR/life.conf" "$TDIR/"
 
 HEART="$TDIR/organs/heart"
-CONF="$TDIR/organs.conf"
 
-# --- Test 1: First heartbeat ---
-"$SPARK" "$CONF"
-sleep 1  # let nohup'd process run
+# --- Test 1: First heartbeat (spark discovers life.conf from cwd) ---
+cd "$TDIR"
+"$SPARK"
+sleep 1
 
 if [ -f "$HEART/health.json" ]; then
   pass "health.json created after first spark"
@@ -46,15 +46,9 @@ else
   fail "beat count should be 1, got: $(cat "$HEART/beats.count" 2>/dev/null || echo 'missing')"
 fi
 
-# --- Clean up PID so next spark can check cadence ---
-[ -f "$HEART/.spark.pid" ] && {
-  pid=$(cat "$HEART/.spark.pid")
-  kill "$pid" 2>/dev/null || true
-  rm -f "$HEART/.spark.pid"
-}
-
 # --- Test 2: Cadence blocks immediate re-spark ---
-"$SPARK" "$CONF" > "$TDIR/spark-out.txt" 2>&1 || true
+sleep 1  # let flock release from backgrounded subshell
+"$SPARK" > "$TDIR/spark-out.txt" 2>&1 || true
 sleep 1
 
 if [ "$(cat "$HEART/beats.count")" = "1" ]; then
@@ -64,10 +58,9 @@ else
 fi
 
 # --- Test 3: Expired cadence allows re-spark ---
-# Set .spark.last to 10 minutes ago
 echo $(($(date +%s) - 600)) > "$HEART/.spark.last"
 
-"$SPARK" "$CONF"
+"$SPARK"
 sleep 1
 
 if [ "$(cat "$HEART/beats.count")" = "2" ]; then
