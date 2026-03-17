@@ -79,3 +79,12 @@ if [ ! -f "$NEILS_BIN_CACHE/git-check" ] || [ $(find "$NEILS_BIN_CACHE/git-check
   # Update Neil's Bin Here repo
   pushd $NEIL_BIN; git pull; popd
 fi
+
+# Life spark — silently install cron job if ~/organs.conf exists
+if [ -f "$HOME/organs.conf" ] && command -v crontab >/dev/null 2>&1; then
+  SPARK_CRON="* * * * * $NEIL_BIN/life/spark-cron.sh"
+  if ! crontab -l 2>/dev/null | grep -qF "spark-cron.sh"; then
+    ( crontab -l 2>/dev/null; echo "$SPARK_CRON" ) | crontab -
+    echo "Life Spark: installed cron job"
+  fi
+fi
