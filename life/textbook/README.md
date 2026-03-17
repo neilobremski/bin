@@ -14,5 +14,5 @@
 | **Organ** | Autonomous component with an executable `live.sh` |
 | **Muscle** | Executes but does not think. No autonomy. |
 | **Nerve** | Communication channel (MQTT, bridges) |
-| **Life Spark** | Layer 0 launcher. Sources `life.conf`, kicks organs. |
+| **Life Spark** | Layer 0 launcher. Sources `life.conf`, sparks organs. |
 | **life.conf** | Sourceable shell config. `ORGANS` plus environment. |
