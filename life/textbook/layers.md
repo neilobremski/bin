@@ -13,7 +13,7 @@ The spark does exactly this:
 1. Source `life.conf` (exports all vars as environment)
 2. Split `ORGANS` on `:` into organ directories
 3. For each organ: does `live.sh` exist? Skip if no.
-4. If `organ.json` has cadence, check `.spark.last`. Skip if not due.
+4. If `organ.conf` has cadence, check `.spark.last`. Skip if not due.
 5. Flock `~/.life/locks/<name>.lock`. Skip if locked (already running).
 6. Launch `live.sh`, capture output to `.spark.log`, write `.spark.last`.
 
@@ -21,13 +21,13 @@ The spark is the heartbeat. It provides **periodic activation** — organs that 
 
 See [spark.md](spark.md) for the full specification.
 
-## Layer 1 — Spinal Cord
+## Layer 1 — Ganglion
 
 **What**: An organ. Sparked like any other organ.
 **Purpose**: Bridges real-time signals (MQTT) into per-organ `stimulus.txt`.
 
-1. Cron sparks the spinal cord on its cadence
-2. Spinal cord connects to MQTT (`$MQTT_HOST` from `life.conf`)
+1. Cron sparks the ganglion on its cadence
+2. Ganglion connects to MQTT (`$MQTT_HOST` from `life.conf`)
 3. Drains queued messages
 4. Appends lines to each target organ's `stimulus.txt`
 5. Runs `life/spark.sh` directly to trigger event-driven organ launch
@@ -36,9 +36,9 @@ See [spark.md](spark.md) for the full specification.
 **Layer 0 + Layer 1 together provide both periodic and event-driven activation.**
 
 - Periodic: Cron sparks Layer 0, Layer 0 sparks organs on cadence
-- Event-driven: MQTT message arrives, spinal cord writes stimulus, sparks the target organ
+- Event-driven: MQTT message arrives, ganglion writes stimulus, sparks the target organ
 
-The spinal cord is NOT persistent. It runs, drains, writes, sparks, exits.
+The ganglion is NOT persistent. It runs, drains, writes, sparks, exits.
 
 ## Layer 2+ — Organs
 
@@ -51,11 +51,11 @@ Each organ:
 - Has full autonomy within its domain
 - Singleton enforced by the spark (flock), not by the organ
 
-Organs do not communicate directly. Inter-organ signals flow through MQTT and get routed by the spinal cord into per-organ `stimulus.txt`.
+Organs do not communicate directly. Inter-organ signals flow through MQTT and get routed by the ganglion into per-organ `stimulus.txt`.
 
 ## Why Three Layers
 
-| Property | Layer 0 (Spark) | Layer 1 (Spinal Cord) | Layer 2+ (Organs) |
+| Property | Layer 0 (Spark) | Layer 1 (Ganglion) | Layer 2+ (Organs) |
 |----------|----------------|----------------------|-------------------|
 | Intelligence | None | Minimal (routing) | Full |
 | Persistence | None (cron) | None (sparked) | None (sparked) |

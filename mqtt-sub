@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# mqtt-sub — subscribe to MQTT using env vars for broker config.
+# Reads: MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS
+# All other args passed through to mosquitto_sub.
+#
+# Usage: mqtt-sub -t "topic/#" [-W 2] [-C 10]
+
+set -euo pipefail
+
+args=(-h "${MQTT_HOST:-localhost}" -p "${MQTT_PORT:-1883}")
+[ -n "${MQTT_USER:-}" ] && args+=(-u "$MQTT_USER")
+[ -n "${MQTT_PASS:-}" ] && args+=(-P "$MQTT_PASS")
+[ "${MQTT_PORT:-1883}" = "8883" ] && args+=(--capath /etc/ssl/certs)
+
+exec mosquitto_sub "${args[@]}" "$@"

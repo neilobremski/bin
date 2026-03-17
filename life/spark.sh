@@ -4,13 +4,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOCK_DIR="${HOME}/.life/locks"
+
+# Make repo-root scripts (mqtt-pub, etc.) available to organs
+export PATH="$BIN_ROOT:$PATH"
 
 log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
 
 # --- Configuration ---
-# Find and source life.conf. Priority: argument > cwd > home.
-# life.conf is a sourceable shell file. ORGANS is colon-separated paths.
 CONF=""
 if [[ $# -ge 1 ]] && [[ -f "$1" ]]; then
   CONF="$1"
@@ -27,7 +29,6 @@ fi
 
 CONF_DIR="$(cd "$(dirname "$CONF")" && pwd)"
 
-# Export all vars so organs inherit them
 set -a
 # shellcheck source=/dev/null
 source "$CONF"
@@ -38,7 +39,7 @@ ORGAN_DIRS=()
 if [[ -n "${ORGANS:-}" ]]; then
   IFS=':' read -ra _raw <<< "$ORGANS"
   for p in "${_raw[@]}"; do
-    p="${p#"${p%%[![:space:]]*}"}"  # trim
+    p="${p#"${p%%[![:space:]]*}"}"
     p="${p%"${p##*[![:space:]]}"}"
     [[ -z "$p" ]] && continue
     [[ "$p" != /* ]] && p="$CONF_DIR/$p"
@@ -51,7 +52,6 @@ if [[ ${#ORGAN_DIRS[@]} -eq 0 ]]; then
   exit 0
 fi
 
-# --- Ensure lock directory exists ---
 mkdir -p "$LOCK_DIR"
 
 # --- Process each organ ---
@@ -63,23 +63,47 @@ for dir in "${ORGAN_DIRS[@]}"; do
     continue
   fi
 
-  # Cadence check (optional — only if organ.json exists with cadence)
-  if [[ -f "$dir/organ.json" ]]; then
-    cadence=$(sed -n 's/.*"cadence"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$dir/organ.json" | head -1)
-    if [[ -n "$cadence" ]] && [[ -f "$dir/.spark.last" ]]; then
+  # Determine if this organ should run:
+  # - Has cadence and it's due → yes
+  # - Has cadence but not due, AND has stimulus → yes
+  # - Has cadence but not due, no stimulus → skip
+  # - No cadence, has stimulus → yes
+  # - No cadence, no stimulus → skip (dormant)
+  has_stimulus=false
+  [[ -f "$dir/stimulus.txt" ]] && [[ -s "$dir/stimulus.txt" ]] && has_stimulus=true
+
+  CADENCE=""
+  if [[ -f "$dir/organ.conf" ]]; then
+    # shellcheck source=/dev/null
+    source "$dir/organ.conf"
+  fi
+  cadence="${CADENCE:-}"
+
+  if [[ -n "$cadence" ]]; then
+    # Has cadence — check if due
+    cadence_due=true
+    if [[ -f "$dir/.spark.last" ]]; then
       last_epoch=$(cat "$dir/.spark.last")
       now_epoch=$(date +%s)
       elapsed=$(( (now_epoch - last_epoch) / 60 ))
       if [[ $elapsed -lt $cadence ]]; then
-        log "$name: cadence ${cadence}m, ${elapsed}m elapsed — skipping"
-        continue
+        cadence_due=false
       fi
     fi
+
+    if [[ "$cadence_due" = false ]] && [[ "$has_stimulus" = false ]]; then
+      log "$name: cadence ${cadence}m, ${elapsed}m elapsed — skipping"
+      continue
+    fi
+  else
+    # No cadence — only run if stimulus present
+    if [[ "$has_stimulus" = false ]]; then
+      continue  # dormant, silent skip
+    fi
+    log "$name: stimulus present"
   fi
 
-  # Singleton via flock — spark owns this, not the organ.
-  # Uses a per-organ lock file. flock is released automatically when the
-  # process exits, so no stale PID problem.
+  # Singleton via flock
   lock_file="$LOCK_DIR/$name.lock"
 
   (

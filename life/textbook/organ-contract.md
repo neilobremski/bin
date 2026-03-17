@@ -20,17 +20,15 @@ echo "ok cycle complete" > "$DIR/health.txt"
 
 The spark enforces singleton via `flock` — the organ does not need to manage its own locking. Language-agnostic: `live.sh` can exec into Python, Node, or anything.
 
-## Optional: organ.json
+## Optional: organ.conf
 
-Cadence configuration. If missing, the organ runs every spark cycle.
+Sourceable shell file, same format as `life.conf`. The spark sources it before deciding whether to launch.
 
-```json
-{
-  "cadence": 5
-}
+```bash
+CADENCE=5
 ```
 
-`cadence` is minutes between launches. Only field the spark reads.
+`CADENCE` is minutes between launches. No `organ.conf` = dormant (stimulus-only). No `CADENCE` in conf = every cycle.
 
 ## Optional: health.txt
 

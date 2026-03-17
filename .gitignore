@@ -1,1 +1,6 @@
 memory.db
+*.count
+health.txt
+stimulus.txt
+.spark.last
+.spark.log
