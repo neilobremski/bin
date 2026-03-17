@@ -32,7 +32,7 @@ echo "ORGANS=organs/heart" > life.conf
 Full specifications live in [life/textbook/](textbook/):
 
 - [spark.md](textbook/spark.md) — Layer 0 algorithm, life.conf, flock singleton
-- [layers.md](textbook/layers.md) — The 3-layer model (Spark → Spinal Cord → Organs)
+- [layers.md](textbook/layers.md) — The 3-layer model (Spark → Ganglion → Organs)
 - [organ-contract.md](textbook/organ-contract.md) — What an organ must provide
 - [stimulus.md](textbook/stimulus.md) — How signals reach organs
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Spinal cord: drain MQTT messages, route to organ stimulus files.
+# Ganglion: drain MQTT messages, route to organ stimulus files.
 # Routes by topic name: tadpole/<organ> → organs/<organ>/stimulus.txt
 set -euo pipefail
 
