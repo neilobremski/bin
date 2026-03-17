@@ -4,7 +4,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOCK_DIR="${HOME}/.life/locks"
+
+# Make repo-root scripts (mqtt-pub, etc.) available to organs
+export PATH="$BIN_ROOT:$PATH"
 
 log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
 

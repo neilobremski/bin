@@ -8,7 +8,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SPARK="${1:-$SCRIPT_DIR/../life/spark.sh}"
+BIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SPARK="${1:-$BIN_ROOT/life/spark.sh}"
+export PATH="$BIN_ROOT:$PATH"
 
 # --- Prerequisites ---
 for cmd in mosquitto mqtt-pub mqtt-sub; do
