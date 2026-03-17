@@ -17,19 +17,11 @@ Secrets resolved via local-secret:
 import json, os, sys, urllib.request
 
 def local_secret(name):
-    """Resolve via local-secret utility or inline fallback."""
+    """Resolve via local-secret utility."""
     import subprocess
     try:
-        return subprocess.check_output(["local-secret", name], text=True).strip()
+        return subprocess.check_output(["local-secret", name], text=True, stderr=subprocess.DEVNULL).strip()
     except (FileNotFoundError, subprocess.CalledProcessError):
-        # Inline fallback if local-secret not in PATH
-        val = os.environ.get(name, "")
-        if val:
-            return val
-        fname = name.lower().replace("_", "-") + ".txt"
-        path = os.path.join(os.path.expanduser("~/lib"), fname)
-        if os.path.exists(path):
-            return open(path).read().strip()
         return ""
 
 url = local_secret("GAS_BRIDGE_URL")
