@@ -1,75 +1,41 @@
 # Life Spark
 
-A cron-based heartbeat that launches "organs" — autonomous processes that do work on their own schedule. Pure bash, no dependencies beyond coreutils. Works on Linux, macOS, and WSL.
+A cron-based heartbeat that launches organs. Pure bash, no dependencies beyond coreutils.
 
-The spark is deliberately dumb: discover organs, check if they're due, launch them. All intelligence lives in the organs themselves.
+## Quick Start
 
-## Install to Cron
+```bash
+# 1. Create life.conf in your organism directory
+echo "ORGANS=organs/heart" > life.conf
 
-The easiest way: put an `organs.conf` in your home directory and source `install.sh`. It will install the cron job automatically. Or manually:
+# 2. Run the spark
+/path/to/life/spark.sh
 
-```
-* * * * * /path/to/life/spark-cron.sh
-```
-
-`spark-cron.sh` wraps `spark.sh` with daily log rotation (`~/.organs/spark-YYYY-MM-DD.log`, 7-day retention).
-
-## Configuring Organs
-
-The spark discovers organ directories in priority order:
-
-1. **Argument** — pass a manifest file path: `spark.sh /path/to/manifest.conf`
-2. **Environment** — set `ORGANS` as colon-separated paths (like `PATH`): `ORGANS=/opt/brain:/opt/eyes spark.sh`
-3. **Local manifest** — `organs.conf` next to the script (one path per line, `#` comments, blank lines ignored)
-4. **Home manifest** — `~/organs.conf` (same format — ideal for machine-wide config with zero args)
-
-If no organs are found, the spark logs a message and exits cleanly.
-
-## Organ Contract
-
-An organ is a directory containing:
-
-| File | Required | Purpose |
-|------|----------|---------|
-| `live.sh` | Yes | Entry point (must be executable) |
-| `organ.json` | No | Configuration (currently: cadence) |
-
-The spark manages these files inside each organ directory:
-
-| File | Purpose |
-|------|---------|
-| `.spark.pid` | PID of the running organ (singleton check) |
-| `.spark.last` | Epoch seconds of last launch (cadence check) |
-| `.spark.log` | stdout/stderr from the organ |
-
-## Example organ.json
-
-```json
-{
-  "cadence": 5
-}
+# 3. Install to cron for continuous heartbeat
+#    * * * * * cd /path/to/organism && /path/to/life/spark-cron.sh
 ```
 
-The `cadence` field is an integer number of minutes between launches. If omitted (or no `organ.json` exists), the organ runs every time the spark fires.
+## How It Works
 
-## Zero Organs
+| Concept | One-liner |
+|---------|-----------|
+| **life.conf** | Sourceable shell file. `ORGANS` (colon-separated) plus any env vars organs need. |
+| **Organ** | A directory with an executable `live.sh`. That's it. |
+| **Cadence** | Optional `organ.json` with `{"cadence": N}` (minutes). No file = every cycle. |
+| **Singleton** | Spark enforces via `flock` in `~/.life/locks/`. Organs don't manage locking. |
+| **Health** | Optional `health.txt`. First word = status (`ok`, `degraded`, `error`). |
+| **Stimulus** | Optional `stimulus.txt`. Lines appended by the nervous system, read by the organ. |
+| **Logs** | `spark-cron.sh` logs to `~/.life/spark/YYYY-MM-DD.log` (7-day retention). |
 
-If no organs are configured, the spark exits cleanly with code 0. This is by design — you can install the cron job first, then add organs later.
+## Textbook
 
-## health.json (optional)
+Full specifications live in [life/textbook/](textbook/):
 
-Organs can write a `health.json` file in their directory to report their status. The spark does not read this file (yet) — it's a contract for future monitoring / immune system use.
+- [spark.md](textbook/spark.md) — Layer 0 algorithm, life.conf, flock singleton
+- [layers.md](textbook/layers.md) — The 3-layer model (Spark → Spinal Cord → Organs)
+- [organ-contract.md](textbook/organ-contract.md) — What an organ must provide
+- [stimulus.md](textbook/stimulus.md) — How signals reach organs
 
-```json
-{
-  "status": "ok",
-  "ts": "2026-03-16T12:00:00-07:00",
-  "message": "processed 42 items"
-}
-```
+## Tadpole
 
-| Field | Type | Values |
-|-------|------|--------|
-| `status` | string | `ok`, `degraded`, or `down` |
-| `ts` | string | ISO-8601 timestamp |
-| `message` | string | Optional human-readable note |
+The [tadpole](../tadpole/) is a minimal test organism with a single heart organ. Run `tadpole/lifetime.sh` to verify the life system works end-to-end.

@@ -1,42 +1,58 @@
 #!/usr/bin/env bash
 # Life Spark — cron-based organ launcher
-# Discovers organ directories, checks cadence and singleton, launches live.sh
+# Sources life.conf for configuration, launches organs with flock singleton.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOCK_DIR="${HOME}/.life/locks"
 
 log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
 
-# --- Organ discovery ---
-# Priority: 1) argument, 2) $ORGANS env, 3) organs.conf next to script, 4) ~/organs.conf
-ORGAN_DIRS=()
-
-read_manifest() {
-  local file="$1" base_dir="$2"
-  while IFS= read -r line; do
-    line="${line%%#*}"            # strip comments
-    line="${line#"${line%%[![:space:]]*}"}"  # trim leading whitespace
-    line="${line%"${line##*[![:space:]]}"}"  # trim trailing whitespace
-    [[ -z "$line" ]] && continue
-    [[ "$line" != /* ]] && line="$base_dir/$line"
-    ORGAN_DIRS+=("$line")
-  done < "$file"
-}
-
+# --- Configuration ---
+# Find and source life.conf. Priority: argument > cwd > home.
+# life.conf is a sourceable shell file. ORGANS is colon-separated paths.
+CONF=""
 if [[ $# -ge 1 ]] && [[ -f "$1" ]]; then
-  read_manifest "$1" "$(cd "$(dirname "$1")" && pwd)"
-elif [[ -n "${ORGANS:-}" ]]; then
-  IFS=':' read -ra ORGAN_DIRS <<< "$ORGANS"
-elif [[ -f "$SCRIPT_DIR/organs.conf" ]]; then
-  read_manifest "$SCRIPT_DIR/organs.conf" "$SCRIPT_DIR"
-elif [[ -f "$HOME/organs.conf" ]]; then
-  read_manifest "$HOME/organs.conf" "$HOME"
+  CONF="$1"
+elif [[ -f "$PWD/life.conf" ]]; then
+  CONF="$PWD/life.conf"
+elif [[ -f "$HOME/life.conf" ]]; then
+  CONF="$HOME/life.conf"
+fi
+
+if [[ -z "$CONF" ]]; then
+  log "No life.conf found — clean exit"
+  exit 0
+fi
+
+CONF_DIR="$(cd "$(dirname "$CONF")" && pwd)"
+
+# Export all vars so organs inherit them
+set -a
+# shellcheck source=/dev/null
+source "$CONF"
+set +a
+
+# --- Build organ list ---
+ORGAN_DIRS=()
+if [[ -n "${ORGANS:-}" ]]; then
+  IFS=':' read -ra _raw <<< "$ORGANS"
+  for p in "${_raw[@]}"; do
+    p="${p#"${p%%[![:space:]]*}"}"  # trim
+    p="${p%"${p##*[![:space:]]}"}"
+    [[ -z "$p" ]] && continue
+    [[ "$p" != /* ]] && p="$CONF_DIR/$p"
+    ORGAN_DIRS+=("$p")
+  done
 fi
 
 if [[ ${#ORGAN_DIRS[@]} -eq 0 ]]; then
-  log "No organs configured — clean exit"
+  log "No ORGANS in life.conf — clean exit"
   exit 0
 fi
+
+# --- Ensure lock directory exists ---
+mkdir -p "$LOCK_DIR"
 
 # --- Process each organ ---
 for dir in "${ORGAN_DIRS[@]}"; do
@@ -47,16 +63,7 @@ for dir in "${ORGAN_DIRS[@]}"; do
     continue
   fi
 
-  # Singleton check
-  if [[ -f "$dir/.spark.pid" ]]; then
-    pid=$(cat "$dir/.spark.pid")
-    if kill -0 "$pid" 2>/dev/null; then
-      log "$name: already running (PID $pid) — skipping"
-      continue
-    fi
-  fi
-
-  # Cadence check
+  # Cadence check (optional — only if organ.json exists with cadence)
   if [[ -f "$dir/organ.json" ]]; then
     cadence=$(sed -n 's/.*"cadence"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$dir/organ.json" | head -1)
     if [[ -n "$cadence" ]] && [[ -f "$dir/.spark.last" ]]; then
@@ -70,10 +77,22 @@ for dir in "${ORGAN_DIRS[@]}"; do
     fi
   fi
 
-  # Launch
-  log "$name: launching"
-  nohup "$dir/live.sh" >> "$dir/.spark.log" 2>&1 &
-  echo $! > "$dir/.spark.pid"
-  date +%s > "$dir/.spark.last"
+  # Singleton via flock — spark owns this, not the organ.
+  # Uses a per-organ lock file. flock is released automatically when the
+  # process exits, so no stale PID problem.
+  lock_file="$LOCK_DIR/$name.lock"
+
+  (
+    if ! flock -n 9; then
+      log "$name: already running — skipping"
+      exit 0
+    fi
+
+    log "$name: launching"
+    date +%s > "$dir/.spark.last"
+    "$dir/live.sh" >> "$dir/.spark.log" 2>&1
+    log "$name: finished"
+  ) 9>"$lock_file" &
+
   log "$name: started (PID $!)"
 done
