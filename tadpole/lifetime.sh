@@ -86,14 +86,13 @@ fi
 #  PART 2: Nervous system (heart → MQTT → spine → tail)
 # ===================================================================
 
-# Reset cadences so all organs can fire
+# Reset cadences for heart and spine (tail is event-driven, not in ORGANS)
 echo $(($(date +%s) - 600)) > "$HEART/.spark.last"
 echo $(($(date +%s) - 600)) > "$SPINE/.spark.last"
-echo $(($(date +%s) - 600)) > "$TAIL/.spark.last"
 
-# Step 1: Heart beats again (publishes to MQTT)
+# One spark cycle: heart publishes to MQTT, spine drains and sparks the tail
 "$SPARK"
-sleep 1
+sleep 3  # spine needs time to drain MQTT + spark tail
 
 if [ "$(cat "$HEART/beats.count")" = "2" ]; then
   pass "heart beat 2 (published to MQTT)"
@@ -101,34 +100,16 @@ else
   fail "expected beat 2, got: $(cat "$HEART/beats.count" 2>/dev/null)"
 fi
 
-# Step 2: Spine drains MQTT, routes to tail's stimulus.txt
-# Reset spine cadence so it can fire
-echo $(($(date +%s) - 600)) > "$SPINE/.spark.last"
-"$SPARK"
-sleep 2
-
-if [ -f "$TAIL/stimulus.txt" ] && [ -s "$TAIL/stimulus.txt" ]; then
-  pass "spine routed MQTT message to tail stimulus.txt"
+if grep -q "^ok routed" "$SPINE/health.txt" 2>/dev/null; then
+  pass "spine routed MQTT message"
 else
-  fail "tail/stimulus.txt is empty or missing after spine ran"
+  fail "spine should have routed, got: $(cat "$SPINE/health.txt" 2>/dev/null || echo 'missing')"
 fi
-
-# Step 3: Tail reads stimulus and swims
-echo $(($(date +%s) - 600)) > "$TAIL/.spark.last"
-"$SPARK"
-sleep 1
 
 if [ -f "$TAIL/health.txt" ] && grep -q "^ok swimming" "$TAIL/health.txt"; then
-  pass "tail swam in response to stimulus"
+  pass "tail swam (sparked by spine, not cron)"
 else
   fail "tail should be swimming, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"
-fi
-
-swims=$(cat "$TAIL/swims.count" 2>/dev/null || echo "0")
-if [ "$swims" -ge 1 ]; then
-  pass "tail has swum ($swims times)"
-else
-  fail "tail should have swum at least once, got: $swims"
 fi
 
 # ===================================================================
