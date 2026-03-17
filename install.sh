@@ -80,8 +80,11 @@ if [ ! -f "$NEILS_BIN_CACHE/git-check" ] || [ $(find "$NEILS_BIN_CACHE/git-check
   pushd $NEIL_BIN; git pull; popd
 fi
 
-# Life spark
-if [ -f "$NEIL_BIN/life/spark.sh" ]; then
-  echo "Life Spark available: $NEIL_BIN/life/spark.sh"
-  echo "  Install to cron: * * * * * $NEIL_BIN/life/spark.sh"
+# Life spark — silently install cron job if ~/organs.conf exists
+if [ -f "$HOME/organs.conf" ] && command -v crontab >/dev/null 2>&1; then
+  SPARK_CRON="* * * * * $NEIL_BIN/life/spark-cron.sh"
+  if ! crontab -l 2>/dev/null | grep -qF "spark-cron.sh"; then
+    ( crontab -l 2>/dev/null; echo "$SPARK_CRON" ) | crontab -
+    echo "Life Spark: installed cron job"
+  fi
 fi

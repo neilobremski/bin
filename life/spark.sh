@@ -8,33 +8,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
 
 # --- Organ discovery ---
-# Priority: 1) argument (manifest file), 2) $ORGANS env var, 3) organs.conf
+# Priority: 1) argument, 2) $ORGANS env, 3) organs.conf next to script, 4) ~/organs.conf
 ORGAN_DIRS=()
 
-if [[ $# -ge 1 ]] && [[ -f "$1" ]]; then
+read_manifest() {
+  local file="$1" base_dir="$2"
   while IFS= read -r line; do
     line="${line%%#*}"            # strip comments
     line="${line#"${line%%[![:space:]]*}"}"  # trim leading whitespace
     line="${line%"${line##*[![:space:]]}"}"  # trim trailing whitespace
     [[ -z "$line" ]] && continue
-    # Resolve relative paths against manifest location
-    [[ "$line" != /* ]] && line="$(cd "$(dirname "$1")" && pwd)/$line"
+    [[ "$line" != /* ]] && line="$base_dir/$line"
     ORGAN_DIRS+=("$line")
-  done < "$1"
+  done < "$file"
+}
+
+if [[ $# -ge 1 ]] && [[ -f "$1" ]]; then
+  read_manifest "$1" "$(cd "$(dirname "$1")" && pwd)"
 elif [[ -n "${ORGANS:-}" ]]; then
   IFS=':' read -ra ORGAN_DIRS <<< "$ORGANS"
-else
-  CONF="$SCRIPT_DIR/organs.conf"
-  if [[ -f "$CONF" ]]; then
-    while IFS= read -r line; do
-      line="${line%%#*}"
-      line="${line#"${line%%[![:space:]]*}"}"
-      line="${line%"${line##*[![:space:]]}"}"
-      [[ -z "$line" ]] && continue
-      [[ "$line" != /* ]] && line="$SCRIPT_DIR/$line"
-      ORGAN_DIRS+=("$line")
-    done < "$CONF"
-  fi
+elif [[ -f "$SCRIPT_DIR/organs.conf" ]]; then
+  read_manifest "$SCRIPT_DIR/organs.conf" "$SCRIPT_DIR"
+elif [[ -f "$HOME/organs.conf" ]]; then
+  read_manifest "$HOME/organs.conf" "$HOME"
 fi
 
 if [[ ${#ORGAN_DIRS[@]} -eq 0 ]]; then
