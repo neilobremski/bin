@@ -42,8 +42,9 @@ mosquitto -p "$MQTT_PORT" &
 MQTT_PID=$!
 sleep 0.5
 
-# Override MQTT_PORT in life.conf for our test broker
+# Override MQTT_PORT and set LIFE_DIR so organs find mqtt.sh
 echo "MQTT_PORT=$MQTT_PORT" >> "$TDIR/life.conf"
+echo "LIFE_DIR=$SCRIPT_DIR/../life" >> "$TDIR/life.conf"
 
 HEART="$TDIR/organs/heart"
 TAIL="$TDIR/organs/tail"

@@ -12,10 +12,14 @@ echo "$beats" > "$DIR/beats.count"
 # Report health
 echo "ok beat $beats" > "$DIR/health.txt"
 
-# Publish heartbeat to nervous system (if MQTT configured)
+# Publish heartbeat to nervous system
 if [ -n "${MQTT_HOST:-}" ]; then
-  mosquitto_pub -h "$MQTT_HOST" -p "${MQTT_PORT:-1883}" \
-    -t "tadpole/heartbeat" -m "beat $beats" -r 2>/dev/null || true
+  # Source mqtt helper from life/ (relative to this organ's position)
+  LIFE_DIR="${LIFE_DIR:-$(cd "$DIR/../../.." && pwd)/life}"
+  [ -f "$LIFE_DIR/mqtt.sh" ] && . "$LIFE_DIR/mqtt.sh"
+  if command -v mqtt_pub >/dev/null 2>&1; then
+    mqtt_pub -t "tadpole/heartbeat" -m "beat $beats" -r 2>/dev/null || true
+  fi
 fi
 
 echo "heart beat #$beats" >&2
