@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# circ-get — Retrieve a payload from the circulatory system.
+#
+# Usage: circ-get <hash> [output-file]
+#        circ-get <hash>              # prints to stdout
+#        circ-get <hash> /tmp/out     # writes to file
+#
+# Backends (set CIRC_BACKEND):
+#   local  — filesystem at CIRC_DIR (default: ~/.life/circ)
+#   drive  — Google Drive via GAS bridge
+
+set -euo pipefail
+
+BACKEND="${CIRC_BACKEND:-local}"
+LOCAL_DIR="${CIRC_DIR:-$HOME/.life/circ}"
+
+if [ $# -lt 1 ]; then
+  echo "Usage: circ-get <hash> [output-file]" >&2
+  exit 1
+fi
+
+hash="$1"
+output="${2:-}"
+
+case "$BACKEND" in
+  local)
+    source="$LOCAL_DIR/$hash"
+    if [ ! -f "$source" ]; then
+      echo "error: payload not found: $hash" >&2
+      exit 1
+    fi
+    if [ -n "$output" ]; then
+      cp "$source" "$output"
+    else
+      cat "$source"
+    fi
+    ;;
+
+  drive)
+    # Search for circ-<hash> on Drive, download
+    python3 -c "
+import sys, base64
+sys.path.insert(0, '${KNOBERT_LIB:-$HOME/knobert/lib}')
+from gas_bridge import GASBridge
+bridge = GASBridge()
+files = bridge._call('drive.list', query=\"name = 'circ-$hash'\", count=1)
+if not files.get('files'):
+    print('error: payload not found on Drive: $hash', file=sys.stderr)
+    sys.exit(1)
+fid = files['files'][0]['id']
+data = bridge._call('drive.download', id=fid)
+content = base64.b64decode(data['data'])
+output = '$output'
+if output:
+    with open(output, 'wb') as f:
+        f.write(content)
+else:
+    sys.stdout.buffer.write(content)
+" 2>/dev/null
+    ;;
+
+  *)
+    echo "error: unknown CIRC_BACKEND=$BACKEND" >&2
+    exit 1
+    ;;
+esac

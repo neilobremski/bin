@@ -18,6 +18,7 @@ Everything is shell. No JSON. No parsing. Just `source` and `echo`.
 | [stimulus.md](stimulus.md) | Per-organ stimulus (plain text lines) |
 | [nervous-system.md](nervous-system.md) | MQTT signals between organs |
 | [immune-system.md](immune-system.md) | Health monitoring and cleanup |
+| [circulatory-system.md](circulatory-system.md) | Payload transfer between organs |
 | [future.md](future.md) | Deferred ideas and non-goals |
 
 ## Terminology

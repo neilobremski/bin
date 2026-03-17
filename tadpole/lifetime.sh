@@ -222,6 +222,65 @@ else
 fi
 
 # ===================================================================
+#  PART 5: Circulatory system (payload transfer between organs)
+#  Stomach produces a payload → circ-put → ref in stimulus → tail retrieves
+# ===================================================================
+
+cd "$TDIR"
+STOMACH="$TDIR/organs/stomach"
+export CIRC_DIR="$TDIR/.circ"
+
+# Reset cadences
+echo $(($(date +%s) - 600)) > "$STOMACH/.spark.last"
+echo $(($(date +%s) - 600)) > "$HEART/.spark.last"
+> "$TAIL/stimulus.txt"  # clear any leftover stimulus
+
+"$SPARK"
+sleep 1
+
+if [ -f "$STOMACH/health.txt" ] && grep -q "^ok meal" "$STOMACH/health.txt"; then
+  pass "stomach produced a meal"
+else
+  fail "stomach should produce meal, got: $(cat "$STOMACH/health.txt" 2>/dev/null || echo 'missing')"
+fi
+
+# Check the circulatory system has a file
+circ_files=$(ls "$CIRC_DIR" 2>/dev/null | wc -l)
+if [ "$circ_files" -ge 1 ]; then
+  pass "circulatory system stored payload ($circ_files files)"
+else
+  fail "circulatory system should have files, got: $circ_files"
+fi
+
+# Tail should have stimulus with a ref
+if grep -q "ref:" "$TAIL/stimulus.txt" 2>/dev/null; then
+  pass "tail received stimulus with circulatory reference"
+else
+  fail "tail should have ref: in stimulus, got: $(cat "$TAIL/stimulus.txt" 2>/dev/null || echo 'empty')"
+fi
+
+# Spark the tail — it should retrieve the payload
+"$SPARK"
+sleep 1
+
+if grep -q "^ok swimming (payload:" "$TAIL/health.txt" 2>/dev/null; then
+  pass "tail retrieved payload from circulatory system"
+else
+  fail "tail should have payload, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"
+fi
+
+# Dedup: put identical content twice, should not create a new file
+echo "dedup test payload" | circ-put - >/dev/null
+circ_before=$(ls "$CIRC_DIR" | wc -l)
+echo "dedup test payload" | circ-put - >/dev/null
+circ_after=$(ls "$CIRC_DIR" | wc -l)
+if [ "$circ_after" -eq "$circ_before" ]; then
+  pass "circulatory system deduplicates same content"
+else
+  fail "dedup failed: had $circ_before files, now $circ_after"
+fi
+
+# ===================================================================
 echo ""
 echo "# $PASSED/$TESTS passed"
 [ "$FAILED" -gt 0 ] && exit 1

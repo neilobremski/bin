@@ -10,9 +10,9 @@ Organs could write messages to `outbox/` (one file per message) instead of calli
 
 The tadpole's distributed test (Part 3) uses separate host directories. Docker containers were attempted but the spark's background subshells exit before the container does. Solvable with `wait` or foreground execution, but deferred.
 
-## Circulatory System
+## Drive Backend for Circulatory System
 
-Bulk data transfer between body parts via Google Drive (or similar blob storage). Stimulus carries a reference (`ref:circ/path`), the organ retrieves the payload. Deferred until payloads exceed what text lines can carry.
+The `circ-put`/`circ-get` Drive backend needs the GAS bridge `drive.list` query to support exact name matching. Currently the local backend is proven; Drive backend needs the query fix.
 
 ## Stimulus Overflow Protection in Spark
 

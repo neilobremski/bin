@@ -18,9 +18,23 @@ swims=0
 if [ -n "$stimulus" ]; then
   swims=$((swims + 1))
   echo "$swims" > "$DIR/swims.count"
-  echo "ok swimming ($stimulus)" > "$DIR/health.txt"
+
+  # If stimulus has a circulatory reference, retrieve the payload
+  payload=""
+  if echo "$stimulus" | grep -q "ref:"; then
+    ref=$(echo "$stimulus" | grep -o 'ref:[^ ]*' | head -1 | cut -d: -f2)
+    if [ -n "$ref" ] && command -v circ-get >/dev/null 2>&1; then
+      payload=$(circ-get "$ref" 2>/dev/null || echo "")
+    fi
+  fi
+
+  if [ -n "$payload" ]; then
+    echo "ok swimming (payload: $payload)" > "$DIR/health.txt"
+  else
+    echo "ok swimming ($stimulus)" > "$DIR/health.txt"
+  fi
 else
   echo "ok idle" > "$DIR/health.txt"
 fi
 
-echo "tail: swims=$swims stimulus='$stimulus'" >&2
+echo "tail: swims=$swims" >&2
