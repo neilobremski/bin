@@ -15,7 +15,7 @@ export PATH="$BIN_ROOT:$PATH"
 # --- Prerequisites ---
 for cmd in mosquitto mqtt-pub mqtt-sub; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "FAIL: $cmd not found. Install mosquitto: apt install mosquitto mosquitto-clients" >&2
+    echo "FAIL: $cmd not found. Install: apt install mosquitto mosquitto-clients" >&2
     exit 1
   fi
 done
@@ -37,10 +37,13 @@ cp -r "$SCRIPT_DIR/organs" "$SCRIPT_DIR/life.conf" "$TDIR/"
 chmod +x "$TDIR/organs/"*/live.sh
 
 # Find a free port for the broker
-MQTT_PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+MQTT_PORT=$(free-port)
 
-# Start mosquitto on that port (no config file, no auth)
-mosquitto -p "$MQTT_PORT" &
+# Start mosquitto on that port, listening on all interfaces (for Docker)
+MQTT_CONF="$TDIR/mosquitto.conf"
+echo "listener $MQTT_PORT 0.0.0.0" > "$MQTT_CONF"
+echo "allow_anonymous true" >> "$MQTT_CONF"
+mosquitto -c "$MQTT_CONF" &
 MQTT_PID=$!
 sleep 0.5
 
@@ -112,6 +115,68 @@ if [ -f "$TAIL/health.txt" ] && grep -q "^ok swimming" "$TAIL/health.txt"; then
   pass "tail woke on stimulus (no cadence, just signal)"
 else
   fail "tail should be swimming, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"
+fi
+
+# ===================================================================
+#  PART 3: Distributed body parts
+#  Two separate directories share one broker. Heart on body-a, tail on body-b.
+#  Same pattern as two machines — different organ sets, same MQTT.
+# ===================================================================
+
+# Build body-a: heart + ganglion (no tail)
+BODY_A=$(mktemp -d)
+mkdir -p "$BODY_A/organs"
+cp -r "$SCRIPT_DIR/organs/heart" "$BODY_A/organs/"
+cp -r "$SCRIPT_DIR/organs/ganglion" "$BODY_A/organs/"
+chmod +x "$BODY_A/organs/"*/live.sh
+cat > "$BODY_A/life.conf" <<EOF
+ORGANS=organs/heart:organs/ganglion
+MQTT_HOST=localhost
+MQTT_PORT=$MQTT_PORT
+EOF
+
+# Build body-b: ganglion + tail (no heart)
+BODY_B=$(mktemp -d)
+mkdir -p "$BODY_B/organs"
+cp -r "$SCRIPT_DIR/organs/ganglion" "$BODY_B/organs/"
+cp -r "$SCRIPT_DIR/organs/tail" "$BODY_B/organs/"
+chmod +x "$BODY_B/organs/"*/live.sh
+cat > "$BODY_B/life.conf" <<EOF
+ORGANS=organs/ganglion:organs/tail
+MQTT_HOST=localhost
+MQTT_PORT=$MQTT_PORT
+EOF
+
+trap 'kill $MQTT_PID 2>/dev/null; rm -rf "$TDIR" "$BODY_A" "$BODY_B"' EXIT
+
+# Cycle 1: body-a heart beats, publishes to MQTT
+cd "$BODY_A" && "$SPARK"
+sleep 3
+
+if [ -f "$BODY_A/organs/heart/health.txt" ] && grep -q "^ok beat" "$BODY_A/organs/heart/health.txt"; then
+  pass "body-a: heart beat (separate dir)"
+else
+  fail "body-a: heart should beat, got: $(cat "$BODY_A/organs/heart/health.txt" 2>/dev/null || echo 'missing')"
+fi
+
+# Cycle 2: body-b ganglion drains MQTT, routes to tail
+cd "$BODY_B" && "$SPARK"
+sleep 3
+
+if grep -q "^ok routed" "$BODY_B/organs/ganglion/health.txt" 2>/dev/null; then
+  pass "body-b: ganglion received signal from body-a"
+else
+  fail "body-b: ganglion should route, got: $(cat "$BODY_B/organs/ganglion/health.txt" 2>/dev/null || echo 'missing')"
+fi
+
+# Cycle 3: body-b spark sees tail stimulus, wakes tail
+cd "$BODY_B" && "$SPARK"
+sleep 1
+
+if [ -f "$BODY_B/organs/tail/health.txt" ] && grep -q "^ok swimming" "$BODY_B/organs/tail/health.txt"; then
+  pass "body-b: tail swam from body-a signal (distributed!)"
+else
+  fail "body-b: tail should swim, got: $(cat "$BODY_B/organs/tail/health.txt" 2>/dev/null || echo 'missing')"
 fi
 
 # ===================================================================
