@@ -5,7 +5,7 @@
 | [spark.md](spark.md) | Layer 0: the life spark |
 | [layers.md](layers.md) | The 3-layer activation model |
 | [organ-contract.md](organ-contract.md) | The organ interface |
-| [stimulus.md](stimulus.md) | Per-organ stimulus format |
+| [stimulus.md](stimulus.md) | Per-organ stimulus (plain text lines) |
 
 ## Terminology
 

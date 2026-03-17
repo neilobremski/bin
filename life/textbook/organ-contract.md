@@ -42,9 +42,9 @@ ok processed 42 items
 
 First word is the status: `ok`, `degraded`, or `error`. Rest is a human-readable message. The file's modification time is the timestamp.
 
-## Optional: stimulus.jsonl
+## Optional: stimulus.txt
 
-Per-organ input queue. See [stimulus.md](stimulus.md).
+Per-organ input. Lines appended by the nervous system, read and emptied by the organ. See [stimulus.md](stimulus.md).
 
 ## Spark-Managed Files
 
