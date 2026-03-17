@@ -8,57 +8,61 @@ The nervous system carries signals between organs via MQTT. It is configured thr
 # life.conf
 MQTT_HOST=localhost
 MQTT_PORT=1883
+MQTT_USER=myuser     # optional
+MQTT_PASS=secret     # optional
 ```
 
-Organs inherit these as environment variables. If `MQTT_HOST` is unset, organs skip MQTT operations gracefully.
+Organs inherit these as environment variables. If `MQTT_HOST` is unset, organs skip MQTT and function locally.
 
 ## Publishing
 
-Any organ can publish a signal:
+Any organ can publish a signal using `mqtt-pub` (a repo-root utility):
 
 ```bash
-mosquitto_pub -h "$MQTT_HOST" -p "${MQTT_PORT:-1883}" \
-  -t "organism/heartbeat" -m "beat 42" -r
+mqtt-pub -t "organism/tail" -m "beat 42" -r
 ```
 
-The `-r` flag retains the message on the broker. Subscribers receive the last retained message immediately on connect — they don't have to be listening when the publish happens. Use retained messages for state ("I am alive") and non-retained for events ("something just happened").
+The `-r` flag retains the message on the broker. Subscribers receive the last retained message immediately on connect. Use retained for state, non-retained for events.
+
+The topic name is the address: `organism/<organ>` routes to that organ.
 
 ## The Ganglion
 
-The ganglion is an organ that bridges MQTT into `stimulus.txt` files. It is sparked on cadence like any other organ. Each cycle:
+The ganglion is an organ that bridges MQTT into per-organ `stimulus.txt` files. It routes by topic name:
 
-1. Subscribe to the organism's MQTT topics
-2. Drain messages (short timeout — subscribe, collect, disconnect)
-3. Append each message as a line in the target organ's `stimulus.txt`
+```
+MQTT topic "organism/tail" → organs/tail/stimulus.txt
+MQTT topic "organism/heart" → organs/heart/stimulus.txt
+```
+
+Each cycle:
+1. Subscribe to `organism/#` with a short timeout
+2. Drain messages, parse topic to get organ name
+3. Append message to target organ's `stimulus.txt`
 4. Exit
 
-The ganglion is not persistent. It runs, drains, routes, exits. The spark will spark it again next cycle.
+The ganglion is not persistent. It runs, drains, routes, exits.
 
-```bash
-# Drain with 2-second timeout, max 10 messages
-messages=$(mosquitto_sub -h "$HOST" -p "$PORT" -t "organism/#" -W 2 -C 10)
-echo "$messages" >> organs/tail/stimulus.txt
-```
+Every body part runs its own ganglion. The ganglion only routes to organs that exist locally — unknown organ names are logged and dropped.
 
 ## Signal Chain
 
-The full path from one organ to another:
-
 ```
-heart (organ)
-  → publishes "beat 42" to MQTT topic
-  → broker holds retained message
+heart (periodic organ)
+  → publishes "beat 42" to MQTT topic organism/tail
 
-ganglion (ganglion organ, sparked by cron)
+ganglion (periodic organ, next cron cycle)
   → subscribes to MQTT, drains messages
-  → appends "beat 42" to tail/stimulus.txt
+  → parses topic: organism/tail → organs/tail
+  → appends "beat 42" to organs/tail/stimulus.txt
 
-tail (organ, sparked by cron)
-  → reads stimulus.txt, processes, empties file
+tail (dormant organ, next cron cycle)
+  → spark sees stimulus.txt has content → launches
+  → reads stimulus, processes, empties file
 ```
 
-This gives the organism both **periodic** (cron → spark → organ) and **event-driven** (MQTT → ganglion → stimulus → spark → organ) activation using the same infrastructure.
+This gives the organism both **periodic** (cadence) and **event-driven** (stimulus) activation using the same spark.
 
 ## No Broker, No Problem
 
-If MQTT is not configured (`MQTT_HOST` unset), organs still function — they just can't send or receive signals through the nervous system. The heart still beats, it just doesn't propagate. This is degradation, not failure.
+If `MQTT_HOST` is unset, organs still function — they just can't send or receive signals through the nervous system. Degradation, not failure.

@@ -21,7 +21,7 @@ echo "ORGANS=organs/heart" > life.conf
 |---------|-----------|
 | **life.conf** | Sourceable shell file. `ORGANS` (colon-separated) plus any env vars organs need. |
 | **Organ** | A directory with an executable `live.sh`. That's it. |
-| **Cadence** | Optional `organ.json` with `{"cadence": N}` (minutes). No file = every cycle. |
+| **Cadence** | Optional `organ.conf` with `CADENCE=N` (minutes). No file = every cycle. |
 | **Singleton** | Spark enforces via `flock` in `~/.life/locks/`. Organs don't manage locking. |
 | **Health** | Optional `health.txt`. First word = status (`ok`, `degraded`, `error`). |
 | **Stimulus** | Optional `stimulus.txt`. Lines appended by the nervous system, read by the organ. |

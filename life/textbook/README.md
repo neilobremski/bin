@@ -16,5 +16,5 @@
 | **Muscle** | Executes but does not think. No autonomy. |
 | **Nerve** | Communication channel (MQTT, bridges) |
 | **Life Spark** | Layer 0 launcher. Sources `life.conf`, sparks organs. |
-| **Spinal Cord** | Organ that bridges MQTT into per-organ `stimulus.txt`. |
+| **Ganglion** | Organ that bridges MQTT into per-organ `stimulus.txt`. |
 | **life.conf** | Sourceable shell config. `ORGANS` plus environment. |

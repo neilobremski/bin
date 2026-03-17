@@ -13,7 +13,7 @@ The spark does exactly this:
 1. Source `life.conf` (exports all vars as environment)
 2. Split `ORGANS` on `:` into organ directories
 3. For each organ: does `live.sh` exist? Skip if no.
-4. If `organ.json` has cadence, check `.spark.last`. Skip if not due.
+4. If `organ.conf` has cadence, check `.spark.last`. Skip if not due.
 5. Flock `~/.life/locks/<name>.lock`. Skip if locked (already running).
 6. Launch `live.sh`, capture output to `.spark.log`, write `.spark.last`.
 
@@ -21,7 +21,7 @@ The spark is the heartbeat. It provides **periodic activation** — organs that 
 
 See [spark.md](spark.md) for the full specification.
 
-## Layer 1 — Spinal Cord
+## Layer 1 — Ganglion
 
 **What**: An organ. Sparked like any other organ.
 **Purpose**: Bridges real-time signals (MQTT) into per-organ `stimulus.txt`.
@@ -55,7 +55,7 @@ Organs do not communicate directly. Inter-organ signals flow through MQTT and ge
 
 ## Why Three Layers
 
-| Property | Layer 0 (Spark) | Layer 1 (Spinal Cord) | Layer 2+ (Organs) |
+| Property | Layer 0 (Spark) | Layer 1 (Ganglion) | Layer 2+ (Organs) |
 |----------|----------------|----------------------|-------------------|
 | Intelligence | None | Minimal (routing) | Full |
 | Persistence | None (cron) | None (sparked) | None (sparked) |

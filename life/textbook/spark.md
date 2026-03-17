@@ -32,7 +32,7 @@ All variables become environment for organ processes.
 3. For each organ directory:
    a. VALIDATE: does live.sh exist and is it executable?
       no -> skip
-   b. CADENCE: if organ.json has cadence and .spark.last exists,
+   b. CADENCE: if organ.conf has cadence and .spark.last exists,
       check elapsed minutes. Too soon -> skip
    c. SINGLETON: flock on ~/.life/locks/<name>.lock
       locked -> skip (already running)
@@ -42,13 +42,13 @@ All variables become environment for organ processes.
 
 ## Cadence
 
-Set in `organ.json`:
+Set in `organ.conf` (sourceable shell, same as `life.conf`):
 
-```json
-{ "cadence": 5 }
+```bash
+CADENCE=5
 ```
 
-Minutes between launches. If missing, runs every cycle.
+Minutes between launches. No `organ.conf` = runs on stimulus only (dormant). No `CADENCE` = runs every cycle.
 
 ## Singleton
 
@@ -61,6 +61,6 @@ The spark enforces one-instance-per-organ via `flock`. Lock files live at `~/.li
 | No life.conf found | Clean exit (code 0) |
 | No ORGANS set | Clean exit |
 | live.sh missing | Skip organ, log warning |
-| organ.json missing | Run every cycle |
+| organ.conf missing | Run every cycle |
 | live.sh fails | Spark retries next cycle |
 | Spark crashes | Cron restarts next minute |

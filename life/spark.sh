@@ -72,10 +72,12 @@ for dir in "${ORGAN_DIRS[@]}"; do
   has_stimulus=false
   [[ -f "$dir/stimulus.txt" ]] && [[ -s "$dir/stimulus.txt" ]] && has_stimulus=true
 
-  cadence=""
-  if [[ -f "$dir/organ.json" ]]; then
-    cadence=$(sed -n 's/.*"cadence"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$dir/organ.json" | head -1)
+  CADENCE=""
+  if [[ -f "$dir/organ.conf" ]]; then
+    # shellcheck source=/dev/null
+    source "$dir/organ.conf"
   fi
+  cadence="${CADENCE:-}"
 
   if [[ -n "$cadence" ]]; then
     # Has cadence — check if due
