@@ -10,23 +10,30 @@ Examples:
   gas drive.upload name=test.txt data_base64=$(base64 -w0 file.txt)
   gas drive.download id=1abc...
 
-Reads BRIDGE_URL and BRIDGE_KEY from environment or from files:
-  $GAS_LIB/gas-bridge-url.txt and $GAS_LIB/gas-bridge-key.txt
+Secrets resolved via local-secret:
+  GAS_BRIDGE_URL — env var or ~/lib/gas-bridge-url.txt
+  GAS_BRIDGE_KEY — env var or ~/lib/gas-bridge-key.txt
 """
 import json, os, sys, urllib.request
 
-def read_secret(name, env_var):
-    val = os.environ.get(env_var, "")
-    if val:
-        return val
-    lib = os.environ.get("GAS_LIB", os.path.expanduser("~/lib"))
-    path = os.path.join(lib, name)
-    if os.path.exists(path):
-        return open(path).read().strip()
-    return ""
+def local_secret(name):
+    """Resolve via local-secret utility or inline fallback."""
+    import subprocess
+    try:
+        return subprocess.check_output(["local-secret", name], text=True).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        # Inline fallback if local-secret not in PATH
+        val = os.environ.get(name, "")
+        if val:
+            return val
+        fname = name.lower().replace("_", "-") + ".txt"
+        path = os.path.join(os.path.expanduser("~/lib"), fname)
+        if os.path.exists(path):
+            return open(path).read().strip()
+        return ""
 
-url = read_secret("gas-bridge-url.txt", "BRIDGE_URL")
-key = read_secret("gas-bridge-key.txt", "BRIDGE_KEY")
+url = local_secret("GAS_BRIDGE_URL")
+key = local_secret("GAS_BRIDGE_KEY")
 
 if not url or not key:
     print("error: BRIDGE_URL and BRIDGE_KEY required", file=sys.stderr)
