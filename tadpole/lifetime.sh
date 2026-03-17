@@ -49,7 +49,7 @@ echo "MQTT_PORT=$MQTT_PORT" >> "$TDIR/life.conf"
 
 HEART="$TDIR/organs/heart"
 TAIL="$TDIR/organs/tail"
-SPINE="$TDIR/organs/spine"
+GANGLION="$TDIR/organs/ganglion"
 
 # ===================================================================
 #  PART 1: Heartbeat (same as before)
@@ -83,12 +83,12 @@ else
 fi
 
 # ===================================================================
-#  PART 2: Nervous system (heart → MQTT → spine → stimulus → tail)
+#  PART 2: Nervous system (heart → MQTT → ganglion → stimulus → tail)
 # ===================================================================
 
-# Cycle 1: heart publishes to MQTT, spine drains and writes stimulus.txt
+# Cycle 1: heart publishes to MQTT, ganglion drains and writes stimulus.txt
 echo $(($(date +%s) - 600)) > "$HEART/.spark.last"
-echo $(($(date +%s) - 600)) > "$SPINE/.spark.last"
+echo $(($(date +%s) - 600)) > "$GANGLION/.spark.last"
 "$SPARK"
 sleep 3
 
@@ -98,10 +98,10 @@ else
   fail "expected beat 2, got: $(cat "$HEART/beats.count" 2>/dev/null)"
 fi
 
-if grep -q "^ok routed" "$SPINE/health.txt" 2>/dev/null; then
-  pass "spine routed MQTT message to tail stimulus.txt"
+if grep -q "^ok routed" "$GANGLION/health.txt" 2>/dev/null; then
+  pass "ganglion routed MQTT message to tail stimulus.txt"
 else
-  fail "spine should have routed, got: $(cat "$SPINE/health.txt" 2>/dev/null || echo 'missing')"
+  fail "ganglion should have routed, got: $(cat "$GANGLION/health.txt" 2>/dev/null || echo 'missing')"
 fi
 
 # Cycle 2: cron fires again, spark sees tail has stimulus, wakes it
