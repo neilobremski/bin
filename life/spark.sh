@@ -27,8 +27,8 @@ if [[ $# -ge 1 ]] && [[ -f "$1" ]]; then
   read_manifest "$1" "$(cd "$(dirname "$1")" && pwd)"
 elif [[ -n "${ORGANS:-}" ]]; then
   IFS=':' read -ra ORGAN_DIRS <<< "$ORGANS"
-elif [[ -f "$SCRIPT_DIR/organs.conf" ]]; then
-  read_manifest "$SCRIPT_DIR/organs.conf" "$SCRIPT_DIR"
+elif [[ -f "$PWD/organs.conf" ]]; then
+  read_manifest "$PWD/organs.conf" "$PWD"
 elif [[ -f "$HOME/organs.conf" ]]; then
   read_manifest "$HOME/organs.conf" "$HOME"
 fi

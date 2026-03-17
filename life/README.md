@@ -20,7 +20,7 @@ The spark discovers organ directories in priority order:
 
 1. **Argument** — pass a manifest file path: `spark.sh /path/to/manifest.conf`
 2. **Environment** — set `ORGANS` as colon-separated paths (like `PATH`): `ORGANS=/opt/brain:/opt/eyes spark.sh`
-3. **Local manifest** — `organs.conf` next to the script (one path per line, `#` comments, blank lines ignored)
+3. **Working directory** — `organs.conf` in the current directory (`cd my-organism && spark.sh`)
 4. **Home manifest** — `~/organs.conf` (same format — ideal for machine-wide config with zero args)
 
 If no organs are found, the spark logs a message and exits cleanly.
