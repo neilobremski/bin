@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Stomach: produces a payload and sends it via the circulatory system.
-# Demonstrates organ-to-organ data transfer through circ-put/circ-get.
+# Publishes to MQTT — the ganglion routes it to the tail.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-CONF_DIR="$(cd "$DIR/../.." && pwd)"
 
 # Produce a payload (digest food)
 meals=0
@@ -15,8 +14,10 @@ echo "$meals" > "$DIR/meals.count"
 payload="meal $meals digested at $(date -u +%H:%M:%S)"
 ref=$(echo "$payload" | circ-put -)
 
-# Stimulate the tail with a reference to the payload
-echo "food circ:$ref" >> "$CONF_DIR/organs/tail/stimulus.txt"
+# Publish to nervous system — ganglion routes to tail
+if [ -n "${MQTT_HOST:-}" ] && command -v mqtt-pub >/dev/null 2>&1; then
+  mqtt-pub -t "tadpole/tail" -m "food circ:$ref" -r 2>/dev/null || true
+fi
 
 echo "ok meal $meals circ:$ref" > "$DIR/health.txt"
 echo "stomach: produced meal $meals, ref=$ref" >&2

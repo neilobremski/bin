@@ -30,6 +30,19 @@ TESTS=0; PASSED=0; FAILED=0
 pass() { TESTS=$((TESTS+1)); PASSED=$((PASSED+1)); echo "ok $TESTS - $1"; }
 fail() { TESTS=$((TESTS+1)); FAILED=$((FAILED+1)); echo "not ok $TESTS - $1"; }
 
+# Wait for a condition (file exists, grep matches) with timeout
+# Usage: wait_for <seconds> <test-command>
+wait_for() {
+  local timeout=$1; shift
+  local elapsed=0
+  while [ $elapsed -lt $timeout ]; do
+    if eval "$@" 2>/dev/null; then return 0; fi
+    sleep 0.5
+    elapsed=$((elapsed + 1))
+  done
+  return 1
+}
+
 # --- Setup: copy tadpole to temp dir, start local MQTT broker ---
 TDIR=$(mktemp -d)
 trap 'kill $MQTT_PID 2>/dev/null; rm -rf "$TDIR"' EXIT
@@ -222,49 +235,53 @@ else
 fi
 
 # ===================================================================
-#  PART 5: Circulatory system (payload transfer between organs)
-#  Stomach produces a payload → circ-put → ref in stimulus → tail retrieves
+#  PART 5: Circulatory system (stomach → MQTT → ganglion → tail)
+#  Full signal chain: payload in circ, reference through nervous system.
 # ===================================================================
 
 cd "$TDIR"
 STOMACH="$TDIR/organs/stomach"
-export CIRC_DIR="$TDIR/.circ"
 
-# Reset cadences
-echo $(($(date +%s) - 600)) > "$STOMACH/.spark.last"
+# Add circulatory config to life.conf (organs inherit env from spark)
+echo "CIRC_DIR=$TDIR/.circ" >> "$TDIR/life.conf"
+echo "CIRC_LOCAL_ONLY=1" >> "$TDIR/life.conf"  # skip Drive uploads in tests
+
+# Feed the stomach (it's dormant until it gets food)
+echo "eat something" > "$STOMACH/stimulus.txt"
 echo $(($(date +%s) - 600)) > "$HEART/.spark.last"
-> "$TAIL/stimulus.txt"  # clear any leftover stimulus
+echo $(($(date +%s) - 600)) > "$GANGLION/.spark.last"
+> "$TAIL/stimulus.txt"
 
+# Cycle 1: stomach wakes on stimulus, produces meal, publishes to MQTT
 "$SPARK"
-sleep 1
-
-if [ -f "$STOMACH/health.txt" ] && grep -q "^ok meal" "$STOMACH/health.txt"; then
-  pass "stomach produced a meal"
+if wait_for 10 'grep -q "^ok meal" "$STOMACH/health.txt"'; then
+  pass "stomach produced a meal (published to MQTT)"
 else
   fail "stomach should produce meal, got: $(cat "$STOMACH/health.txt" 2>/dev/null || echo 'missing')"
 fi
 
-# Check the circulatory system has a file
-circ_files=$(ls "$CIRC_DIR" 2>/dev/null | wc -l)
-if [ "$circ_files" -ge 1 ]; then
-  pass "circulatory system stored payload ($circ_files files)"
+if wait_for 5 'ls "$CIRC_DIR"/* >/dev/null 2>&1'; then
+  pass "circulatory system stored payload"
 else
-  fail "circulatory system should have files, got: $circ_files"
+  fail "circulatory system should have files"
 fi
 
-# Tail may have already consumed stimulus (both ran in same cycle).
-# Check health.txt for proof of payload retrieval.
-if grep -q "^ok swimming (payload:" "$TAIL/health.txt" 2>/dev/null; then
-  pass "tail retrieved payload via circulatory reference"
-else
-  # Tail hasn't run yet — spark it
+# Run spark cycles until tail gets the payload (max 5 cycles)
+found=false
+for i in 1 2 3 4 5; do
+  echo $(($(date +%s) - 600)) > "$GANGLION/.spark.last"
   "$SPARK"
-  sleep 1
+  sleep 2
   if grep -q "^ok swimming (payload:" "$TAIL/health.txt" 2>/dev/null; then
-    pass "tail retrieved payload via circulatory reference"
-  else
-    fail "tail should have payload, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"
+    found=true
+    break
   fi
+done
+
+if [ "$found" = true ]; then
+  pass "tail retrieved payload via nervous + circulatory system"
+else
+  fail "tail should have payload, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"
 fi
 
 # Dedup: put identical content twice, should not create a new file
