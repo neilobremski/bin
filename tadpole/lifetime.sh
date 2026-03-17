@@ -83,16 +83,14 @@ else
 fi
 
 # ===================================================================
-#  PART 2: Nervous system (heart → MQTT → spine → tail)
+#  PART 2: Nervous system (heart → MQTT → spine → stimulus → tail)
 # ===================================================================
 
-# Reset cadences for heart and spine (tail is event-driven, not in ORGANS)
+# Cycle 1: heart publishes to MQTT, spine drains and writes stimulus.txt
 echo $(($(date +%s) - 600)) > "$HEART/.spark.last"
 echo $(($(date +%s) - 600)) > "$SPINE/.spark.last"
-
-# One spark cycle: heart publishes to MQTT, spine drains and sparks the tail
 "$SPARK"
-sleep 3  # spine needs time to drain MQTT + spark tail
+sleep 3
 
 if [ "$(cat "$HEART/beats.count")" = "2" ]; then
   pass "heart beat 2 (published to MQTT)"
@@ -101,13 +99,17 @@ else
 fi
 
 if grep -q "^ok routed" "$SPINE/health.txt" 2>/dev/null; then
-  pass "spine routed MQTT message"
+  pass "spine routed MQTT message to tail stimulus.txt"
 else
   fail "spine should have routed, got: $(cat "$SPINE/health.txt" 2>/dev/null || echo 'missing')"
 fi
 
+# Cycle 2: cron fires again, spark sees tail has stimulus, wakes it
+"$SPARK"
+sleep 1
+
 if [ -f "$TAIL/health.txt" ] && grep -q "^ok swimming" "$TAIL/health.txt"; then
-  pass "tail swam (sparked by spine, not cron)"
+  pass "tail woke on stimulus (no cadence, just signal)"
 else
   fail "tail should be swimming, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"
 fi
