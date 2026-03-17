@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SPARK="${1:-$SCRIPT_DIR/../life/spark.sh}"
 
 # --- Prerequisites ---
-for cmd in mosquitto mosquitto_pub mosquitto_sub; do
+for cmd in mosquitto mqtt-pub mqtt-sub; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "FAIL: $cmd not found. Install mosquitto: apt install mosquitto mosquitto-clients" >&2
     exit 1
@@ -42,9 +42,8 @@ mosquitto -p "$MQTT_PORT" &
 MQTT_PID=$!
 sleep 0.5
 
-# Override MQTT_PORT and set LIFE_DIR so organs find mqtt.sh
+# Override MQTT_PORT for our test broker
 echo "MQTT_PORT=$MQTT_PORT" >> "$TDIR/life.conf"
-echo "LIFE_DIR=$SCRIPT_DIR/../life" >> "$TDIR/life.conf"
 
 HEART="$TDIR/organs/heart"
 TAIL="$TDIR/organs/tail"

@@ -5,12 +5,8 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 CONF_DIR="$(cd "$DIR/../.." && pwd)"
 
-# Source mqtt helper
-LIFE_DIR="${LIFE_DIR:-$(cd "$DIR/../../.." && pwd)/life}"
-[ -f "$LIFE_DIR/mqtt.sh" ] && . "$LIFE_DIR/mqtt.sh"
-
 # Drain messages (2-second timeout, max 10)
-messages=$(mqtt_sub -t "tadpole/#" -W 2 -C 10 2>/dev/null || true)
+messages=$(mqtt-sub -t "tadpole/#" -W 2 -C 10 2>/dev/null || true)
 
 if [ -z "$messages" ]; then
   echo "ok idle" > "$DIR/health.txt"
