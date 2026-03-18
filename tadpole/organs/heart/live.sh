@@ -12,9 +12,4 @@ echo "$beats" > "$DIR/beats.count"
 # Report health
 echo "ok beat $beats" > "$DIR/health.txt"
 
-# Publish heartbeat to nervous system (source-based topic)
-if [ -n "${MQTT_HOST:-}" ] && command -v mqtt-pub >/dev/null 2>&1; then
-  mqtt-pub -t "tadpole/heart" -m "beat $beats" -r 2>/dev/null || true
-fi
-
 echo "heart beat #$beats" >&2

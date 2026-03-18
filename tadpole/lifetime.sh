@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# lifetime.sh — Integration test for the life system.
-# Tests: heartbeat + cadence, nervous system routing, immune system cleanup.
-# Requires: mosquitto, mqtt-pub, mqtt-sub
+# lifetime.sh — Integration test for the life system (ganglion v2).
+# Tests: heartbeat + cadence, stimulus routing, source routing, immune system.
+# Requires: mosquitto, mqtt-pub, mqtt-sub, sqlite3
 
 set -euo pipefail
 
@@ -11,7 +11,7 @@ SPARK="$BIN_ROOT/life/spark.sh"
 export PATH="$BIN_ROOT:$PATH"
 
 # --- Prerequisites ---
-for cmd in mosquitto mqtt-pub mqtt-sub; do
+for cmd in mosquitto mqtt-pub mqtt-sub sqlite3; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "FAIL: $cmd not found" >&2; exit 1; }
 done
 [ -x "$SPARK" ] || { echo "FAIL: spark.sh not found" >&2; exit 1; }
@@ -33,8 +33,11 @@ wait_for() {
 # --- Setup: fresh copy + local MQTT broker ---
 TDIR=$(mktemp -d)
 trap 'kill $MQTT_PID 2>/dev/null; rm -rf "$TDIR"' EXIT
+
+# Copy organs and ganglion into test dir
 cp -r "$SCRIPT_DIR/organs" "$SCRIPT_DIR/life.conf" "$TDIR/"
-chmod +x "$TDIR/organs/"*/live.sh
+cp -r "$BIN_ROOT/ganglion" "$TDIR/ganglion"
+chmod +x "$TDIR/organs/"*/live.sh "$TDIR/ganglion/live.sh"
 
 MQTT_PORT=$(free-port)
 echo "listener $MQTT_PORT 0.0.0.0" > "$TDIR/mosquitto.conf"
@@ -43,17 +46,20 @@ mosquitto -c "$TDIR/mosquitto.conf" &
 MQTT_PID=$!
 sleep 0.5
 
-# Configure: unique ganglion ID, local-only circ, test MQTT port
+# Configure for test: local MQTT, ganglion DB in temp dir, test body part
 cat >> "$TDIR/life.conf" << EOF
 MQTT_PORT=$MQTT_PORT
 GANGLION_CLIENT_ID=test-$$
+GANGLION_DB=$TDIR/ganglion.db
+BODY_PART=test
 CIRC_LOCAL_ONLY=1
 CIRC_DIR=$TDIR/.circ
+ORGANS=organs/heart:ganglion:organs/tail:organs/lymph:organs/stomach
 EOF
 
 HEART="$TDIR/organs/heart"
 TAIL="$TDIR/organs/tail"
-GANGLION="$TDIR/organs/ganglion"
+GANGLION="$TDIR/ganglion"
 LYMPH="$TDIR/organs/lymph"
 STOMACH="$TDIR/organs/stomach"
 
@@ -83,21 +89,24 @@ else
 fi
 
 # ===================================================================
-#  PART 2: Nervous system (direct signal → ganglion → stimulus → tail)
+#  PART 2: Nervous system (stimulus send → ganglion MQTT → tail)
 # ===================================================================
 
-# Publish a direct signal addressed to the tail (not retained — it's an event)
-MQTT_HOST=localhost MQTT_PORT=$MQTT_PORT mqtt-pub -t "tadpole/tail" -m "swim now" -q 1
+# Send stimulus to tail via the stimulus CLI (uses MQTT)
+cd "$TDIR"
+source "$TDIR/life.conf"
+export MQTT_HOST MQTT_PORT BODY_PART GANGLION_DB ORGANS
+stimulus send tail "swim now"
 
 # Let ganglion drain and route it
 echo $(($(date +%s) - 600)) > "$GANGLION/.spark.last"
 "$SPARK"
-wait_for 8 'grep -q "^ok routed" "$GANGLION/health.txt"'
+wait_for 8 'grep -q "^ok scanned" "$GANGLION/health.txt"'
 
-if grep -q "^ok routed" "$GANGLION/health.txt" 2>/dev/null; then
-  pass "ganglion routed direct signal"
+if grep -q "^ok scanned" "$GANGLION/health.txt" 2>/dev/null; then
+  pass "ganglion scanned and routed"
 else
-  fail "ganglion should route, got: $(cat "$GANGLION/health.txt" 2>/dev/null || echo 'missing')"
+  fail "ganglion should scan, got: $(cat "$GANGLION/health.txt" 2>/dev/null || echo 'missing')"
 fi
 
 # Tail wakes on stimulus (dormant organ, no cadence)
@@ -111,7 +120,7 @@ else
 fi
 
 # ===================================================================
-#  PART 3: Source routing (stomach → MQTT → ganglion → tail)
+#  PART 3: Source routing (stomach → stimulus send tail → tail)
 # ===================================================================
 
 # Feed the stomach (dormant until stimulus)
@@ -124,7 +133,7 @@ echo $(($(date +%s) - 600)) > "$GANGLION/.spark.last"
 wait_for 10 'grep -q "^ok meal" "$STOMACH/health.txt"'
 
 if grep -q "^ok meal" "$STOMACH/health.txt" 2>/dev/null; then
-  pass "stomach produced meal via source topic"
+  pass "stomach produced meal via stimulus send"
 else
   fail "stomach should produce meal, got: $(cat "$STOMACH/health.txt" 2>/dev/null || echo 'missing')"
 fi
