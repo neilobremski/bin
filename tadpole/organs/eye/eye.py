@@ -84,25 +84,60 @@ def read_commands():
     return commands
 
 
+def get_organ_health(organ_type):
+    """Get an organ's health text from the ganglion registry."""
+    output = stimulus_query()
+    for line in output.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 5 and parts[0] == organ_type:
+            return parts[4]  # health_text column
+    return ""
+
+
 def process_commands(commands):
     """Deliver commands as stimulus and mark processed."""
-    now = datetime.now(timezone.utc).strftime("%H:%M:%S")
     for cmd in commands:
         target = cmd["target"]
         message = cmd["command"]
         row = cmd["row"]
 
         ok = stimulus_send(target, message)
-        response = f"delivered at {now}" if ok else f"failed at {now}"
 
-        # Mark processed in sheet
+        # Mark processed, response filled in later by update_responses()
         gas(
             "sheets.update",
             f"spreadsheet_id={SHEET_ID}",
             f"range=Sheet1!C{row}:D{row}",
-            f'values=[["yes","{response}"]]'
+            f'values=[["yes","pending..."]]'
         )
         log(f"row {row}: {message} -> {target} ({'ok' if ok else 'fail'})")
+
+
+def update_responses():
+    """Fill in organ responses for processed rows that still say 'pending...'."""
+    data = gas("sheets.read", f"spreadsheet_id={SHEET_ID}", "range=Sheet1!A:D")
+    if not data or "rows" not in data:
+        return
+
+    for i, row in enumerate(data["rows"]):
+        if i == 0:
+            continue
+        while len(row) < 4:
+            row.append("")
+        target = str(row[1]) if row[1] else "stomach"
+        processed = str(row[2])
+        response = str(row[3])
+
+        if processed == "yes" and response == "pending...":
+            health = get_organ_health(target)
+            if health and not health.startswith("ok idle"):
+                gas(
+                    "sheets.update",
+                    f"spreadsheet_id={SHEET_ID}",
+                    f"range=Sheet1!D{i + 1}:D{i + 1}",
+                    f"values={json.dumps([[health]])}"
+                )
+                log(f"row {i + 1}: response updated -> {health}")
 
 
 def write_health():
@@ -136,12 +171,15 @@ def main():
         (DIR / "health.txt").write_text("ok idle (no sheet)\n")
         return
 
-    # Read and process commands
+    # Read and process new commands
     commands = read_commands()
     processed = 0
     if commands:
         process_commands(commands)
         processed = len(commands)
+
+    # Fill in organ responses for previously processed commands
+    update_responses()
 
     # Write health status to sheet
     write_health()
