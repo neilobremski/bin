@@ -44,9 +44,7 @@ SPARK_INTERVAL=10 ../life/spark-loop.sh
 
 ## The Spreadsheet
 
-The tadpole's Google Sheet has two areas:
-
-**Input (columns A-D)**: Write commands here. The eye reads them each cycle.
+The eye reads commands from a Google Sheet named "Tadpole" (created automatically).
 
 | Command | Target | Processed | Response |
 |---------|--------|-----------|----------|
@@ -54,14 +52,7 @@ The tadpole's Google Sheet has two areas:
 | swim now | tail | yes | ok splish splash |
 | eat | stomach | | |
 
-**Status (columns F-I)**: The eye writes organ health here each cycle.
-
-| Organ | Status | Health | Updated |
-|-------|--------|--------|---------|
-| heart | ok | ok beat 42 | 09:31 |
-| stomach | ok | ok yum yum (meal 3) | 09:30 |
-| tail | ok | ok splish splash | 09:31 |
-| lymph | ok | ok all healthy | 09:31 |
+Write a command in column A, target organ in column B. The eye picks it up, delivers it as stimulus, and fills in the organ's actual response once it processes.
 
 ## Configuration
 
