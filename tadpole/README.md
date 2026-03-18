@@ -63,13 +63,13 @@ The tadpole's Google Sheet has two areas:
 | tail | ok | ok swimming | 09:31 |
 | lymph | ok | ok all healthy | 09:31 |
 
-[Open the tadpole's spreadsheet](https://docs.google.com/spreadsheets/d/1wCyxlJk6V7pbANsilG9wNlfKgTfUEJCqYde1_0r88SQ/edit)
-
 ## Configuration
 
 In `life.conf`:
 ```bash
-SHEETS_ID=1wCyxlJk6V7pbANsilG9wNlfKgTfUEJCqYde1_0r88SQ
+SHEETS_NAME=Tadpole    # eye finds or creates a sheet with this name
 ```
+
+The eye automatically finds an existing Google Sheet by name, or creates one if none exists. Each person running the tadpole with their own GAS bridge gets their own sheet.
 
 Requires the GAS bridge (`GAS_BRIDGE_URL` and `GAS_BRIDGE_KEY` via `local-secret`). Without it, the eye stays idle — degradation, not failure.

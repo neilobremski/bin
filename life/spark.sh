@@ -32,6 +32,7 @@ CONF_DIR="$(cd "$(dirname "$CONF")" && pwd)"
 set -a
 # shellcheck source=/dev/null
 source "$CONF"
+CONF_DIR="$CONF_DIR"
 set +a
 
 # --- Build organ list ---

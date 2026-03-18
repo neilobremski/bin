@@ -16,11 +16,41 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 DIR = Path(__file__).resolve().parent
-SHEET_ID = os.environ.get("SHEETS_ID", "")
+SHEET_NAME = os.environ.get("SHEETS_NAME", "Tadpole")
+_SHEET_ID_FILE = DIR / ".sheet_id"
+_ACTIVE_SHEET = ""
 
 
 def log(msg):
     print(f"eye: {msg}", file=sys.stderr)
+
+
+def get_sheet_id():
+    """Find or create the spreadsheet by name. Caches ID locally."""
+    # Check cache first
+    if _SHEET_ID_FILE.exists():
+        cached = _SHEET_ID_FILE.read_text().strip()
+        if cached:
+            return cached
+
+    # Search Drive for existing sheet
+    result = gas("drive.list", f"query=title = '{SHEET_NAME}'", "count=1")
+    if result and result.get("files"):
+        sheet_id = result["files"][0]["id"]
+        _SHEET_ID_FILE.write_text(sheet_id)
+        log(f"found existing sheet: {sheet_id}")
+        return sheet_id
+
+    # Create new sheet
+    result = gas("sheets.create", f"name={SHEET_NAME}",
+                 'headers=["Command","Target","Processed","Response"]')
+    if result and result.get("id"):
+        sheet_id = result["id"]
+        _SHEET_ID_FILE.write_text(sheet_id)
+        log(f"created new sheet: {sheet_id}")
+        return sheet_id
+
+    return ""
 
 
 def gas(*args):
@@ -63,7 +93,7 @@ def stimulus_query():
 
 def read_commands():
     """Read unprocessed commands from the sheet."""
-    data = gas("sheets.read", f"spreadsheet_id={SHEET_ID}", "range=Sheet1!A:D")
+    data = gas("sheets.read", f"spreadsheet_id={_ACTIVE_SHEET}", "range=Sheet1!A:D")
     if not data or "rows" not in data:
         return []
 
@@ -106,7 +136,7 @@ def process_commands(commands):
         # Mark processed, response filled in later by update_responses()
         gas(
             "sheets.update",
-            f"spreadsheet_id={SHEET_ID}",
+            f"spreadsheet_id={_ACTIVE_SHEET}",
             f"range=Sheet1!C{row}:D{row}",
             f'values=[["yes","pending..."]]'
         )
@@ -115,7 +145,7 @@ def process_commands(commands):
 
 def update_responses():
     """Fill in organ responses for processed rows that still say 'pending...'."""
-    data = gas("sheets.read", f"spreadsheet_id={SHEET_ID}", "range=Sheet1!A:D")
+    data = gas("sheets.read", f"spreadsheet_id={_ACTIVE_SHEET}", "range=Sheet1!A:D")
     if not data or "rows" not in data:
         return
 
@@ -133,7 +163,7 @@ def update_responses():
             if health and not health.startswith("ok idle"):
                 gas(
                     "sheets.update",
-                    f"spreadsheet_id={SHEET_ID}",
+                    f"spreadsheet_id={_ACTIVE_SHEET}",
                     f"range=Sheet1!D{i + 1}:D{i + 1}",
                     f"values={json.dumps([[health]])}"
                 )
@@ -159,15 +189,17 @@ def write_health():
 
     gas(
         "sheets.update",
-        f"spreadsheet_id={SHEET_ID}",
+        f"spreadsheet_id={_ACTIVE_SHEET}",
         f"range=Sheet1!F1:I11",
         f"values={json.dumps(rows)}"
     )
 
 
 def main():
-    if not SHEET_ID:
-        log("no SHEETS_ID configured — sleeping")
+    global _ACTIVE_SHEET
+    _ACTIVE_SHEET = get_sheet_id()
+    if not _ACTIVE_SHEET:
+        log("no GAS bridge or sheet — idle")
         (DIR / "health.txt").write_text("ok idle (no sheet)\n")
         return
 
