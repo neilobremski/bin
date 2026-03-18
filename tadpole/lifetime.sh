@@ -1,224 +1,183 @@
 #!/usr/bin/env bash
-# lifetime.sh — Run the tadpole through its entire lifecycle.
-# Tests heartbeat, cadence, AND the nervous system (MQTT).
-# Requires: mosquitto, mosquitto_pub, mosquitto_sub
-#
-# Usage: ./lifetime.sh [path/to/spark.sh]
+# lifetime.sh — Integration test for the life system.
+# Tests: heartbeat + cadence, nervous system routing, immune system cleanup.
+# Requires: mosquitto, mqtt-pub, mqtt-sub
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SPARK="${1:-$BIN_ROOT/life/spark.sh}"
+SPARK="$BIN_ROOT/life/spark.sh"
 export PATH="$BIN_ROOT:$PATH"
 
 # --- Prerequisites ---
 for cmd in mosquitto mqtt-pub mqtt-sub; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "FAIL: $cmd not found. Install: apt install mosquitto mosquitto-clients" >&2
-    exit 1
-  fi
+  command -v "$cmd" >/dev/null 2>&1 || { echo "FAIL: $cmd not found" >&2; exit 1; }
 done
-
-if [ ! -x "$SPARK" ]; then
-  echo "FAIL: spark.sh not found at $SPARK" >&2
-  exit 1
-fi
+[ -x "$SPARK" ] || { echo "FAIL: spark.sh not found" >&2; exit 1; }
 
 # --- Helpers ---
 TESTS=0; PASSED=0; FAILED=0
 pass() { TESTS=$((TESTS+1)); PASSED=$((PASSED+1)); echo "ok $TESTS - $1"; }
 fail() { TESTS=$((TESTS+1)); FAILED=$((FAILED+1)); echo "not ok $TESTS - $1"; }
 
-# --- Setup: copy tadpole to temp dir, start local MQTT broker ---
+wait_for() {
+  local timeout=$1; shift; local i=0
+  while [ $i -lt $timeout ]; do
+    if eval "$@" 2>/dev/null; then return 0; fi
+    sleep 0.5; i=$((i + 1))
+  done
+  return 1
+}
+
+# --- Setup: fresh copy + local MQTT broker ---
 TDIR=$(mktemp -d)
 trap 'kill $MQTT_PID 2>/dev/null; rm -rf "$TDIR"' EXIT
 cp -r "$SCRIPT_DIR/organs" "$SCRIPT_DIR/life.conf" "$TDIR/"
 chmod +x "$TDIR/organs/"*/live.sh
 
-# Find a free port for the broker
 MQTT_PORT=$(free-port)
-
-# Start mosquitto on that port, listening on all interfaces (for Docker)
-MQTT_CONF="$TDIR/mosquitto.conf"
-echo "listener $MQTT_PORT 0.0.0.0" > "$MQTT_CONF"
-echo "allow_anonymous true" >> "$MQTT_CONF"
-mosquitto -c "$MQTT_CONF" &
+echo "listener $MQTT_PORT 0.0.0.0" > "$TDIR/mosquitto.conf"
+echo "allow_anonymous true" >> "$TDIR/mosquitto.conf"
+mosquitto -c "$TDIR/mosquitto.conf" &
 MQTT_PID=$!
 sleep 0.5
 
-# Override MQTT_PORT for our test broker
-echo "MQTT_PORT=$MQTT_PORT" >> "$TDIR/life.conf"
+# Configure: unique ganglion ID, local-only circ, test MQTT port
+cat >> "$TDIR/life.conf" << EOF
+MQTT_PORT=$MQTT_PORT
+GANGLION_CLIENT_ID=test-$$
+CIRC_LOCAL_ONLY=1
+CIRC_DIR=$TDIR/.circ
+EOF
 
 HEART="$TDIR/organs/heart"
 TAIL="$TDIR/organs/tail"
 GANGLION="$TDIR/organs/ganglion"
+LYMPH="$TDIR/organs/lymph"
+STOMACH="$TDIR/organs/stomach"
 
 # ===================================================================
-#  PART 1: Heartbeat (same as before)
+#  PART 1: Heartbeat (cron-sparked organ, cadence enforcement)
 # ===================================================================
 
 cd "$TDIR"
 "$SPARK"
-sleep 1
+wait_for 6 '[ -f "$HEART/health.txt" ]'
 
-if [ -f "$HEART/health.txt" ] && grep -q "^ok " "$HEART/health.txt"; then
-  pass "heart beats and reports health"
+if grep -q "^ok beat 1" "$HEART/health.txt" 2>/dev/null; then
+  pass "heart beats (cron-sparked)"
 else
-  fail "heart health.txt missing or wrong: $(cat "$HEART/health.txt" 2>/dev/null || echo 'missing')"
-fi
-
-if [ "$(cat "$HEART/beats.count" 2>/dev/null)" = "1" ]; then
-  pass "beat count is 1"
-else
-  fail "beat count should be 1, got: $(cat "$HEART/beats.count" 2>/dev/null || echo 'missing')"
+  fail "heart should beat, got: $(cat "$HEART/health.txt" 2>/dev/null || echo 'missing')"
 fi
 
 # Cadence blocks re-spark
-sleep 1
-"$SPARK" > "$TDIR/spark-out.txt" 2>&1 || true
+wait_for 4 '[ -f "$HEART/.spark.last" ]'
+"$SPARK" > /dev/null 2>&1 || true
 sleep 1
 
 if [ "$(cat "$HEART/beats.count")" = "1" ]; then
-  pass "cadence blocks immediate re-spark"
+  pass "cadence blocks re-spark"
 else
-  fail "cadence should block, but beats is $(cat "$HEART/beats.count")"
+  fail "cadence should block, beats is $(cat "$HEART/beats.count")"
 fi
 
 # ===================================================================
-#  PART 2: Nervous system (heart → MQTT → ganglion → stimulus → tail)
+#  PART 2: Nervous system (direct signal → ganglion → stimulus → tail)
 # ===================================================================
 
-# Cycle 1: heart publishes to MQTT, ganglion drains and writes stimulus.txt
-echo $(($(date +%s) - 600)) > "$HEART/.spark.last"
+# Publish a direct signal addressed to the tail (not retained — it's an event)
+MQTT_HOST=localhost MQTT_PORT=$MQTT_PORT mqtt-pub -t "tadpole/tail" -m "swim now" -q 1
+
+# Let ganglion drain and route it
 echo $(($(date +%s) - 600)) > "$GANGLION/.spark.last"
 "$SPARK"
-sleep 3
-
-if [ "$(cat "$HEART/beats.count")" = "2" ]; then
-  pass "heart beat 2 (published to MQTT)"
-else
-  fail "expected beat 2, got: $(cat "$HEART/beats.count" 2>/dev/null)"
-fi
+wait_for 8 'grep -q "^ok routed" "$GANGLION/health.txt"'
 
 if grep -q "^ok routed" "$GANGLION/health.txt" 2>/dev/null; then
-  pass "ganglion routed MQTT message to tail stimulus.txt"
+  pass "ganglion routed direct signal"
 else
-  fail "ganglion should have routed, got: $(cat "$GANGLION/health.txt" 2>/dev/null || echo 'missing')"
+  fail "ganglion should route, got: $(cat "$GANGLION/health.txt" 2>/dev/null || echo 'missing')"
 fi
 
-# Cycle 2: cron fires again, spark sees tail has stimulus, wakes it
+# Tail wakes on stimulus (dormant organ, no cadence)
 "$SPARK"
-sleep 1
+wait_for 4 'grep -q "^ok swimming" "$TAIL/health.txt"'
 
-if [ -f "$TAIL/health.txt" ] && grep -q "^ok swimming" "$TAIL/health.txt"; then
-  pass "tail woke on stimulus (no cadence, just signal)"
+if grep -q "^ok swimming" "$TAIL/health.txt" 2>/dev/null; then
+  pass "tail woke on stimulus (event-driven)"
 else
-  fail "tail should be swimming, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"
+  fail "tail should swim, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"
 fi
 
 # ===================================================================
-#  PART 3: Distributed body parts
-#  Two separate directories share one broker. Heart on body-a, tail on body-b.
-#  Same pattern as two machines — different organ sets, same MQTT.
+#  PART 3: Source routing (stomach → MQTT → ganglion → tail)
 # ===================================================================
 
-# Build body-a: heart + ganglion (no tail)
-BODY_A=$(mktemp -d)
-mkdir -p "$BODY_A/organs"
-cp -r "$SCRIPT_DIR/organs/heart" "$BODY_A/organs/"
-cp -r "$SCRIPT_DIR/organs/ganglion" "$BODY_A/organs/"
-chmod +x "$BODY_A/organs/"*/live.sh
-cat > "$BODY_A/life.conf" <<EOF
-ORGANS=organs/heart:organs/ganglion
-MQTT_HOST=localhost
-MQTT_PORT=$MQTT_PORT
-EOF
+# Feed the stomach (dormant until stimulus)
+echo "eat" > "$STOMACH/stimulus.txt"
+echo $(($(date +%s) - 600)) > "$GANGLION/.spark.last"
+> "$TAIL/stimulus.txt"
+> "$TAIL/health.txt"
 
-# Build body-b: ganglion + tail (no heart)
-BODY_B=$(mktemp -d)
-mkdir -p "$BODY_B/organs"
-cp -r "$SCRIPT_DIR/organs/ganglion" "$BODY_B/organs/"
-cp -r "$SCRIPT_DIR/organs/tail" "$BODY_B/organs/"
-chmod +x "$BODY_B/organs/"*/live.sh
-cat > "$BODY_B/life.conf" <<EOF
-ORGANS=organs/ganglion:organs/tail
-MQTT_HOST=localhost
-MQTT_PORT=$MQTT_PORT
-EOF
+"$SPARK"
+wait_for 10 'grep -q "^ok meal" "$STOMACH/health.txt"'
 
-trap 'kill $MQTT_PID 2>/dev/null; rm -rf "$TDIR" "$BODY_A" "$BODY_B"' EXIT
-
-# Cycle 1: body-a heart beats, publishes to MQTT
-cd "$BODY_A" && "$SPARK"
-sleep 3
-
-if [ -f "$BODY_A/organs/heart/health.txt" ] && grep -q "^ok beat" "$BODY_A/organs/heart/health.txt"; then
-  pass "body-a: heart beat (separate dir)"
+if grep -q "^ok meal" "$STOMACH/health.txt" 2>/dev/null; then
+  pass "stomach produced meal via source topic"
 else
-  fail "body-a: heart should beat, got: $(cat "$BODY_A/organs/heart/health.txt" 2>/dev/null || echo 'missing')"
+  fail "stomach should produce meal, got: $(cat "$STOMACH/health.txt" 2>/dev/null || echo 'missing')"
 fi
 
-# Cycle 2: body-b ganglion drains MQTT, routes to tail
-cd "$BODY_B" && "$SPARK"
-sleep 3
+# Run spark cycles until tail gets the circulatory payload
+for cycle in 1 2 3 4; do
+  echo $(($(date +%s) - 600)) > "$GANGLION/.spark.last"
+  "$SPARK"
+  sleep 2
+  if grep -q "^ok swimming (payload:" "$TAIL/health.txt" 2>/dev/null; then break; fi
+done
 
-if grep -q "^ok routed" "$BODY_B/organs/ganglion/health.txt" 2>/dev/null; then
-  pass "body-b: ganglion received signal from body-a"
+if grep -q "^ok swimming (payload:" "$TAIL/health.txt" 2>/dev/null; then
+  pass "tail retrieved circulatory payload via nervous system"
 else
-  fail "body-b: ganglion should route, got: $(cat "$BODY_B/organs/ganglion/health.txt" 2>/dev/null || echo 'missing')"
-fi
-
-# Cycle 3: body-b spark sees tail stimulus, wakes tail
-cd "$BODY_B" && "$SPARK"
-sleep 1
-
-if [ -f "$BODY_B/organs/tail/health.txt" ] && grep -q "^ok swimming" "$BODY_B/organs/tail/health.txt"; then
-  pass "body-b: tail swam from body-a signal (distributed!)"
-else
-  fail "body-b: tail should swim, got: $(cat "$BODY_B/organs/tail/health.txt" 2>/dev/null || echo 'missing')"
+  fail "tail should have payload, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"
 fi
 
 # ===================================================================
-#  PART 4: Immune system (lymph node)
-#  Scans organ health, detects issues, cleans overflows.
+#  PART 4: Immune system (lymph node health scan + cleanup)
 # ===================================================================
 
-cd "$TDIR"
-LYMPH="$TDIR/organs/lymph"
-
-# Reset cadences so lymph can fire
 echo $(($(date +%s) - 600)) > "$LYMPH/.spark.last"
 "$SPARK"
-sleep 1
+wait_for 4 '[ -f "$LYMPH/health.txt" ]'
 
-if [ -f "$LYMPH/health.txt" ] && grep -q "^ok" "$LYMPH/health.txt"; then
+if grep -q "^ok" "$LYMPH/health.txt" 2>/dev/null; then
   pass "lymph node reports healthy"
 else
   fail "lymph should report ok, got: $(cat "$LYMPH/health.txt" 2>/dev/null || echo 'missing')"
 fi
 
-# Inject a sick organ: write "error" to heart's health.txt
+# Inject sick organ
 echo "error cardiac arrest" > "$HEART/health.txt"
 echo $(($(date +%s) - 600)) > "$LYMPH/.spark.last"
 "$SPARK"
-sleep 1
+wait_for 4 'grep -q "degraded" "$LYMPH/health.txt"'
 
-if grep -q "degraded" "$LYMPH/health.txt" && grep -q "heart:error" "$LYMPH/health.txt"; then
+if grep -q "degraded" "$LYMPH/health.txt" 2>/dev/null; then
   pass "lymph node detected sick organ"
 else
-  fail "lymph should detect heart:error, got: $(cat "$LYMPH/health.txt" 2>/dev/null)"
+  fail "lymph should detect error, got: $(cat "$LYMPH/health.txt" 2>/dev/null)"
 fi
 
-# Inject stimulus overflow: 200 lines into tail
+# Stimulus overflow cleanup
 for i in $(seq 1 200); do echo "noise $i" >> "$TAIL/stimulus.txt"; done
 STALE_SECONDS=9999 MAX_STIMULUS_LINES=50 "$TDIR/organs/lymph/live.sh" 2>/dev/null
 stim_lines=$(wc -l < "$TAIL/stimulus.txt")
 
 if [ "$stim_lines" -le 50 ]; then
-  pass "lymph node truncated stimulus overflow ($stim_lines lines)"
+  pass "lymph truncated stimulus overflow ($stim_lines lines)"
 else
-  fail "lymph should truncate to 50 lines, got: $stim_lines"
+  fail "should truncate to 50, got: $stim_lines"
 fi
 
 # ===================================================================

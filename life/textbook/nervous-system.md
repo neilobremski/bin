@@ -1,68 +1,76 @@
 # Nervous System
 
-The nervous system carries signals between organs via MQTT. It is configured through `life.conf` and consists of two parts: organs that **publish** signals and a **ganglion** organ that **routes** them.
+The nervous system lets organs discover and signal each other without knowing where anything lives. An organ says "send this to a heart" and the nervous system figures out the rest.
 
-## Configuration
+## Organs Have Type and ID
 
-```bash
-# life.conf
-MQTT_HOST=localhost
-MQTT_PORT=1883
-MQTT_USER=myuser     # optional
-MQTT_PASS=secret     # optional
-```
+Every organ has a **type** (what it does) and an **ID** (which one it is). The type comes from the directory name. The ID is assigned by the body part — typically `type-bodypart` (e.g., `heart-aws`, `heart-hp`).
 
-Organs inherit these as environment variables. If `MQTT_HOST` is unset, organs skip MQTT and function locally.
-
-## Publishing
-
-Any organ can publish a signal using `mqtt-pub` (a repo-root utility):
-
-```bash
-mqtt-pub -t "organism/tail" -m "beat 42" -r
-```
-
-The `-r` flag retains the message on the broker. Subscribers receive the last retained message immediately on connect. Use retained for state, non-retained for events.
-
-The topic name is the address: `organism/<organ>` routes to that organ.
+An organ doesn't know or care about IDs. It thinks in types: "signal a tail," "how are the hearts doing?" The nervous system resolves types to specific organs.
 
 ## The Ganglion
 
-The ganglion is an organ that bridges MQTT into per-organ `stimulus.txt` files. It routes by topic name:
+Each body part runs one ganglion. The ganglion is the nervous system's local node. It knows:
 
+- What organs exist locally (from the `ORGANS` env var)
+- Each organ's type and health (by reading their `health.txt`)
+- What organs exist remotely (by talking to other ganglions)
+
+The ganglion maintains a **registry** — a SQLite database of every organ it knows about, local and remote. Each cycle, it:
+
+1. Scans local organs and records their current health
+2. Broadcasts its local organ list to other ganglions
+3. Receives broadcasts from other ganglions, updates the registry
+4. Delivers any incoming stimuli to local organs (writes to `stimulus.txt`)
+
+The registry is **eventually consistent**. Health status reflects the last ganglion cycle, not real-time. This is by design — biological systems don't poll organs at 60fps. The delay gives organs time to recover before being flagged, and lets the ganglion track health over time.
+
+## The Stimulus CLI
+
+Organs interact with the nervous system through the `stimulus` command. They never touch MQTT or write to other organs' files directly.
+
+```bash
+# Signal an organ by type (any one of that type will receive it)
+stimulus send tail "swim now"
+
+# Signal a specific organ by ID
+stimulus send heart-aws "reset"
+
+# Query health of all organs of a type
+stimulus query heart
+# heart  aws       ok beat 42       2m ago
+# heart  hp        ok beat 17       1m ago
+
+# Include a circulatory reference
+stimulus send tail "food circ:a1b2c3d4"
 ```
-MQTT topic "organism/tail" → organs/tail/stimulus.txt
-MQTT topic "organism/heart" → organs/heart/stimulus.txt
-```
 
-Each cycle:
-1. Subscribe to `organism/#` with a short timeout
-2. Drain messages, parse topic to get organ name
-3. Append message to target organ's `stimulus.txt`
-4. Exit
+### Three Operations
 
-The ganglion is not persistent. It runs, drains, routes, exits.
+**Send by type** — "deliver this to any organ of type X." The ganglion picks one. If there are multiple, distribution strategy is up to the ganglion (round-robin, local-first, etc.). Only one organ receives the stimulus.
 
-Every body part runs its own ganglion. The ganglion only routes to organs that exist locally — unknown organ names are logged and dropped.
+**Send by ID** — "deliver this to a specific organ." Direct routing. The ganglion knows which body part hosts it.
 
-## Signal Chain
+**Query by type** — "give me the health of all organs of type X." Reads from the local registry. No network round-trip — the registry is pre-populated by ganglion-to-ganglion broadcasts.
 
-```
-heart (periodic organ)
-  → publishes "beat 42" to MQTT topic organism/tail
+## Health Is Local
 
-ganglion (periodic organ, next cron cycle)
-  → subscribes to MQTT, drains messages
-  → parses topic: organism/tail → organs/tail
-  → appends "beat 42" to organs/tail/stimulus.txt
+An organ updates its own `health.txt`. That's it. No MQTT, no network call. The ganglion reads it locally each cycle and shares it with other ganglions. This means:
 
-tail (dormant organ, next cron cycle)
-  → spark sees stimulus.txt has content → launches
-  → reads stimulus, processes, empties file
-```
+- An organ's health is always writable, even if the network is down
+- The ganglion is the only thing that reads `health.txt` for external consumption
+- The immune system (lymph node) can query the ganglion's registry instead of scanning directories
 
-This gives the organism both **periodic** (cadence) and **event-driven** (stimulus) activation using the same spark.
+## Transport
 
-## No Broker, No Problem
+The ganglions currently talk to each other over MQTT. But the design doesn't depend on MQTT — any pub/sub or message queue would work. The `stimulus` CLI and `health.txt` files are the stable interfaces. The wire between ganglions is an implementation detail.
 
-If `MQTT_HOST` is unset, organs still function — they just can't send or receive signals through the nervous system. Degradation, not failure.
+MQTT details (current implementation):
+- Ganglions use persistent sessions so no messages are lost between cycles
+- Stimulus messages use QoS 1 (guaranteed delivery)
+- Health broadcasts are retained (latest wins)
+- Each ganglion has a stable client ID for session persistence
+
+## No Network, No Problem
+
+If `MQTT_HOST` is unset, the ganglion still works — it just can't see remote organs. Local stimulus delivery and health tracking work fine. A body part in isolation is degraded, not dead.

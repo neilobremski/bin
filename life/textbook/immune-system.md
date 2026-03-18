@@ -13,7 +13,7 @@ The lymph node is a periodic organ. Each cycle:
 5. Write its own `health.txt` summarizing findings
 6. Publish summary to MQTT (retained) for cross-body-part visibility
 
-If everything is healthy: `ok 4 organs checked`
+If everything is healthy: `ok N organs checked`
 If something is wrong: `degraded 2 issues: heart:stale ganglion:dropped`
 
 ## Thresholds
@@ -37,8 +37,8 @@ Configurable via environment (set in `life.conf` or `organ.conf`):
 Each body part runs its own lymph node. Each publishes a retained summary to MQTT:
 
 ```
-knobert-head/health → "ok 5 organs checked"
-knobert-phone/health → "degraded sms:error"
+head/health → "ok 5 organs checked"
+phone/health → "degraded sms:error"
 ```
 
 A central consumer (future brain) subscribes to `+/health` and gets the full organism picture. The lymph nodes don't know about each other — they just emit.

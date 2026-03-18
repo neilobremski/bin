@@ -11,16 +11,31 @@ else
   stimulus=""
 fi
 
-# Count swims
 swims=0
 [ -f "$DIR/swims.count" ] && swims=$(cat "$DIR/swims.count")
 
 if [ -n "$stimulus" ]; then
   swims=$((swims + 1))
   echo "$swims" > "$DIR/swims.count"
-  echo "ok swimming ($stimulus)" > "$DIR/health.txt"
+
+  # Check each line for circulatory references
+  payload=""
+  while IFS= read -r line; do
+    if echo "$line" | grep -q "circ:"; then
+      ref=$(echo "$line" | grep -o 'circ:[^ ]*' | head -1 | cut -d: -f2)
+      if [ -n "$ref" ] && command -v circ-get >/dev/null 2>&1; then
+        payload=$(circ-get "$ref" 2>/dev/null || echo "")
+      fi
+    fi
+  done <<< "$stimulus"
+
+  if [ -n "$payload" ]; then
+    echo "ok swimming (payload: $payload)" > "$DIR/health.txt"
+  else
+    echo "ok swimming ($stimulus)" > "$DIR/health.txt"
+  fi
 else
   echo "ok idle" > "$DIR/health.txt"
 fi
 
-echo "tail: swims=$swims stimulus='$stimulus'" >&2
+echo "tail: swims=$swims" >&2

@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""gas — CLI for the GAS Bridge. Pure Python, no dependencies beyond stdlib.
+
+Usage: gas <action> [key=value ...]
+
+Examples:
+  gas info
+  gas gmail.search query="is:unread" count=5
+  gas drive.list query="title contains 'circ-'" count=3
+  gas drive.upload name=test.txt data_base64=@file.txt
+  gas drive.download id=1abc...
+  echo "hello" | gas drive.upload name=test.txt data_base64=-
+
+Secrets resolved via local-secret:
+  GAS_BRIDGE_URL — env var or ~/lib/gas-bridge-url.txt
+  GAS_BRIDGE_KEY — env var or ~/lib/gas-bridge-key.txt
+"""
+import json, os, sys, urllib.request
+
+def local_secret(name):
+    """Resolve via local-secret utility."""
+    import subprocess
+    try:
+        return subprocess.check_output(["local-secret", name], text=True, stderr=subprocess.DEVNULL).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return ""
+
+url = local_secret("GAS_BRIDGE_URL")
+key = local_secret("GAS_BRIDGE_KEY")
+
+if not url or not key:
+    print("error: BRIDGE_URL and BRIDGE_KEY required", file=sys.stderr)
+    sys.exit(1)
+
+if len(sys.argv) < 2:
+    print("Usage: gas <action> [key=value ...]", file=sys.stderr)
+    sys.exit(1)
+
+action = sys.argv[1]
+payload = {"action": action, "key": key}
+
+import base64
+
+for arg in sys.argv[2:]:
+    k, _, v = arg.partition("=")
+    # @- reads from stdin, @filename reads from file — both base64-encode
+    if v == "@-":
+        payload[k] = base64.b64encode(sys.stdin.buffer.read()).decode()
+    elif v.startswith("@"):
+        filepath = v[1:]
+        with open(filepath, "rb") as f:
+            payload[k] = base64.b64encode(f.read()).decode()
+    # Auto-detect types
+    elif v.isdigit():
+        payload[k] = int(v)
+    elif v in ("true", "false"):
+        payload[k] = v == "true"
+    else:
+        payload[k] = v
+
+data = json.dumps(payload).encode()
+req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = resp.read().decode()
+        # Pretty-print if terminal, raw if piped
+        if sys.stdout.isatty():
+            try:
+                print(json.dumps(json.loads(body), indent=2))
+            except json.JSONDecodeError:
+                print(body)
+        else:
+            print(body)
+except urllib.error.HTTPError as e:
+    print(json.dumps({"error": f"HTTP {e.code}", "body": e.read().decode()[:200]}))
+    sys.exit(1)
+except Exception as e:
+    print(json.dumps({"error": str(e)}))
+    sys.exit(1)

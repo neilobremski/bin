@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# circ-put — Store a payload in the circulatory system.
+# Returns a content-addressed reference (SHA-256 hash prefix).
+#
+# Usage: circ-put <file>
+#        echo "data" | circ-put -
+#
+# Backends: local (filesystem) always used as staging.
+# If BRIDGE_KEY is set, also uploads to Google Drive via gas CLI.
+
+set -euo pipefail
+
+LOCAL_DIR="${CIRC_DIR:-$HOME/.life/circ}"
+
+if [ $# -lt 1 ]; then
+  echo "Usage: circ-put <file>  or  echo data | circ-put -" >&2
+  exit 1
+fi
+
+input="$1"
+if [ "$input" = "-" ]; then
+  input=$(mktemp)
+  cat > "$input"
+  trap "rm -f '$input'" EXIT
+fi
+
+[ -f "$input" ] || { echo "error: file not found: $input" >&2; exit 1; }
+
+hash=$(sha256sum "$input" | cut -c1-16)
+
+# Always store locally (fast, works offline)
+mkdir -p "$LOCAL_DIR"
+[ -f "$LOCAL_DIR/$hash" ] || cp "$input" "$LOCAL_DIR/$hash"
+
+# If GAS bridge (gdrive backend) is configured and not local-only, upload to Drive
+if [ -z "${CIRC_LOCAL_ONLY:-}" ] && local-secret GAS_BRIDGE_KEY >/dev/null 2>&1; then
+  if command -v gas >/dev/null 2>&1; then
+    # Check if already on Drive
+    existing=$(gas drive.list "query=title = 'circ-$hash'" count=1 2>/dev/null || echo '{}')
+    if ! echo "$existing" | grep -q "circ-$hash"; then
+      gas drive.upload "name=circ-$hash" "data_base64=@$input" >/dev/null 2>&1 || true
+    fi
+  fi
+fi
+
+echo "$hash"
