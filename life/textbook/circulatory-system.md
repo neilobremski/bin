@@ -4,7 +4,7 @@ The circulatory system carries payloads between organs. Stimulus lines carry sig
 
 ## How It Works
 
-An organ stores a payload and gets back a content-addressed reference (SHA-256 hash). The reference travels through stimulus. The receiving organ retrieves the payload using the reference.
+An organ stores a payload and gets back a content-addressed reference (first 16 hex characters of the SHA-256 hash — 64 bits). The reference travels through stimulus. The receiving organ retrieves the payload using the reference.
 
 ```bash
 # Organ A: store a payload, signal through the nervous system

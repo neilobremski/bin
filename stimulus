@@ -35,12 +35,14 @@ case "$cmd" in
 
     # Try local delivery first (organ exists in ORGANS list)
     delivered=false
+    conf_dir="${CONF_DIR:-$PWD}"
     if [ -z "$target_id" ] && [ -n "${ORGANS:-}" ]; then
       IFS=':' read -ra _paths <<< "$ORGANS"
       for op in "${_paths[@]}"; do
         op="${op#"${op%%[![:space:]]*}"}"
         op="${op%"${op##*[![:space:]]}"}"
         [ -z "$op" ] && continue
+        [[ "$op" != /* ]] && op="$conf_dir/$op"
         if [ "$(basename "$op")" = "$target_type" ] && [ -d "$op" ]; then
           echo "$message" >> "$op/stimulus.txt"
           delivered=true

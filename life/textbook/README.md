@@ -17,7 +17,7 @@ Everything is shell. No JSON. No parsing. Just `source` and `echo`.
 | [layers.md](layers.md) | The 3-layer activation model |
 | [organ-contract.md](organ-contract.md) | The organ interface |
 | [stimulus.md](stimulus.md) | Per-organ stimulus (plain text lines) |
-| [nervous-system.md](nervous-system.md) | MQTT signals between organs |
+| [nervous-system.md](nervous-system.md) | Type-based discovery and stimulus routing |
 | [immune-system.md](immune-system.md) | Health monitoring and cleanup |
 | [circulatory-system.md](circulatory-system.md) | Payload transfer between organs |
 | [future.md](future.md) | Deferred ideas and non-goals |
@@ -26,8 +26,8 @@ Everything is shell. No JSON. No parsing. Just `source` and `echo`.
 
 | Term | Meaning |
 |------|---------|
-| **Organ** | Autonomous component with an executable `live.sh` |
-| **Muscle** | Executes but does not think. No autonomy. |
+| **Organ** | Autonomous component with an executable `live.sh`. Has cadence, health, stimulus. |
+| **Muscle** | Capability that executes but does not think. No `live.sh`, no autonomy. Example: `gas` (GAS Bridge CLI). |
 | **Ganglion** | Per-body-part nervous system node. Maintains organ registry (SQLite), routes stimulus, broadcasts health. |
 | **Lymph Node** | Scans organ health, cleans overflows, emits summary |
 | **stimulus** | CLI tool for organs to send signals and query health through the nervous system |

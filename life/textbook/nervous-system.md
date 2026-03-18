@@ -33,9 +33,6 @@ Organs interact with the nervous system through the `stimulus` command. They nev
 # Signal an organ by type (any one of that type will receive it)
 stimulus send tail "swim now"
 
-# Signal a specific organ by ID
-stimulus send heart-aws "reset"
-
 # Query health of all organs of a type
 stimulus query heart
 # heart  aws       ok beat 42       2m ago
@@ -45,11 +42,9 @@ stimulus query heart
 stimulus send tail "food circ:a1b2c3d4"
 ```
 
-### Three Operations
+### Two Operations
 
-**Send by type** — "deliver this to any organ of type X." The ganglion picks one. If there are multiple, distribution strategy is up to the ganglion (round-robin, local-first, etc.). Only one organ receives the stimulus.
-
-**Send by ID** — "deliver this to a specific organ." Direct routing. The ganglion knows which body part hosts it.
+**Send by type** — "deliver this to any organ of type X." Delivered to the first local match. If no local match, published to MQTT for remote delivery.
 
 **Query by type** — "give me the health of all organs of type X." Reads from the local registry. No network round-trip — the registry is pre-populated by ganglion-to-ganglion broadcasts.
 

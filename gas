@@ -51,6 +51,11 @@ for arg in sys.argv[2:]:
         with open(filepath, "rb") as f:
             payload[k] = base64.b64encode(f.read()).decode()
     # Auto-detect types
+    elif v.startswith("[") or v.startswith("{"):
+        try:
+            payload[k] = json.loads(v)
+        except json.JSONDecodeError:
+            payload[k] = v
     elif v.isdigit():
         payload[k] = int(v)
     elif v in ("true", "false"):

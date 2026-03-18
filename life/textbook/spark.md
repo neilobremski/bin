@@ -61,6 +61,6 @@ The spark enforces one-instance-per-organ via `flock`. Lock files live at `~/.li
 | No life.conf found | Clean exit (code 0) |
 | No ORGANS set | Clean exit |
 | live.sh missing | Skip organ, log warning |
-| organ.conf missing | Run every cycle |
+| organ.conf missing | Dormant (runs on stimulus only) |
 | live.sh fails | Spark retries next cycle |
 | Spark crashes | Cron restarts next minute |

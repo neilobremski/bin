@@ -30,9 +30,9 @@ if [ -n "$stimulus" ]; then
   done <<< "$stimulus"
 
   if [ -n "$payload" ]; then
-    echo "ok swimming (payload: $payload)" > "$DIR/health.txt"
+    echo "ok splish splash (payload: $payload)" > "$DIR/health.txt"
   else
-    echo "ok swimming ($stimulus)" > "$DIR/health.txt"
+    echo "ok splish splash" > "$DIR/health.txt"
   fi
 else
   echo "ok idle" > "$DIR/health.txt"

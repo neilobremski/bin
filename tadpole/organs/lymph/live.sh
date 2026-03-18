@@ -4,7 +4,7 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-CONF_DIR="$(cd "$DIR/../.." && pwd)"
+CONF_DIR="${CONF_DIR:-$(cd "$DIR/../.." && pwd)}"
 
 # Thresholds
 STALE_SECONDS="${STALE_SECONDS:-300}"   # health.txt older than 5 min = stale
@@ -15,9 +15,20 @@ issues=0
 total=0
 report=""
 
-# Scan all organ directories
-for organ_dir in "$CONF_DIR"/organs/*/; do
-  [ -d "$organ_dir" ] || continue
+# Resolve organ directories from ORGANS env (same as ganglion and stimulus)
+organ_dirs=()
+if [ -n "${ORGANS:-}" ]; then
+  IFS=':' read -ra _raw <<< "$ORGANS"
+  for p in "${_raw[@]}"; do
+    p="${p#"${p%%[![:space:]]*}"}"
+    p="${p%"${p##*[![:space:]]}"}"
+    [ -z "$p" ] && continue
+    [[ "$p" != /* ]] && p="$CONF_DIR/$p"
+    [ -d "$p" ] && organ_dirs+=("$p")
+  done
+fi
+
+for organ_dir in "${organ_dirs[@]}"; do
   organ=$(basename "$organ_dir")
 
   # Skip self
@@ -29,7 +40,6 @@ for organ_dir in "$CONF_DIR"/organs/*/; do
   health_file="$organ_dir/health.txt"
   if [ ! -f "$health_file" ]; then
     report="${report}${organ}:no-health "
-    # Not necessarily an issue — organ may not have run yet
   else
     status=$(head -c 20 "$health_file" | awk '{print $1}')
     if [ "$status" = "error" ] || [ "$status" = "degraded" ]; then
@@ -49,7 +59,6 @@ for organ_dir in "$CONF_DIR"/organs/*/; do
   if [ -f "$stim_file" ]; then
     line_count=$(wc -l < "$stim_file")
     if [ "$line_count" -gt "$MAX_STIMULUS_LINES" ]; then
-      # Keep last N lines, discard the rest
       tail -n "$MAX_STIMULUS_LINES" "$stim_file" > "$stim_file.tmp"
       mv "$stim_file.tmp" "$stim_file"
       dropped=$((line_count - MAX_STIMULUS_LINES))

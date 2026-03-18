@@ -111,9 +111,9 @@ fi
 
 # Tail wakes on stimulus (dormant organ, no cadence)
 "$SPARK"
-wait_for 4 'grep -q "^ok swimming" "$TAIL/health.txt"'
+wait_for 4 'grep -q "^ok splish splash" "$TAIL/health.txt"'
 
-if grep -q "^ok swimming" "$TAIL/health.txt" 2>/dev/null; then
+if grep -q "^ok splish splash" "$TAIL/health.txt" 2>/dev/null; then
   pass "tail woke on stimulus (event-driven)"
 else
   fail "tail should swim, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"
@@ -130,9 +130,9 @@ echo $(($(date +%s) - 600)) > "$GANGLION/.spark.last"
 > "$TAIL/health.txt"
 
 "$SPARK"
-wait_for 10 'grep -q "^ok meal" "$STOMACH/health.txt"'
+wait_for 10 'grep -q "^ok yum yum" "$STOMACH/health.txt"'
 
-if grep -q "^ok meal" "$STOMACH/health.txt" 2>/dev/null; then
+if grep -q "^ok yum yum" "$STOMACH/health.txt" 2>/dev/null; then
   pass "stomach produced meal via stimulus send"
 else
   fail "stomach should produce meal, got: $(cat "$STOMACH/health.txt" 2>/dev/null || echo 'missing')"
@@ -143,10 +143,10 @@ for cycle in 1 2 3 4; do
   echo $(($(date +%s) - 600)) > "$GANGLION/.spark.last"
   "$SPARK"
   sleep 2
-  if grep -q "^ok swimming (payload:" "$TAIL/health.txt" 2>/dev/null; then break; fi
+  if grep -q "^ok splish splash (payload:" "$TAIL/health.txt" 2>/dev/null; then break; fi
 done
 
-if grep -q "^ok swimming (payload:" "$TAIL/health.txt" 2>/dev/null; then
+if grep -q "^ok splish splash (payload:" "$TAIL/health.txt" 2>/dev/null; then
   pass "tail retrieved circulatory payload via nervous system"
 else
   fail "tail should have payload, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"

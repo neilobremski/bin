@@ -15,7 +15,7 @@ ORGANS = os.environ.get("ORGANS", "")
 MQTT_HOST = os.environ.get("MQTT_HOST", "")
 CLIENT_ID = os.environ.get("GANGLION_CLIENT_ID", f"{BODY}-ganglion")
 DIR = Path(__file__).resolve().parent
-CONF_DIR = DIR.parent
+CONF_DIR = Path(os.environ["CONF_DIR"]) if "CONF_DIR" in os.environ else DIR.parent
 
 
 def log(msg):

@@ -23,5 +23,5 @@ ref=$(echo "$payload" | circ-put -)
 # Send food to tail via stimulus
 stimulus send tail "food circ:$ref" 2>/dev/null || true
 
-echo "ok meal $meals circ:$ref" > "$DIR/health.txt"
+echo "ok yum yum (meal $meals)" > "$DIR/health.txt"
 echo "stomach: produced meal $meals, ref=$ref" >&2
