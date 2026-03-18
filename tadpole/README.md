@@ -50,17 +50,17 @@ The tadpole's Google Sheet has two areas:
 
 | Command | Target | Processed | Response |
 |---------|--------|-----------|----------|
-| eat | stomach | yes | delivered at 09:30 |
-| swim now | tail | yes | delivered at 09:31 |
-| eat | stomach | | *(pending)* |
+| eat | stomach | yes | ok yum yum (meal 1) |
+| swim now | tail | yes | ok splish splash |
+| eat | stomach | | |
 
 **Status (columns F-I)**: The eye writes organ health here each cycle.
 
 | Organ | Status | Health | Updated |
 |-------|--------|--------|---------|
 | heart | ok | ok beat 42 | 09:31 |
-| stomach | ok | ok meal 3 | 09:30 |
-| tail | ok | ok swimming | 09:31 |
+| stomach | ok | ok yum yum (meal 3) | 09:30 |
+| tail | ok | ok splish splash | 09:31 |
 | lymph | ok | ok all healthy | 09:31 |
 
 ## Configuration
