@@ -27,7 +27,6 @@ check "sqlite3 module"      "python3 -c 'import sqlite3'"
 if [ -n "${MQTT_HOST:-}" ]; then
   check "mqtt-pub available"  "command -v mqtt-pub"
   check "mqtt-sub available"  "command -v mqtt-sub"
-  check "mosquitto broker"    "command -v mosquitto"
 else
   echo "  skip: MQTT (no MQTT_HOST set)" >&2
 fi

@@ -73,12 +73,11 @@ for dir in "${ORGAN_DIRS[@]}"; do
   has_stimulus=false
   [[ -f "$dir/stimulus.txt" ]] && [[ -s "$dir/stimulus.txt" ]] && has_stimulus=true
 
-  CADENCE=""
+  cadence=""
   if [[ -f "$dir/organ.conf" ]]; then
-    # shellcheck source=/dev/null
-    source "$dir/organ.conf"
+    # Source in subshell to prevent variable leakage between organs
+    cadence=$(CADENCE=""; source "$dir/organ.conf"; echo "${CADENCE:-}")
   fi
-  cadence="${CADENCE:-}"
 
   if [[ -n "$cadence" ]]; then
     # Has cadence — check if due
