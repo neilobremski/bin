@@ -38,10 +38,17 @@ if len(sys.argv) < 2:
 action = sys.argv[1]
 payload = {"action": action, "key": key}
 
+import base64
+
 for arg in sys.argv[2:]:
     k, _, v = arg.partition("=")
+    # @filename: read file and base64-encode
+    if v.startswith("@"):
+        filepath = v[1:]
+        with open(filepath, "rb") as f:
+            payload[k] = base64.b64encode(f.read()).decode()
     # Auto-detect types
-    if v.isdigit():
+    elif v.isdigit():
         payload[k] = int(v)
     elif v in ("true", "false"):
         payload[k] = v == "true"

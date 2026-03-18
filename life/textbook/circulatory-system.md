@@ -27,7 +27,7 @@ The `circ-put` and `circ-get` scripts read `CIRC_BACKEND` from environment:
 | Backend | Storage | Use case |
 |---------|---------|----------|
 | `local` | `~/.life/circ/` (or `$CIRC_DIR`) | Testing, single machine |
-| `drive` | Google Drive via GAS bridge | Production, distributed |
+| `gdrive` | Google Drive via GAS bridge | Production, distributed |
 
 Organs don't know which backend is active. They call `circ-put` and `circ-get` — the backend is configuration, not code.
 

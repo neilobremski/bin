@@ -60,8 +60,9 @@ mosquitto -c "$MQTT_CONF" &
 MQTT_PID=$!
 sleep 0.5
 
-# Override MQTT_PORT for our test broker
+# Override MQTT_PORT and use unique ganglion client ID to avoid cross-test contamination
 echo "MQTT_PORT=$MQTT_PORT" >> "$TDIR/life.conf"
+echo "GANGLION_CLIENT_ID=test-$$" >> "$TDIR/life.conf"
 
 HEART="$TDIR/organs/heart"
 TAIL="$TDIR/organs/tail"
@@ -99,33 +100,29 @@ else
 fi
 
 # ===================================================================
-#  PART 2: Nervous system (heart → MQTT → ganglion → stimulus → tail)
+#  PART 2: Nervous system (direct signal via MQTT → ganglion → tail)
 # ===================================================================
 
-# Cycle 1: heart publishes to MQTT, ganglion drains and writes stimulus.txt
-echo $(($(date +%s) - 600)) > "$HEART/.spark.last"
+# Send a direct signal to the tail via MQTT
+MQTT_HOST=localhost MQTT_PORT=$MQTT_PORT mqtt-pub -t "tadpole/tail" -m "swim now"
+
+# Ganglion drains MQTT and routes to tail's stimulus.txt
 echo $(($(date +%s) - 600)) > "$GANGLION/.spark.last"
 "$SPARK"
 sleep 3
 
-if [ "$(cat "$HEART/beats.count")" = "2" ]; then
-  pass "heart beat 2 (published to MQTT)"
-else
-  fail "expected beat 2, got: $(cat "$HEART/beats.count" 2>/dev/null)"
-fi
-
 if grep -q "^ok routed" "$GANGLION/health.txt" 2>/dev/null; then
-  pass "ganglion routed MQTT message to tail stimulus.txt"
+  pass "ganglion routed direct signal to tail"
 else
   fail "ganglion should have routed, got: $(cat "$GANGLION/health.txt" 2>/dev/null || echo 'missing')"
 fi
 
-# Cycle 2: cron fires again, spark sees tail has stimulus, wakes it
+# Tail wakes on stimulus
 "$SPARK"
 sleep 1
 
 if [ -f "$TAIL/health.txt" ] && grep -q "^ok swimming" "$TAIL/health.txt"; then
-  pass "tail woke on stimulus (no cadence, just signal)"
+  pass "tail woke on direct stimulus via nervous system"
 else
   fail "tail should be swimming, got: $(cat "$TAIL/health.txt" 2>/dev/null || echo 'missing')"
 fi

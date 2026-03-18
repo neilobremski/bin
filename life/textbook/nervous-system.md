@@ -1,6 +1,22 @@
 # Nervous System
 
-The nervous system carries signals between organs via MQTT. It is configured through `life.conf` and consists of two parts: organs that **publish** signals and a **ganglion** organ that **routes** them.
+The nervous system carries signals between organs via MQTT. Every body part runs a **ganglion** that routes messages to local organs.
+
+## Two Kinds of Messages
+
+**Direct signals** — addressed to a specific organ. The sender knows the target.
+
+```
+tadpole/tail → ganglion routes to organs/tail/stimulus.txt
+```
+
+**Emissions** — state broadcasts from an organ. No specific target. Captured by health.txt and the immune system, not routed as stimulus.
+
+```
+tadpole/heart → retained state, readable by anyone
+```
+
+The ganglion routes direct signals. Emissions are passive — they sit on the broker as retained messages.
 
 ## Configuration
 
@@ -12,57 +28,47 @@ MQTT_USER=myuser     # optional
 MQTT_PASS=secret     # optional
 ```
 
-Organs inherit these as environment variables. If `MQTT_HOST` is unset, organs skip MQTT and function locally.
-
 ## Publishing
 
-Any organ can publish a signal using `mqtt-pub` (a repo-root utility):
+Any organ can publish using `mqtt-pub`:
 
 ```bash
-mqtt-pub -t "organism/tail" -m "beat 42" -r
+# Direct signal to another organ
+mqtt-pub -t "organism/tail" -m "swim now"
+
+# State emission (retained — latest wins)
+mqtt-pub -t "organism/heart" -m "beat 42" -r
+
+# Event from source (not retained — queued for persistent subscribers)
+mqtt-pub -t "organism/stomach" -m "food circ:a1b2c3d4"
 ```
-
-The `-r` flag retains the message on the broker. Subscribers receive the last retained message immediately on connect. Use retained for state, non-retained for events.
-
-The topic name is the address: `organism/<organ>` routes to that organ.
 
 ## The Ganglion
 
-The ganglion is an organ that bridges MQTT into per-organ `stimulus.txt` files. It routes by topic name:
-
-```
-MQTT topic "organism/tail" → organs/tail/stimulus.txt
-MQTT topic "organism/heart" → organs/heart/stimulus.txt
-```
+The ganglion drains MQTT and routes messages to local organs. It uses a **persistent session** so no messages are lost between cycles.
 
 Each cycle:
-1. Subscribe to `organism/#` with a short timeout
-2. Drain messages, parse topic to get organ name
-3. Append message to target organ's `stimulus.txt`
+1. Connect with stable client ID and persistent session
+2. Drain all queued messages since last connection
+3. Route: direct topics go to matching organ, source topics use routing table
 4. Exit
 
-The ganglion is not persistent. It runs, drains, routes, exits.
+The ganglion is the **only organ guaranteed to exist** on every body part (Layer 1).
 
-Every body part runs its own ganglion. The ganglion only routes to organs that exist locally — unknown organ names are logged and dropped.
+## Routing
 
-## Signal Chain
+1. **Direct**: topic matches a local organ directory → route to its stimulus.txt
+2. **Source-based**: topic is a source organ → routing table maps to target organ
 
-```
-heart (periodic organ)
-  → publishes "beat 42" to MQTT topic organism/tail
+Source-based routing lets organs publish without knowing the target. The ganglion decides where things go. This decouples organs from each other.
 
-ganglion (periodic organ, next cron cycle)
-  → subscribes to MQTT, drains messages
-  → parses topic: organism/tail → organs/tail
-  → appends "beat 42" to organs/tail/stimulus.txt
+## Persistent Sessions
 
-tail (dormant organ, next cron cycle)
-  → spark sees stimulus.txt has content → launches
-  → reads stimulus, processes, empties file
-```
+Retained messages are for **state** (latest wins — heartbeat, health).
+Persistent sessions are for **events** (all queued — food produced, email arrived).
 
-This gives the organism both **periodic** (cadence) and **event-driven** (stimulus) activation using the same spark.
+The broker queues event messages while the ganglion is disconnected. On reconnect, all queued messages are delivered. Nothing lost between cron cycles.
 
 ## No Broker, No Problem
 
-If `MQTT_HOST` is unset, organs still function — they just can't send or receive signals through the nervous system. Degradation, not failure.
+If `MQTT_HOST` is unset, organs still function locally. Degradation, not failure.

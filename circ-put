@@ -32,14 +32,13 @@ hash=$(sha256sum "$input" | cut -c1-16)
 mkdir -p "$LOCAL_DIR"
 [ -f "$LOCAL_DIR/$hash" ] || cp "$input" "$LOCAL_DIR/$hash"
 
-# If GAS bridge is configured and not local-only, upload to Drive
+# If GAS bridge (gdrive backend) is configured and not local-only, upload to Drive
 if [ -z "${CIRC_LOCAL_ONLY:-}" ] && local-secret GAS_BRIDGE_KEY >/dev/null 2>&1; then
   if command -v gas >/dev/null 2>&1; then
     # Check if already on Drive
     existing=$(gas drive.list "query=title = 'circ-$hash'" count=1 2>/dev/null || echo '{}')
     if ! echo "$existing" | grep -q "circ-$hash"; then
-      data_b64=$(base64 -w0 "$input")
-      gas drive.upload "name=circ-$hash" "data_base64=$data_b64" >/dev/null 2>&1 || true
+      gas drive.upload "name=circ-$hash" "data_base64=@$input" >/dev/null 2>&1 || true
     fi
   fi
 fi
