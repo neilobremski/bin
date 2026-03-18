@@ -50,15 +50,17 @@ The ganglion drains MQTT and routes messages to local organs. It uses a **persis
 Each cycle:
 1. Connect with stable client ID and persistent session
 2. Drain all queued messages since last connection
-3. Route: direct topics go to matching organ, source topics use routing table
+3. Route: source topics use routing table first, then direct topics go to matching organ
 4. Exit
 
 The ganglion is the **only organ guaranteed to exist** on every body part (Layer 1).
 
 ## Routing
 
-1. **Direct**: topic matches a local organ directory → route to its stimulus.txt
-2. **Source-based**: topic is a source organ → routing table maps to target organ
+1. **Source-based** (checked first): routing table maps source organ → target organ
+2. **Direct** (fallback): topic matches a local organ directory → route to its stimulus.txt
+
+Source-based routing is checked first because it represents intentional mappings. Without this priority, a message from `tadpole/stomach` would route back to the stomach organ (direct match) instead of to its intended target.
 
 Source-based routing lets organs publish without knowing the target. The ganglion decides where things go. This decouples organs from each other.
 

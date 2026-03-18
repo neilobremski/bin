@@ -29,24 +29,24 @@ while IFS= read -r line; do
   message="${line#* }"
   source="${topic##*/}"
 
-  # Try direct routing: does an organ with this name exist?
-  target="$CONF_DIR/organs/$source"
-  if [ -d "$target" ] && [ "$source" != "ganglion" ]; then
-    echo "$message" >> "$target/stimulus.txt"
-    routed=$((routed + 1))
-    echo "ganglion: $topic → $source" >&2
-  else
-    # Source-based routing: check if a route exists for this source
-    # Default routes for tadpole (stomach produces food → tail consumes)
-    case "$source" in
-      stomach) dest="$CONF_DIR/organs/tail" ;;
-      *)       dest="" ;;
-    esac
+  # Source-based routing first: check if a route exists for this source
+  # Default routes for tadpole (stomach produces food → tail consumes)
+  case "$source" in
+    stomach) dest="$CONF_DIR/organs/tail" ;;
+    *)       dest="" ;;
+  esac
 
-    if [ -n "$dest" ] && [ -d "$dest" ]; then
-      echo "$message" >> "$dest/stimulus.txt"
+  if [ -n "$dest" ] && [ -d "$dest" ]; then
+    echo "$message" >> "$dest/stimulus.txt"
+    routed=$((routed + 1))
+    echo "ganglion: $topic → $(basename "$dest") (routed from $source)" >&2
+  else
+    # Direct routing: does an organ with this name exist?
+    target="$CONF_DIR/organs/$source"
+    if [ -d "$target" ] && [ "$source" != "ganglion" ]; then
+      echo "$message" >> "$target/stimulus.txt"
       routed=$((routed + 1))
-      echo "ganglion: $topic → $(basename "$dest") (routed from $source)" >&2
+      echo "ganglion: $topic → $source" >&2
     else
       dropped=$((dropped + 1))
       dropped_names="${dropped_names}${source} "
