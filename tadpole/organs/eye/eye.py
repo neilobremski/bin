@@ -115,12 +115,18 @@ def read_commands():
 
 
 def get_organ_health(organ_type):
-    """Get an organ's health text from the ganglion registry."""
-    output = stimulus_query()
-    for line in output.splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 5 and parts[0] == organ_type:
-            return parts[4]  # health_text column
+    """Get an organ's health text by reading its health.txt directly."""
+    conf_dir = os.environ.get("CONF_DIR", str(DIR.parent))
+    organs = os.environ.get("ORGANS", "")
+    for p in organs.split(":"):
+        p = p.strip()
+        if not p:
+            continue
+        path = Path(p) if Path(p).is_absolute() else Path(conf_dir) / p
+        if path.name == organ_type and path.is_dir():
+            health_file = path / "health.txt"
+            if health_file.exists():
+                return health_file.read_text().strip()
     return ""
 
 
