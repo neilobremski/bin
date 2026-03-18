@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# stimulus — CLI for the life nervous system.
+# Send signals to organs, query the registry.
+set -euo pipefail
+
+DB="${GANGLION_DB:-$HOME/.life/ganglion.db}"
+BODY="${BODY_PART:-local}"
+
+usage() {
+  echo "Usage:"
+  echo "  stimulus send <type> \"message\"       # signal organ by type"
+  echo "  stimulus send <type>:<id> \"message\"  # signal specific organ"
+  echo "  stimulus query [type]                 # query registry"
+  exit 1
+}
+
+[ $# -lt 1 ] && usage
+
+cmd="$1"; shift
+
+case "$cmd" in
+  send)
+    [ $# -lt 2 ] && { echo "stimulus send: need <target> <message>" >&2; exit 1; }
+    target="$1"; shift
+    message="$*"
+
+    # Parse target — type or type:id
+    if echo "$target" | grep -q ':'; then
+      target_type="${target%%:*}"
+      target_id="${target#*:}"
+    else
+      target_type="$target"
+      target_id=""
+    fi
+
+    # Try local delivery first (organ exists in ORGANS list)
+    delivered=false
+    if [ -z "$target_id" ] && [ -n "${ORGANS:-}" ]; then
+      IFS=':' read -ra _paths <<< "$ORGANS"
+      for op in "${_paths[@]}"; do
+        op="${op#"${op%%[![:space:]]*}"}"
+        op="${op%"${op##*[![:space:]]}"}"
+        [ -z "$op" ] && continue
+        if [ "$(basename "$op")" = "$target_type" ] && [ -d "$op" ]; then
+          echo "$message" >> "$op/stimulus.txt"
+          delivered=true
+          break
+        fi
+      done
+    fi
+
+    # Fall back to MQTT for remote delivery
+    if [ "$delivered" = false ]; then
+      if [ -n "${MQTT_HOST:-}" ] && command -v mqtt-pub >/dev/null 2>&1; then
+        if [ -n "$target_id" ]; then
+          mqtt-pub -t "life/stimulus/$target_id" -m "$message" -q 1 2>/dev/null
+        else
+          mqtt-pub -t "life/${BODY}/stimulus/${target_type}" -m "$message" -q 1 2>/dev/null
+        fi
+      else
+        echo "stimulus send: no local organ '$target_type' and no MQTT — cannot deliver" >&2
+        exit 1
+      fi
+    fi
+    ;;
+
+  query)
+    if [ ! -f "$DB" ]; then
+      echo "stimulus query: no registry at $DB" >&2
+      exit 1
+    fi
+    if [ $# -ge 1 ]; then
+      target_type="$1"
+      sqlite3 -separator "	" "$DB" \
+        "SELECT type, id, body_part, health_status, health_text, last_seen FROM organs WHERE type='$target_type' ORDER BY id;"
+    else
+      sqlite3 -separator "	" "$DB" \
+        "SELECT type, id, body_part, health_status, health_text, last_seen FROM organs ORDER BY type, id;"
+    fi
+    ;;
+
+  *)
+    usage
+    ;;
+esac

@@ -20,10 +20,8 @@ echo "$meals" > "$DIR/meals.count"
 payload="meal $meals digested at $(date -u +%H:%M:%S)"
 ref=$(echo "$payload" | circ-put -)
 
-# Publish event to nervous system
-if [ -n "${MQTT_HOST:-}" ] && command -v mqtt-pub >/dev/null 2>&1; then
-  mqtt-pub -t "tadpole/stomach" -m "food circ:$ref" -q 1 2>/dev/null || true
-fi
+# Send food to tail via stimulus
+stimulus send tail "food circ:$ref" 2>/dev/null || true
 
 echo "ok meal $meals circ:$ref" > "$DIR/health.txt"
 echo "stomach: produced meal $meals, ref=$ref" >&2
