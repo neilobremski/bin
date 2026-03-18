@@ -7,8 +7,9 @@ Examples:
   gas info
   gas gmail.search query="is:unread" count=5
   gas drive.list query="title contains 'circ-'" count=3
-  gas drive.upload name=test.txt data_base64=$(base64 -w0 file.txt)
+  gas drive.upload name=test.txt data_base64=@file.txt
   gas drive.download id=1abc...
+  echo "hello" | gas drive.upload name=test.txt data_base64=-
 
 Secrets resolved via local-secret:
   GAS_BRIDGE_URL — env var or ~/lib/gas-bridge-url.txt
@@ -42,8 +43,10 @@ import base64
 
 for arg in sys.argv[2:]:
     k, _, v = arg.partition("=")
-    # @filename: read file and base64-encode
-    if v.startswith("@"):
+    # @- reads from stdin, @filename reads from file — both base64-encode
+    if v == "@-":
+        payload[k] = base64.b64encode(sys.stdin.buffer.read()).decode()
+    elif v.startswith("@"):
         filepath = v[1:]
         with open(filepath, "rb") as f:
             payload[k] = base64.b64encode(f.read()).decode()

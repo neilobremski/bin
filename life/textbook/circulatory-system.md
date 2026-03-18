@@ -7,9 +7,9 @@ The circulatory system carries payloads between organs. Stimulus lines carry sig
 An organ stores a payload and gets back a content-addressed reference (SHA-256 hash). The reference travels through stimulus. The receiving organ retrieves the payload using the reference.
 
 ```bash
-# Organ A: store a payload
+# Organ A: store a payload, signal through the nervous system
 ref=$(echo "meal digested" | circ-put -)
-echo "food circ:$ref" >> organs/tail/stimulus.txt
+stimulus send tail "food circ:$ref"
 
 # Organ B: retrieve the payload
 ref=$(grep -o 'circ:[^ ]*' stimulus.txt | cut -d: -f2)
@@ -22,12 +22,12 @@ Same content = same hash = no duplicate storage. Upload the same file twice, get
 
 ## Backends
 
-The `circ-put` and `circ-get` scripts read `CIRC_BACKEND` from environment:
+Local storage is always used (fast, works offline). If the GAS bridge is configured and `CIRC_LOCAL_ONLY` is unset, payloads are also uploaded to Google Drive for cross-body-part access.
 
-| Backend | Storage | Use case |
-|---------|---------|----------|
-| `local` | `~/.life/circ/` (or `$CIRC_DIR`) | Testing, single machine |
-| `gdrive` | Google Drive via GAS bridge | Production, distributed |
+| Backend | Storage | When |
+|---------|---------|------|
+| local | `~/.life/circ/` (or `$CIRC_DIR`) | Always |
+| gdrive | Google Drive via `gas` CLI | When GAS bridge is available |
 
 Organs don't know which backend is active. They call `circ-put` and `circ-get` — the backend is configuration, not code.
 
