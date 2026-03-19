@@ -25,7 +25,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tadpole", "organs", "hippocampus"))
 from retrieval import search, recent, by_importance, stats
 from storage import store, admit_memory
-from entities import extract_and_link_entities, get_entity_context, list_entities, get_entity_detail
+from entities import get_entity_context, list_entities, get_entity_detail
 from schema import init_db, migrate
 import sqlite3
 
@@ -100,8 +100,7 @@ def cmd_store(args):
         db.commit()
         print("exists (access bumped)")
     else:
-        # Extract entities and build tags
-        extract_and_link_entities(db, mid, content)
+        # Entity extraction now happens inside store() — single code path.
         db.commit()
         print("stored")
 

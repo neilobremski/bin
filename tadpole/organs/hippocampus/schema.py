@@ -75,7 +75,16 @@ MIGRATIONS = [
 
 
 def init_db(db):
-    """Create base schema (v1 tables)."""
+    """Create base schema (v1 tables).
+
+    NOTE on migration-created objects not yet used by production code:
+    - Columns: last_pe_score, labile_until, recon_count (v2_003–005)
+      Created for future prediction-error reconsolidation. Read/written nowhere.
+    - Table: associations (v2_012) — reserved for inter-memory link graph.
+    - Table: consolidation_log (v2_013) — reserved for merge audit trail.
+    These migrations are kept so existing DBs don't re-run them, and new DBs
+    stay schema-compatible. They carry no runtime cost.
+    """
     db.execute("PRAGMA journal_mode=WAL")
     db.executescript("""
         CREATE TABLE IF NOT EXISTS memories (

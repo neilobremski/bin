@@ -176,38 +176,61 @@ def get_entity_context(db, memory_ids):
     """Given a list of memory IDs, return entity context for any linked entities.
 
     Returns list of strings like "[Entity: Neil] Primary human collaborator."
+
+    Uses a single JOIN query to fetch entities and their top linked memories,
+    avoiding the N+1 pattern of one query per entity.
     """
     if not memory_ids:
         return []
 
     try:
-        # Find all entities linked to these memories
+        # Single query: find entities linked to these memories, plus each
+        # entity's top 3 linked memories (by importance then recency).
+        # The ROW_NUMBER window function limits per-entity memory rows.
         placeholders = ",".join("?" for _ in memory_ids)
         rows = db.execute(f"""
-            SELECT DISTINCT e.id, e.name, e.summary
-            FROM entities e
-            JOIN entity_memories em ON e.id = em.entity_id
-            WHERE em.memory_id IN ({placeholders}) AND em.valid_until IS NULL
+            WITH matched_entities AS (
+                SELECT DISTINCT e.id, e.name, e.summary
+                FROM entities e
+                JOIN entity_memories em ON e.id = em.entity_id
+                WHERE em.memory_id IN ({placeholders}) AND em.valid_until IS NULL
+            ),
+            ranked_memories AS (
+                SELECT me.id AS ent_id, m.content, m.importance,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY me.id
+                           ORDER BY m.importance DESC, m.accessed_at DESC
+                       ) AS rn
+                FROM matched_entities me
+                JOIN entity_memories em2 ON me.id = em2.entity_id
+                    AND em2.valid_until IS NULL
+                JOIN memories m ON m.id = em2.memory_id AND m.is_active = 1
+            )
+            SELECT me.id, me.name, me.summary,
+                   rm.content, rm.importance
+            FROM matched_entities me
+            LEFT JOIN ranked_memories rm ON me.id = rm.ent_id AND rm.rn <= 3
+            ORDER BY me.name, rm.importance DESC
         """, memory_ids).fetchall()
     except sqlite3.OperationalError:
         return []
 
+    # Group rows by entity
+    from collections import OrderedDict
+    entities_map = OrderedDict()
+    for ent_id, name, summary, mem_content, mem_importance in rows:
+        if ent_id not in entities_map:
+            entities_map[ent_id] = {
+                "name": name, "summary": summary, "memories": []
+            }
+        if mem_content is not None:
+            entities_map[ent_id]["memories"].append((mem_content, mem_importance))
+
     context = []
-    for ent_id, name, summary in rows:
-        block = f"[Entity: {name}] {summary}"
-
-        # Get top linked memories for this entity
-        linked = db.execute("""
-            SELECT m.content, m.importance FROM memories m
-            JOIN entity_memories em ON m.id = em.memory_id
-            WHERE em.entity_id = ? AND em.valid_until IS NULL AND m.is_active = 1
-            ORDER BY m.importance DESC, m.accessed_at DESC
-            LIMIT 3
-        """, (ent_id,)).fetchall()
-
-        for content, importance in linked:
+    for ent_id, info in entities_map.items():
+        block = f"[Entity: {info['name']}] {info['summary']}"
+        for content, importance in info["memories"]:
             block += f"\n  - [{importance}] {content[:200]}"
-
         context.append(block)
 
     return context

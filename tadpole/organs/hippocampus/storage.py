@@ -122,6 +122,11 @@ def store(db, content, importance=5, category="general", source=""):
     )
     mid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     _store_count_this_cycle += 1
+
+    # Entity extraction is always called after store — single code path
+    # for both CLI and stimulus processing (Joel A: unified store path).
+    extract_and_link_entities(db, mid, content)
+
     return mid
 
 
@@ -193,8 +198,7 @@ def process_stimulus(db, stimulus_text):
                 stored += 1
                 # Apply auto-supersession (Step 6)
                 check_supersession(db, mid, parsed["content"], category, importance)
-                # Extract entities and build tags (Steps 8-10)
-                extract_and_link_entities(db, mid, parsed["content"])
+                # Entity extraction now happens inside store() — single code path.
                 log(f"stored [{category}] imp={importance}: {parsed['content'][:60]}...")
 
     return stored

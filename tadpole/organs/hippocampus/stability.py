@@ -70,6 +70,7 @@ def retier_memories(db, now):
     rows = db.execute("""
         SELECT id, importance, accessed_at, stability_days, access_count
         FROM memories WHERE is_active = 1
+        LIMIT 10000
     """).fetchall()
 
     scored = []
