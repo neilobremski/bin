@@ -11,8 +11,11 @@ Sheet layout (Sheet1):
 The eye reads unprocessed rows, calls `stimulus send <target> <command>`,
 marks rows as processed, and fills in the organ's response on the next cycle.
 """
-import json, os, sys, subprocess
+import json, os, sys
 from pathlib import Path
+
+sys.path.insert(0, os.environ.get("CONF_DIR", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+import muscles
 
 DIR = Path(__file__).resolve().parent
 SHEET_NAME = os.environ.get("SHEETS_NAME", "Tadpole")
@@ -20,32 +23,6 @@ SHEET_NAME = os.environ.get("SHEETS_NAME", "Tadpole")
 
 def log(msg):
     print(f"eye: {msg}", file=sys.stderr)
-
-
-def gas(*args):
-    """Call the gas CLI and return parsed JSON."""
-    try:
-        result = subprocess.run(
-            ["gas"] + list(args),
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode != 0:
-            return None
-        return json.loads(result.stdout)
-    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
-        return None
-
-
-def stimulus_send(target, message):
-    """Call stimulus send CLI."""
-    try:
-        subprocess.run(
-            ["stimulus", "send", target, message],
-            capture_output=True, timeout=10
-        )
-        return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
 
 
 def get_organ_health(organ_type):
@@ -66,7 +43,7 @@ def get_organ_health(organ_type):
 
 def read_commands():
     """Read unprocessed commands from the sheet."""
-    data = gas("sheets.read", f"name={SHEET_NAME}", "range=Sheet1!A:D")
+    data = muscles.gas("sheets.read", f"name={SHEET_NAME}", "range=Sheet1!A:D")
     if not data or "rows" not in data:
         return [], []
 
@@ -94,9 +71,9 @@ def process_commands(commands):
         message = cmd["command"]
         row = cmd["row"]
 
-        ok = stimulus_send(target, message)
+        ok = muscles.stimulus.send(target, message)
 
-        gas(
+        muscles.gas(
             "sheets.update",
             f"name={SHEET_NAME}",
             f"range=Sheet1!C{row}:D{row}",
@@ -119,7 +96,7 @@ def update_responses(all_rows):
         if processed == "yes" and response == "pending...":
             health = get_organ_health(target)
             if health and not health.startswith("ok idle"):
-                gas(
+                muscles.gas(
                     "sheets.update",
                     f"name={SHEET_NAME}",
                     f"range=Sheet1!D{i + 1}:D{i + 1}",
@@ -130,7 +107,7 @@ def update_responses(all_rows):
 
 def main():
     # Quick check: can we reach the GAS bridge?
-    test = gas("info")
+    test = muscles.gas("info")
     if not test:
         log("no GAS bridge — idle")
         (DIR / "health.txt").write_text("ok idle (no bridge)\n")

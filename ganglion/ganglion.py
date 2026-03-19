@@ -8,6 +8,9 @@ import os, sys, sqlite3, json, subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.environ.get("CONF_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import muscles
+
 # --- Configuration from environment (set by spark via life.conf) ---
 DB_PATH = os.environ.get("GANGLION_DB", os.path.expanduser("~/.life/ganglion.db"))
 BODY = os.environ.get("BODY_PART", "local")
@@ -135,13 +138,7 @@ def mqtt_broadcast(db):
          "health_status": r[3], "health_text": r[4], "last_seen": r[5]}
         for r in rows
     ])
-    try:
-        subprocess.run(
-            ["mqtt-pub", "-t", f"life/{BODY}/registry", "-m", payload, "-r"],
-            capture_output=True, timeout=5
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    muscles.mqtt.pub(topic=f"life/{BODY}/registry", message=payload, retain=True, timeout=5)
 
 
 def mqtt_receive(db):
