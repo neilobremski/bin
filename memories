@@ -238,6 +238,10 @@ def cmd_search(args):
 
 def _fts_query(db, query, tier=None):
     """Execute FTS5 query with optional tier filter. Returns rows with stability_days."""
+    # Convert multi-word queries to OR syntax for broader matching
+    words = query.strip().split()
+    if len(words) > 1 and "OR" not in query and "AND" not in query and '"' not in query:
+        query = " OR ".join(words)
     sql = """
         SELECT m.id, m.content, m.importance, m.category, m.created_at,
                m.access_count, rank, m.stability_days

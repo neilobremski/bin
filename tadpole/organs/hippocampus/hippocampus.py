@@ -709,6 +709,12 @@ def search_fts(db, query, limit=10, tier=None, category=None, exclude_ids=None):
     if not query or not query.strip():
         return []
 
+    # Convert multi-word queries to OR syntax for broader matching.
+    # FTS5 defaults to AND which misses partial matches.
+    words = query.strip().split()
+    if len(words) > 1 and "OR" not in query and "AND" not in query and '"' not in query:
+        query = " OR ".join(words)
+
     sql = """
         SELECT m.id, m.content, m.importance, m.category, m.source,
                m.created_at, m.accessed_at, m.access_count, rank,
