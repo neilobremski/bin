@@ -132,7 +132,8 @@ memories (
     last_pe_score   REAL DEFAULT 0.0,       -- prediction error score
     labile_until    TEXT DEFAULT NULL,       -- reconsolidation window end
     recon_count     INTEGER DEFAULT 0,      -- reconsolidation count
-    tier            TEXT DEFAULT 'hot'      -- 'hot' or 'cold'
+    tier            TEXT DEFAULT 'hot',     -- 'hot' or 'cold'
+    tags            TEXT DEFAULT ''         -- pipe-delimited entity tags: |neil|tadpole|
 )
 
 -- Supporting tables:
@@ -146,18 +147,50 @@ schema_migrations (id, applied_at)
 memories_fts (content)
 ```
 
+## Entity System
+
+Entities are named things the organism knows about: people, places, concepts. Each entity has a name, aliases (alternate names), a type, and a summary. Entities live in the `entities` table.
+
+### How Entities Work
+
+1. **Seeding**: On first run, the hippocampus seeds initial entities (Neil, Tadpole). These are bootstrapped from `SEED_ENTITIES` in hippocampus.py.
+
+2. **Entity extraction on store**: When a new memory is stored, the hippocampus scans its content for known entity aliases (fast string matching, no LLM). Matches create links in the `entity_memories` junction table and populate the `tags` column on the memory.
+
+3. **Tags**: Each memory has a `tags` column with pipe-delimited entity IDs: `|neil|tadpole|`. This enables fast display and LIKE-based filtering (`WHERE tags LIKE '%|neil|%'`). The junction table (`entity_memories`) provides the relational path for proper queries.
+
+4. **Entity-aware search**: When search results reference entities, the CLI shows entity context (summary + top linked memories) below the results.
+
+5. **Unconscious entity recall**: When building context for the brain, the hippocampus scans the input message for entity mentions and auto-injects entity summaries and linked memories. This is the unconscious path -- no explicit search needed.
+
+6. **Entity summary evolution**: When `HIPPOCAMPUS_USE_LLM=1`, entity summaries are regenerated from linked memories during consolidation.
+
+### Entity CLI
+
+```bash
+memories entities              # list all entities with link counts
+memories entity neil           # show entity detail + linked memories
+```
+
+### Design Decisions
+
+- Entity extraction is fast (string matching, no LLM) -- runs on every store
+- Tags column is additive (pipe-delimited with bookends) for fast display
+- Junction table provides the relational path for proper queries
+- neil_insight memories do NOT get special protection in tiering/decay -- they survive by being relevant and accessed, not by having a badge
+
 ## Category Configuration
 
 | Category | TTL (days) | Min Importance | Protected | Tier Override |
 |----------|-----------|----------------|-----------|---------------|
-| neil_insight | never | 7 | yes | hot |
+| neil_insight | never | 7 | no | -- |
 | decision | 30 | 5 | no | -- |
 | observation | 7 | 1 | no | -- |
 | research | 14 | 3 | no | -- |
 | system | 1 | 1 | no | -- |
 | general | 14 | 1 | no | -- |
 
-Protected categories are immune to consolidation/decay.
+No categories receive special protection. neil_insight memories have no TTL expiry and a high minimum importance floor (7), which gives them natural longevity -- but they must earn their place through relevance and access like everything else.
 
 ## Consolidation (v2)
 
@@ -178,10 +211,12 @@ The `memories` command is a Python CLI that provides a shell interface to the hi
 | `memories store "content"` | Store a memory (direct + stimulus) |
 | `memories store -i 8 "content"` | Store with explicit importance |
 | `memories store -c food "content"` | Store with category |
-| `memories search "query"` | FTS5 search, ranked by v2 five-factor scoring |
+| `memories search "query"` | FTS5 search, ranked by v2 five-factor scoring, with entity context |
 | `memories recent [N]` | Last N memories (default 10) |
 | `memories important [min]` | Memories with importance >= min (default 7) |
-| `memories stats` | Count, categories, avg importance, tier breakdown |
+| `memories stats` | Count, categories, avg importance, tier breakdown, entity counts |
+| `memories entities` | List all entities with link counts |
+| `memories entity <id>` | Show entity detail + linked memories |
 
 The `store` command uses a dual path: writes directly to `memory.db` (fast, same body part) AND sends a stimulus to the hippocampus (so it can process and consolidate).
 
