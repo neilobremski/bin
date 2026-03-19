@@ -70,8 +70,10 @@ def composite_score(bm25_rank, importance, created_at_str, access_count,
              FSRS retrievability 0.15, UCB exploration 0.10
     """
     # Factor 1: Relevance (BM25) -- weight 0.35
-    bm25_raw = -bm25_rank
-    relevance = 1.0 / (1.0 + math.exp(-bm25_raw))  # sigmoid normalization
+    # Log transform preserves ranking differentiation better than sigmoid,
+    # which compressed scores into near-binary 0/1 clusters.
+    bm25_raw = -bm25_rank  # raw BM25 scores (higher = more relevant)
+    relevance = math.log(1.0 + abs(bm25_raw)) / math.log(1.0 + 10.0)
 
     # Factor 2: Importance -- weight 0.25
     imp = importance / 10.0

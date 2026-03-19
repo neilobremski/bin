@@ -150,3 +150,50 @@ def test_create_entity_duplicate_returns_false(db):
     entities.create_entity(db, "dup", "Duplicate", entity_type="thing")
     result = entities.create_entity(db, "dup", "Duplicate Again", entity_type="thing")
     assert result is False
+
+
+def test_list_entities_returns_all_with_link_counts(db):
+    """list_entities should return all entities with their link counts."""
+    entities.seed_entities(db)
+    mid = _insert_memory(db, "Neil said the hippocampus needs more tests")
+    entities.extract_and_link_entities(db, mid, "Neil said the hippocampus needs more tests")
+    db.commit()
+
+    result = entities.list_entities(db)
+    assert len(result) == len(entities.SEED_ENTITIES)
+
+    neil_ent = [e for e in result if e["id"] == "neil"][0]
+    assert neil_ent["name"] == "Neil"
+    assert neil_ent["entity_type"] == "person"
+    assert neil_ent["link_count"] >= 1
+
+
+def test_list_entities_empty_db(db):
+    """list_entities on empty entities table returns empty list."""
+    result = entities.list_entities(db)
+    assert result == []
+
+
+def test_get_entity_detail_returns_entity_and_memories(db):
+    """get_entity_detail should return entity info plus linked memories."""
+    entities.seed_entities(db)
+    mid1 = _insert_memory(db, "Neil prefers structured memory systems", importance=8)
+    mid2 = _insert_memory(db, "Neil asked about entity context injection", importance=7)
+    entities.extract_and_link_entities(db, mid1, "Neil prefers structured memory systems")
+    entities.extract_and_link_entities(db, mid2, "Neil asked about entity context injection")
+    db.commit()
+
+    detail = entities.get_entity_detail(db, "neil")
+    assert detail is not None
+    assert detail["name"] == "Neil"
+    assert detail["entity_type"] == "person"
+    assert len(detail["linked_memories"]) >= 2
+    # Memories should be sorted by importance DESC
+    importances = [m["importance"] for m in detail["linked_memories"]]
+    assert importances == sorted(importances, reverse=True)
+
+
+def test_get_entity_detail_nonexistent_returns_none(db):
+    """get_entity_detail with nonexistent id returns None."""
+    entities.seed_entities(db)
+    assert entities.get_entity_detail(db, "nonexistent") is None

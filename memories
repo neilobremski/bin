@@ -25,7 +25,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tadpole", "organs", "hippocampus"))
 from retrieval import search, recent, by_importance, stats
 from storage import store, admit_memory
-from entities import extract_and_link_entities, get_entity_context
+from entities import extract_and_link_entities, get_entity_context, list_entities, get_entity_detail
 from schema import init_db, migrate
 import sqlite3
 
@@ -172,19 +172,14 @@ def cmd_important(args):
 def cmd_entities(args):
     db = get_db()
 
-    rows = db.execute(
-        "SELECT id, name, entity_type, summary FROM entities ORDER BY name"
-    ).fetchall()
+    entities = list_entities(db)
 
-    if not rows:
+    if not entities:
         print("no entities")
     else:
-        for eid, name, etype, summary in rows:
-            count = db.execute(
-                "SELECT COUNT(*) FROM entity_memories WHERE entity_id=? AND valid_until IS NULL",
-                (eid,)
-            ).fetchone()[0]
-            print(f"{eid}\t{name}\t{etype}\t{count} memories\t{summary}")
+        for ent in entities:
+            print(f"{ent['id']}\t{ent['name']}\t{ent['entity_type']}\t"
+                  f"{ent['link_count']} memories\t{ent['summary']}")
 
     db.close()
 
@@ -193,34 +188,23 @@ def cmd_entity(args):
     db = get_db()
 
     eid = args.entity_id
-    row = db.execute(
-        "SELECT id, name, aliases, entity_type, summary, properties "
-        "FROM entities WHERE id=?", (eid,)
-    ).fetchone()
+    detail = get_entity_detail(db, eid)
 
-    if not row:
+    if not detail:
         print(f"entity '{eid}' not found", file=sys.stderr)
         db.close()
         sys.exit(1)
 
-    print(f"Entity: {row[1]} ({row[0]})")
-    print(f"Type: {row[3]}")
-    print(f"Aliases: {row[2]}")
-    print(f"Summary: {row[4]}")
+    print(f"Entity: {detail['name']} ({detail['id']})")
+    print(f"Type: {detail['entity_type']}")
+    print(f"Aliases: {detail['aliases']}")
+    print(f"Summary: {detail['summary']}")
 
-    # Show linked memories
-    linked = db.execute("""
-        SELECT m.id, m.content, m.importance, m.category, m.created_at
-        FROM memories m
-        JOIN entity_memories em ON m.id = em.memory_id
-        WHERE em.entity_id = ? AND em.valid_until IS NULL AND m.is_active = 1
-        ORDER BY m.importance DESC, m.created_at DESC LIMIT 20
-    """, (eid,)).fetchall()
-
+    linked = detail["linked_memories"]
     if linked:
         print(f"\nLinked memories ({len(linked)}):")
-        for mid, content, imp, cat, created in linked:
-            print(f"  [{imp}] ({cat}) {content[:120]}")
+        for m in linked:
+            print(f"  [{m['importance']}] ({m['category']}) {m['content'][:120]}")
     else:
         print("\nNo linked memories.")
 

@@ -49,6 +49,78 @@ def seed_entities(db):
     log(f"seeded {len(SEED_ENTITIES)} entities")
 
 
+def list_entities(db):
+    """Return all entities with their active link counts.
+
+    Returns list of dicts: {id, name, entity_type, summary, link_count}
+    """
+    try:
+        rows = db.execute("""
+            SELECT e.id, e.name, e.entity_type, e.summary,
+                   COUNT(em.memory_id) AS link_count
+            FROM entities e
+            LEFT JOIN entity_memories em
+                ON e.id = em.entity_id AND em.valid_until IS NULL
+            GROUP BY e.id
+            ORDER BY e.name
+        """).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    return [
+        {"id": r[0], "name": r[1], "entity_type": r[2],
+         "summary": r[3], "link_count": r[4]}
+        for r in rows
+    ]
+
+
+def get_entity_detail(db, entity_id):
+    """Return entity info plus linked memories.
+
+    Returns dict: {id, name, aliases, entity_type, summary, properties,
+                   created_at, updated_at, linked_memories}
+    or None if not found.
+
+    linked_memories is a list of dicts:
+        {id, content, importance, category, created_at}
+    """
+    try:
+        row = db.execute(
+            "SELECT id, name, aliases, entity_type, summary, properties, "
+            "created_at, updated_at FROM entities WHERE id=?",
+            (entity_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+
+    if not row:
+        return None
+
+    linked = []
+    try:
+        linked_rows = db.execute("""
+            SELECT m.id, m.content, m.importance, m.category, m.created_at
+            FROM memories m
+            JOIN entity_memories em ON m.id = em.memory_id
+            WHERE em.entity_id = ? AND em.valid_until IS NULL AND m.is_active = 1
+            ORDER BY m.importance DESC, m.created_at DESC LIMIT 20
+        """, (entity_id,)).fetchall()
+        linked = [
+            {"id": r[0], "content": r[1], "importance": r[2],
+             "category": r[3], "created_at": r[4]}
+            for r in linked_rows
+        ]
+    except sqlite3.OperationalError:
+        pass
+
+    return {
+        "id": row[0], "name": row[1], "aliases": row[2],
+        "entity_type": row[3], "summary": row[4], "properties": row[5],
+        "created_at": row[6], "updated_at": row[7],
+        "linked_memories": linked,
+    }
+
+
 def get_entity(db, entity_id):
     """Get a single entity by id. Returns row or None."""
     try:
