@@ -96,6 +96,7 @@ Each grades A-F. Track grades across iterations to verify improvement.
 | 2026-03-19 R2 | B | B+ | B- | Fixed scoring duplication, batch SQL. Entity system still premature per Jobs. |
 | 2026-03-19 R3 | B+ | A- | B | Full CLI delegation, BM25 log transform, 10K benchmark 1.24s. BM25 unbounded. |
 | 2026-03-19 R4 | A- | A- | B+ | BM25 clamped, entities slimmed 322→213, dead code cut, scripts moved. |
+| 2026-03-19 R5 | A- | A- | B+ | Unified store path, N+1 CTE fix, LIMIT guard, 5-factor validated. Held. |
 
 ## What to Test When Adding New Features
 
