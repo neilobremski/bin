@@ -104,3 +104,31 @@ Each grades A-F. Track grades across iterations to verify improvement.
 - [ ] Does FSRS stability still increase on access?
 - [ ] Is there any new duplicate code between CLI and package?
 - [ ] Can it handle 10K memories without >60s cycle time?
+
+## Cognitive Science Memory Tests (from research)
+
+Full research at: [Drive: memory-testing-research.md](https://drive.google.com/file/d/1qEwnccod8sN_6qzNd7zv3hKe5P5Q6RRc)
+
+### RAVLT (Rey Auditory Verbal Learning Test)
+Store 15 memories, query them 5 times (learning curve), introduce interference memories, re-query (interference drop), consolidate, re-query (retention). Tests encoding, interference susceptibility, and consolidation.
+
+### DRM False Memory Paradigm
+Store semantically related memories (e.g., "bed, rest, awake, tired, dream, wake, snooze, nap") and test if the system retrieves a never-stored critical lure ("sleep"). Our AND-first strategy should prevent this.
+
+### Proactive/Retroactive Interference
+Store overlapping memory sets (Project Alpha meetings, then Project Beta meetings). Test if Beta disrupts Alpha recall (retroactive) and if Alpha disrupts Beta recall (proactive).
+
+### Working Memory Capacity (Digit Span)
+Inject N concurrent context items and test if the system can hold all of them. Find the breaking point where retrieval degrades.
+
+### Spaced Retrieval
+Store a memory, access it at increasing intervals (1 cycle, 2 cycles, 4 cycles, 8 cycles). Verify FSRS stability increases monotonically. Compare against a control memory never accessed.
+
+### Memory Health Index
+Proposed metrics for health.txt:
+- recall_accuracy: what % of stored memories are retrievable?
+- false_alarm_rate: what % of search results are for never-stored content?
+- interference_resistance: how much does new content disrupt old recall?
+- consolidation_effectiveness: do merge cycles reduce count without losing substance?
+- stability_growth: does repeated access increase FSRS stability?
+- learning_curve: does retrieval improve with repeated queries?
