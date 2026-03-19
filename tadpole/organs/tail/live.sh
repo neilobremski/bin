@@ -4,12 +4,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Read and consume stimulus
-if [ -f "$DIR/stimulus.txt" ]; then
-  stimulus=$(cat "$DIR/stimulus.txt")
-  > "$DIR/stimulus.txt"
-else
-  stimulus=""
-fi
+stimulus=$(stimulus consume "$DIR")
 
 swims=0
 [ -f "$DIR/swims.count" ] && swims=$(cat "$DIR/swims.count")

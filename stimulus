@@ -11,6 +11,7 @@ usage() {
   echo "  stimulus send <type> \"message\"       # signal organ by type"
   echo "  stimulus send <type>:<id> \"message\"  # signal specific organ"
   echo "  stimulus query [type]                 # query registry"
+  echo "  stimulus consume [dir]                # read and clear stimulus.txt"
   exit 1
 }
 
@@ -82,6 +83,19 @@ case "$cmd" in
     else
       sqlite3 -separator "	" "$DB" \
         "SELECT type, id, body_part, health_status, health_text, last_seen FROM organs ORDER BY type, id;"
+    fi
+    ;;
+
+  consume)
+    # Atomically read and clear stimulus.txt. Outputs lines to stdout.
+    # Uses rename-then-read so no lines are lost between read and clear.
+    dir="${1:-$PWD}"
+    stim="$dir/stimulus.txt"
+    tmp="$dir/.stimulus.processing"
+    if [ -f "$stim" ] && [ -s "$stim" ]; then
+      mv "$stim" "$tmp"
+      cat "$tmp"
+      rm -f "$tmp"
     fi
     ;;
 

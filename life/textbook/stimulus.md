@@ -15,23 +15,14 @@ Short writes (under 4096 bytes) with `>>` are effectively atomic on Linux. Multi
 
 ## Reading
 
-The organ reads and empties the file when it runs:
+The organ reads and clears stimulus using the `stimulus` CLI:
 
 ```bash
-lines=$(cat stimulus.txt)
-> stimulus.txt
+lines=$(stimulus consume "$DIR")
 # process $lines
 ```
 
-For concurrent-safe consumption, use flock:
-
-```bash
-exec 9>stimulus.txt.lock
-flock 9
-lines=$(cat stimulus.txt)
-> stimulus.txt
-exec 9>&-
-```
+`stimulus consume` atomically renames stimulus.txt before reading it, so no lines are lost between the read and the clear. Organs should never `cat + truncate` directly.
 
 ## What Goes in a Line
 
