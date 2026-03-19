@@ -16,46 +16,31 @@ Usage:
     memories entity <id>           — show entity detail + linked memories
 """
 import argparse
-import hashlib
-import math
 import os
 import re
-import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timezone
 
-# Import from the hippocampus package to avoid duplicating scoring/entity logic.
+# Import from the hippocampus package — all data operations are delegated here.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tadpole", "organs", "hippocampus"))
-from retrieval import composite_score
+from retrieval import search, recent, by_importance, stats
+from storage import store, admit_memory
 from entities import extract_and_link_entities, get_entity_context
+from schema import init_db, migrate
+import sqlite3
 
 DB_PATH = os.environ.get("MEMORY_DB", os.path.join(os.getcwd(), "organs", "hippocampus", "memory.db"))
 
 
 def get_db():
-    """Connect to memory.db with WAL mode."""
+    """Connect to memory.db with WAL mode and ensure schema is current."""
     if not os.path.isfile(DB_PATH):
         print(f"memories: no database at {DB_PATH}", file=sys.stderr)
         sys.exit(1)
     db = sqlite3.connect(DB_PATH)
     db.execute("PRAGMA journal_mode=WAL")
+    migrate(db)
     return db
-
-
-def _has_column(db, table, column):
-    """Check if a column exists in a table."""
-    cols = db.execute(f"PRAGMA table_info({table})").fetchall()
-    return any(c[1] == column for c in cols)
-
-
-def _has_table(db, table):
-    """Check if a table exists."""
-    row = db.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
-        (table,)
-    ).fetchone()
-    return row[0] > 0
 
 
 def cmd_store(args):
@@ -79,7 +64,7 @@ def cmd_store(args):
 
     # Dual-write: direct DB + stimulus. The stimulus path ensures remote
     # body parts receive the memory even if this CLI can't reach the DB.
-    # The hash dedup in hippocampus.py handles the double-arrival gracefully.
+    # The hash dedup in hippocampus handles the double-arrival gracefully.
     try:
         if importance >= 10:
             msg = f"remember critical: {content}"
@@ -99,52 +84,24 @@ def cmd_store(args):
         print("queued (hippocampus will process next cycle)")
         return
 
-    db = sqlite3.connect(DB_PATH)
-    db.execute("PRAGMA journal_mode=WAL")
+    db = get_db()
 
-    content_hash = hashlib.sha256(content.encode()).hexdigest()[:32]
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Admission control
+    should_store, importance, category = admit_memory(content, importance, category)
+    if not should_store:
+        print("rejected (admission control)")
+        db.close()
+        return
 
-    # Check for duplicate -- bump access if exists
-    existing = db.execute(
-        "SELECT id, importance FROM memories WHERE content_hash = ?",
-        (content_hash,)
-    ).fetchone()
+    # Store via hippocampus storage module (handles dedup, hashing, difficulty, etc.)
+    mid = store(db, content, importance, category, source="cli")
 
-    if existing:
-        db.execute(
-            "UPDATE memories SET accessed_at = ?, access_count = access_count + 1, "
-            "importance = MAX(importance, ?) WHERE id = ?",
-            (now, importance, existing[0])
-        )
+    if mid is None:
         db.commit()
         print("exists (access bumped)")
     else:
-        # Set initial difficulty and stability if v2 columns exist
-        has_stability = _has_column(db, "memories", "stability_days")
-        if has_stability:
-            initial_difficulty = max(1.0, min(10.0, 11.0 - importance))
-            db.execute(
-                "INSERT INTO memories(content, importance, category, source, "
-                "created_at, accessed_at, access_count, content_hash, is_active, "
-                "stability_days, difficulty, tier) "
-                "VALUES (?, ?, ?, ?, ?, ?, 0, ?, 1, 1.0, ?, 'hot')",
-                (content, importance, category, "cli", now, now, content_hash,
-                 initial_difficulty)
-            )
-        else:
-            db.execute(
-                "INSERT INTO memories(content, importance, category, source, "
-                "created_at, accessed_at, access_count, content_hash, is_active) "
-                "VALUES (?, ?, ?, ?, ?, ?, 0, ?, 1)",
-                (content, importance, category, "cli", now, now, content_hash)
-            )
-
-        # Extract entities and build tags (Steps 8-10)
-        mid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-        if _has_table(db, "entities"):
-            extract_and_link_entities(db, mid, content)
-
+        # Extract entities and build tags
+        extract_and_link_entities(db, mid, content)
         db.commit()
         print("stored")
 
@@ -158,85 +115,29 @@ def cmd_search(args):
         sys.exit(1)
 
     db = get_db()
-    now = datetime.now(timezone.utc)
-    has_stability = _has_column(db, "memories", "stability_days")
 
-    if has_stability:
-        # v2 search: tiered, five-factor scoring
-        # Stage 1: search hot tier
-        hot_rows = _fts_query(db, query, tier="hot")
-        all_rows = list(hot_rows)
+    # Delegate to retrieval.search() — handles tiered FTS, composite scoring, FSRS updates
+    results = search(db, query, limit=10)
 
-        # Stage 2: search cold if hot didn't fill
-        if len(hot_rows) < 10:
-            cold_rows = _fts_query(db, query, tier="cold")
-            all_rows.extend(cold_rows)
-
-        # Fallback: untiered search if nothing found
-        if not all_rows:
-            all_rows = _fts_query(db, query, tier=None)
-
-        # Re-rank with v2 composite score
-        scored = []
-        seen_ids = set()
-        for r in all_rows:
-            mid = r[0]
-            if mid in seen_ids:
-                continue
-            seen_ids.add(mid)
-            score = composite_score(
-                bm25_rank=r[6],
-                importance=r[2],
-                created_at_str=r[4],
-                access_count=r[5],
-                stability_days=r[7] if len(r) > 7 else 1.0,
-                total_queries=10,  # reasonable default for CLI
-                now=now
-            )
-            scored.append((score, r))
-    else:
-        # v1 fallback: three-factor scoring
-        try:
-            rows = db.execute(
-                "SELECT m.id, m.content, m.importance, m.category, m.created_at, "
-                "m.access_count, rank "
-                "FROM memories_fts fts JOIN memories m ON m.id = fts.rowid "
-                "WHERE memories_fts MATCH ? AND m.is_active = 1 "
-                "ORDER BY rank LIMIT 30",
-                (query,)
-            ).fetchall()
-        except sqlite3.OperationalError:
-            print("memories search: invalid query syntax", file=sys.stderr)
-            sys.exit(1)
-
-        scored = []
-        for r in rows:
-            bm25 = -r[6]
-            imp = r[2] / 10.0
-            created = datetime.fromisoformat(r[4].replace("Z", "+00:00"))
-            age = max((now - created).total_seconds() / 86400, 0.01)
-            recency = 1.0 / (1.0 + math.log(1 + age))
-            score = 0.4 * bm25 + 0.35 * imp + 0.25 * recency
-            scored.append((score, r))
-
-    scored.sort(key=lambda x: -x[0])
-
-    has_tags = _has_column(db, "memories", "tags")
     result_ids = []
-
-    for _, r in scored[:10]:
+    for r in results:
         mid = r[0]
         result_ids.append(mid)
-        # Print: content, importance, category, created_at, access_count
-        line = f"{r[1]}\t{r[2]}\t{r[3]}\t{r[4]}\t{r[5]}"
-        if has_tags:
-            tags = db.execute("SELECT tags FROM memories WHERE id=?", (mid,)).fetchone()
-            if tags and tags[0]:
-                line += f"\ttags={tags[0]}"
+        # r = (id, content, importance, category, source, created_at, accessed_at, access_count, rank, stability_days)
+        content = r[1]
+        imp = r[2]
+        cat = r[3]
+        created = r[5]
+        access_count = r[7]
+        line = f"{content}\t{imp}\t{cat}\t{created}\t{access_count}"
+        # Check for tags
+        tags_row = db.execute("SELECT tags FROM memories WHERE id=?", (mid,)).fetchone()
+        if tags_row and tags_row[0]:
+            line += f"\ttags={tags_row[0]}"
         print(line)
 
-    # Show entity context if entities table exists and results reference entities
-    if result_ids and _has_table(db, "entities"):
+    # Show entity context if results reference entities
+    if result_ids:
         entity_context = get_entity_context(db, result_ids)
         if entity_context:
             print("\n--- Entity Context ---")
@@ -246,73 +147,30 @@ def cmd_search(args):
     db.close()
 
 
-def _fts_query(db, query, tier=None):
-    """Execute FTS5 query with optional tier filter. Returns rows with stability_days."""
-    # AND first (precise), OR fallback (broad) — prevents false memories
-    original_query = query.strip()
-    sql = """
-        SELECT m.id, m.content, m.importance, m.category, m.created_at,
-               m.access_count, rank, m.stability_days
-        FROM memories_fts fts JOIN memories m ON m.id = fts.rowid
-        WHERE memories_fts MATCH ? AND m.is_active = 1
-    """
-    params = [query]
-    if tier:
-        sql += " AND m.tier = ?"
-        params.append(tier)
-    sql += " ORDER BY rank LIMIT 30"
-
-    try:
-        results = db.execute(sql, params).fetchall()
-    except sqlite3.OperationalError:
-        results = []
-
-    # AND-then-OR fallback
-    if not results:
-        words = original_query.split()
-        if len(words) > 1 and "OR" not in original_query and "AND" not in original_query:
-            or_query = " OR ".join(words)
-            return _fts_query(db, or_query, tier)
-
-    return results
-
-
 def cmd_recent(args):
     db = get_db()
-    rows = db.execute(
-        "SELECT content, importance, category, created_at "
-        "FROM memories WHERE is_active = 1 "
-        "ORDER BY created_at DESC LIMIT ?",
-        (args.count,)
-    ).fetchall()
+    rows = recent(db, limit=args.count)
 
     for r in rows:
-        print("\t".join(str(c) for c in r))
+        # r = (id, content, importance, category, source, created_at, accessed_at, access_count)
+        print(f"{r[1]}\t{r[2]}\t{r[3]}\t{r[5]}")
 
     db.close()
 
 
 def cmd_important(args):
     db = get_db()
-    rows = db.execute(
-        "SELECT content, importance, category, created_at "
-        "FROM memories WHERE is_active = 1 AND importance >= ? "
-        "ORDER BY importance DESC, created_at DESC LIMIT 20",
-        (args.min_importance,)
-    ).fetchall()
+    rows = by_importance(db, limit=20, min_importance=args.min_importance)
 
     for r in rows:
-        print("\t".join(str(c) for c in r))
+        # r = (id, content, importance, category, source, created_at)
+        print(f"{r[1]}\t{r[2]}\t{r[3]}\t{r[5]}")
 
     db.close()
 
 
 def cmd_entities(args):
     db = get_db()
-    if not _has_table(db, "entities"):
-        print("no entities table (run hippocampus first)")
-        db.close()
-        return
 
     rows = db.execute(
         "SELECT id, name, entity_type, summary FROM entities ORDER BY name"
@@ -322,7 +180,6 @@ def cmd_entities(args):
         print("no entities")
     else:
         for eid, name, etype, summary in rows:
-            # Count linked memories
             count = db.execute(
                 "SELECT COUNT(*) FROM entity_memories WHERE entity_id=? AND valid_until IS NULL",
                 (eid,)
@@ -334,10 +191,6 @@ def cmd_entities(args):
 
 def cmd_entity(args):
     db = get_db()
-    if not _has_table(db, "entities"):
-        print("no entities table (run hippocampus first)")
-        db.close()
-        return
 
     eid = args.entity_id
     row = db.execute(
@@ -377,41 +230,29 @@ def cmd_entity(args):
 def cmd_stats(args):
     db = get_db()
 
-    total = db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-    active = db.execute(
-        "SELECT COUNT(*) FROM memories WHERE is_active = 1"
-    ).fetchone()[0]
-    avg = db.execute(
-        "SELECT ROUND(AVG(importance), 1) FROM memories WHERE is_active = 1"
-    ).fetchone()[0] or 0
-    cats = db.execute(
-        "SELECT category, COUNT(*) FROM memories WHERE is_active = 1 "
-        "GROUP BY category ORDER BY COUNT(*) DESC"
-    ).fetchall()
+    # Delegate to retrieval.stats()
+    s = stats(db)
 
-    print(f"Total: {total} ({active} active)")
-    print(f"Avg importance: {avg}")
+    print(f"Total: {s['total']} ({s['active']} active)")
+    print(f"Avg importance: {s['avg_importance']}")
 
-    # v2 tier stats
-    if _has_column(db, "memories", "tier"):
-        hot = db.execute(
-            "SELECT COUNT(*) FROM memories WHERE is_active=1 AND tier='hot'"
-        ).fetchone()[0]
-        cold = db.execute(
-            "SELECT COUNT(*) FROM memories WHERE is_active=1 AND tier='cold'"
-        ).fetchone()[0]
-        print(f"Tiers: {hot} hot, {cold} cold")
+    # Tier stats (hot_count is always present from stats())
+    cold = s['active'] - s['hot_count']
+    if cold > 0 or s['hot_count'] != s['active']:
+        print(f"Tiers: {s['hot_count']} hot, {cold} cold")
 
     # Entity stats
-    if _has_table(db, "entities"):
+    try:
         ent_count = db.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
         link_count = db.execute(
             "SELECT COUNT(*) FROM entity_memories WHERE valid_until IS NULL"
         ).fetchone()[0]
         print(f"Entities: {ent_count} ({link_count} links)")
+    except sqlite3.OperationalError:
+        pass
 
     print("Categories:")
-    for c, n in cats:
+    for c, n in s['categories']:
         print(f"  {c}: {n}")
 
     db.close()
