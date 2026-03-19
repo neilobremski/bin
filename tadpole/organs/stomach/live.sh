@@ -6,10 +6,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Consume stimulus
-if [ -f "$DIR/stimulus.txt" ]; then
-  cat "$DIR/stimulus.txt" > /dev/null
-  > "$DIR/stimulus.txt"
-fi
+stimulus consume "$DIR" > /dev/null
 
 # Produce a payload
 meals=0
