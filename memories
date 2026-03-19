@@ -17,7 +17,6 @@ Usage:
 """
 import argparse
 import hashlib
-import json
 import math
 import os
 import re
@@ -25,6 +24,11 @@ import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timezone
+
+# Import from the hippocampus package to avoid duplicating scoring/entity logic.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tadpole", "organs", "hippocampus"))
+from retrieval import composite_score
+from entities import extract_and_link_entities, get_entity_context
 
 DB_PATH = os.environ.get("MEMORY_DB", os.path.join(os.getcwd(), "organs", "hippocampus", "memory.db"))
 
@@ -52,67 +56,6 @@ def _has_table(db, table):
         (table,)
     ).fetchone()
     return row[0] > 0
-
-
-def _extract_and_link_entities(db, memory_id, content, now):
-    """Extract entities from content, create links and tags."""
-    try:
-        entities = db.execute("SELECT id, aliases FROM entities").fetchall()
-    except sqlite3.OperationalError:
-        return
-
-    content_lower = content.lower()
-    matched = []
-
-    for ent_id, aliases_json in entities:
-        aliases = json.loads(aliases_json)
-        for alias in aliases:
-            if alias.lower() in content_lower:
-                try:
-                    db.execute(
-                        "INSERT OR IGNORE INTO entity_memories"
-                        "(entity_id, memory_id, relationship, valid_from) "
-                        "VALUES (?, ?, 'mentions', ?)",
-                        (ent_id, memory_id, now)
-                    )
-                except sqlite3.OperationalError:
-                    pass
-                matched.append(ent_id)
-                break
-
-    if matched and _has_column(db, "memories", "tags"):
-        tags = "|" + "|".join(matched) + "|"
-        db.execute("UPDATE memories SET tags=? WHERE id=?", (tags, memory_id))
-
-
-def _get_entity_context(db, memory_ids):
-    """Get entity context blocks for a list of memory IDs."""
-    if not memory_ids:
-        return []
-    try:
-        placeholders = ",".join("?" for _ in memory_ids)
-        rows = db.execute(f"""
-            SELECT DISTINCT e.id, e.name, e.summary
-            FROM entities e
-            JOIN entity_memories em ON e.id = em.entity_id
-            WHERE em.memory_id IN ({placeholders}) AND em.valid_until IS NULL
-        """, memory_ids).fetchall()
-    except sqlite3.OperationalError:
-        return []
-
-    blocks = []
-    for ent_id, name, summary in rows:
-        block = f"[Entity: {name}] {summary}"
-        linked = db.execute("""
-            SELECT m.content, m.importance FROM memories m
-            JOIN entity_memories em ON m.id = em.memory_id
-            WHERE em.entity_id = ? AND em.valid_until IS NULL AND m.is_active = 1
-            ORDER BY m.importance DESC, m.accessed_at DESC LIMIT 3
-        """, (ent_id,)).fetchall()
-        for content, importance in linked:
-            block += f"\n  - [{importance}] {content[:200]}"
-        blocks.append(block)
-    return blocks
 
 
 def cmd_store(args):
@@ -200,42 +143,12 @@ def cmd_store(args):
         # Extract entities and build tags (Steps 8-10)
         mid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         if _has_table(db, "entities"):
-            _extract_and_link_entities(db, mid, content, now)
+            extract_and_link_entities(db, mid, content)
 
         db.commit()
         print("stored")
 
     db.close()
-
-
-def composite_score_v2(bm25_rank, importance, created_at_str, access_count,
-                       stability_days, total_queries, now):
-    """Five-factor composite retrieval score (v2).
-
-    Weights: relevance 0.35, importance 0.25, recency 0.15,
-             FSRS retrievability 0.15, UCB exploration 0.10
-    """
-    bm25_raw = -bm25_rank
-    relevance = 1.0 / (1.0 + math.exp(-bm25_raw))
-
-    imp = importance / 10.0
-
-    created = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-    age_days = max((now - created).total_seconds() / 86400.0, 0.01)
-    recency = 1.0 / (1.0 + math.log(1.0 + age_days))
-
-    r = 1.0 / (1.0 + age_days / (9.0 * max(stability_days, 0.1)))
-
-    exploration = math.sqrt(2.0 * math.log(total_queries + 1) / (access_count + 1))
-    exploration = min(1.0, exploration)
-
-    return (
-        0.35 * relevance +
-        0.25 * imp +
-        0.15 * recency +
-        0.15 * r +
-        0.10 * exploration
-    )
 
 
 def cmd_search(args):
@@ -271,7 +184,7 @@ def cmd_search(args):
             if mid in seen_ids:
                 continue
             seen_ids.add(mid)
-            score = composite_score_v2(
+            score = composite_score(
                 bm25_rank=r[6],
                 importance=r[2],
                 created_at_str=r[4],
@@ -324,7 +237,7 @@ def cmd_search(args):
 
     # Show entity context if entities table exists and results reference entities
     if result_ids and _has_table(db, "entities"):
-        entity_context = _get_entity_context(db, result_ids)
+        entity_context = get_entity_context(db, result_ids)
         if entity_context:
             print("\n--- Entity Context ---")
             for block in entity_context:

@@ -28,24 +28,33 @@ def fsrs_decay(db, now):
     When R drops below 0.3 and access_count is low: deactivate.
     When R drops below 0.5: demote to cold.
     No category exemptions — decay is universal.
+
+    Uses batch SQL to avoid loading all memories into Python.
+    The FSRS power-law formula R = 1/(1 + t/(9*S)) is computed inline.
+    R < threshold becomes: t/(9*S) > (1/threshold - 1), i.e. t > 9*S*(1/threshold - 1).
+    For R < 0.3: t > 9*S*(1/0.3 - 1) = 9*S*7/3 = 21*S
+    For R < 0.5: t > 9*S*(1/0.5 - 1) = 9*S*1 = 9*S
     """
-    decayed = 0
-    rows = db.execute("""
-        SELECT id, accessed_at, stability_days, importance, access_count
-        FROM memories WHERE is_active = 1
-    """).fetchall()
+    now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    for mid, accessed_at, stability, importance, access_count in rows:
-        last_access = datetime.fromisoformat(accessed_at.replace("Z", "+00:00"))
-        age_since_access = (now - last_access).total_seconds() / 86400.0
+    # Deactivate: R < 0.3 AND access_count < 5
+    cursor = db.execute("""
+        UPDATE memories SET is_active=0, tier='cold'
+        WHERE is_active = 1 AND access_count < 5
+          AND (julianday(?) - julianday(
+                REPLACE(REPLACE(accessed_at, 'Z', '+00:00'), 'T', ' ')
+              )) > 21.0 * MAX(stability_days, 0.1)
+    """, (now_str,))
+    decayed = cursor.rowcount
 
-        r = 1.0 / (1.0 + age_since_access / (9.0 * max(stability, 0.1)))
-
-        if r < 0.3 and access_count < 5:
-            db.execute("UPDATE memories SET is_active=0, tier='cold' WHERE id=?", (mid,))
-            decayed += 1
-        elif r < 0.5:
-            db.execute("UPDATE memories SET tier='cold' WHERE id=? AND tier='hot'", (mid,))
+    # Demote to cold: R < 0.5 (but still active)
+    db.execute("""
+        UPDATE memories SET tier='cold'
+        WHERE is_active = 1 AND tier='hot'
+          AND (julianday(?) - julianday(
+                REPLACE(REPLACE(accessed_at, 'Z', '+00:00'), 'T', ' ')
+              )) > 9.0 * MAX(stability_days, 0.1)
+    """, (now_str,))
 
     return decayed
 
@@ -54,6 +63,9 @@ def retier_memories(db, now):
     """Reassign memories to hot/cold tiers based on utility score.
 
     Hot tier target: ~HOT_TIER_SIZE memories.
+
+    Scoring still requires Python (log function), but tier UPDATEs are
+    batched into two SQL statements instead of one per row.
     """
     rows = db.execute("""
         SELECT id, importance, accessed_at, stability_days, access_count
@@ -71,15 +83,25 @@ def retier_memories(db, now):
 
     scored.sort(key=lambda x: -x[0])
 
-    hot_ids = {mid for _, mid in scored[:HOT_TIER_SIZE]}
+    hot_ids = [mid for _, mid in scored[:HOT_TIER_SIZE]]
+    cold_ids = [mid for _, mid in scored[HOT_TIER_SIZE:]]
+
     retiered = 0
 
-    for _, mid in scored:
-        new_tier = "hot" if mid in hot_ids else "cold"
-        updated = db.execute(
-            "UPDATE memories SET tier=? WHERE id=? AND tier!=?",
-            (new_tier, mid, new_tier)
+    # Batch promote to hot
+    if hot_ids:
+        placeholders = ",".join("?" for _ in hot_ids)
+        retiered += db.execute(
+            f"UPDATE memories SET tier='hot' WHERE id IN ({placeholders}) AND tier!='hot'",
+            hot_ids
         ).rowcount
-        retiered += updated
+
+    # Batch demote to cold
+    if cold_ids:
+        placeholders = ",".join("?" for _ in cold_ids)
+        retiered += db.execute(
+            f"UPDATE memories SET tier='cold' WHERE id IN ({placeholders}) AND tier!='cold'",
+            cold_ids
+        ).rowcount
 
     return retiered

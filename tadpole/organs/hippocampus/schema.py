@@ -10,6 +10,10 @@ MIGRATIONS = [
      "ALTER TABLE memories ADD COLUMN stability_days REAL DEFAULT 1.0"),
     ("v2_002_difficulty",
      "ALTER TABLE memories ADD COLUMN difficulty REAL DEFAULT 5.0"),
+    # Reserved for future use: last_pe_score, labile_until, recon_count.
+    # These columns are created by migration but not yet read or written by any code.
+    # Keep the migrations so existing DBs don't re-run them; remove the columns
+    # only if we're sure no DB in the wild has data in them.
     ("v2_003_pe_score",
      "ALTER TABLE memories ADD COLUMN last_pe_score REAL DEFAULT 0.0"),
     ("v2_004_labile",
@@ -42,6 +46,8 @@ MIGRATIONS = [
      "CREATE INDEX IF NOT EXISTS idx_em_entity ON entity_memories(entity_id, valid_until)"),
     ("v2_011c_em_idx2",
      "CREATE INDEX IF NOT EXISTS idx_em_memory ON entity_memories(memory_id)"),
+    # Reserved for future use: associations table is created but not yet
+    # read or written by any code. Keep the migration for DB compatibility.
     ("v2_012_associations", """CREATE TABLE IF NOT EXISTS associations (
         source_id INTEGER NOT NULL REFERENCES memories(id),
         target_id INTEGER NOT NULL REFERENCES memories(id),
