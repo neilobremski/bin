@@ -25,49 +25,6 @@ def log(msg):
     print(f"hippocampus: {msg}", file=sys.stderr)
 
 
-# =========================================================================
-#  Category Configuration (Appendix C)
-# =========================================================================
-
-CATEGORY_CONFIG = {
-    "neil_insight": {
-        "min_importance": 7,
-        "ttl_days": None,       # never expires
-        "protected": False,     # survives by relevance and access, not by badge
-        "tier_override": None,  # no special tier treatment
-    },
-    "decision": {
-        "min_importance": 5,
-        "ttl_days": 30,
-        "protected": False,
-        "tier_override": None,
-    },
-    "observation": {
-        "min_importance": 1,
-        "ttl_days": 7,
-        "protected": False,
-        "tier_override": None,
-    },
-    "research": {
-        "min_importance": 3,
-        "ttl_days": 14,
-        "protected": False,
-        "tier_override": None,
-    },
-    "system": {
-        "min_importance": 1,
-        "ttl_days": 1,
-        "protected": False,
-        "tier_override": None,
-    },
-    "general": {
-        "min_importance": 1,
-        "ttl_days": 14,
-        "protected": False,
-        "tier_override": None,
-    },
-}
-
 
 # =========================================================================
 #  Small-LLM integration (optional, controlled by HIPPOCAMPUS_USE_LLM=1)

@@ -4,24 +4,24 @@ import json
 import sqlite3
 from datetime import datetime, timezone, timedelta
 
-from config import CATEGORY_CONFIG, MAX_MEMORIES, USE_LLM, _call_small_llm, log
+from config import MAX_MEMORIES, USE_LLM, _call_small_llm, log
 from supersession import jaccard_similarity
 from stability import fsrs_decay, retier_memories
 
 
-def find_merge_candidates(db, category="observation", threshold=0.65, max_age_days=7):
+def find_merge_candidates(db, threshold=0.65, max_age_days=7):
     """Find groups of similar memories to merge.
 
-    Uses Jaccard similarity with union-find grouping.
+    Uses Jaccard similarity with union-find grouping across ALL active memories.
     Only returns groups of 3+ memories.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
 
     rows = db.execute("""
         SELECT id, content FROM memories
-        WHERE is_active=1 AND category=? AND created_at > ?
+        WHERE is_active=1 AND created_at > ?
         ORDER BY created_at DESC LIMIT 50
-    """, (category, cutoff)).fetchall()
+    """, (cutoff,)).fetchall()
 
     groups = {}
     group_members = {}
@@ -130,14 +130,11 @@ def consolidate(db):
     # Phase 2: Merge Similar Memories (only if LLM available)
     merged = 0
     if USE_LLM:
-        for cat in ("observation", "general", "system"):
-            groups = find_merge_candidates(db, category=cat)
-            for gid, mids in list(groups.items())[:5]:
-                result = merge_memories(db, mids, now)
-                if result:
-                    merged += 1
-            if merged >= 5:
-                break
+        groups = find_merge_candidates(db)
+        for gid, mids in list(groups.items())[:5]:
+            result = merge_memories(db, mids, now)
+            if result:
+                merged += 1
 
     # Phase 3: Tier Reassignment
     retiered = retier_memories(db, now)

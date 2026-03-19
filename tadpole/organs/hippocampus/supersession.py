@@ -40,13 +40,13 @@ def check_supersession(db, new_id, content, category, importance):
             supersede(db, old_id, new_id)
             return old_id
 
-    # Mechanism 2: Jaccard similarity (only for decision/general, importance < 9)
-    if category in ("decision", "general") and importance < 9:
+    # Mechanism 2: Jaccard similarity (any category, importance < 9)
+    if importance < 9:
         candidates = db.execute("""
             SELECT id, content FROM memories
-            WHERE is_active=1 AND category=? AND id != ?
+            WHERE is_active=1 AND id != ?
             ORDER BY created_at DESC LIMIT 30
-        """, (category, new_id)).fetchall()
+        """, (new_id,)).fetchall()
 
         for old_id, old_content in candidates:
             sim = jaccard_similarity(content, old_content)

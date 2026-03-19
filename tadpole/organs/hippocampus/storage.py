@@ -5,7 +5,7 @@ import subprocess
 from datetime import datetime, timezone
 
 from config import (
-    ADMISSION_RULES, CATEGORY_CONFIG, DEDUP_WINDOW_SECONDS, MAX_STORE_RATE,
+    ADMISSION_RULES, DEDUP_WINDOW_SECONDS, MAX_STORE_RATE,
     USE_LLM, check_similar, log, score_importance, DIR,
 )
 from supersession import check_supersession
@@ -54,10 +54,6 @@ def admit_memory(content, importance=5, category="general"):
         if now_ts - _recent_hashes[content_hash] < DEDUP_WINDOW_SECONDS:
             return False, importance, category
     _recent_hashes[content_hash] = now_ts
-
-    # Apply category minimum importance
-    config = CATEGORY_CONFIG.get(category, CATEGORY_CONFIG["general"])
-    importance = max(importance, config["min_importance"])
 
     return True, importance, category
 

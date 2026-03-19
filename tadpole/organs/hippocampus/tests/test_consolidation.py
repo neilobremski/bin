@@ -73,13 +73,13 @@ def test_find_merge_candidates_empty_db(db):
 
 def test_find_merge_candidates_finds_similar_group(db):
     """find_merge_candidates should group memories with high Jaccard similarity."""
-    # Insert 3+ very similar observation memories (within 7 days)
+    # Insert 3+ very similar memories (within 7 days)
     base = "the system health check passed all tests successfully today"
     _insert_memory(db, base + " morning run", category="observation", days_ago=1)
     _insert_memory(db, base + " afternoon run", category="observation", days_ago=1)
     _insert_memory(db, base + " evening run", category="observation", days_ago=1)
 
-    groups = consolidation.find_merge_candidates(db, category="observation", threshold=0.65)
+    groups = consolidation.find_merge_candidates(db, threshold=0.65)
     # Should find at least one group of 3
     if groups:
         assert any(len(mids) >= 3 for mids in groups.values())

@@ -89,16 +89,14 @@ def test_admit_memory_rejects_burst_duplicates():
     assert ok2 is False  # burst duplicate
 
 
-def test_admit_memory_applies_category_min_importance():
-    """admit_memory should enforce category minimum importance."""
+def test_admit_memory_pattern_boosts_importance():
+    """admit_memory should boost importance via pattern matching (not category floors)."""
     storage._recent_hashes.clear()
-    # neil_insight has min_importance=7
+    # Pattern "neil said" should set importance=8 (overrides default 5)
     ok, imp, cat = storage.admit_memory(
         "Neil said that memory is the most important thing ever", 5, "neil_insight"
     )
-    # The pattern match for "neil said" should set importance=8 (overrides default 5)
-    # and category min_importance=7 also applies
-    assert imp >= 7
+    assert imp == 8  # pattern match overrides default, no category floor
 
 
 def test_store_sets_initial_difficulty(db):
