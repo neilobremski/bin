@@ -33,18 +33,18 @@ if command -v gas >/dev/null 2>&1; then
   fid=$(echo "$files" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['files'][0]['id'] if d.get('files') else '')" 2>/dev/null)
 
   if [ -n "$fid" ]; then
-    data=$(gas drive.download "id=$fid" 2>/dev/null)
-    # Extract base64 data and decode
-    decoded=$(echo "$data" | python3 -c "import sys,json,base64; d=json.load(sys.stdin); sys.stdout.buffer.write(base64.b64decode(d['data']))" 2>/dev/null)
-
-    # Cache locally for next time
+    # Decode directly to file — never capture binary in a bash variable
     mkdir -p "$LOCAL_DIR"
-    echo "$decoded" > "$LOCAL_DIR/$hash"
+    gas drive.download "id=$fid" 2>/dev/null | python3 -c "
+import sys, json, base64
+d = json.load(sys.stdin)
+sys.stdout.buffer.write(base64.b64decode(d['data']))
+" > "$LOCAL_DIR/$hash"
 
     if [ -n "$output" ]; then
-      echo "$decoded" > "$output"
+      cp "$LOCAL_DIR/$hash" "$output"
     else
-      echo "$decoded"
+      cat "$LOCAL_DIR/$hash"
     fi
     exit 0
   fi
