@@ -248,10 +248,8 @@ def cmd_search(args):
 
 def _fts_query(db, query, tier=None):
     """Execute FTS5 query with optional tier filter. Returns rows with stability_days."""
-    # Convert multi-word queries to OR syntax for broader matching
-    words = query.strip().split()
-    if len(words) > 1 and "OR" not in query and "AND" not in query and '"' not in query:
-        query = " OR ".join(words)
+    # AND first (precise), OR fallback (broad) — prevents false memories
+    original_query = query.strip()
     sql = """
         SELECT m.id, m.content, m.importance, m.category, m.created_at,
                m.access_count, rank, m.stability_days
@@ -265,9 +263,18 @@ def _fts_query(db, query, tier=None):
     sql += " ORDER BY rank LIMIT 30"
 
     try:
-        return db.execute(sql, params).fetchall()
+        results = db.execute(sql, params).fetchall()
     except sqlite3.OperationalError:
-        return []
+        results = []
+
+    # AND-then-OR fallback
+    if not results:
+        words = original_query.split()
+        if len(words) > 1 and "OR" not in original_query and "AND" not in original_query:
+            or_query = " OR ".join(words)
+            return _fts_query(db, or_query, tier)
+
+    return results
 
 
 def cmd_recent(args):

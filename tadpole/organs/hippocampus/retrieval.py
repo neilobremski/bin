@@ -112,11 +112,10 @@ def search_fts(db, query, limit=10, tier=None, category=None, exclude_ids=None):
     if not query or not query.strip():
         return []
 
-    # Convert multi-word queries to OR syntax for broader matching.
-    # FTS5 defaults to AND which misses partial matches.
-    words = query.strip().split()
-    if len(words) > 1 and "OR" not in query and "AND" not in query and '"' not in query:
-        query = " OR ".join(words)
+    # Multi-word strategy: try AND first (precise), fall back to OR (broad).
+    # AND prevents false memories ("defendant confessed" won't match "defendant at bank").
+    # OR catches partial matches ("phone broken" matches memories with just "phone").
+    _original_query = query.strip()
 
     sql = """
         SELECT m.id, m.content, m.importance, m.category, m.source,
@@ -141,9 +140,18 @@ def search_fts(db, query, limit=10, tier=None, category=None, exclude_ids=None):
     params.append(limit * 3)  # over-fetch for re-ranking
 
     try:
-        return db.execute(sql, params).fetchall()
+        results = db.execute(sql, params).fetchall()
     except sqlite3.OperationalError:
-        return []
+        results = []
+
+    # AND-then-OR fallback: if AND returned nothing, retry with OR for partial matches
+    if not results:
+        words = _original_query.split()
+        if len(words) > 1 and "OR" not in _original_query and "AND" not in _original_query:
+            or_query = " OR ".join(words)
+            return search_fts(db, or_query, limit, tier, category, exclude_ids)
+
+    return results
 
 
 def search(db, query, limit=10, category=None):
