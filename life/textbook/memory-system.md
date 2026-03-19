@@ -1,74 +1,117 @@
 # Memory System
 
-The memory system gives an organism the ability to accumulate experience across spark cycles. Without memory, every cycle starts from zero — the organism learns nothing.
+The memory system gives an organism the ability to accumulate experience across spark cycles. Without memory, every cycle starts from zero -- the organism learns nothing.
 
 ## The Hippocampus
 
-The hippocampus is a memory organ. It stores memories in SQLite with full-text search (FTS5), deduplicates them by content hash, and consolidates over time.
+The hippocampus is a memory organ. It stores memories in SQLite with full-text search (FTS5), deduplicates them by content hash, tracks stability via FSRS-inspired forgetting curves, and consolidates over time.
 
 The hippocampus runs on cadence like any organ. Each cycle:
 
-1. **Consume** — read stimulus for `remember:` commands, store as memories
-2. **Consolidate** — prune low-value memories when the database grows too large
-3. **Report** — write health status (total memory count)
+1. **Consume** -- read stimulus for `remember:` commands, apply admission control, store as memories
+2. **Consolidate** -- FSRS decay, merge similar memories, reassign tiers, prune excess
+3. **Report** -- write health status (total memory count, tier breakdown)
 
 ## Storing Memories
 
 Any organ can send a memory through the nervous system:
 
 ```bash
-stimulus send hippocampus "remember: the stomach ate meal 3"
+stimulus send hippocampus "remember: the tadpole ate its first meal"
 stimulus send hippocampus "remember important: learned to swim faster"
 stimulus send hippocampus "remember critical: human fed me for the first time"
 ```
 
 Importance levels:
-- `remember:` — importance 5 (default)
-- `remember important:` — importance 8
-- `remember critical:` — importance 10
-- `remember <category>:` — custom category, importance 5
+- `remember:` -- importance 5 (default)
+- `remember important:` -- importance 8
+- `remember critical:` -- importance 10
+- `remember <category>:` -- custom category, importance 5
 
 Each memory is deduplicated by SHA-256 content hash. Storing the same content twice updates the access timestamp instead of creating a duplicate.
 
+### Admission Control
+
+Before storing, memories pass through admission control:
+
+1. **Minimum length**: content shorter than 10 characters is rejected as noise
+2. **Pattern matching**: trivial acks ("ok", "sure", "yes") are rejected; decisions and neil insights get importance boosts
+3. **Dedup window**: identical content within 60 seconds is rejected (burst dedup)
+4. **Rate limit**: max 100 memories per cycle
+5. **Category floors**: each category has a minimum importance (e.g. neil_insight >= 7)
+
+### Auto-Supersession
+
+When a new memory is stored, the hippocampus checks if it supersedes an existing one:
+
+1. **Explicit reference**: content containing "supersedes memory #NNN" marks the old memory inactive
+2. **Jaccard similarity**: for decision/general categories (importance < 9), if a new memory has >= 0.85 word-level Jaccard similarity with an existing one, the old one is superseded
+3. **Rolling windows**: recurring patterns (session_reflection, health_check, morning_ritual, evening_ritual) keep only the N most recent entries
+
 ## Active and Inactive Memories
 
-Every memory has an `is_active` flag. Active memories (is_active=1) are the working set — they appear in searches, recent lists, and stats. Inactive memories (is_active=0) are retained in the database but excluded from queries.
+Every memory has an `is_active` flag. Active memories (is_active=1) are the working set -- they appear in searches, recent lists, and stats. Inactive memories (is_active=0) are retained in the database but excluded from queries.
 
-Memories become inactive through two paths:
-- **Decay**: stale, low-importance, rarely accessed memories are marked inactive during consolidation (importance < 5, access_count < 2, older than STALE_DAYS)
-- **Supersession**: when a newer memory replaces an older one, the old memory's `superseded_by` field points to its replacement and it becomes inactive
+Memories become inactive through three paths:
+- **FSRS Decay**: when retrievability drops below 0.3 and the memory is past its category TTL with few accesses
+- **Supersession**: when a newer memory replaces an older one
+- **Manual deactivation**: explicit deactivation by the brain
 
 Inactive memories are not deleted immediately. They persist as a low-priority archive until the database exceeds MAX_MEMORIES, at which point the lowest-value inactive memories are pruned.
 
 ## Recalling Memories
 
-The brain (or any organ on the same body part) reads `memory.db` directly. This is the high-bandwidth path — no network, no stimulus delay, just SQLite on the local filesystem.
+The brain (or any organ on the same body part) reads `memory.db` directly. This is the high-bandwidth path -- no network, no stimulus delay, just SQLite on the local filesystem.
 
 ```bash
 # CLI interface
 memories search "food"        # FTS5 full-text search with smart ranking
 memories recent 5             # last 5 memories
 memories important 8          # memories with importance >= 8
-memories stats                # count, categories, avg importance
+memories stats                # count, categories, avg importance, tier breakdown
 ```
 
-For remote body parts (future), the pattern is: send a query stimulus to the hippocampus, include your organ type so the hippocampus can send the results back. This is the low-bandwidth path — eventually consistent, one cycle of latency.
+## Smart Retrieval (v2)
 
-## Smart Retrieval
-
-Search results are not returned in raw FTS5 order. The hippocampus re-ranks them using a composite score that balances three factors:
+Search results are ranked using a five-factor composite score:
 
 ```
-score = 0.4 * relevance + 0.35 * importance + 0.25 * recency
+score = 0.35 * relevance + 0.25 * importance + 0.15 * recency
+      + 0.15 * retrievability + 0.10 * exploration
 ```
 
-- **Relevance** (weight 0.4): BM25 score from FTS5 full-text search. Measures how well the memory matches the query terms.
-- **Importance** (weight 0.35): The memory's importance rating (1-10), normalized to 0-1. Critical memories float to the top even if they are older or less textually relevant.
-- **Recency** (weight 0.25): Computed as `1 / (1 + log(1 + age_days))`. Recent memories get a boost that decays logarithmically — a one-day-old memory scores much higher than a 30-day-old one, but the difference between 30 and 60 days is small.
+- **Relevance** (weight 0.35): BM25 score from FTS5, sigmoid-normalized. Measures query-memory match.
+- **Importance** (weight 0.25): The memory's importance rating (1-10), normalized to 0-1.
+- **Recency** (weight 0.15): `1 / (1 + log(1 + age_days))`. Recent memories get a logarithmic boost.
+- **Retrievability** (weight 0.15): FSRS v4 forgetting curve `R(t,S) = (1 + t/(9*S))^(-1)`. Memories with high stability (frequently accessed, confirmed relevant) score higher.
+- **Exploration** (weight 0.10): UCB-inspired bonus `sqrt(2*log(N+1)/(n+1))`. Prevents "rich get richer" -- rarely accessed but relevant memories get a boost.
 
-The search over-fetches 3x the requested limit from FTS5, re-ranks with the composite score, then returns the top N. This ensures that a highly important but textually marginal memory can still surface.
+### Tiered Retrieval
 
-## Schema
+Memories are split into hot and cold tiers:
+- **Hot tier** (~500 memories): searched first. Contains the most useful memories by utility score.
+- **Cold tier**: searched only when hot tier yields fewer than the requested limit.
+
+Tier assignment happens during consolidation based on `importance * retrievability * (1 + log(access_count + 1))`. Category overrides apply (neil_insight always hot).
+
+## FSRS Stability Tracking
+
+Each memory tracks two FSRS-inspired values:
+- **stability_days**: how many days until retrievability drops to 90%. Starts at 1.0, grows on relevant access.
+- **difficulty**: how hard this memory is to retrieve (1-10). Starts at `11 - importance`.
+
+When a memory is accessed during search:
+- If relevant: stability grows (desirable difficulty effect -- harder recalls strengthen more)
+- If irrelevant: stability decays by 10%, difficulty increases
+
+The FSRS formulas are simplified from FSRS v4 since we cannot ML-fit parameters:
+```
+Retrievability: R(t, S) = (1 + t/(9*S))^(-1)
+Stability gain: S_new = S * (1 + 0.1 + 0.3 * difficulty_factor * retrievability_bonus)
+Stability loss: S_new = S * 0.9
+```
+
+## Schema (v2)
 
 ```sql
 memories (
@@ -82,22 +125,49 @@ memories (
     access_count    INTEGER DEFAULT 0,
     content_hash    TEXT NOT NULL UNIQUE,   -- SHA-256 prefix, dedup key
     superseded_by   INTEGER DEFAULT NULL,   -- id of replacement memory
-    is_active       INTEGER DEFAULT 1       -- 1=active, 0=inactive
+    is_active       INTEGER DEFAULT 1,      -- 1=active, 0=inactive
+    -- v2 columns:
+    stability_days  REAL DEFAULT 1.0,       -- FSRS stability (days to 90% recall)
+    difficulty      REAL DEFAULT 5.0,       -- FSRS difficulty (1-10)
+    last_pe_score   REAL DEFAULT 0.0,       -- prediction error score
+    labile_until    TEXT DEFAULT NULL,       -- reconsolidation window end
+    recon_count     INTEGER DEFAULT 0,      -- reconsolidation count
+    tier            TEXT DEFAULT 'hot'      -- 'hot' or 'cold'
 )
+
+-- Supporting tables:
+entities (id, name, aliases, entity_type, summary, properties, created_at, updated_at)
+entity_memories (entity_id, memory_id, relationship, valid_from, valid_until)
+associations (source_id, target_id, link_type, strength, created_at)
+consolidation_log (id, operation, source_ids, result_id, summary, verified, created_at)
+schema_migrations (id, applied_at)
 
 -- FTS5 full-text search index (kept in sync by triggers)
 memories_fts (content)
 ```
 
-## Consolidation
+## Category Configuration
 
-Consolidation runs every hippocampus cycle in two phases:
+| Category | TTL (days) | Min Importance | Protected | Tier Override |
+|----------|-----------|----------------|-----------|---------------|
+| neil_insight | never | 7 | yes | hot |
+| decision | 30 | 5 | no | -- |
+| observation | 7 | 1 | no | -- |
+| research | 14 | 3 | no | -- |
+| system | 1 | 1 | no | -- |
+| general | 14 | 1 | no | -- |
 
-1. **Decay** — mark stale low-value memories as inactive (importance < 5, access_count < 2, older than STALE_DAYS). These memories are not deleted; they just stop appearing in queries.
+Protected categories are immune to consolidation/decay.
 
-2. **Prune** — if total memory count exceeds MAX_MEMORIES (default 10,000), hard-delete the lowest-value inactive memories (sorted by importance ASC, access_count ASC, created_at ASC).
+## Consolidation (v2)
 
-This two-phase approach means memories degrade gracefully: they go quiet before they disappear.
+Consolidation runs every hippocampus cycle in three phases:
+
+1. **FSRS Decay** -- for each active, unprotected memory, compute retrievability. If R < 0.3 and past category TTL with few accesses: deactivate. If R < 0.5 and past TTL: demote to cold tier.
+
+2. **Merge** (LLM only) -- within each category, find groups of 3+ memories with Jaccard similarity >= 0.65. Merge them into a single memory (LLM summarizes; without LLM, keep highest-importance and supersede rest). Max 5 merges per cycle.
+
+3. **Tier & Prune** -- reassign all active memories to hot/cold based on utility score. Prune excess inactive memories if over MAX_MEMORIES.
 
 ## The Memory CLI
 
@@ -108,42 +178,22 @@ The `memories` command is a Python CLI that provides a shell interface to the hi
 | `memories store "content"` | Store a memory (direct + stimulus) |
 | `memories store -i 8 "content"` | Store with explicit importance |
 | `memories store -c food "content"` | Store with category |
-| `memories search "query"` | FTS5 search, ranked by smart retrieval |
+| `memories search "query"` | FTS5 search, ranked by v2 five-factor scoring |
 | `memories recent [N]` | Last N memories (default 10) |
 | `memories important [min]` | Memories with importance >= min (default 7) |
-| `memories stats` | Count, categories, avg importance |
+| `memories stats` | Count, categories, avg importance, tier breakdown |
 
-The `store` command uses a dual path: writes directly to `memory.db` (fast, same body part) AND sends a stimulus to the hippocampus (so it can process and consolidate). This means memories are immediately queryable even before the hippocampus's next cycle.
+The `store` command uses a dual path: writes directly to `memory.db` (fast, same body part) AND sends a stimulus to the hippocampus (so it can process and consolidate).
 
 ## Small-LLM Integration (Optional)
 
-When `HIPPOCAMPUS_USE_LLM=1` is set, the hippocampus gains two LLM-powered capabilities via the `small-llm` CLI:
+When `HIPPOCAMPUS_USE_LLM=1` is set, the hippocampus gains LLM-powered capabilities:
+- **Auto-importance scoring**: memories without explicit importance get LLM-rated scores
+- **Similarity detection**: semantic duplicate detection beyond hash matching
+- **Merge summaries**: consolidation merges generate LLM summaries
 
-**Auto-importance scoring**: When a memory arrives without explicit importance (default 5), the LLM rates it 1-10. This means memories stored via plain `remember:` stimulus get smarter importance than the flat default.
+All LLM calls use the `small-llm` CLI with 30-second timeouts. Failures fall back silently to default behavior.
 
-**Similarity detection**: Before storing a new memory, the hippocampus asks the LLM to compare it against the 20 most recent memories. If the LLM identifies a semantic duplicate (same meaning, different words), the existing memory's access count is bumped instead of creating a new entry. This catches duplicates that hash-based dedup misses.
+## Migration
 
-Both features are off by default. When `HIPPOCAMPUS_USE_LLM` is unset or not `1`, the hippocampus works purely with SQLite — fast, predictable, no external dependencies. The LLM integration calls `small-llm` via subprocess with a 30-second timeout; failures fall back silently to default behavior.
-
-```bash
-# Run hippocampus with LLM features
-HIPPOCAMPUS_USE_LLM=1 python3 hippocampus.py
-
-# Run without (default, pure SQLite)
-python3 hippocampus.py
-```
-
-## Brain Integration (Future)
-
-The brain organ will:
-1. Read stimulus via `stimulus consume`
-2. Query recent memories via `memories search` or direct SQLite access
-3. Process through an LLM (Haiku, Ollama, etc.)
-4. Store new memories: `memories store "I thought about X and decided Y"`
-5. Send responses via `stimulus send`
-
-The hippocampus and brain share `memory.db` on the same body part. The brain reads, the hippocampus writes and consolidates. SQLite WAL mode handles concurrent access.
-
-## No Memory, No Problem
-
-If the hippocampus isn't in the ORGANS list, the organism still functions — it just doesn't remember anything. Degradation, not failure. The `memories` CLI returns an error if no database exists, and the `store` command falls back to stimulus-only delivery.
+Schema migrations are tracked in the `schema_migrations` table. The `migrate()` function runs on every startup and is fully idempotent -- safe to run on both fresh and existing databases. Existing memories get backfilled with initial stability_days and difficulty values based on their access history.

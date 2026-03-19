@@ -36,6 +36,12 @@ def get_db():
     return db
 
 
+def _has_column(db, table, column):
+    """Check if a column exists in a table."""
+    cols = db.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(c[1] == column for c in cols)
+
+
 def cmd_store(args):
     content = " ".join(args.content).strip()
     if not content:
@@ -98,16 +104,59 @@ def cmd_store(args):
         db.commit()
         print("exists (access bumped)")
     else:
-        db.execute(
-            "INSERT INTO memories(content, importance, category, source, "
-            "created_at, accessed_at, access_count, content_hash, is_active) "
-            "VALUES (?, ?, ?, ?, ?, ?, 0, ?, 1)",
-            (content, importance, category, "cli", now, now, content_hash)
-        )
+        # Set initial difficulty and stability if v2 columns exist
+        has_stability = _has_column(db, "memories", "stability_days")
+        if has_stability:
+            initial_difficulty = max(1.0, min(10.0, 11.0 - importance))
+            db.execute(
+                "INSERT INTO memories(content, importance, category, source, "
+                "created_at, accessed_at, access_count, content_hash, is_active, "
+                "stability_days, difficulty, tier) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0, ?, 1, 1.0, ?, 'hot')",
+                (content, importance, category, "cli", now, now, content_hash,
+                 initial_difficulty)
+            )
+        else:
+            db.execute(
+                "INSERT INTO memories(content, importance, category, source, "
+                "created_at, accessed_at, access_count, content_hash, is_active) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0, ?, 1)",
+                (content, importance, category, "cli", now, now, content_hash)
+            )
         db.commit()
         print("stored")
 
     db.close()
+
+
+def composite_score_v2(bm25_rank, importance, created_at_str, access_count,
+                       stability_days, total_queries, now):
+    """Five-factor composite retrieval score (v2).
+
+    Weights: relevance 0.35, importance 0.25, recency 0.15,
+             FSRS retrievability 0.15, UCB exploration 0.10
+    """
+    bm25_raw = -bm25_rank
+    relevance = 1.0 / (1.0 + math.exp(-bm25_raw))
+
+    imp = importance / 10.0
+
+    created = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+    age_days = max((now - created).total_seconds() / 86400.0, 0.01)
+    recency = 1.0 / (1.0 + math.log(1.0 + age_days))
+
+    r = 1.0 / (1.0 + age_days / (9.0 * max(stability_days, 0.1)))
+
+    exploration = math.sqrt(2.0 * math.log(total_queries + 1) / (access_count + 1))
+    exploration = min(1.0, exploration)
+
+    return (
+        0.35 * relevance +
+        0.25 * imp +
+        0.15 * recency +
+        0.15 * r +
+        0.10 * exploration
+    )
 
 
 def cmd_search(args):
@@ -118,37 +167,93 @@ def cmd_search(args):
 
     db = get_db()
     now = datetime.now(timezone.utc)
+    has_stability = _has_column(db, "memories", "stability_days")
 
-    try:
-        rows = db.execute(
-            "SELECT m.id, m.content, m.importance, m.category, m.created_at, "
-            "m.access_count, rank "
-            "FROM memories_fts fts JOIN memories m ON m.id = fts.rowid "
-            "WHERE memories_fts MATCH ? AND m.is_active = 1 "
-            "ORDER BY rank LIMIT 30",
-            (query,)
-        ).fetchall()
-    except sqlite3.OperationalError:
-        print("memories search: invalid query syntax", file=sys.stderr)
-        sys.exit(1)
+    if has_stability:
+        # v2 search: tiered, five-factor scoring
+        # Stage 1: search hot tier
+        hot_rows = _fts_query(db, query, tier="hot")
+        all_rows = list(hot_rows)
 
-    # Re-rank: relevance (BM25) x importance x recency
-    scored = []
-    for r in rows:
-        bm25 = -r[6]
-        imp = r[2] / 10.0
-        created = datetime.fromisoformat(r[4].replace("Z", "+00:00"))
-        age = max((now - created).total_seconds() / 86400, 0.01)
-        recency = 1.0 / (1.0 + math.log(1 + age))
-        score = 0.4 * bm25 + 0.35 * imp + 0.25 * recency
-        scored.append((score, r))
+        # Stage 2: search cold if hot didn't fill
+        if len(hot_rows) < 10:
+            cold_rows = _fts_query(db, query, tier="cold")
+            all_rows.extend(cold_rows)
+
+        # Fallback: untiered search if nothing found
+        if not all_rows:
+            all_rows = _fts_query(db, query, tier=None)
+
+        # Re-rank with v2 composite score
+        scored = []
+        seen_ids = set()
+        for r in all_rows:
+            mid = r[0]
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            score = composite_score_v2(
+                bm25_rank=r[6],
+                importance=r[2],
+                created_at_str=r[4],
+                access_count=r[5],
+                stability_days=r[7] if len(r) > 7 else 1.0,
+                total_queries=10,  # reasonable default for CLI
+                now=now
+            )
+            scored.append((score, r))
+    else:
+        # v1 fallback: three-factor scoring
+        try:
+            rows = db.execute(
+                "SELECT m.id, m.content, m.importance, m.category, m.created_at, "
+                "m.access_count, rank "
+                "FROM memories_fts fts JOIN memories m ON m.id = fts.rowid "
+                "WHERE memories_fts MATCH ? AND m.is_active = 1 "
+                "ORDER BY rank LIMIT 30",
+                (query,)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            print("memories search: invalid query syntax", file=sys.stderr)
+            sys.exit(1)
+
+        scored = []
+        for r in rows:
+            bm25 = -r[6]
+            imp = r[2] / 10.0
+            created = datetime.fromisoformat(r[4].replace("Z", "+00:00"))
+            age = max((now - created).total_seconds() / 86400, 0.01)
+            recency = 1.0 / (1.0 + math.log(1 + age))
+            score = 0.4 * bm25 + 0.35 * imp + 0.25 * recency
+            scored.append((score, r))
 
     scored.sort(key=lambda x: -x[0])
 
     for _, r in scored[:10]:
+        # Print: content, importance, category, created_at, access_count
         print(f"{r[1]}\t{r[2]}\t{r[3]}\t{r[4]}\t{r[5]}")
 
     db.close()
+
+
+def _fts_query(db, query, tier=None):
+    """Execute FTS5 query with optional tier filter. Returns rows with stability_days."""
+    sql = """
+        SELECT m.id, m.content, m.importance, m.category, m.created_at,
+               m.access_count, rank, m.stability_days
+        FROM memories_fts fts JOIN memories m ON m.id = fts.rowid
+        WHERE memories_fts MATCH ? AND m.is_active = 1
+    """
+    params = [query]
+    if tier:
+        sql += " AND m.tier = ?"
+        params.append(tier)
+    sql += " ORDER BY rank LIMIT 30"
+
+    try:
+        return db.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        return []
 
 
 def cmd_recent(args):
@@ -198,6 +303,17 @@ def cmd_stats(args):
 
     print(f"Total: {total} ({active} active)")
     print(f"Avg importance: {avg}")
+
+    # v2 tier stats
+    if _has_column(db, "memories", "tier"):
+        hot = db.execute(
+            "SELECT COUNT(*) FROM memories WHERE is_active=1 AND tier='hot'"
+        ).fetchone()[0]
+        cold = db.execute(
+            "SELECT COUNT(*) FROM memories WHERE is_active=1 AND tier='cold'"
+        ).fetchone()[0]
+        print(f"Tiers: {hot} hot, {cold} cold")
+
     print("Categories:")
     for c, n in cats:
         print(f"  {c}: {n}")
