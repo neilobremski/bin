@@ -93,7 +93,7 @@ Each grades A-F. Track grades across iterations to verify improvement.
 | Date | Joel | Carmack | Jobs | Notes |
 |------|------|---------|------|-------|
 | 2026-03-19 R1 | B- | B | C+ | Duplicate CLI scoring, Python SQL loops, dead columns |
-| 2026-03-19 R2 | (pending) | (pending) | (pending) | Fixed duplication, batch SQL, documented dead code |
+| 2026-03-19 R2 | B | B+ | B- | Fixed scoring duplication, batch SQL. Entity system still premature per Jobs. |
 
 ## What to Test When Adding New Features
 
