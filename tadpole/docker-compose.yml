@@ -1,0 +1,48 @@
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+    volumes:
+      - ./mosquitto-docker.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$$SYS/#", "-W", "1", "-C", "1"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
+
+  body-a:
+    build:
+      context: ..
+      dockerfile: tadpole/Dockerfile
+    depends_on:
+      mqtt:
+        condition: service_healthy
+    environment:
+      - MQTT_HOST=mqtt
+      - MQTT_PORT=1883
+      - BODY_PART=body-a
+      - CIRC_LOCAL_ONLY=1
+    volumes:
+      - body-a-data:/opt/bin/tadpole/work
+    entrypoint: ["sleep", "infinity"]
+
+  body-b:
+    build:
+      context: ..
+      dockerfile: tadpole/Dockerfile
+    depends_on:
+      mqtt:
+        condition: service_healthy
+    environment:
+      - MQTT_HOST=mqtt
+      - MQTT_PORT=1883
+      - BODY_PART=body-b
+      - CIRC_LOCAL_ONLY=1
+    volumes:
+      - body-b-data:/opt/bin/tadpole/work
+    entrypoint: ["sleep", "infinity"]
+
+volumes:
+  body-a-data:
+  body-b-data:
