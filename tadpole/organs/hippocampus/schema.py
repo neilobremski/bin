@@ -10,10 +10,10 @@ MIGRATIONS = [
      "ALTER TABLE memories ADD COLUMN stability_days REAL DEFAULT 1.0"),
     ("v2_002_difficulty",
      "ALTER TABLE memories ADD COLUMN difficulty REAL DEFAULT 5.0"),
-    # Reserved for future use: last_pe_score, labile_until, recon_count.
-    # These columns are created by migration but not yet read or written by any code.
-    # Keep the migrations so existing DBs don't re-run them; remove the columns
-    # only if we're sure no DB in the wild has data in them.
+    # RESERVED: not yet implemented. Migration kept for DB compatibility.
+    # last_pe_score, labile_until, recon_count — columns created but not
+    # read or written by any production code. Keep migrations so existing
+    # DBs don't re-run them.
     ("v2_003_pe_score",
      "ALTER TABLE memories ADD COLUMN last_pe_score REAL DEFAULT 0.0"),
     ("v2_004_labile",

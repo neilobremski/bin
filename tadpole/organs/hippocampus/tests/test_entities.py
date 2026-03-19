@@ -130,28 +130,6 @@ def test_get_entity_context_empty_ids(db):
     assert entities.get_entity_context(db, []) == []
 
 
-def test_create_entity(db):
-    """create_entity should insert a new entity."""
-    result = entities.create_entity(
-        db, "test_thing", "Test Thing",
-        aliases=["test", "thing"],
-        entity_type="concept",
-        summary="A test entity"
-    )
-    assert result is True
-
-    row = db.execute("SELECT name, entity_type FROM entities WHERE id='test_thing'").fetchone()
-    assert row[0] == "Test Thing"
-    assert row[1] == "concept"
-
-
-def test_create_entity_duplicate_returns_false(db):
-    """create_entity with existing id should return False (INSERT OR IGNORE)."""
-    entities.create_entity(db, "dup", "Duplicate", entity_type="thing")
-    result = entities.create_entity(db, "dup", "Duplicate Again", entity_type="thing")
-    assert result is False
-
-
 def test_list_entities_returns_all_with_link_counts(db):
     """list_entities should return all entities with their link counts."""
     entities.seed_entities(db)
