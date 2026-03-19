@@ -73,6 +73,10 @@ case "$cmd" in
     fi
     if [ $# -ge 1 ]; then
       target_type="$1"
+      # Sanitize: only allow alphanumeric, dash, underscore
+      if ! echo "$target_type" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+        echo "stimulus query: invalid type '$target_type'" >&2; exit 1
+      fi
       sqlite3 -separator "	" "$DB" \
         "SELECT type, id, body_part, health_status, health_text, last_seen FROM organs WHERE type='$target_type' ORDER BY id;"
     else
