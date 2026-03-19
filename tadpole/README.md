@@ -36,7 +36,7 @@ A tadpole's life goes like this:
 
 ## Memory
 
-The hippocampus owns `memory.db` — a SQLite database with FTS5 full-text search. Other organs interact through stimulus or the `memories` CLI:
+The hippocampus owns `memory.db` — a SQLite database with FTS5 full-text search. Other organs interact through stimulus or the `memories` CLI (a Python script with argparse):
 
 ```bash
 # Store a memory (via nervous system)
@@ -49,13 +49,22 @@ memories store "the tail went splish splash"
 memories store -i 8 "this food was especially good"
 memories store -c food "ate algae at 09:30"
 
-# Search memories
+# Search memories (smart ranking: relevance x importance x recency)
 memories search "food"
 memories recent 5
+memories important 8
 memories stats
 ```
 
 The brain (future organ) reads `memory.db` directly — no network round-trip, no stimulus delay. This is high-bandwidth local access, same as the ganglion reading `health.txt` files.
+
+### Optional LLM Integration
+
+Set `HIPPOCAMPUS_USE_LLM=1` to enable small-llm powered features:
+- **Auto-importance scoring** — memories without explicit importance get rated by the LLM
+- **Similarity detection** — catches semantic duplicates beyond exact hash matching
+
+Off by default. Without it, the hippocampus is pure SQLite — fast and predictable.
 
 ## Running
 

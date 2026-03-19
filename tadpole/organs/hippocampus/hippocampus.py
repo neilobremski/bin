@@ -16,7 +16,7 @@ Each cycle:
 
 Schema mirrors the proven knobert memory.db architecture.
 """
-import os, sys, sqlite3, subprocess, hashlib, math
+import os, sys, sqlite3, subprocess, hashlib, math, json
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -29,9 +29,98 @@ MAX_MEMORIES = int(os.environ.get("MAX_MEMORIES", "10000"))
 SIMILAR_THRESHOLD = float(os.environ.get("SIMILAR_THRESHOLD", "0.85"))
 STALE_DAYS = int(os.environ.get("STALE_DAYS", "30"))
 
+# Optional LLM integration (off by default)
+USE_LLM = os.environ.get("HIPPOCAMPUS_USE_LLM", "") == "1"
+
 
 def log(msg):
     print(f"hippocampus: {msg}", file=sys.stderr)
+
+
+# =========================================================================
+#  Small-LLM integration (optional, controlled by HIPPOCAMPUS_USE_LLM=1)
+# =========================================================================
+
+def _call_small_llm(system_prompt, user_prompt, timeout=30):
+    """Call small-llm CLI and return its output, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["small-llm", "-s", system_prompt, user_prompt],
+            capture_output=True, text=True, timeout=timeout
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def score_importance(content):
+    """Ask small-llm to rate a memory's importance 1-10.
+
+    Returns an integer 1-10, or 5 (default) if the LLM is unavailable
+    or returns an unparseable response.
+    """
+    if not USE_LLM:
+        return 5
+
+    system = (
+        "You are a memory importance scorer. Rate the following memory on a "
+        "scale of 1-10 where 1 is trivial noise and 10 is critical information "
+        "that must never be forgotten. Respond with ONLY a single integer."
+    )
+    response = _call_small_llm(system, content)
+    if response:
+        # Extract the first integer from the response
+        for token in response.split():
+            try:
+                score = int(token)
+                if 1 <= score <= 10:
+                    return score
+            except ValueError:
+                continue
+    return 5
+
+
+def check_similar(content, candidates):
+    """Ask small-llm if content is similar to any candidate memories.
+
+    Args:
+        content: the new memory text
+        candidates: list of (id, existing_content) tuples
+
+    Returns:
+        The id of the most similar memory, or None if no match.
+    """
+    if not USE_LLM or not candidates:
+        return None
+
+    # Build a numbered list of candidates for the LLM
+    numbered = []
+    for i, (mid, text) in enumerate(candidates, 1):
+        numbered.append(f"{i}. {text[:200]}")
+    candidate_text = "\n".join(numbered)
+
+    system = (
+        "You compare memories for similarity. Given a NEW memory and a numbered "
+        "list of EXISTING memories, respond with ONLY the number of the existing "
+        "memory that says the same thing as the new one. If none are similar, "
+        "respond with 0."
+    )
+    user = f"NEW: {content[:300]}\n\nEXISTING:\n{candidate_text}"
+
+    response = _call_small_llm(system, user)
+    if response:
+        for token in response.split():
+            try:
+                idx = int(token)
+                if 1 <= idx <= len(candidates):
+                    return candidates[idx - 1][0]  # return the memory id
+                if idx == 0:
+                    return None
+            except ValueError:
+                continue
+    return None
 
 
 def init_db(db):
@@ -93,6 +182,10 @@ def consume_stimulus():
 def store(db, content, importance=5, category="general", source=""):
     """Store a memory with dedup by content hash.
 
+    When HIPPOCAMPUS_USE_LLM=1:
+    - Auto-scores importance if not explicitly set (importance == 5 default)
+    - Checks for semantic duplicates beyond exact hash matching
+
     Returns the memory id if new, None if duplicate (access count bumped).
     """
     content = content.strip()
@@ -102,7 +195,7 @@ def store(db, content, importance=5, category="general", source=""):
     content_hash = hashlib.sha256(content.encode()).hexdigest()[:32]
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Check for exact duplicate
+    # Check for exact duplicate (hash match)
     existing = db.execute(
         "SELECT id, importance FROM memories WHERE content_hash = ?", (content_hash,)
     ).fetchone()
@@ -115,6 +208,28 @@ def store(db, content, importance=5, category="general", source=""):
             (now, new_imp, existing[0])
         )
         return None
+
+    # LLM-powered similarity detection (beyond exact hash)
+    if USE_LLM:
+        candidates = db.execute(
+            "SELECT id, content FROM memories WHERE is_active = 1 "
+            "ORDER BY created_at DESC LIMIT 20"
+        ).fetchall()
+        similar_id = check_similar(content, candidates)
+        if similar_id is not None:
+            log(f"LLM detected similar memory (id={similar_id}), bumping access")
+            db.execute(
+                "UPDATE memories SET accessed_at=?, access_count=access_count+1 WHERE id=?",
+                (now, similar_id)
+            )
+            return None
+
+    # LLM-powered auto-importance scoring (when no explicit importance given)
+    if USE_LLM and importance == 5:
+        scored = score_importance(content)
+        if scored != 5:
+            log(f"LLM scored importance: {scored}")
+            importance = scored
 
     db.execute(
         "INSERT INTO memories(content, importance, category, source, created_at, accessed_at, access_count, content_hash) "
@@ -158,7 +273,10 @@ def search(db, query, limit=10, category=None):
     sql += " ORDER BY rank LIMIT ?"
     params.append(limit * 3)  # over-fetch for re-ranking
 
-    rows = db.execute(sql, params).fetchall()
+    try:
+        rows = db.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        return []
 
     # Re-rank with composite score: relevance (BM25) × importance × recency
     scored = []

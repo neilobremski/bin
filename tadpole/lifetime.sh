@@ -54,13 +54,15 @@ GANGLION_DB=$TDIR/ganglion.db
 BODY_PART=test
 CIRC_LOCAL_ONLY=1
 CIRC_DIR=$TDIR/.circ
-ORGANS=organs/heart:ganglion:organs/tail:organs/lymph:organs/stomach
+ORGANS=organs/heart:ganglion:organs/tail:organs/lymph:organs/stomach:organs/hippocampus
+MEMORY_DB=$TDIR/organs/hippocampus/memory.db
 EOF
 
 HEART="$TDIR/organs/heart"
 TAIL="$TDIR/organs/tail"
 GANGLION="$TDIR/ganglion"
 LYMPH="$TDIR/organs/lymph"
+HIPPO="$TDIR/organs/hippocampus"
 STOMACH="$TDIR/organs/stomach"
 
 # ===================================================================
@@ -187,6 +189,38 @@ if [ "$stim_lines" -le 50 ]; then
   pass "lymph truncated stimulus overflow ($stim_lines lines)"
 else
   fail "should truncate to 50, got: $stim_lines"
+fi
+
+# ===================================================================
+#  PART 5: Memory system (hippocampus stores and recalls)
+# ===================================================================
+
+# Store memories via stimulus
+echo "remember: the tadpole ate its first meal" > "$HIPPO/stimulus.txt"
+echo "remember important: swimming is the best activity" >> "$HIPPO/stimulus.txt"
+> "$HIPPO/health.txt"
+echo $(($(date +%s) - 600)) > "$HIPPO/.spark.last"
+"$SPARK"
+wait_for 8 'grep -q "stored 2" "$HIPPO/health.txt"'
+
+if grep -q "stored 2" "$HIPPO/health.txt" 2>/dev/null; then
+  pass "hippocampus stored memories from stimulus"
+else
+  fail "hippocampus should store 2 memories, got: $(cat "$HIPPO/health.txt" 2>/dev/null || echo 'missing')"
+fi
+
+# Dedup: same content should not increase count
+echo "remember: the tadpole ate its first meal" > "$HIPPO/stimulus.txt"
+> "$HIPPO/health.txt"
+echo $(($(date +%s) - 600)) > "$HIPPO/.spark.last"
+"$SPARK"
+wait_for 8 'grep -q "memories" "$HIPPO/health.txt"'
+
+total=$(sqlite3 "$TDIR/organs/hippocampus/memory.db" "SELECT COUNT(*) FROM memories;" 2>/dev/null || echo 0)
+if [ "$total" = "2" ]; then
+  pass "hippocampus deduplicates by content hash"
+else
+  fail "dedup should keep count at 2, got: $total"
 fi
 
 # ===================================================================
