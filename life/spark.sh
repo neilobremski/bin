@@ -9,6 +9,8 @@ LOCK_DIR="${HOME}/.life/locks"
 
 # Make repo-root scripts (mqtt-pub, etc.) available to organs
 export PATH="$BIN_ROOT:$PATH"
+# Make muscles.py importable by Python organs
+export PYTHONPATH="${BIN_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 
 log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
 
