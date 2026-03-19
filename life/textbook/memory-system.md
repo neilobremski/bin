@@ -36,9 +36,9 @@ The brain (or any organ on the same body part) reads `memory.db` directly. This 
 
 ```bash
 # CLI interface
-memory search "food"        # FTS5 full-text search
-memory recent 5             # last 5 memories
-memory stats                # count, categories, avg importance
+memories search "food"        # FTS5 full-text search
+memories recent 5             # last 5 memories
+memories stats                # count, categories, avg importance
 ```
 
 For remote body parts (future), the pattern is: send a query stimulus to the hippocampus, include your organ type so the hippocampus can send the results back. This is the low-bandwidth path — eventually consistent, one cycle of latency.
@@ -69,16 +69,16 @@ The consolidation algorithm is intentionally simple: sort by importance, access 
 
 ## The Memory CLI
 
-The `memory` command provides a shell interface to the hippocampus:
+The `memories` command provides a shell interface to the hippocampus:
 
 | Command | What it does |
 |---------|-------------|
-| `memory store "content"` | Store a memory (direct + stimulus) |
-| `memory store -i 8 "content"` | Store with importance |
-| `memory store -c food "content"` | Store with category |
-| `memory search "query"` | FTS5 search, ranked by relevance |
-| `memory recent [N]` | Last N memories (default 10) |
-| `memory stats` | Count, categories, avg importance |
+| `memories store "content"` | Store a memory (direct + stimulus) |
+| `memories store -i 8 "content"` | Store with importance |
+| `memories store -c food "content"` | Store with category |
+| `memories search "query"` | FTS5 search, ranked by relevance |
+| `memories recent [N]` | Last N memories (default 10) |
+| `memories stats` | Count, categories, avg importance |
 
 The `store` command uses a dual path: writes directly to `memory.db` (fast, same body part) AND sends a stimulus to the hippocampus (so it can process and consolidate). This means memories are immediately queryable even before the hippocampus's next cycle.
 
@@ -86,13 +86,13 @@ The `store` command uses a dual path: writes directly to `memory.db` (fast, same
 
 The brain organ will:
 1. Read stimulus via `stimulus consume`
-2. Query recent memories via `memory search` or direct SQLite access
+2. Query recent memories via `memories search` or direct SQLite access
 3. Process through an LLM (Haiku, Ollama, etc.)
-4. Store new memories: `memory store "I thought about X and decided Y"`
+4. Store new memories: `memories store "I thought about X and decided Y"`
 5. Send responses via `stimulus send`
 
 The hippocampus and brain share `memory.db` on the same body part. The brain reads, the hippocampus writes and consolidates. SQLite WAL mode handles concurrent access.
 
 ## No Memory, No Problem
 
-If the hippocampus isn't in the ORGANS list, the organism still functions — it just doesn't remember anything. Degradation, not failure. The `memory` CLI returns an error if no database exists, and the `store` command falls back to stimulus-only delivery.
+If the hippocampus isn't in the ORGANS list, the organism still functions — it just doesn't remember anything. Degradation, not failure. The `memories` CLI returns an error if no database exists, and the `store` command falls back to stimulus-only delivery.

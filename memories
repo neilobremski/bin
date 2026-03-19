@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# memories — CLI for the hippocampus (memory organ).
+# Store and recall memories. The hippocampus owns memory.db;
+# this CLI provides the interface.
+set -euo pipefail
+
+DB="${MEMORY_DB:-$PWD/organs/hippocampus/memory.db}"
+
+usage() {
+  echo "Usage:"
+  echo "  memories store \"content\"                    # store a memory"
+  echo "  memories store -i 8 \"content\"               # store with importance (1-10)"
+  echo "  memories store -c category \"content\"         # store with category"
+  echo "  memories search \"query\"                     # search memories (FTS5 + smart ranking)"
+  echo "  memories recent [count]                     # show recent memories"
+  echo "  memories important [min_importance]          # show high-importance memories"
+  echo "  memories stats                              # memory statistics"
+  exit 1
+}
+
+[ $# -lt 1 ] && usage
+cmd="$1"; shift
+
+case "$cmd" in
+  store)
+    importance=5
+    category="general"
+
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -i) importance="$2"; shift 2 ;;
+        -c) category="$2"; shift 2 ;;
+        *)  break ;;
+      esac
+    done
+
+    content="$*"
+    [ -z "$content" ] && { echo "memories store: need content" >&2; exit 1; }
+
+    # Validate importance
+    if ! echo "$importance" | grep -qE '^[0-9]+$' || [ "$importance" -lt 1 ] || [ "$importance" -gt 10 ]; then
+      echo "memories store: importance must be 1-10" >&2; exit 1
+    fi
+
+    # Validate category
+    if ! echo "$category" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+      echo "memories store: invalid category" >&2; exit 1
+    fi
+
+    # Send stimulus to hippocampus
+    if command -v stimulus >/dev/null 2>&1; then
+      if [ "$importance" -ge 10 ]; then
+        stimulus send hippocampus "remember critical: $content" 2>/dev/null || true
+      elif [ "$importance" -ge 8 ]; then
+        stimulus send hippocampus "remember important: $content" 2>/dev/null || true
+      else
+        stimulus send hippocampus "remember ${category}: $content" 2>/dev/null || true
+      fi
+    fi
+
+    # Also store directly if we have DB access (fast path, same body part)
+    if [ -f "$DB" ]; then
+      python3 -c "
+import sqlite3, hashlib, sys
+from datetime import datetime, timezone
+
+db = sqlite3.connect(sys.argv[4])
+db.execute('PRAGMA journal_mode=WAL')
+content, importance, category = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+h = hashlib.sha256(content.encode()).hexdigest()[:32]
+now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+# Check for duplicate — bump access if exists
+existing = db.execute('SELECT id, importance FROM memories WHERE content_hash=?', (h,)).fetchone()
+if existing:
+    db.execute('UPDATE memories SET accessed_at=?, access_count=access_count+1, importance=MAX(importance,?) WHERE id=?',
+        (now, importance, existing[0]))
+    db.commit()
+    print('exists (access bumped)')
+else:
+    db.execute('INSERT INTO memories(content,importance,category,source,created_at,accessed_at,access_count,content_hash,is_active) VALUES(?,?,?,?,?,?,0,?,1)',
+        (content, importance, category, 'cli', now, now, h))
+    db.commit()
+    print('stored')
+db.close()
+" "$content" "$importance" "$category" "$DB"
+    else
+      echo "queued (hippocampus will process next cycle)"
+    fi
+    ;;
+
+  search)
+    [ $# -lt 1 ] && { echo "memories search: need query" >&2; exit 1; }
+    query="$*"
+    [ ! -f "$DB" ] && { echo "memories search: no database at $DB" >&2; exit 1; }
+    python3 -c "
+import sqlite3, sys, math
+from datetime import datetime, timezone
+
+db = sqlite3.connect(sys.argv[2])
+q = sys.argv[1]
+if not q.strip():
+    sys.exit(0)
+
+now = datetime.now(timezone.utc)
+rows = db.execute('''
+    SELECT m.id, m.content, m.importance, m.category, m.created_at, m.access_count, rank
+    FROM memories_fts fts JOIN memories m ON m.id = fts.rowid
+    WHERE memories_fts MATCH ? AND m.is_active = 1
+    ORDER BY rank LIMIT 30
+''', (q,)).fetchall()
+
+# Re-rank: relevance × importance × recency
+scored = []
+for r in rows:
+    bm25 = -r[6]
+    imp = r[2] / 10.0
+    created = datetime.fromisoformat(r[4].replace('Z', '+00:00'))
+    age = max((now - created).total_seconds() / 86400, 0.01)
+    recency = 1.0 / (1.0 + math.log(1 + age))
+    score = 0.4 * bm25 + 0.35 * imp + 0.25 * recency
+    scored.append((score, r))
+
+scored.sort(key=lambda x: -x[0])
+for _, r in scored[:10]:
+    print(f'{r[1]}\t{r[2]}\t{r[3]}\t{r[4]}\t{r[5]}')
+db.close()
+" "$query" "$DB"
+    ;;
+
+  recent)
+    count="${1:-10}"
+    echo "$count" | grep -qE '^[0-9]+$' || { echo "memories recent: count must be a number" >&2; exit 1; }
+    [ ! -f "$DB" ] && { echo "memories recent: no database at $DB" >&2; exit 1; }
+    python3 -c "
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[2])
+for r in db.execute('SELECT content, importance, category, created_at FROM memories WHERE is_active=1 ORDER BY created_at DESC LIMIT ?', (int(sys.argv[1]),)):
+    print('\t'.join(str(c) for c in r))
+db.close()
+" "$count" "$DB"
+    ;;
+
+  important)
+    min_imp="${1:-7}"
+    echo "$min_imp" | grep -qE '^[0-9]+$' || { echo "memories important: must be a number" >&2; exit 1; }
+    [ ! -f "$DB" ] && { echo "memories important: no database at $DB" >&2; exit 1; }
+    python3 -c "
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[2])
+for r in db.execute('SELECT content, importance, category, created_at FROM memories WHERE is_active=1 AND importance>=? ORDER BY importance DESC, created_at DESC LIMIT 20', (int(sys.argv[1]),)):
+    print('\t'.join(str(c) for c in r))
+db.close()
+" "$min_imp" "$DB"
+    ;;
+
+  stats)
+    [ ! -f "$DB" ] && { echo "memories stats: no database at $DB" >&2; exit 1; }
+    python3 -c "
+import sqlite3
+db = sqlite3.connect('$DB')
+total = db.execute('SELECT COUNT(*) FROM memories').fetchone()[0]
+active = db.execute('SELECT COUNT(*) FROM memories WHERE is_active=1').fetchone()[0]
+avg = db.execute('SELECT ROUND(AVG(importance),1) FROM memories WHERE is_active=1').fetchone()[0] or 0
+cats = db.execute('SELECT category, COUNT(*) FROM memories WHERE is_active=1 GROUP BY category ORDER BY COUNT(*) DESC').fetchall()
+print(f'Total: {total} ({active} active)')
+print(f'Avg importance: {avg}')
+print('Categories:')
+for c, n in cats:
+    print(f'  {c}: {n}')
+db.close()
+"
+    ;;
+
+  *)
+    usage
+    ;;
+esac

@@ -36,7 +36,7 @@ A tadpole's life goes like this:
 
 ## Memory
 
-The hippocampus owns `memory.db` — a SQLite database with FTS5 full-text search. Other organs interact through stimulus or the `memory` CLI:
+The hippocampus owns `memory.db` — a SQLite database with FTS5 full-text search. Other organs interact through stimulus or the `memories` CLI:
 
 ```bash
 # Store a memory (via nervous system)
@@ -45,14 +45,14 @@ stimulus send hippocampus "remember important: learned to swim faster"
 stimulus send hippocampus "remember critical: human fed me for the first time"
 
 # Store directly (same body part, fast path)
-memory store "the tail went splish splash"
-memory store -i 8 "this food was especially good"
-memory store -c food "ate algae at 09:30"
+memories store "the tail went splish splash"
+memories store -i 8 "this food was especially good"
+memories store -c food "ate algae at 09:30"
 
 # Search memories
-memory search "food"
-memory recent 5
-memory stats
+memories search "food"
+memories recent 5
+memories stats
 ```
 
 The brain (future organ) reads `memory.db` directly — no network round-trip, no stimulus delay. This is high-bandwidth local access, same as the ganglion reading `health.txt` files.
