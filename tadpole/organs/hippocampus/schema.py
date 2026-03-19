@@ -56,6 +56,9 @@ MIGRATIONS = [
         created_at TEXT NOT NULL,
         PRIMARY KEY (source_id, target_id)
     )"""),
+    # NOTE: idx_assoc_source and idx_assoc_target indexes exist in applied DBs
+    # but serve no purpose until the associations feature is implemented (no
+    # readers/writers). Migrations kept for idempotency on existing databases.
     ("v2_012b_assoc_idx1",
      "CREATE INDEX IF NOT EXISTS idx_assoc_source ON associations(source_id)"),
     ("v2_012c_assoc_idx2",

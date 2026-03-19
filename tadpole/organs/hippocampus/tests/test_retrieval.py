@@ -55,31 +55,25 @@ def test_composite_score_weights_sum_to_one():
 
 def test_composite_score_returns_between_zero_and_one():
     """composite_score should return a value in [0, 1]."""
-    now = datetime.now(timezone.utc)
-    created = (now - timedelta(days=1)).isoformat()
     score = retrieval.composite_score(
         bm25_rank=-5.0,
         importance=7,
-        created_at_str=created,
+        age_days=1.0,
         access_count=3,
         stability_days=10.0,
         total_queries=100,
-        now=now,
     )
     assert 0.0 <= score <= 1.0
 
 
 def test_composite_score_higher_importance_scores_higher():
     """Higher importance should produce a higher composite score, all else equal."""
-    now = datetime.now(timezone.utc)
-    created = (now - timedelta(days=1)).isoformat()
     kwargs = dict(
         bm25_rank=-3.0,
-        created_at_str=created,
+        age_days=1.0,
         access_count=2,
         stability_days=5.0,
         total_queries=50,
-        now=now,
     )
     score_low = retrieval.composite_score(importance=2, **kwargs)
     score_high = retrieval.composite_score(importance=9, **kwargs)

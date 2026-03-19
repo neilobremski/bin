@@ -60,14 +60,16 @@ def on_memory_used(db, memory_id, was_relevant):
     """, (new_stability, new_difficulty, now_str, memory_id))
 
 
-def composite_score(bm25_rank, importance, created_at_str, access_count,
-                    stability_days, total_queries, now):
+def composite_score(bm25_rank, importance, age_days, access_count,
+                    stability_days, total_queries):
     """Five-factor composite retrieval score.
 
     All factors are normalized to [0, 1] before weighting.
 
     Weights: relevance 0.35, importance 0.25, recency 0.15,
              FSRS retrievability 0.15, UCB exploration 0.10
+
+    age_days: pre-computed from SQL via julianday('now') - julianday(created_at).
     """
     # Factor 1: Relevance (BM25) -- weight 0.35
     # Log transform preserves ranking differentiation better than sigmoid,
@@ -79,11 +81,6 @@ def composite_score(bm25_rank, importance, created_at_str, access_count,
     imp = importance / 10.0
 
     # Factor 3: Recency -- weight 0.15
-    if isinstance(created_at_str, str):
-        created = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-    else:
-        created = created_at_str
-    age_days = max((now - created).total_seconds() / 86400.0, 0.01)
     recency = 1.0 / (1.0 + math.log(1.0 + age_days))
 
     # Factor 4: Stability (FSRS-inspired) -- weight 0.15
@@ -109,7 +106,7 @@ def search_fts(db, query, limit=10, tier=None, category=None, exclude_ids=None):
 
     Returns list of tuples:
         (id, content, importance, category, source, created_at, accessed_at,
-         access_count, rank, stability_days)
+         access_count, rank, stability_days, age_days)
     """
     if not query or not query.strip():
         return []
@@ -122,7 +119,8 @@ def search_fts(db, query, limit=10, tier=None, category=None, exclude_ids=None):
     sql = """
         SELECT m.id, m.content, m.importance, m.category, m.source,
                m.created_at, m.accessed_at, m.access_count, rank,
-               m.stability_days
+               m.stability_days,
+               MAX(0.01, julianday('now') - julianday(m.created_at)) AS age_days
         FROM memories_fts fts
         JOIN memories m ON m.id = fts.rowid
         WHERE memories_fts MATCH ? AND m.is_active = 1
@@ -167,8 +165,6 @@ def search(db, query, limit=10, category=None):
     if not query or not query.strip():
         return []
 
-    now = datetime.now(timezone.utc)
-
     # Stage 1: Search hot tier
     hot_rows = search_fts(db, query, limit=limit, tier="hot", category=category)
 
@@ -194,11 +190,10 @@ def search(db, query, limit=10, category=None):
         score = composite_score(
             bm25_rank=row[8],
             importance=row[2],
-            created_at_str=row[5],
+            age_days=row[10] if len(row) > 10 else 1.0,
             access_count=row[7],
             stability_days=row[9] if len(row) > 9 else 1.0,
             total_queries=_config._total_queries,
-            now=now
         )
         scored.append((score, row))
 

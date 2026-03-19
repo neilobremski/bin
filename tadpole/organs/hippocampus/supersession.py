@@ -62,7 +62,7 @@ def check_supersession(db, new_id, content, category, importance):
             old_memories = db.execute("""
                 SELECT id FROM memories
                 WHERE is_active=1 AND content LIKE ?
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC LIMIT 100
             """, (f"%{pattern}%",)).fetchall()
 
             if len(old_memories) > keep_n:
