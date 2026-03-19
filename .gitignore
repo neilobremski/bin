@@ -7,3 +7,4 @@ stimulus.txt
 .spark.last
 .spark.log
 .stimulus.processing
+__pycache__/
