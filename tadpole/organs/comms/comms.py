@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Comms organ — stimulus-driven email I/O for the tadpole.
+"""Comms organ — stimulus-driven communication I/O.
 
 The comms organ does NOT check email on its own. It processes stimulus signals:
   - "check-email [query]" -> search Gmail, notify brain of new emails
