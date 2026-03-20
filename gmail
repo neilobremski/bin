@@ -7,8 +7,10 @@ when the bridge is rate-limited.
 Usage:
     gmail search <query> [--count N]
     gmail get <id>
-    gmail reply <id> --body "text"
-    gmail reply <id> --body-file <path>
+    gmail reply <id> --body "text" [--format markdown|plain] [--html "<html>"]
+    gmail reply <id> --body-file <path> [--format markdown|plain]
+    gmail send <to> --subject "text" --body "text" [--format markdown|plain]
+    gmail send <to> --subject "text" --html "<html>"
     gmail label <id> --add LABEL
     gmail label <id> --remove LABEL
 
@@ -19,6 +21,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -28,6 +31,219 @@ import urllib.error
 import urllib.parse
 from email.mime.text import MIMEText
 from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Markdown-to-HTML converter (stdlib only, covers the 80% case)
+# ---------------------------------------------------------------------------
+
+def _md_to_html(md_text):
+    """Convert markdown text to HTML. Handles headers, bold, italic, links,
+    code blocks, inline code, lists, paragraphs, and line breaks."""
+    lines = md_text.split('\n')
+    html_parts = []
+    in_code_block = False
+    in_ul = False
+    in_ol = False
+    paragraph_lines = []
+
+    def _flush_paragraph():
+        if paragraph_lines:
+            text = '\n'.join(paragraph_lines)
+            text = _inline_format(text)
+            html_parts.append(f'<p>{text}</p>')
+            paragraph_lines.clear()
+
+    def _close_list():
+        nonlocal in_ul, in_ol
+        if in_ul:
+            html_parts.append('</ul>')
+            in_ul = False
+        if in_ol:
+            html_parts.append('</ol>')
+            in_ol = False
+
+    def _inline_format(text):
+        """Apply inline formatting: bold, italic, links, inline code."""
+        # Inline code (must come before bold/italic to avoid conflicts)
+        text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+        # Links [text](url)
+        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
+        # Bold **text** or __text__
+        text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+        text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
+        # Italic *text* or _text_ (but not inside words with underscores)
+        text = re.sub(r'(?<!\w)\*(.+?)\*(?!\w)', r'<em>\1</em>', text)
+        text = re.sub(r'(?<!\w)_(.+?)_(?!\w)', r'<em>\1</em>', text)
+        # Line breaks (two trailing spaces or explicit <br>)
+        text = re.sub(r'  \n', '<br>\n', text)
+        return text
+
+    for line in lines:
+        # Code block toggle
+        if line.strip().startswith('```'):
+            if in_code_block:
+                html_parts.append('</code></pre>')
+                in_code_block = False
+            else:
+                _flush_paragraph()
+                _close_list()
+                lang = line.strip()[3:].strip()
+                cls = f' class="language-{lang}"' if lang else ''
+                html_parts.append(f'<pre><code{cls}>')
+                in_code_block = True
+            continue
+
+        if in_code_block:
+            # Escape HTML inside code blocks
+            escaped = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            html_parts.append(escaped)
+            continue
+
+        stripped = line.strip()
+
+        # Blank line — flush paragraph and close lists
+        if not stripped:
+            _flush_paragraph()
+            _close_list()
+            continue
+
+        # Headers
+        header_match = re.match(r'^(#{1,6})\s+(.+)$', stripped)
+        if header_match:
+            _flush_paragraph()
+            _close_list()
+            level = len(header_match.group(1))
+            content = _inline_format(header_match.group(2))
+            html_parts.append(f'<h{level}>{content}</h{level}>')
+            continue
+
+        # Unordered list item
+        ul_match = re.match(r'^[-*+]\s+(.+)$', stripped)
+        if ul_match:
+            _flush_paragraph()
+            if in_ol:
+                html_parts.append('</ol>')
+                in_ol = False
+            if not in_ul:
+                html_parts.append('<ul>')
+                in_ul = True
+            content = _inline_format(ul_match.group(1))
+            html_parts.append(f'<li>{content}</li>')
+            continue
+
+        # Ordered list item
+        ol_match = re.match(r'^\d+\.\s+(.+)$', stripped)
+        if ol_match:
+            _flush_paragraph()
+            if in_ul:
+                html_parts.append('</ul>')
+                in_ul = False
+            if not in_ol:
+                html_parts.append('<ol>')
+                in_ol = True
+            content = _inline_format(ol_match.group(1))
+            html_parts.append(f'<li>{content}</li>')
+            continue
+
+        # Horizontal rule
+        if re.match(r'^[-*_]{3,}\s*$', stripped):
+            _flush_paragraph()
+            _close_list()
+            html_parts.append('<hr>')
+            continue
+
+        # Regular text — accumulate for paragraph
+        _close_list()
+        paragraph_lines.append(stripped)
+
+    # Flush remaining state
+    if in_code_block:
+        html_parts.append('</code></pre>')
+    _flush_paragraph()
+    _close_list()
+
+    return '\n'.join(html_parts)
+
+
+def _wrap_html_email(html_body):
+    """Wrap HTML body in a clean email template with basic styling."""
+    return f"""\
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                 'Helvetica Neue', Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    color: #222;
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 20px;
+  }}
+  h1, h2, h3, h4, h5, h6 {{
+    margin-top: 1.2em;
+    margin-bottom: 0.4em;
+    color: #111;
+  }}
+  h1 {{ font-size: 1.6em; }}
+  h2 {{ font-size: 1.3em; }}
+  h3 {{ font-size: 1.1em; }}
+  p {{ margin: 0.8em 0; }}
+  a {{ color: #1a73e8; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  code {{
+    background: #f1f3f4;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.9em;
+  }}
+  pre {{
+    background: #f8f9fa;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    padding: 12px 16px;
+    overflow-x: auto;
+  }}
+  pre code {{
+    background: none;
+    padding: 0;
+    font-size: 0.85em;
+  }}
+  ul, ol {{ padding-left: 1.5em; }}
+  li {{ margin: 0.3em 0; }}
+  hr {{
+    border: none;
+    border-top: 1px solid #e0e0e0;
+    margin: 1.5em 0;
+  }}
+  strong {{ color: #111; }}
+</style>
+</head>
+<body>
+{html_body}
+</body>
+</html>"""
+
+
+def _render_body(body_text, fmt, raw_html):
+    """Return (plain_text, html_or_none) based on format flags.
+
+    - raw_html provided: use it directly as HTML
+    - fmt='markdown': convert body_text to HTML
+    - fmt='plain': no HTML
+    """
+    if raw_html:
+        return body_text, raw_html
+    if fmt == 'markdown':
+        inner = _md_to_html(body_text)
+        return body_text, _wrap_html_email(inner)
+    return body_text, None
 
 
 # ---------------------------------------------------------------------------
@@ -224,18 +440,21 @@ def cmd_reply(args):
         print("error: --body or --body-file required", file=sys.stderr)
         sys.exit(1)
 
-    # Pass body via a temp approach to avoid CLI arg size limits:
-    # Write to a temp file, pass as body=@<path> (gas reads and base64-encodes,
-    # but gmail.reply on the bridge expects plain text in the body field).
-    # Simpler: just pass the body as a string arg for GAS bridge (it handles
-    # encoding internally), but cap at 100KB to avoid OS arg limits.
-    if len(body_text) > 100000:
+    fmt = getattr(args, 'format', 'markdown')
+    raw_html = getattr(args, 'html', None)
+    plain_text, html_content = _render_body(body_text, fmt, raw_html)
+
+    # Cap at 100KB to avoid OS arg limits.
+    if len(plain_text) > 100000:
         # Large body: fall back to REST API directly
-        result = _rest_reply(args.id, body_text)
+        result = _rest_reply(args.id, plain_text)
     else:
-        result = gas("gmail.reply", f"id={args.id}", f"body={body_text}")
+        gas_args = ["gmail.reply", f"id={args.id}", f"body={plain_text}"]
+        if html_content:
+            gas_args.append(f"html={html_content}")
+        result = gas(*gas_args)
         if result is _RATE_LIMITED:
-            result = _rest_reply(args.id, body_text)
+            result = _rest_reply(args.id, plain_text)
 
     if not result:
         print('{"error": "reply failed"}', file=sys.stderr)
@@ -258,16 +477,23 @@ def cmd_send(args):
         print("error: --body or --body-file required", file=sys.stderr)
         sys.exit(1)
 
+    fmt = getattr(args, 'format', 'markdown')
+    raw_html = getattr(args, 'html', None)
+    plain_text, html_content = _render_body(body_text, fmt, raw_html)
+
     gas_args = ["gmail.send", f"to={args.to}"]
     if args.subject:
         gas_args.append(f"subject={args.subject}")
 
-    if len(body_text) > 100000:
+    if len(plain_text) > 100000:
         # TODO: REST API fallback for large sends
         print('{"error": "body too large for GAS bridge, REST send not yet implemented"}', file=sys.stderr)
         sys.exit(1)
 
-    gas_args.append(f"body={body_text}")
+    gas_args.append(f"body={plain_text}")
+    if html_content:
+        gas_args.append(f"html={html_content}")
+
     result = gas(*gas_args)
 
     if result is _RATE_LIMITED:
@@ -343,6 +569,9 @@ def main():
     p_reply.add_argument("id", help="Thread/message ID to reply to")
     p_reply.add_argument("--body", help="Reply body text")
     p_reply.add_argument("--body-file", help="File containing reply body")
+    p_reply.add_argument("--format", choices=["markdown", "plain"], default="markdown",
+                         help="Body format: markdown (default) converts to HTML, plain sends as-is")
+    p_reply.add_argument("--html", help="Pre-rendered HTML to send (bypasses --format)")
 
     # send
     p_send = sub.add_parser("send", help="Send a new email")
@@ -350,6 +579,9 @@ def main():
     p_send.add_argument("--subject", default="", help="Email subject")
     p_send.add_argument("--body", help="Email body text")
     p_send.add_argument("--body-file", help="File containing email body")
+    p_send.add_argument("--format", choices=["markdown", "plain"], default="markdown",
+                         help="Body format: markdown (default) converts to HTML, plain sends as-is")
+    p_send.add_argument("--html", help="Pre-rendered HTML to send (bypasses --format)")
 
     # label
     p_label = sub.add_parser("label", help="Manage labels on a message")
