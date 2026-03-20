@@ -133,7 +133,6 @@ def main():
     organ_lib.ensure_memory_db(CONF_DIR)
 
     lines = organ_lib.consume_stimulus(DIR)
-    had_email = False
     processed = 0
     errors = 0
 
@@ -159,8 +158,6 @@ def main():
                     continue
 
                 circ_ref = circ_ref_token[5:]
-
-                had_email = True
                 ok = handle_new_email(thread_id, circ_ref)
                 if ok:
                     processed += 1

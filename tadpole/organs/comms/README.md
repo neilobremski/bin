@@ -15,7 +15,7 @@ The comms organ is **stimulus-driven** — it does not poll for messages on its 
 
 | Muscle/Tool | Used For |
 |-------------|----------|
-| `gmail` | Email search, read, reply, label management |
+| `gmail` | Email search, read, send, reply, label management |
 | `circ-put` / `circ-get` | Content-addressed payload storage |
 | `stimulus` | Inter-organ messaging |
 | `memories` | Store conversation history in hippocampus |
@@ -32,6 +32,7 @@ The comms organ is **stimulus-driven** — it does not poll for messages on its 
 |--------|-------------|
 | `check-email [query]` | Search Gmail for unread emails, report each to brain |
 | `send-reply <thread_id> circ:<hash>` | Send the reply body stored at circ hash, mark email as read |
+| `send-email <to> <subject> circ:<hash>` | Compose and send a new email (body from circ) |
 
 ### Outbound (to brain)
 
@@ -39,6 +40,7 @@ The comms organ is **stimulus-driven** — it does not poll for messages on its 
 |--------|-------------|
 | `new-email <thread_id> circ:<hash>` | New email found — full content (from, subject, body) stored in circ as JSON |
 | `sent <thread_id>` | Reply successfully delivered |
+| `email-sent <to>` | New email successfully sent |
 
 ### Circ Payload Format (new-email)
 
@@ -62,6 +64,7 @@ The `gmail` CLI (`~/projects/bin/gmail`) abstracts Gmail access with automatic r
 ```bash
 gmail search "label:Tadpole is:unread" --count 5
 gmail get <thread_id>
+gmail send <to> --subject "text" --body "text" | --body-file <path>
 gmail reply <thread_id> --body "text" | --body-file <path>
 gmail label <thread_id> --remove UNREAD
 ```
@@ -116,7 +119,8 @@ sequenceDiagram
 ## Design Principles
 
 - **Stimulus-driven, not polling** — comms never decides to check email on its own. The brain (or any authorized organ) initiates communication checks. This prevents runaway API usage.
-- **Circulatory payloads** — all message content flows through `circ-put`/`circ-get`, never as CLI arguments. This avoids OS arg size limits and naturally supports attachments and inline images.
+- **Circulatory payloads** — all message content flows through `circ-put`/`circ-get`, never as CLI arguments. This avoids OS arg size limits and can be extended to support attachments and inline images.
+- **Mouth-ready** — currently the brain connects directly to comms. A mouth organ will eventually sit between them to enforce one-mind-one-mouth (personality, filtering, tone). The stimulus contract is designed to support this insertion.
 - **Muscle abstraction** — comms calls `gmail`, not `gas`. The muscle handles backend selection (GAS bridge vs REST API), token caching, and rate-limit recovery transparently.
 - **Memory integration** — every interaction is stored in the hippocampus. Over time, this builds conversational context that shapes future replies.
 - **Future-proof** — the stimulus contract is transport-agnostic. Adding Fastmail/IMAP or SMS means adding new muscles, not changing the organ.

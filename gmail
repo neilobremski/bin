@@ -244,6 +244,44 @@ def cmd_reply(args):
     output(result)
 
 
+def cmd_send(args):
+    """Send a new email."""
+    if args.body_file:
+        try:
+            body_text = Path(args.body_file).read_text()
+        except Exception as e:
+            print(f"error: could not read body file: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif args.body:
+        body_text = args.body
+    else:
+        print("error: --body or --body-file required", file=sys.stderr)
+        sys.exit(1)
+
+    gas_args = ["gmail.send", f"to={args.to}"]
+    if args.subject:
+        gas_args.append(f"subject={args.subject}")
+
+    if len(body_text) > 100000:
+        # TODO: REST API fallback for large sends
+        print('{"error": "body too large for GAS bridge, REST send not yet implemented"}', file=sys.stderr)
+        sys.exit(1)
+
+    gas_args.append(f"body={body_text}")
+    result = gas(*gas_args)
+
+    if result is _RATE_LIMITED:
+        # TODO: REST API fallback for sends
+        print('{"error": "rate limited, REST send not yet implemented"}', file=sys.stderr)
+        sys.exit(1)
+
+    if not result:
+        print('{"error": "send failed"}', file=sys.stderr)
+        sys.exit(1)
+
+    output(result)
+
+
 def cmd_label(args):
     """Add or remove a label."""
     if not args.add and not args.remove:
@@ -306,6 +344,13 @@ def main():
     p_reply.add_argument("--body", help="Reply body text")
     p_reply.add_argument("--body-file", help="File containing reply body")
 
+    # send
+    p_send = sub.add_parser("send", help="Send a new email")
+    p_send.add_argument("to", help="Recipient email address")
+    p_send.add_argument("--subject", default="", help="Email subject")
+    p_send.add_argument("--body", help="Email body text")
+    p_send.add_argument("--body-file", help="File containing email body")
+
     # label
     p_label = sub.add_parser("label", help="Manage labels on a message")
     p_label.add_argument("id", help="Message ID")
@@ -322,6 +367,7 @@ def main():
         "search": cmd_search,
         "get": cmd_get,
         "reply": cmd_reply,
+        "send": cmd_send,
         "label": cmd_label,
     }
     dispatch[args.command](args)

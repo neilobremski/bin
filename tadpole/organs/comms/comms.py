@@ -153,6 +153,31 @@ def handle_send_reply(thread_id, circ_ref):
     return True
 
 
+def handle_send_email(to_addr, subject, circ_ref):
+    """Compose and send a new email. Body from circ."""
+    circ_dir = os.environ.get("CIRC_DIR", os.path.expanduser("~/.life/circ"))
+    circ_path = os.path.join(circ_dir, circ_ref)
+
+    body = organ_lib.circ_get(circ_ref)
+    if not body:
+        log(f"send-email: could not retrieve circ:{circ_ref}")
+        return False
+
+    _, ok = organ_lib.run_cli(["gmail", "send", to_addr, "--subject", subject, "--body-file", circ_path])
+    if not ok:
+        log(f"send-email: gmail send failed to {to_addr}")
+        return False
+
+    organ_lib.memories_store(
+        f"Sent email to {to_addr} about '{subject}': {body[:200]}",
+        importance=5, conf_dir=CONF_DIR,
+    )
+
+    organ_lib.stimulus_send("brain", f"email-sent {to_addr}")
+    log(f"send-email: sent to {to_addr} re: {subject}")
+    return True
+
+
 def main():
     lines = organ_lib.consume_stimulus(DIR)
 
@@ -175,6 +200,27 @@ def main():
                 query = parts[1] if len(parts) > 1 else None
                 n = handle_check_email(query)
                 processed += 1
+
+            elif line.startswith("send-email"):
+                # "send-email <to> <subject> circ:<hash>"
+                parts = line.split()
+                if len(parts) < 4:
+                    log(f"send-email: bad format: {line}")
+                    errors += 1
+                    continue
+                to_addr = parts[1]
+                subject = " ".join(parts[2:-1])  # everything between to and circ:ref
+                circ_ref = parts[-1]
+                if not circ_ref.startswith("circ:"):
+                    log(f"send-email: expected circ:ref as last token: {line}")
+                    errors += 1
+                    continue
+                ref = circ_ref[5:]
+                ok = handle_send_email(to_addr, subject, ref)
+                if ok:
+                    processed += 1
+                else:
+                    errors += 1
 
             elif line.startswith("send-reply"):
                 # "send-reply <thread_id> circ:<hash>"
