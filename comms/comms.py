@@ -18,19 +18,19 @@ from pathlib import Path
 DIR = Path(__file__).resolve().parent
 CONF_DIR = os.environ.get("CONF_DIR", "")
 
-# organ_lib.py lives at BIN_ROOT (peer to comms/). Spark sets PYTHONPATH.
+# muscles.py lives at BIN_ROOT (peer to comms/). Spark sets PYTHONPATH.
 # Fallback: comms/ is one level below BIN_ROOT, so DIR.parent works.
 sys.path.insert(0, str(DIR.parent))
-import organ_lib
+import muscles
 
 
 def log(msg):
-    organ_lib.log("comms", msg)
+    muscles.log("comms", msg)
 
 
 def gmail_search(query, count=5):
     """Search Gmail via the gmail muscle. Returns parsed JSON or None."""
-    out, ok = organ_lib.run_cli(["gmail", "search", query, "--count", str(count)])
+    out, ok = muscles.run(["gmail", "search", query, "--count", str(count)])
     if ok and out:
         try:
             return json.loads(out)
@@ -41,7 +41,7 @@ def gmail_search(query, count=5):
 
 def gmail_get(msg_id):
     """Get a full email via the gmail muscle."""
-    out, ok = organ_lib.run_cli(["gmail", "get", msg_id])
+    out, ok = muscles.run(["gmail", "get", msg_id])
     if ok and out:
         try:
             return json.loads(out)
@@ -52,7 +52,7 @@ def gmail_get(msg_id):
 
 def gmail_reply(thread_id, body_file):
     """Reply to a thread via the gmail muscle using --body-file."""
-    _, ok = organ_lib.run_cli(["gmail", "reply", thread_id, "--body-file", body_file])
+    _, ok = muscles.run(["gmail", "reply", thread_id, "--body-file", body_file])
     return ok
 
 
@@ -63,7 +63,7 @@ def gmail_label(msg_id, remove=None, add=None):
         cmd.extend(["--remove", remove])
     if add:
         cmd.extend(["--add", add])
-    _, ok = organ_lib.run_cli(cmd)
+    _, ok = muscles.run(cmd)
     return ok
 
 
@@ -108,12 +108,12 @@ def handle_check_email(reply_to, query=None):
             "subject": email_subject,
             "body": email_body,
         })
-        ref = organ_lib.circ_put(payload)
+        ref = muscles.circ.put(payload)
         if not ref:
             log(f"check-email: failed to store email {email_id} in circ")
             continue
 
-        organ_lib.stimulus_send(reply_to, f"new-email {email_id} circ:{ref}")
+        muscles.stimulus.send(reply_to, f"new-email {email_id} circ:{ref}")
         count += 1
 
     log(f"check-email: notified {reply_to} of {count} emails")
@@ -125,7 +125,7 @@ def handle_send_reply(reply_to, thread_id, circ_ref):
     circ_dir = os.environ.get("CIRC_DIR", os.path.expanduser("~/.life/circ"))
     circ_path = os.path.join(circ_dir, circ_ref)
 
-    body = organ_lib.circ_get(circ_ref)
+    body = muscles.circ.get(circ_ref)
     if not body:
         log(f"send-reply: could not retrieve circ:{circ_ref}")
         return False
@@ -137,12 +137,12 @@ def handle_send_reply(reply_to, thread_id, circ_ref):
 
     gmail_label(thread_id, remove="UNREAD")
 
-    organ_lib.memories_store(
+    muscles.memories.store(
         f"Sent reply to thread {thread_id}: {body[:200]}",
-        importance=5, conf_dir=CONF_DIR,
+        importance=5, env=muscles.memory_env(CONF_DIR),
     )
 
-    organ_lib.stimulus_send(reply_to, f"sent {thread_id}")
+    muscles.stimulus.send(reply_to, f"sent {thread_id}")
 
     log(f"send-reply: replied to {thread_id}")
     return True
@@ -152,7 +152,7 @@ def handle_send_email(reply_to, circ_ref):
     """Compose and send a new email. Full payload (to, subject, body, format) from circ JSON."""
     import tempfile as _tempfile
 
-    raw = organ_lib.circ_get(circ_ref)
+    raw = muscles.circ.get(circ_ref)
     if not raw:
         log(f"send-email: could not retrieve circ:{circ_ref}")
         return False
@@ -181,7 +181,7 @@ def handle_send_email(reply_to, circ_ref):
         tmp.close()
 
         cmd = ["gmail", "send", to_addr, "--subject", subject, "--body-file", tmp.name, "--format", fmt]
-        _, ok = organ_lib.run_cli(cmd)
+        _, ok = muscles.run(cmd)
     finally:
         try:
             os.unlink(tmp.name)
@@ -192,18 +192,18 @@ def handle_send_email(reply_to, circ_ref):
         log(f"send-email: gmail send failed to {to_addr}")
         return False
 
-    organ_lib.memories_store(
+    muscles.memories.store(
         f"Sent email to {to_addr} about '{subject}': {body[:200]}",
-        importance=5, conf_dir=CONF_DIR,
+        importance=5, env=muscles.memory_env(CONF_DIR),
     )
 
-    organ_lib.stimulus_send(reply_to, f"email-sent {to_addr}")
+    muscles.stimulus.send(reply_to, f"email-sent {to_addr}")
     log(f"send-email: sent to {to_addr} re: {subject}")
     return True
 
 
 def main():
-    lines = organ_lib.consume_stimulus(DIR)
+    lines = muscles.stimulus.consume(str(DIR)).strip().splitlines()
 
     if not lines:
         (DIR / "health.txt").write_text("ok idle\n")

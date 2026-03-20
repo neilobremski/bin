@@ -69,7 +69,7 @@ Over time, the hippocampus accumulates conversation history. FSRS stability ensu
 
 | Component | Used For |
 |-----------|----------|
-| `organ_lib` | Shared primitives (stimulus, circ, memory) |
+| `muscles` | Python bindings for CLI tools (stimulus, circ, memory) |
 | `claude -p --model haiku` | Reply generation (60s timeout) |
 | `memories` CLI | Search context, store interactions |
 | `circ-put` / `circ-get` | Payload storage for emails and replies |

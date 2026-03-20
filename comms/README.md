@@ -9,7 +9,7 @@ The comms organ is **stimulus-driven** — it does not poll for messages on its 
 | Module | Purpose |
 |--------|---------|
 | `comms.py` | Stimulus processor — routes check-email and send-reply commands |
-| `organ_lib.py` | Shared organ primitives (stimulus, circ, memory ops) — lives at `tadpole/` level |
+| `muscles.py` | Python bindings for CLI tools (stimulus, circ, memory ops) — lives at BIN_ROOT |
 
 ## Dependencies
 
@@ -159,7 +159,7 @@ The brain wants to send Neil a daily summary email with headers, bold text, a li
 
 ```python
 import json
-from organ_lib import circ_put, stimulus_send
+import muscles
 
 body = """\
 # Daily Summary — Day 22
@@ -193,8 +193,8 @@ payload = json.dumps({
     "body": body,
     "format": "markdown",
 })
-ref = circ_put(payload)
-stimulus_send("comms", f"send-email brain circ:{ref}")
+ref = muscles.circ.put(payload)
+muscles.stimulus.send("comms", f"send-email brain circ:{ref}")
 ```
 
 ### 2. Comms organ reads circ, calls the gmail muscle

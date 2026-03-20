@@ -7,9 +7,18 @@ Usage:
     import muscles
 
     muscles.stimulus.send("tail", "swim now")
+    lines = muscles.stimulus.consume("/path/to/organ")
     ref = muscles.circ.put("payload data")
+    content = muscles.circ.get(ref)
+    muscles.memories.store("learned something", importance=7)
     result = muscles.gas("sheets.read", name="Tadpole")
     response = muscles.llm("What is 2+2?")
+
+    # Organ helpers
+    muscles.log("brain", "processing email")
+    stdout, ok = muscles.run(["some-cli", "arg1"])
+    env = muscles.memory_env("/path/to/organism")
+    muscles.ensure_memory_db("/path/to/organism")
 """
 import json
 import os
@@ -26,6 +35,27 @@ BIN_DIR = None
 DEFAULT_TIMEOUT = 30
 
 
+def log(name, msg):
+    """Print a tagged message to stderr."""
+    print(f"{name}: {msg}", file=sys.stderr)
+
+
+def run(cmd, input_data=None, timeout=30):
+    """Run an arbitrary CLI command and return (stdout, ok). Inherits parent env.
+
+    This is a general-purpose escape hatch for commands that don't have a
+    dedicated muscle wrapper (e.g. ``gmail search``).
+    """
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            input=input_data,
+        )
+        return result.stdout.strip(), result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "", False
+
+
 def _find(tool):
     """Locate a CLI tool. Returns full path or None."""
     if BIN_DIR:
@@ -35,7 +65,7 @@ def _find(tool):
     return shutil.which(tool)
 
 
-def _run(tool, args, timeout=None, stdin_data=None):
+def _run(tool, args, timeout=None, stdin_data=None, env=None):
     """Run a CLI tool and return (stdout, returncode). Never raises."""
     path = _find(tool)
     if path is None:
@@ -48,6 +78,7 @@ def _run(tool, args, timeout=None, stdin_data=None):
             text=True,
             timeout=timeout,
             input=stdin_data,
+            env=env,
         )
         return result.stdout, result.returncode
     except (subprocess.TimeoutExpired, OSError):
@@ -121,16 +152,22 @@ stimulus = _Stimulus()
 class _Memories:
     """Wrapper for the `memories` CLI."""
 
-    def store(self, content, importance=5, category="general", timeout=None):
-        """Store a memory. Returns True on success."""
+    def store(self, content, importance=5, category="general", timeout=None, env=None):
+        """Store a memory. Returns True on success.
+
+        Pass *env* (e.g. from ``memory_env()``) to override ``MEMORY_DB``.
+        """
         args = ["store", str(content), "-i", str(importance), "-c", str(category)]
-        _, rc = _run("memories", args, timeout=timeout)
+        _, rc = _run("memories", args, timeout=timeout, env=env)
         return rc == 0
 
-    def search(self, query, limit=10, timeout=None):
-        """Search memories. Returns list of dicts."""
+    def search(self, query, limit=10, timeout=None, env=None):
+        """Search memories. Returns list of dicts or raw text.
+
+        Pass *env* (e.g. from ``memory_env()``) to override ``MEMORY_DB``.
+        """
         args = ["search", str(query)]
-        return self._parse_json("memories", args, timeout)
+        return self._parse_json("memories", args, timeout, env=env)
 
     def recent(self, count=10, timeout=None):
         """Get recent memories. Returns list of dicts."""
@@ -152,8 +189,8 @@ class _Memories:
         except (json.JSONDecodeError, ValueError):
             return {"raw": out.strip()}
 
-    def _parse_json(self, tool, args, timeout):
-        out, rc = _run(tool, args, timeout=timeout)
+    def _parse_json(self, tool, args, timeout, env=None):
+        out, rc = _run(tool, args, timeout=timeout, env=env)
         if rc != 0 or not out:
             return []
         try:
@@ -283,3 +320,51 @@ class _MQTT:
 
 
 mqtt = _MQTT()
+
+
+# ---- Organ helpers (memory bootstrapping) ----
+
+def memory_env(conf_dir):
+    """Build an env dict with MEMORY_DB pointing at the organism's hippocampus.
+
+    Useful when organs need to direct the ``memories`` CLI at a specific database.
+    """
+    memory_db = os.environ.get(
+        "MEMORY_DB",
+        os.path.join(conf_dir, "organs", "hippocampus", "memory.db"),
+    )
+    env = os.environ.copy()
+    env["MEMORY_DB"] = memory_db
+    return env
+
+
+def ensure_memory_db(conf_dir):
+    """Initialize memory.db if it doesn't exist yet.
+
+    Imports the hippocampus schema module to bootstrap the database.
+    """
+    memory_db = os.environ.get(
+        "MEMORY_DB",
+        os.path.join(conf_dir, "organs", "hippocampus", "memory.db"),
+    )
+    if os.path.isfile(memory_db):
+        return
+    db_dir = os.path.dirname(memory_db)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+    try:
+        hippocampus_dir = os.path.join(conf_dir, "organs", "hippocampus")
+        sys.path.insert(0, hippocampus_dir)
+        try:
+            import sqlite3
+            from schema import init_db, migrate
+        finally:
+            sys.path.pop(0)
+        db = sqlite3.connect(memory_db)
+        init_db(db)
+        migrate(db)
+        db.commit()
+        db.close()
+        log("muscles", f"initialized memory.db at {memory_db}")
+    except Exception as e:
+        log("muscles", f"could not initialize memory.db: {e}")

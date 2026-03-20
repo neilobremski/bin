@@ -38,7 +38,7 @@ trap 'kill $MQTT_PID 2>/dev/null; rm -rf "$TDIR"' EXIT
 cp -r "$SCRIPT_DIR/organs" "$SCRIPT_DIR/life.conf" "$TDIR/"
 cp -r "$BIN_ROOT/ganglion" "$TDIR/ganglion"
 cp -r "$BIN_ROOT/comms" "$TDIR/comms"
-cp "$BIN_ROOT/organ_lib.py" "$TDIR/"
+cp "$BIN_ROOT/muscles.py" "$TDIR/"
 chmod +x "$TDIR/organs/"*/live.sh "$TDIR/ganglion/live.sh" "$TDIR/comms/live.sh"
 
 MQTT_PORT=$(free-port)
@@ -306,6 +306,7 @@ export GMAIL_MOCK_DIR="$MOCK_GMAIL"
   CIRC_DIR="$TDIR/.circ" \
   CIRC_LOCAL_ONLY=1 \
   MEMORY_DB="$TDIR/organs/hippocampus/memory.db" \
+  PYTHONPATH="$TDIR:${PYTHONPATH:-}" \
   python3 "$COMMS/comms.py") 2>/dev/null || true
 
 # Check: brain should have received new-email stimulus
@@ -349,6 +350,7 @@ echo "send-reply brain test001 circ:$reply_ref" > "$COMMS/stimulus.txt"
   CIRC_DIR="$TDIR/.circ" \
   CIRC_LOCAL_ONLY=1 \
   MEMORY_DB="$TDIR/organs/hippocampus/memory.db" \
+  PYTHONPATH="$TDIR:${PYTHONPATH:-}" \
   python3 "$COMMS/comms.py") 2>/dev/null || true
 
 # Check: sent dir should have a reply

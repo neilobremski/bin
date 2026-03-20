@@ -24,13 +24,10 @@ from pathlib import Path
 DIR = Path(__file__).resolve().parent
 CONF_DIR = os.environ.get("CONF_DIR", str(DIR.parent.parent))
 
-# organ_lib.py lives at BIN_ROOT (top-level). Spark sets PYTHONPATH.
-# Fallback for manual testing: walk up from brain/ to find organ_lib.py
-for _p in [DIR.parent.parent.parent, Path(CONF_DIR).parent, Path(CONF_DIR)]:
-    if (_p / "organ_lib.py").exists():
-        sys.path.insert(0, str(_p))
-        break
-import organ_lib
+# muscles.py lives at BIN_ROOT (top-level). Spark sets PYTHONPATH.
+# Fallback for manual testing: brain is at tadpole/organs/brain/, BIN_ROOT is 3 levels up.
+sys.path.insert(0, str(DIR.parent.parent.parent))
+import muscles
 
 SYSTEM_PROMPT = (
     "You are Tadpole, a tiny organism learning about the world through email "
@@ -41,7 +38,7 @@ SYSTEM_PROMPT = (
 
 
 def log(msg):
-    organ_lib.log("brain", msg)
+    muscles.log("brain", msg)
 
 
 def generate_reply(email_from, email_subject, email_body, memory_context):
@@ -83,7 +80,7 @@ def generate_reply(email_from, email_subject, email_body, memory_context):
 def handle_new_email(thread_id, circ_ref):
     """Process a new email: get content, recall memories, generate reply, send to comms."""
     # Get email content from circ
-    raw = organ_lib.circ_get(circ_ref)
+    raw = muscles.circ.get(circ_ref)
     if not raw:
         log(f"new-email: could not retrieve circ:{circ_ref}")
         return False
@@ -100,7 +97,11 @@ def handle_new_email(thread_id, circ_ref):
 
     # Search memories for context
     search_terms = f"{email_from} {email_subject}"
-    memory_context = organ_lib.memories_search(search_terms, conf_dir=CONF_DIR)
+    # Use run() directly for raw text output (brain prompt needs string, not parsed JSON)
+    memory_context, _ = muscles.run(
+        ["memories", "search", "--", search_terms],
+        timeout=15,
+    )
 
     # Generate reply
     reply = generate_reply(email_from, email_subject, email_body, memory_context)
@@ -109,18 +110,18 @@ def handle_new_email(thread_id, circ_ref):
         return False
 
     # Store reply in circulatory system
-    reply_ref = organ_lib.circ_put(reply)
+    reply_ref = muscles.circ.put(reply)
     if not reply_ref:
         log(f"new-email: failed to store reply in circ")
         return False
 
     # Tell comms to send the reply
-    organ_lib.stimulus_send("comms", f"send-reply brain {thread_id} circ:{reply_ref}")
+    muscles.stimulus.send("comms", f"send-reply brain {thread_id} circ:{reply_ref}")
 
     # Store incoming email as memory
-    organ_lib.memories_store(
+    muscles.memories.store(
         f"Email from {email_from} about '{email_subject}': {email_body[:200]}",
-        importance=6, conf_dir=CONF_DIR,
+        importance=6, env=muscles.memory_env(CONF_DIR),
     )
 
     log(f"new-email: generated reply for {thread_id}, sent to comms")
@@ -134,9 +135,9 @@ def handle_sent(thread_id):
 
 
 def main():
-    organ_lib.ensure_memory_db(CONF_DIR)
+    muscles.ensure_memory_db(CONF_DIR)
 
-    lines = organ_lib.consume_stimulus(DIR)
+    lines = muscles.stimulus.consume(str(DIR)).strip().splitlines()
     processed = 0
     errors = 0
 
@@ -185,7 +186,7 @@ def main():
 
     # If no stimulus at all, tell comms to check
     if not lines:
-        organ_lib.stimulus_send("comms", "check-email brain")
+        muscles.stimulus.send("comms", "check-email brain")
         log("no pending emails, told comms to check")
 
     health = f"ok processed {processed}"
