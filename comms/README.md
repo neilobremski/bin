@@ -32,7 +32,7 @@ The comms organ is **stimulus-driven** — it does not poll for messages on its 
 |--------|-------------|
 | `check-email <reply-to> [query]` | Search Gmail for unread emails, report each to `reply-to` organ |
 | `send-reply <reply-to> <thread_id> circ:<hash>` | Send the reply body stored at circ hash, confirm to `reply-to` |
-| `send-email <reply-to> <to> <subject> circ:<hash>` | Compose and send a new email, confirm to `reply-to` |
+| `send-email <reply-to> circ:<hash>` | Compose and send a new email (circ payload is JSON: `{to, subject, body, format}`), confirm to `reply-to` |
 
 ### Outbound (to brain)
 
@@ -55,31 +55,25 @@ The comms organ is **stimulus-driven** — it does not poll for messages on its 
 
 ### Circ Payload Format (send-email / send-reply — rich)
 
-For outbound emails, the circ payload supports markdown body and future attachment/image fields:
+For outbound emails, the circ payload supports markdown body with inline circ images:
 
 ```json
 {
   "to": "user@example.com",
   "subject": "Daily Summary",
-  "body": "# Daily Summary\n\nHere are today's **highlights**:\n\n- Deployed `v2.6`\n- Fixed dashboard bug\n- PR #15 merged",
-  "format": "markdown",
-  "attachments": [
-    {"name": "report.pdf", "circ": "a1b2c3d4e5f6a7b8"}
-  ],
-  "inline_images": [
-    {"name": "chart.png", "circ": "f9e8d7c6b5a4f3e2", "cid": "chart1"}
-  ]
+  "body": "# Daily Summary\n\nHere are today's **highlights**:\n\n- Deployed `v2.6`\n- Fixed dashboard bug\n- PR #15 merged\n\n![System chart](circ:f9e8d7c6b5a4f3e2)",
+  "format": "markdown"
 }
 ```
 
 | Field | Status | Description |
 |-------|--------|-------------|
-| `body` | Implemented | Email body text. Interpreted based on `format`. |
+| `body` | Implemented | Email body text. Interpreted based on `format`. Supports `![alt](circ:HASH)` for inline images. |
 | `format` | Implemented | `"markdown"` (default) or `"plain"`. When markdown, the gmail muscle converts to styled HTML. |
+| `inline images` | Implemented | Use `![alt text](circ:HASH)` in the markdown body. The gmail muscle calls `circ-get` to retrieve the image, detects MIME type from magic bytes, and embeds it as a `data:` URI in the HTML. |
 | `attachments` | Planned | Array of `{name, circ}` objects. The circ hash points to file content in the circulatory system. |
-| `inline_images` | Planned | Array of `{name, circ, cid}` objects. Referenced in HTML body via `<img src="cid:chart1">`. |
 
-> **Note**: `attachments` and `inline_images` are documented for future implementation. Currently only `body` + `format` are functional.
+> **Note**: `attachments` are documented for future implementation. Inline images via `![alt](circ:HASH)` and `body` + `format` are functional.
 
 ## Gmail Muscle
 
@@ -200,7 +194,7 @@ payload = json.dumps({
     "format": "markdown",
 })
 ref = circ_put(payload)
-stimulus_send("comms", f"send-email brain user@example.com Daily Summary circ:{ref}")
+stimulus_send("comms", f"send-email brain circ:{ref}")
 ```
 
 ### 2. Comms organ reads circ, calls the gmail muscle
@@ -232,26 +226,26 @@ memory:    ok (2341 memories)</code></pre>
 
 Both `body=` (plain text fallback) and `html=` (rendered HTML) are sent to the GAS bridge, so Neil sees a nicely formatted email in any client.
 
-### 4. Future: attachments and inline images
+### 4. Inline images via circ references
 
-When attachment support lands, the brain will include circ references in the payload:
+The brain can embed images stored in the circulatory system directly in email bodies using markdown image syntax with `circ:` URIs:
 
 ```json
 {
   "to": "user@example.com",
   "subject": "Weekly Report",
-  "body": "# Weekly Report\n\nSee attached PDF and chart below.\n\n![System chart](cid:chart1)",
-  "format": "markdown",
-  "attachments": [
-    {"name": "weekly-report.pdf", "circ": "a1b2c3d4e5f6a7b8"}
-  ],
-  "inline_images": [
-    {"name": "system-chart.png", "circ": "f9e8d7c6b5a4f3e2", "cid": "chart1"}
-  ]
+  "body": "# Weekly Report\n\nSee the chart below.\n\n![System chart](circ:f9e8d7c6b5a4f3e2)\n\nLooks healthy!",
+  "format": "markdown"
 }
 ```
 
-This format is documented and ready; the gmail muscle will be extended to resolve circ references and attach files when the feature is built.
+The gmail muscle's `_resolve_circ_images()` function processes each `![alt](circ:HASH)` reference:
+1. Calls `circ-get <hash>` to retrieve and cache the image at `~/.life/circ/<hash>`
+2. Detects MIME type from magic bytes (PNG, JPEG, GIF, WebP)
+3. Base64-encodes the image data into a `data:` URI
+4. The normal markdown-to-HTML conversion then produces `<img src="data:image/png;base64,...">`
+
+Per-image limit: 500 KB raw. Cumulative base64 limit: 1 MB. Images exceeding either limit, or that fail retrieval, or are not a recognized format (PNG, JPEG, GIF, WebP), are replaced with alt text. Warnings are printed to stderr. Regular URL images like `![alt](https://example.com/img.png)` work as standard HTML `<img>` tags.
 
 ## Design Principles
 

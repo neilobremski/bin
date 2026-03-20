@@ -64,9 +64,12 @@ def _md_to_html(md_text):
             in_ol = False
 
     def _inline_format(text):
-        """Apply inline formatting: bold, italic, links, inline code."""
+        """Apply inline formatting: bold, italic, links, images, inline code."""
         # Inline code (must come before bold/italic to avoid conflicts)
         text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+        # Images ![alt](url) — must come before links
+        text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)',
+                       r'<img src="\2" alt="\1" style="max-width:100%;height:auto">', text)
         # Links [text](url)
         text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
         # Bold **text** or __text__
@@ -166,6 +169,95 @@ def _md_to_html(md_text):
     return '\n'.join(html_parts)
 
 
+def _detect_mime(data):
+    """Detect image MIME type from magic bytes. Returns type or None."""
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        return 'image/png'
+    if data[:3] == b'\xff\xd8\xff':
+        return 'image/jpeg'
+    if data[:4] in (b'GIF8',):
+        return 'image/gif'
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'image/webp'
+    return None
+
+
+_IMAGE_MAX_RAW = 500 * 1024      # 500 KB per image (raw bytes)
+_IMAGE_TOTAL_B64 = 1024 * 1024   # 1 MB cumulative base64 budget
+
+
+def _resolve_circ_images(md_text):
+    """Replace ![alt](circ:HASH) with data-URI images in markdown text.
+
+    Calls circ-get to retrieve each image, detects MIME type from magic bytes,
+    base64-encodes the data, and substitutes a data URI. If retrieval or
+    detection fails, the image reference is replaced with the alt text.
+
+    Per-image limit: 500 KB raw. Total base64 budget: 1 MB. Exceeding either
+    falls back to alt text with a stderr warning.
+
+    Returns the modified markdown string.
+    """
+    pattern = re.compile(r'!\[([^\]]*)\]\(circ:([a-fA-F0-9]+)\)')
+    matches = list(pattern.finditer(md_text))
+    if not matches:
+        return md_text
+
+    circ_dir = Path(os.environ.get('CIRC_DIR', Path.home() / '.life' / 'circ'))
+    result = md_text
+    cumulative_b64 = 0
+
+    for match in reversed(matches):  # reverse to preserve offsets
+        alt = match.group(1)
+        circ_hash = match.group(2)
+        cache_path = circ_dir / circ_hash
+
+        # Ensure the file is cached locally
+        if not cache_path.exists():
+            try:
+                subprocess.run(
+                    ['circ-get', circ_hash],
+                    capture_output=True, timeout=15
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+        if not cache_path.exists():
+            # Could not retrieve — replace with alt text
+            print(f"gmail: warning: image circ:{circ_hash} could not be resolved (circ-get failed)", file=sys.stderr)
+            result = result[:match.start()] + alt + result[match.end():]
+            continue
+
+        data = cache_path.read_bytes()
+
+        # Per-image size limit
+        if len(data) > _IMAGE_MAX_RAW:
+            print(f"gmail: warning: image circ:{circ_hash} could not be resolved (exceeds {_IMAGE_MAX_RAW} byte limit: {len(data)} bytes)", file=sys.stderr)
+            result = result[:match.start()] + alt + result[match.end():]
+            continue
+
+        mime = _detect_mime(data)
+        if not mime:
+            print(f"gmail: warning: image circ:{circ_hash} could not be resolved (unrecognized image format)", file=sys.stderr)
+            result = result[:match.start()] + alt + result[match.end():]
+            continue
+
+        b64 = base64.b64encode(data).decode('ascii')
+
+        # Total budget check
+        if cumulative_b64 + len(b64) > _IMAGE_TOTAL_B64:
+            print(f"gmail: warning: image circ:{circ_hash} could not be resolved (cumulative base64 budget exceeded)", file=sys.stderr)
+            result = result[:match.start()] + alt + result[match.end():]
+            continue
+
+        cumulative_b64 += len(b64)
+        data_uri = f'data:{mime};base64,{b64}'
+        img_md = f'![{alt}]({data_uri})'
+        result = result[:match.start()] + img_md + result[match.end():]
+
+    return result
+
+
 def _wrap_html_email(html_body):
     """Wrap HTML body in a clean email template with basic styling."""
     return f"""\
@@ -231,18 +323,27 @@ def _wrap_html_email(html_body):
 </html>"""
 
 
+_CIRC_IMG_RE = re.compile(r'!\[([^\]]*)\]\(circ:[a-fA-F0-9]+\)')
+
+
+def _strip_circ_images(text):
+    """Replace ![alt](circ:HASH) with just the alt text for plain text fallback."""
+    return _CIRC_IMG_RE.sub(r'\1', text)
+
+
 def _render_body(body_text, fmt, raw_html):
     """Return (plain_text, html_or_none) based on format flags.
 
     - raw_html provided: use it directly as HTML
-    - fmt='markdown': convert body_text to HTML
+    - fmt='markdown': convert body_text to HTML, strip circ refs from plain text
     - fmt='plain': no HTML
     """
     if raw_html:
-        return body_text, raw_html
+        return _strip_circ_images(body_text), raw_html
     if fmt == 'markdown':
-        inner = _md_to_html(body_text)
-        return body_text, _wrap_html_email(inner)
+        resolved = _resolve_circ_images(body_text)
+        inner = _md_to_html(resolved)
+        return _strip_circ_images(body_text), _wrap_html_email(inner)
     return body_text, None
 
 
@@ -305,12 +406,11 @@ def _get_token():
         # Cache it (assume 55 min lifetime if not specified)
         expires_at = data.get("expires_at", time.time() + 3300)
         TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = TOKEN_CACHE.with_suffix('.tmp')
-        tmp.write_text(json.dumps({
-            "access_token": token,
-            "expires_at": expires_at,
-        }))
-        tmp.rename(TOKEN_CACHE)
+        import tempfile as _tf
+        fd, tmp_path = _tf.mkstemp(dir=str(TOKEN_CACHE.parent), suffix='.tmp')
+        with os.fdopen(fd, 'w') as f:
+            json.dump({"access_token": token, "expires_at": expires_at}, f)
+        Path(tmp_path).rename(TOKEN_CACHE)
         return token
     except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
         return None
@@ -444,9 +544,11 @@ def cmd_reply(args):
     raw_html = getattr(args, 'html', None)
     plain_text, html_content = _render_body(body_text, fmt, raw_html)
 
-    # Cap at 100KB to avoid OS arg limits.
-    if len(plain_text) > 100000:
-        # Large body: fall back to REST API directly
+    # Cap total arg size to avoid OS limits (data URI images can be large)
+    total_size = len(plain_text) + (len(html_content) if html_content else 0)
+    if total_size > 100000:
+        if html_content:
+            print("gmail: warning: HTML content dropped (REST fallback is plain-text only)", file=sys.stderr)
         result = _rest_reply(args.id, plain_text)
     else:
         gas_args = ["gmail.reply", f"id={args.id}", f"body={plain_text}"]
@@ -454,6 +556,8 @@ def cmd_reply(args):
             gas_args.append(f"html={html_content}")
         result = gas(*gas_args)
         if result is _RATE_LIMITED:
+            if html_content:
+                print("gmail: warning: HTML content dropped (REST fallback is plain-text only)", file=sys.stderr)
             result = _rest_reply(args.id, plain_text)
 
     if not result:
@@ -485,7 +589,8 @@ def cmd_send(args):
     if args.subject:
         gas_args.append(f"subject={args.subject}")
 
-    if len(plain_text) > 100000:
+    total_size = len(plain_text) + (len(html_content) if html_content else 0)
+    if total_size > 100000:
         # TODO: REST API fallback for large sends
         print('{"error": "body too large for GAS bridge, REST send not yet implemented"}', file=sys.stderr)
         sys.exit(1)
