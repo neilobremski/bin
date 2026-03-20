@@ -30,17 +30,17 @@ The comms organ is **stimulus-driven** — it does not poll for messages on its 
 
 | Signal | Description |
 |--------|-------------|
-| `check-email [query]` | Search Gmail for unread emails, report each to brain |
-| `send-reply <thread_id> circ:<hash>` | Send the reply body stored at circ hash, mark email as read |
-| `send-email <to> <subject> circ:<hash>` | Compose and send a new email (body from circ) |
+| `check-email <reply-to> [query]` | Search Gmail for unread emails, report each to `reply-to` organ |
+| `send-reply <reply-to> <thread_id> circ:<hash>` | Send the reply body stored at circ hash, confirm to `reply-to` |
+| `send-email <reply-to> <to> <subject> circ:<hash>` | Compose and send a new email, confirm to `reply-to` |
 
 ### Outbound (to brain)
 
 | Signal | Description |
 |--------|-------------|
-| `new-email <thread_id> circ:<hash>` | New email found — full content (from, subject, body) stored in circ as JSON |
-| `sent <thread_id>` | Reply successfully delivered |
-| `email-sent <to>` | New email successfully sent |
+| `new-email <thread_id> circ:<hash>` | New email found — sent to whoever requested `check-email` |
+| `sent <thread_id>` | Reply successfully delivered — sent to whoever requested `send-reply` |
+| `email-sent <to>` | New email successfully sent — sent to whoever requested `send-email` |
 
 ### Circ Payload Format (new-email)
 

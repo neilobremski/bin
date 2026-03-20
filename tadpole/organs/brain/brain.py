@@ -111,7 +111,7 @@ def handle_new_email(thread_id, circ_ref):
         return False
 
     # Tell comms to send the reply
-    organ_lib.stimulus_send("comms", f"send-reply {thread_id} circ:{reply_ref}")
+    organ_lib.stimulus_send("comms", f"send-reply brain {thread_id} circ:{reply_ref}")
 
     # Store incoming email as memory
     organ_lib.memories_store(
@@ -181,7 +181,7 @@ def main():
 
     # If no stimulus at all, tell comms to check
     if not lines:
-        organ_lib.stimulus_send("comms", "check-email")
+        organ_lib.stimulus_send("comms", "check-email brain")
         log("no pending emails, told comms to check")
 
     health = f"ok processed {processed}"

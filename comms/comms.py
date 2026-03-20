@@ -68,8 +68,8 @@ def gmail_label(msg_id, remove=None, add=None):
     return ok
 
 
-def handle_check_email(query=None):
-    """Check Gmail for unread Tadpole emails, notify brain of each."""
+def handle_check_email(reply_to, query=None):
+    """Check Gmail for unread emails, notify requesting organ of each."""
     if not query:
         query = "label:Tadpole is:unread"
 
@@ -114,21 +114,18 @@ def handle_check_email(query=None):
             log(f"check-email: failed to store email {email_id} in circ")
             continue
 
-        # Notify brain — simplified format: new-email <thread_id> circ:<hash>
-        organ_lib.stimulus_send("brain", f"new-email {email_id} circ:{ref}")
+        organ_lib.stimulus_send(reply_to, f"new-email {email_id} circ:{ref}")
         count += 1
 
-    log(f"check-email: notified brain of {count} emails")
+    log(f"check-email: notified {reply_to} of {count} emails")
     return count
 
 
-def handle_send_reply(thread_id, circ_ref):
+def handle_send_reply(reply_to, thread_id, circ_ref):
     """Send reply from circ, mark as read, store memory. Uses circ cache path directly."""
-    # Get the circ cache path — avoids CLI arg size limits, supports attachments later
     circ_dir = os.environ.get("CIRC_DIR", os.path.expanduser("~/.life/circ"))
     circ_path = os.path.join(circ_dir, circ_ref)
 
-    # Ensure the file exists locally (circ_get caches from Drive if needed)
     body = organ_lib.circ_get(circ_ref)
     if not body:
         log(f"send-reply: could not retrieve circ:{circ_ref}")
@@ -139,23 +136,20 @@ def handle_send_reply(thread_id, circ_ref):
         log(f"send-reply: gmail reply failed for {thread_id}")
         return False
 
-    # Mark as read
     gmail_label(thread_id, remove="UNREAD")
 
-    # Store interaction as memory
     organ_lib.memories_store(
         f"Sent reply to thread {thread_id}: {body[:200]}",
         importance=5, conf_dir=CONF_DIR,
     )
 
-    # Notify brain
-    organ_lib.stimulus_send("brain", f"sent {thread_id}")
+    organ_lib.stimulus_send(reply_to, f"sent {thread_id}")
 
     log(f"send-reply: replied to {thread_id}")
     return True
 
 
-def handle_send_email(to_addr, subject, circ_ref):
+def handle_send_email(reply_to, to_addr, subject, circ_ref):
     """Compose and send a new email. Body from circ."""
     circ_dir = os.environ.get("CIRC_DIR", os.path.expanduser("~/.life/circ"))
     circ_path = os.path.join(circ_dir, circ_ref)
@@ -175,7 +169,7 @@ def handle_send_email(to_addr, subject, circ_ref):
         importance=5, conf_dir=CONF_DIR,
     )
 
-    organ_lib.stimulus_send("brain", f"email-sent {to_addr}")
+    organ_lib.stimulus_send(reply_to, f"email-sent {to_addr}")
     log(f"send-email: sent to {to_addr} re: {subject}")
     return True
 
@@ -197,48 +191,55 @@ def main():
 
         try:
             if line.startswith("check-email"):
-                # "check-email" or "check-email <query>"
-                parts = line.split(None, 1)
-                query = parts[1] if len(parts) > 1 else None
-                n = handle_check_email(query)
+                # "check-email <reply-to> [query]"
+                parts = line.split(None, 2)
+                if len(parts) < 2:
+                    log(f"check-email: missing reply-to: {line}")
+                    errors += 1
+                    continue
+                reply_to = parts[1]
+                query = parts[2] if len(parts) > 2 else None
+                n = handle_check_email(reply_to, query)
                 processed += 1
 
             elif line.startswith("send-email"):
-                # "send-email <to> <subject> circ:<hash>"
+                # "send-email <reply-to> <to> <subject> circ:<hash>"
                 parts = line.split()
-                if len(parts) < 4:
+                if len(parts) < 5:
                     log(f"send-email: bad format: {line}")
                     errors += 1
                     continue
-                to_addr = parts[1]
-                subject = " ".join(parts[2:-1])  # everything between to and circ:ref
+                reply_to = parts[1]
+                to_addr = parts[2]
+                subject = " ".join(parts[3:-1])
                 circ_ref = parts[-1]
                 if not circ_ref.startswith("circ:"):
                     log(f"send-email: expected circ:ref as last token: {line}")
                     errors += 1
                     continue
                 ref = circ_ref[5:]
-                ok = handle_send_email(to_addr, subject, ref)
+                ok = handle_send_email(reply_to, to_addr, subject, ref)
                 if ok:
                     processed += 1
                 else:
                     errors += 1
 
             elif line.startswith("send-reply"):
-                # "send-reply <thread_id> circ:<hash>"
+                # "send-reply <reply-to> <thread_id> circ:<hash>"
                 parts = line.split()
-                if len(parts) < 3:
+                if len(parts) < 4:
                     log(f"send-reply: bad format: {line}")
                     errors += 1
                     continue
-                thread_id = parts[1]
-                circ_ref = parts[2]
+                reply_to = parts[1]
+                thread_id = parts[2]
+                circ_ref = parts[3]
                 if not circ_ref.startswith("circ:"):
                     log(f"send-reply: expected circ:ref, got: {circ_ref}")
                     errors += 1
                     continue
                 ref = circ_ref[5:]  # strip "circ:"
-                ok = handle_send_reply(thread_id, ref)
+                ok = handle_send_reply(reply_to, thread_id, ref)
                 if ok:
                     processed += 1
                 else:
