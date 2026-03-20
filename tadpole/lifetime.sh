@@ -54,6 +54,7 @@ GANGLION_DB=$TDIR/ganglion.db
 BODY_PART=test
 CIRC_LOCAL_ONLY=1
 CIRC_DIR=$TDIR/.circ
+# brain/comms/eye excluded: they need external services (claude CLI, gmail, GAS bridge)
 ORGANS=organs/heart:ganglion:organs/tail:organs/lymph:organs/stomach:organs/hippocampus
 MEMORY_DB=$TDIR/organs/hippocampus/memory.db
 EOF
@@ -221,6 +222,52 @@ if [ "$total" = "2" ]; then
   pass "hippocampus deduplicates by content hash"
 else
   fail "dedup should keep count at 2, got: $total"
+fi
+
+# ===================================================================
+#  PART 6: Comms organ structure check
+# ===================================================================
+
+COMMS="$TDIR/organs/comms"
+if [ -x "$COMMS/live.sh" ] && [ -f "$COMMS/organ.conf" ] && [ -f "$COMMS/comms.py" ]; then
+  pass "comms organ has correct structure (live.sh, organ.conf, comms.py)"
+else
+  fail "comms organ missing files"
+fi
+
+cadence=$(CADENCE=""; source "$COMMS/organ.conf"; echo "${CADENCE:-}")
+if [ "$cadence" = "1" ]; then
+  pass "comms organ cadence is 1 minute"
+else
+  fail "comms cadence should be 1, got: $cadence"
+fi
+
+# ===================================================================
+#  PART 7: Brain organ structure check
+# ===================================================================
+
+BRAIN="$TDIR/organs/brain"
+if [ -x "$BRAIN/live.sh" ] && [ -f "$BRAIN/organ.conf" ] && [ -f "$BRAIN/brain.py" ]; then
+  pass "brain organ has correct structure (live.sh, organ.conf, brain.py)"
+else
+  fail "brain organ missing files"
+fi
+
+brain_cadence=$(CADENCE=""; source "$BRAIN/organ.conf"; echo "${CADENCE:-}")
+if [ "$brain_cadence" = "15" ]; then
+  pass "brain organ cadence is 15 minutes"
+else
+  fail "brain cadence should be 15, got: $brain_cadence"
+fi
+
+# ===================================================================
+#  PART 8: Gmail muscle structure check
+# ===================================================================
+
+if [ -x "$BIN_ROOT/gmail" ]; then
+  pass "gmail muscle is executable"
+else
+  fail "gmail muscle not found or not executable"
 fi
 
 # ===================================================================
