@@ -16,6 +16,40 @@ Secrets resolved via local-secret:
   GAS_BRIDGE_KEY — env var or ~/lib/gas-bridge-key.txt
 """
 import json, os, sys, urllib.request
+from datetime import datetime
+from pathlib import Path
+
+
+def _log(action, args, result_snippet):
+    """Append one line to ~/.gas/logs/YYYY-MM-DD.txt. Never raises."""
+    try:
+        log_dir = Path.home() / ".gas" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        now = datetime.now()
+        log_file = log_dir / f"{now:%Y-%m-%d}.txt"
+        args_str = " ".join(args) if args else ""
+        line = f"{now:%H:%M:%S} {action} {args_str} -> {result_snippet}\n"
+        with open(log_file, "a") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
+def _snippet(body):
+    """Extract a short status snippet from a response body string."""
+    try:
+        obj = json.loads(body)
+        if isinstance(obj, dict):
+            if "error" in obj:
+                msg = str(obj["error"])[:80]
+                return f"error: {msg}"
+            if "status" in obj:
+                return f"status: {obj['status']}"
+        if isinstance(obj, list):
+            return f"list[{len(obj)}]"
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return "ok"
 
 def local_secret(name):
     """Resolve via local-secret utility."""
@@ -66,9 +100,12 @@ for arg in sys.argv[2:]:
 data = json.dumps(payload).encode()
 req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
 
+cli_args = sys.argv[2:]
+
 try:
     with urllib.request.urlopen(req, timeout=30) as resp:
         body = resp.read().decode()
+        _log(action, cli_args, _snippet(body))
         # Pretty-print if terminal, raw if piped
         if sys.stdout.isatty():
             try:
@@ -78,8 +115,11 @@ try:
         else:
             print(body)
 except urllib.error.HTTPError as e:
-    print(json.dumps({"error": f"HTTP {e.code}", "body": e.read().decode()[:200]}))
+    err_body = e.read().decode()[:200]
+    _log(action, cli_args, f"HTTP {e.code}")
+    print(json.dumps({"error": f"HTTP {e.code}", "body": err_body}))
     sys.exit(1)
 except Exception as e:
+    _log(action, cli_args, f"exception: {str(e)[:80]}")
     print(json.dumps({"error": str(e)}))
     sys.exit(1)
