@@ -38,7 +38,7 @@ trap 'kill $MQTT_PID 2>/dev/null; rm -rf "$TDIR"' EXIT
 cp -r "$SCRIPT_DIR/organs" "$SCRIPT_DIR/life.conf" "$TDIR/"
 cp -r "$BIN_ROOT/ganglion" "$TDIR/ganglion"
 cp -r "$BIN_ROOT/comms" "$TDIR/comms"
-cp "$SCRIPT_DIR/organ_lib.py" "$TDIR/"
+cp "$BIN_ROOT/organ_lib.py" "$TDIR/"
 chmod +x "$TDIR/organs/"*/live.sh "$TDIR/ganglion/live.sh" "$TDIR/comms/live.sh"
 
 MQTT_PORT=$(free-port)

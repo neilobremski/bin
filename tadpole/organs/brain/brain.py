@@ -24,8 +24,12 @@ from pathlib import Path
 DIR = Path(__file__).resolve().parent
 CONF_DIR = os.environ.get("CONF_DIR", str(DIR.parent.parent))
 
-# Make organ_lib importable
-sys.path.insert(0, str(Path(CONF_DIR)))
+# organ_lib.py lives at BIN_ROOT (top-level). Spark sets PYTHONPATH.
+# Fallback for manual testing: walk up from brain/ to find organ_lib.py
+for _p in [DIR.parent.parent.parent, Path(CONF_DIR).parent, Path(CONF_DIR)]:
+    if (_p / "organ_lib.py").exists():
+        sys.path.insert(0, str(_p))
+        break
 import organ_lib
 
 SYSTEM_PROMPT = (
