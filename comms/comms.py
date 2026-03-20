@@ -16,7 +16,9 @@ import sys
 from pathlib import Path
 
 DIR = Path(__file__).resolve().parent
-CONF_DIR = os.environ.get("CONF_DIR", str(DIR.parent.parent))
+# CONF_DIR is set by spark.sh — points to the organism (e.g., tadpole/)
+# Fallback is for manual testing only; organ_lib.py must be at $CONF_DIR/
+CONF_DIR = os.environ.get("CONF_DIR", "")
 
 # Make organ_lib importable
 sys.path.insert(0, str(Path(CONF_DIR)))

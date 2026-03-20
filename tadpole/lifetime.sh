@@ -34,10 +34,11 @@ wait_for() {
 TDIR=$(mktemp -d)
 trap 'kill $MQTT_PID 2>/dev/null; rm -rf "$TDIR"' EXIT
 
-# Copy organs and ganglion into test dir
+# Copy organs, ganglion, and comms into test dir
 cp -r "$SCRIPT_DIR/organs" "$SCRIPT_DIR/life.conf" "$TDIR/"
 cp -r "$BIN_ROOT/ganglion" "$TDIR/ganglion"
-chmod +x "$TDIR/organs/"*/live.sh "$TDIR/ganglion/live.sh"
+cp -r "$BIN_ROOT/comms" "$TDIR/comms"
+chmod +x "$TDIR/organs/"*/live.sh "$TDIR/ganglion/live.sh" "$TDIR/comms/live.sh"
 
 MQTT_PORT=$(free-port)
 echo "listener $MQTT_PORT 0.0.0.0" > "$TDIR/mosquitto.conf"
@@ -228,7 +229,7 @@ fi
 #  PART 6: Comms organ structure check
 # ===================================================================
 
-COMMS="$TDIR/organs/comms"
+COMMS="$TDIR/comms"
 if [ -x "$COMMS/live.sh" ] && [ -f "$COMMS/organ.conf" ] && [ -f "$COMMS/comms.py" ]; then
   pass "comms organ has correct structure (live.sh, organ.conf, comms.py)"
 else
