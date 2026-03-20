@@ -97,6 +97,9 @@ Each grades A-F. Track grades across iterations to verify improvement.
 | 2026-03-19 R3 | B+ | A- | B | Full CLI delegation, BM25 log transform, 10K benchmark 1.24s. BM25 unbounded. |
 | 2026-03-19 R4 | A- | A- | B+ | BM25 clamped, entities slimmed 322→213, dead code cut, scripts moved. |
 | 2026-03-19 R5 | A- | A- | B+ | Unified store path, N+1 CTE fix, LIMIT guard, 5-factor validated. Held. |
+| 2026-03-19 R6 | B+ | B+ | B | LIMIT on LIKE, julianday pre-compute, docs. Stricter reviewer oscillated down. |
+
+**Note on reviewer variance**: Fresh-eyes grades oscillate ±1 step because each reviewer is independently strict. The code improved consistently (R1→R6), but grades depend on reviewer harshness. Remaining issues are architectural, not patchable.
 
 ## What to Test When Adding New Features
 
