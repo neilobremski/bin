@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# small-llm — lightweight LLM inference for organs.
+# Uses Ollama by default, configurable via SMALL_LLM_CMD.
+#
+# Usage: small-llm "prompt"
+#        echo "prompt" | small-llm -
+#        small-llm -s "system prompt" "user prompt"
+#
+# Environment:
+#   SMALL_LLM_CMD    — override command (default: ollama run qwen2.5:3b)
+#   SMALL_LLM_MODEL  — override model (default: qwen2.5:3b)
+set -euo pipefail
+
+MODEL="${SMALL_LLM_MODEL:-qwen2.5:3b}"
+CMD="${SMALL_LLM_CMD:-}"
+
+usage() {
+  echo "Usage: small-llm \"prompt\"" >&2
+  echo "       echo \"prompt\" | small-llm -" >&2
+  echo "       small-llm -s \"system prompt\" \"user prompt\"" >&2
+  exit 1
+}
+
+[ $# -lt 1 ] && usage
+
+system_prompt=""
+if [ "$1" = "-s" ]; then
+  shift
+  system_prompt="$1"; shift
+fi
+
+# Get the prompt
+if [ "$1" = "-" ]; then
+  prompt=$(cat)
+else
+  prompt="$*"
+fi
+
+[ -z "$prompt" ] && usage
+
+# If custom command is set, use it
+if [ -n "$CMD" ]; then
+  if [ -n "$system_prompt" ]; then
+    echo "$system_prompt
+
+$prompt" | $CMD
+  else
+    echo "$prompt" | $CMD
+  fi
+  exit $?
+fi
+
+# Default: use Ollama API (non-streaming, structured)
+if command -v curl >/dev/null 2>&1; then
+  # Build JSON payload
+  if [ -n "$system_prompt" ]; then
+    full_prompt="$system_prompt
+
+$prompt"
+  else
+    full_prompt="$prompt"
+  fi
+
+  response=$(curl -s --max-time 120 http://localhost:11434/api/generate \
+    -d "$(python3 -c "
+import json, sys
+print(json.dumps({
+    'model': sys.argv[1],
+    'prompt': sys.argv[2],
+    'stream': False,
+    'options': {'num_predict': 256}
+}))
+" "$MODEL" "$full_prompt")")
+
+  echo "$response" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get('response', '').strip())
+except Exception:
+    print('error: failed to parse response', file=sys.stderr)
+    sys.exit(1)
+"
+else
+  # Fallback: pipe directly to ollama
+  if [ -n "$system_prompt" ]; then
+    echo "$system_prompt
+
+$prompt" | ollama run "$MODEL" 2>/dev/null
+  else
+    echo "$prompt" | ollama run "$MODEL" 2>/dev/null
+  fi
+fi

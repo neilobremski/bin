@@ -2,7 +2,7 @@
 
 Life is brutally simple.
 
-A tadpole is the simplest organism that proves the life system works. It has six organs, one nervous system, and a short, eventful life.
+A tadpole is the simplest organism that proves the life system works. It has seven organs, one nervous system, and a short, eventful life.
 
 ## The Lifetime Story
 
@@ -18,7 +18,9 @@ A tadpole's life goes like this:
 
 5. **It can be fed by a human.** The eye organ watches a Google Sheet. When you type a command ("eat", "swim now"), the eye delivers it as stimulus to the right organ. Health status is written back to the sheet so you can watch the tadpole respond in real time. This proves the organism can interact with the outside world.
 
-`lifetime.sh` tests chapters 1-4 automatically. Chapter 5 is interactive — run the tadpole continuously and feed it through the spreadsheet.
+6. **It remembers.** The hippocampus stores memories in SQLite, deduplicates them, and consolidates over time. Other organs send memories via stimulus (`remember: ate a big meal`). The brain (future) queries memory directly. This proves an organism can accumulate experience across spark cycles.
+
+`lifetime.sh` tests chapters 1-4 automatically. Chapters 5-6 are interactive.
 
 ## Organs
 
@@ -26,10 +28,43 @@ A tadpole's life goes like this:
 |-------|------|---------|
 | heart | Beats, writes health | 1 min |
 | ganglion | Scans health, maintains registry, routes signals | 1 min |
+| hippocampus | Stores and consolidates memories (SQLite + FTS5) | 1 min |
 | eye | Reads commands from Google Sheet, writes health back | 1 min |
 | tail | Swims when told to (dormant until stimulus) | none |
 | stomach | Digests food into circulatory payload (dormant until stimulus) | none |
 | lymph | Scans health, cleans overflows | 1 min |
+
+## Memory
+
+The hippocampus owns `memory.db` — a SQLite database with FTS5 full-text search. Other organs interact through stimulus or the `memories` CLI (a Python script with argparse):
+
+```bash
+# Store a memory (via nervous system)
+stimulus send hippocampus "remember: the stomach ate meal 3"
+stimulus send hippocampus "remember important: learned to swim faster"
+stimulus send hippocampus "remember critical: human fed me for the first time"
+
+# Store directly (same body part, fast path)
+memories store "the tail went splish splash"
+memories store -i 8 "this food was especially good"
+memories store -c food "ate algae at 09:30"
+
+# Search memories (smart ranking: relevance x importance x recency)
+memories search "food"
+memories recent 5
+memories important 8
+memories stats
+```
+
+The brain (future organ) reads `memory.db` directly — no network round-trip, no stimulus delay. This is high-bandwidth local access, same as the ganglion reading `health.txt` files.
+
+### Optional LLM Integration
+
+Set `HIPPOCAMPUS_USE_LLM=1` to enable small-llm powered features:
+- **Auto-importance scoring** — memories without explicit importance get rated by the LLM
+- **Similarity detection** — catches semantic duplicates beyond exact hash matching
+
+Off by default. Without it, the hippocampus is pure SQLite — fast and predictable.
 
 ## Running
 
@@ -38,7 +73,7 @@ A tadpole's life goes like this:
 cd tadpole
 ./lifetime.sh
 
-# Interactive mode (chapter 5) — feed it through the spreadsheet
+# Interactive mode (chapters 5-6) — feed it through the spreadsheet
 SPARK_INTERVAL=10 ../life/spark-loop.sh
 ```
 
@@ -50,9 +85,7 @@ The eye reads commands from a Google Sheet named "Tadpole" (created automaticall
 |---------|--------|-----------|----------|
 | eat | stomach | yes | ok yum yum (meal 1) |
 | swim now | tail | yes | ok splish splash |
-| eat | stomach | | |
-
-Write a command in column A, target organ in column B. The eye picks it up, delivers it as stimulus, and fills in the organ's actual response once it processes.
+| remember: I like algae | hippocampus | yes | ok 1 memories (stored 1) |
 
 ## Configuration
 

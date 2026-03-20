@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""memories — CLI for the hippocampus (memory organ).
+
+Store and recall memories. The hippocampus owns memory.db;
+this CLI provides the interface.
+
+Usage:
+    memories store "content"
+    memories store -i 8 "content"
+    memories store -c category "content"
+    memories search "query"
+    memories recent [count]
+    memories important [min_importance]
+    memories stats
+    memories entities              — list all entities
+    memories entity <id>           — show entity detail + linked memories
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+# Import from the hippocampus package — all data operations are delegated here.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tadpole", "organs", "hippocampus"))
+from retrieval import search, recent, by_importance, stats
+from storage import store, admit_memory
+from entities import get_entity_context, list_entities, get_entity_detail
+from schema import init_db, migrate
+import sqlite3
+
+DB_PATH = os.environ.get("MEMORY_DB", os.path.join(os.getcwd(), "organs", "hippocampus", "memory.db"))
+
+
+def get_db():
+    """Connect to memory.db with WAL mode and ensure schema is current."""
+    if not os.path.isfile(DB_PATH):
+        print(f"memories: no database at {DB_PATH}", file=sys.stderr)
+        sys.exit(1)
+    db = sqlite3.connect(DB_PATH)
+    db.execute("PRAGMA journal_mode=WAL")
+    migrate(db)
+    return db
+
+
+def cmd_store(args):
+    content = " ".join(args.content).strip()
+    if not content:
+        print("memories store: need content", file=sys.stderr)
+        sys.exit(1)
+
+    importance = args.importance
+    category = args.category
+
+    # Validate importance
+    if importance < 1 or importance > 10:
+        print("memories store: importance must be 1-10", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate category
+    if not re.match(r'^[a-zA-Z0-9_-]+$', category):
+        print("memories store: invalid category", file=sys.stderr)
+        sys.exit(1)
+
+    # Dual-write: direct DB + stimulus. The stimulus path ensures remote
+    # body parts receive the memory even if this CLI can't reach the DB.
+    # The hash dedup in hippocampus handles the double-arrival gracefully.
+    try:
+        if importance >= 10:
+            msg = f"remember critical: {content}"
+        elif importance >= 8:
+            msg = f"remember important: {content}"
+        else:
+            msg = f"remember {category}: {content}"
+        subprocess.run(
+            ["stimulus", "send", "hippocampus", msg],
+            capture_output=True, timeout=5
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Direct store if DB exists (fast path, same body part)
+    if not os.path.isfile(DB_PATH):
+        print("queued (hippocampus will process next cycle)")
+        return
+
+    db = get_db()
+
+    # Admission control
+    should_store, importance, category = admit_memory(content, importance, category)
+    if not should_store:
+        print("rejected (admission control)")
+        db.close()
+        return
+
+    # Store via hippocampus storage module (handles dedup, hashing, difficulty, etc.)
+    mid = store(db, content, importance, category, source="cli")
+
+    if mid is None:
+        db.commit()
+        print("exists (access bumped)")
+    else:
+        # Entity extraction now happens inside store() — single code path.
+        db.commit()
+        print("stored")
+
+    db.close()
+
+
+def cmd_search(args):
+    query = " ".join(args.query).strip()
+    if not query:
+        print("memories search: need query", file=sys.stderr)
+        sys.exit(1)
+
+    db = get_db()
+
+    # Delegate to retrieval.search() — handles tiered FTS, composite scoring, FSRS updates
+    results = search(db, query, limit=10)
+
+    result_ids = []
+    for r in results:
+        mid = r[0]
+        result_ids.append(mid)
+        # r = (id, content, importance, category, source, created_at, accessed_at, access_count, rank, stability_days)
+        content = r[1]
+        imp = r[2]
+        cat = r[3]
+        created = r[5]
+        access_count = r[7]
+        line = f"{content}\t{imp}\t{cat}\t{created}\t{access_count}"
+        # Check for tags
+        tags_row = db.execute("SELECT tags FROM memories WHERE id=?", (mid,)).fetchone()
+        if tags_row and tags_row[0]:
+            line += f"\ttags={tags_row[0]}"
+        print(line)
+
+    # Show entity context if results reference entities
+    if result_ids:
+        entity_context = get_entity_context(db, result_ids)
+        if entity_context:
+            print("\n--- Entity Context ---")
+            for block in entity_context:
+                print(block)
+
+    db.close()
+
+
+def cmd_recent(args):
+    db = get_db()
+    rows = recent(db, limit=args.count)
+
+    for r in rows:
+        # r = (id, content, importance, category, source, created_at, accessed_at, access_count)
+        print(f"{r[1]}\t{r[2]}\t{r[3]}\t{r[5]}")
+
+    db.close()
+
+
+def cmd_important(args):
+    db = get_db()
+    rows = by_importance(db, limit=20, min_importance=args.min_importance)
+
+    for r in rows:
+        # r = (id, content, importance, category, source, created_at)
+        print(f"{r[1]}\t{r[2]}\t{r[3]}\t{r[5]}")
+
+    db.close()
+
+
+def cmd_entities(args):
+    db = get_db()
+
+    entities = list_entities(db)
+
+    if not entities:
+        print("no entities")
+    else:
+        for ent in entities:
+            print(f"{ent['id']}\t{ent['name']}\t{ent['entity_type']}\t"
+                  f"{ent['link_count']} memories\t{ent['summary']}")
+
+    db.close()
+
+
+def cmd_entity(args):
+    db = get_db()
+
+    eid = args.entity_id
+    detail = get_entity_detail(db, eid)
+
+    if not detail:
+        print(f"entity '{eid}' not found", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+
+    print(f"Entity: {detail['name']} ({detail['id']})")
+    print(f"Type: {detail['entity_type']}")
+    print(f"Aliases: {detail['aliases']}")
+    print(f"Summary: {detail['summary']}")
+
+    linked = detail["linked_memories"]
+    if linked:
+        print(f"\nLinked memories ({len(linked)}):")
+        for m in linked:
+            print(f"  [{m['importance']}] ({m['category']}) {m['content'][:120]}")
+    else:
+        print("\nNo linked memories.")
+
+    db.close()
+
+
+def cmd_stats(args):
+    db = get_db()
+
+    # Delegate to retrieval.stats()
+    s = stats(db)
+
+    print(f"Total: {s['total']} ({s['active']} active)")
+    print(f"Avg importance: {s['avg_importance']}")
+
+    # Tier stats (hot_count is always present from stats())
+    cold = s['active'] - s['hot_count']
+    if cold > 0 or s['hot_count'] != s['active']:
+        print(f"Tiers: {s['hot_count']} hot, {cold} cold")
+
+    # Entity stats
+    try:
+        ent_count = db.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+        link_count = db.execute(
+            "SELECT COUNT(*) FROM entity_memories WHERE valid_until IS NULL"
+        ).fetchone()[0]
+        print(f"Entities: {ent_count} ({link_count} links)")
+    except sqlite3.OperationalError:
+        pass
+
+    print("Categories:")
+    for c, n in s['categories']:
+        print(f"  {c}: {n}")
+
+    db.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="memories",
+        description="CLI for the hippocampus (memory organ)."
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # store
+    p_store = sub.add_parser("store", help="Store a memory")
+    p_store.add_argument("-i", "--importance", type=int, default=5,
+                         help="Importance 1-10 (default: 5)")
+    p_store.add_argument("-c", "--category", default="general",
+                         help="Category (default: general)")
+    p_store.add_argument("content", nargs="+", help="Memory content")
+
+    # search
+    p_search = sub.add_parser("search", help="Search memories (FTS5 + smart ranking)")
+    p_search.add_argument("query", nargs="+", help="Search query")
+
+    # recent
+    p_recent = sub.add_parser("recent", help="Show recent memories")
+    p_recent.add_argument("count", nargs="?", type=int, default=10,
+                          help="Number of memories (default: 10)")
+
+    # important
+    p_important = sub.add_parser("important", help="Show high-importance memories")
+    p_important.add_argument("min_importance", nargs="?", type=int, default=7,
+                             help="Minimum importance (default: 7)")
+
+    # stats
+    sub.add_parser("stats", help="Memory statistics")
+
+    # entities
+    sub.add_parser("entities", help="List all entities")
+
+    # entity
+    p_entity = sub.add_parser("entity", help="Show entity detail + linked memories")
+    p_entity.add_argument("entity_id", help="Entity ID")
+
+    args = parser.parse_args()
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(1)
+
+    dispatch = {
+        "store": cmd_store,
+        "search": cmd_search,
+        "recent": cmd_recent,
+        "important": cmd_important,
+        "stats": cmd_stats,
+        "entities": cmd_entities,
+        "entity": cmd_entity,
+    }
+    dispatch[args.command](args)
+
+
+if __name__ == "__main__":
+    main()
