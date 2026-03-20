@@ -1,0 +1,883 @@
+#!/usr/bin/env python3
+"""gmail — CLI muscle for Gmail access.
+
+Abstracts Gmail via GAS bridge, with automatic fallback to Gmail REST API
+when the bridge is rate-limited.
+
+Usage:
+    gmail search <query> [--count N]
+    gmail get <id>
+    gmail reply <id> --body "text" [--format markdown|plain] [--html "<html>"]
+    gmail reply <id> --body-file <path> [--format markdown|plain]
+    gmail send <to> --subject "text" --body "text" [--format markdown|plain]
+    gmail send <to> --subject "text" --html "<html>"
+    gmail label <id> --add LABEL
+    gmail label <id> --remove LABEL
+
+Secrets resolved via local-secret:
+    GAS_BRIDGE_URL, GAS_BRIDGE_KEY
+"""
+import argparse
+import base64
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+import urllib.error
+import urllib.parse
+from email.mime.text import MIMEText
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Mock mode — filesystem-based mailbox for testing
+# ---------------------------------------------------------------------------
+
+def _mock_dir():
+    """Return Path to mock dir, or None if not in mock mode."""
+    d = os.environ.get("GMAIL_MOCK_DIR")
+    return Path(d) if d else None
+
+
+def _mock_next_id(mock):
+    """Return the next integer ID as a string, incrementing the counter."""
+    id_file = mock / "next_id.txt"
+    try:
+        n = int(id_file.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        n = 1
+    id_file.write_text(str(n + 1) + "\n")
+    return str(n)
+
+
+def _mock_search(args):
+    """Mock gmail search: filter inbox/*.json by query tokens."""
+    mock = _mock_dir()
+    inbox = mock / "inbox"
+    if not inbox.is_dir():
+        print("[]")
+        return
+
+    query = args.query
+    results = []
+    for p in sorted(inbox.glob("*.json")):
+        try:
+            email = json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        labels = email.get("labels", [])
+
+        # Filter: is:unread
+        if "is:unread" in query and "UNREAD" not in labels:
+            continue
+
+        # Filter: label:X
+        label_ok = True
+        for m in re.finditer(r'label:(\S+)', query):
+            if m.group(1) not in labels:
+                label_ok = False
+                break
+        if not label_ok:
+            continue
+
+        results.append({
+            "id": email.get("id", p.stem),
+            "from": email.get("from", ""),
+            "subject": email.get("subject", ""),
+            "snippet": email.get("body", "")[:100],
+        })
+
+    output(results[:args.count])
+
+
+def _mock_get(args):
+    """Mock gmail get: read inbox/<id>.json."""
+    mock = _mock_dir()
+    p = mock / "inbox" / f"{args.id}.json"
+    if not p.exists():
+        print("{}")
+        return
+    try:
+        email = json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        print("{}")
+        return
+    output({
+        "id": email.get("id", args.id),
+        "from": email.get("from", ""),
+        "subject": email.get("subject", ""),
+        "body": email.get("body", ""),
+    })
+
+
+def _mock_reply(args):
+    """Mock gmail reply: write to sent/, return status."""
+    mock = _mock_dir()
+    original_path = mock / "inbox" / f"{args.id}.json"
+    try:
+        original = json.loads(original_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        print('{"error": "original email not found"}', file=sys.stderr)
+        sys.exit(1)
+
+    if args.body_file:
+        body_text = Path(args.body_file).read_text()
+    elif args.body:
+        body_text = args.body
+    else:
+        print("error: --body or --body-file required", file=sys.stderr)
+        sys.exit(1)
+
+    new_id = _mock_next_id(mock)
+    sent_dir = mock / "sent"
+    sent_dir.mkdir(parents=True, exist_ok=True)
+    reply = {
+        "id": new_id,
+        "to": original.get("from", ""),
+        "subject": "Re: " + original.get("subject", ""),
+        "body": body_text,
+        "in_reply_to": args.id,
+    }
+    (sent_dir / f"{new_id}.json").write_text(json.dumps(reply))
+    output({"status": "sent", "id": new_id})
+
+
+def _mock_send(args):
+    """Mock gmail send: write to sent/, return status."""
+    mock = _mock_dir()
+
+    if args.body_file:
+        body_text = Path(args.body_file).read_text()
+    elif args.body:
+        body_text = args.body
+    else:
+        print("error: --body or --body-file required", file=sys.stderr)
+        sys.exit(1)
+
+    new_id = _mock_next_id(mock)
+    sent_dir = mock / "sent"
+    sent_dir.mkdir(parents=True, exist_ok=True)
+    email = {
+        "id": new_id,
+        "to": args.to,
+        "subject": args.subject,
+        "body": body_text,
+    }
+    (sent_dir / f"{new_id}.json").write_text(json.dumps(email))
+    output({"status": "sent", "id": new_id})
+
+
+def _mock_label(args):
+    """Mock gmail label: modify labels array in inbox/<id>.json."""
+    mock = _mock_dir()
+    p = mock / "inbox" / f"{args.id}.json"
+    try:
+        email = json.loads(p.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        print('{"error": "email not found"}', file=sys.stderr)
+        sys.exit(1)
+
+    labels = email.get("labels", [])
+    if args.add and args.add not in labels:
+        labels.append(args.add)
+    if args.remove and args.remove in labels:
+        labels.remove(args.remove)
+    email["labels"] = labels
+    p.write_text(json.dumps(email))
+    output({"status": "ok"})
+
+
+# ---------------------------------------------------------------------------
+# Markdown-to-HTML converter (stdlib only, covers the 80% case)
+# ---------------------------------------------------------------------------
+
+def _md_to_html(md_text):
+    """Convert markdown text to HTML. Handles headers, bold, italic, links,
+    code blocks, inline code, lists, paragraphs, and line breaks."""
+    lines = md_text.split('\n')
+    html_parts = []
+    in_code_block = False
+    in_ul = False
+    in_ol = False
+    paragraph_lines = []
+
+    def _flush_paragraph():
+        if paragraph_lines:
+            text = '\n'.join(paragraph_lines)
+            text = _inline_format(text)
+            html_parts.append(f'<p>{text}</p>')
+            paragraph_lines.clear()
+
+    def _close_list():
+        nonlocal in_ul, in_ol
+        if in_ul:
+            html_parts.append('</ul>')
+            in_ul = False
+        if in_ol:
+            html_parts.append('</ol>')
+            in_ol = False
+
+    def _inline_format(text):
+        """Apply inline formatting: bold, italic, links, images, inline code."""
+        # Inline code (must come before bold/italic to avoid conflicts)
+        text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+        # Images ![alt](url) — must come before links
+        text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)',
+                       r'<img src="\2" alt="\1" style="max-width:100%;height:auto">', text)
+        # Links [text](url)
+        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
+        # Bold **text** or __text__
+        text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+        text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
+        # Italic *text* or _text_ (but not inside words with underscores)
+        text = re.sub(r'(?<!\w)\*(.+?)\*(?!\w)', r'<em>\1</em>', text)
+        text = re.sub(r'(?<!\w)_(.+?)_(?!\w)', r'<em>\1</em>', text)
+        # Line breaks (two trailing spaces or explicit <br>)
+        text = re.sub(r'  \n', '<br>\n', text)
+        return text
+
+    for line in lines:
+        # Code block toggle
+        if line.strip().startswith('```'):
+            if in_code_block:
+                html_parts.append('</code></pre>')
+                in_code_block = False
+            else:
+                _flush_paragraph()
+                _close_list()
+                lang = line.strip()[3:].strip()
+                cls = f' class="language-{lang}"' if lang else ''
+                html_parts.append(f'<pre><code{cls}>')
+                in_code_block = True
+            continue
+
+        if in_code_block:
+            # Escape HTML inside code blocks
+            escaped = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            html_parts.append(escaped)
+            continue
+
+        stripped = line.strip()
+
+        # Blank line — flush paragraph and close lists
+        if not stripped:
+            _flush_paragraph()
+            _close_list()
+            continue
+
+        # Headers
+        header_match = re.match(r'^(#{1,6})\s+(.+)$', stripped)
+        if header_match:
+            _flush_paragraph()
+            _close_list()
+            level = len(header_match.group(1))
+            content = _inline_format(header_match.group(2))
+            html_parts.append(f'<h{level}>{content}</h{level}>')
+            continue
+
+        # Unordered list item
+        ul_match = re.match(r'^[-*+]\s+(.+)$', stripped)
+        if ul_match:
+            _flush_paragraph()
+            if in_ol:
+                html_parts.append('</ol>')
+                in_ol = False
+            if not in_ul:
+                html_parts.append('<ul>')
+                in_ul = True
+            content = _inline_format(ul_match.group(1))
+            html_parts.append(f'<li>{content}</li>')
+            continue
+
+        # Ordered list item
+        ol_match = re.match(r'^\d+\.\s+(.+)$', stripped)
+        if ol_match:
+            _flush_paragraph()
+            if in_ul:
+                html_parts.append('</ul>')
+                in_ul = False
+            if not in_ol:
+                html_parts.append('<ol>')
+                in_ol = True
+            content = _inline_format(ol_match.group(1))
+            html_parts.append(f'<li>{content}</li>')
+            continue
+
+        # Horizontal rule
+        if re.match(r'^[-*_]{3,}\s*$', stripped):
+            _flush_paragraph()
+            _close_list()
+            html_parts.append('<hr>')
+            continue
+
+        # Regular text — accumulate for paragraph
+        _close_list()
+        paragraph_lines.append(stripped)
+
+    # Flush remaining state
+    if in_code_block:
+        html_parts.append('</code></pre>')
+    _flush_paragraph()
+    _close_list()
+
+    return '\n'.join(html_parts)
+
+
+def _detect_mime(data):
+    """Detect image MIME type from magic bytes. Returns type or None."""
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        return 'image/png'
+    if data[:3] == b'\xff\xd8\xff':
+        return 'image/jpeg'
+    if data[:4] in (b'GIF8',):
+        return 'image/gif'
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'image/webp'
+    return None
+
+
+_IMAGE_MAX_RAW = 500 * 1024      # 500 KB per image (raw bytes)
+_IMAGE_TOTAL_B64 = 1024 * 1024   # 1 MB cumulative base64 budget
+
+
+def _resolve_circ_images(md_text):
+    """Replace ![alt](circ:HASH) with data-URI images in markdown text.
+
+    Calls circ-get to retrieve each image, detects MIME type from magic bytes,
+    base64-encodes the data, and substitutes a data URI. If retrieval or
+    detection fails, the image reference is replaced with the alt text.
+
+    Per-image limit: 500 KB raw. Total base64 budget: 1 MB. Exceeding either
+    falls back to alt text with a stderr warning.
+
+    Returns the modified markdown string.
+    """
+    pattern = re.compile(r'!\[([^\]]*)\]\(circ:([a-fA-F0-9]+)\)')
+    matches = list(pattern.finditer(md_text))
+    if not matches:
+        return md_text
+
+    circ_dir = Path(os.environ.get('CIRC_DIR', Path.home() / '.life' / 'circ'))
+    result = md_text
+    cumulative_b64 = 0
+
+    for match in reversed(matches):  # reverse to preserve offsets
+        alt = match.group(1)
+        circ_hash = match.group(2)
+        cache_path = circ_dir / circ_hash
+
+        # Ensure the file is cached locally
+        if not cache_path.exists():
+            try:
+                subprocess.run(
+                    ['circ-get', circ_hash],
+                    capture_output=True, timeout=15
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+        if not cache_path.exists():
+            # Could not retrieve — replace with alt text
+            print(f"gmail: warning: image circ:{circ_hash} could not be resolved (circ-get failed)", file=sys.stderr)
+            result = result[:match.start()] + alt + result[match.end():]
+            continue
+
+        data = cache_path.read_bytes()
+
+        # Per-image size limit
+        if len(data) > _IMAGE_MAX_RAW:
+            print(f"gmail: warning: image circ:{circ_hash} could not be resolved (exceeds {_IMAGE_MAX_RAW} byte limit: {len(data)} bytes)", file=sys.stderr)
+            result = result[:match.start()] + alt + result[match.end():]
+            continue
+
+        mime = _detect_mime(data)
+        if not mime:
+            print(f"gmail: warning: image circ:{circ_hash} could not be resolved (unrecognized image format)", file=sys.stderr)
+            result = result[:match.start()] + alt + result[match.end():]
+            continue
+
+        b64 = base64.b64encode(data).decode('ascii')
+
+        # Total budget check
+        if cumulative_b64 + len(b64) > _IMAGE_TOTAL_B64:
+            print(f"gmail: warning: image circ:{circ_hash} could not be resolved (cumulative base64 budget exceeded)", file=sys.stderr)
+            result = result[:match.start()] + alt + result[match.end():]
+            continue
+
+        cumulative_b64 += len(b64)
+        data_uri = f'data:{mime};base64,{b64}'
+        img_md = f'![{alt}]({data_uri})'
+        result = result[:match.start()] + img_md + result[match.end():]
+
+    return result
+
+
+def _wrap_html_email(html_body):
+    """Wrap HTML body in a clean email template with basic styling."""
+    return f"""\
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                 'Helvetica Neue', Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    color: #222;
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 20px;
+  }}
+  h1, h2, h3, h4, h5, h6 {{
+    margin-top: 1.2em;
+    margin-bottom: 0.4em;
+    color: #111;
+  }}
+  h1 {{ font-size: 1.6em; }}
+  h2 {{ font-size: 1.3em; }}
+  h3 {{ font-size: 1.1em; }}
+  p {{ margin: 0.8em 0; }}
+  a {{ color: #1a73e8; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  code {{
+    background: #f1f3f4;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.9em;
+  }}
+  pre {{
+    background: #f8f9fa;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    padding: 12px 16px;
+    overflow-x: auto;
+  }}
+  pre code {{
+    background: none;
+    padding: 0;
+    font-size: 0.85em;
+  }}
+  ul, ol {{ padding-left: 1.5em; }}
+  li {{ margin: 0.3em 0; }}
+  hr {{
+    border: none;
+    border-top: 1px solid #e0e0e0;
+    margin: 1.5em 0;
+  }}
+  strong {{ color: #111; }}
+</style>
+</head>
+<body>
+{html_body}
+</body>
+</html>"""
+
+
+_CIRC_IMG_RE = re.compile(r'!\[([^\]]*)\]\(circ:[a-fA-F0-9]+\)')
+
+
+def _strip_circ_images(text):
+    """Replace ![alt](circ:HASH) with just the alt text for plain text fallback."""
+    return _CIRC_IMG_RE.sub(r'\1', text)
+
+
+def _render_body(body_text, fmt, raw_html):
+    """Return (plain_text, html_or_none) based on format flags.
+
+    - raw_html provided: use it directly as HTML
+    - fmt='markdown': convert body_text to HTML, strip circ refs from plain text
+    - fmt='plain': no HTML
+    """
+    if raw_html:
+        return _strip_circ_images(body_text), raw_html
+    if fmt == 'markdown':
+        resolved = _resolve_circ_images(body_text)
+        inner = _md_to_html(resolved)
+        return _strip_circ_images(body_text), _wrap_html_email(inner)
+    return body_text, None
+
+
+# ---------------------------------------------------------------------------
+# GAS bridge helpers
+# ---------------------------------------------------------------------------
+
+def gas(*args):
+    """Call the gas CLI and return parsed JSON, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["gas"] + list(args),
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            err = result.stderr.strip() + result.stdout.strip()
+            # Detect rate limiting — trigger fallback
+            if "too many times" in err.lower() or "quota" in err.lower():
+                return _RATE_LIMITED
+            return None
+        return json.loads(result.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None
+
+
+# Sentinel for rate-limit detection
+_RATE_LIMITED = object()
+
+
+# ---------------------------------------------------------------------------
+# Gmail REST API fallback (direct token-based)
+# ---------------------------------------------------------------------------
+
+TOKEN_CACHE = Path.home() / ".gas" / "token.json"
+GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
+
+
+def _get_token():
+    """Return a valid access token, refreshing via gas if needed."""
+    # Check cache
+    if TOKEN_CACHE.exists():
+        try:
+            data = json.loads(TOKEN_CACHE.read_text())
+            if data.get("expires_at", 0) > time.time() + 60:
+                return data["access_token"]
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Refresh via gas
+    try:
+        result = subprocess.run(
+            ["gas", "token.get"], capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout)
+        token = data.get("access_token") or data.get("token")
+        if not token:
+            return None
+        # Cache it (assume 55 min lifetime if not specified)
+        expires_at = data.get("expires_at", time.time() + 3300)
+        TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        import tempfile as _tf
+        fd, tmp_path = _tf.mkstemp(dir=str(TOKEN_CACHE.parent), suffix='.tmp')
+        with os.fdopen(fd, 'w') as f:
+            json.dump({"access_token": token, "expires_at": expires_at}, f)
+        Path(tmp_path).rename(TOKEN_CACHE)
+        return token
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None
+
+
+def _gmail_request(path, method="GET", body=None):
+    """Make an authenticated Gmail REST API request."""
+    token = _get_token()
+    if not token:
+        print("error: could not obtain Gmail access token", file=sys.stderr)
+        return None
+
+    url = f"{GMAIL_API}/{path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        print(f"error: Gmail API HTTP {e.code}: {e.read().decode()[:200]}", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"error: Gmail API: {e}", file=sys.stderr)
+        return None
+
+
+def _rest_search(query, count):
+    """Search via Gmail REST API."""
+    q = urllib.parse.quote(query)
+    return _gmail_request(f"messages?q={q}&maxResults={count}")
+
+
+def _rest_get(msg_id):
+    """Get a message via Gmail REST API."""
+    return _gmail_request(f"messages/{msg_id}?format=full")
+
+
+def _rest_reply(msg_id, body_text):
+    """Reply to a thread via Gmail REST API."""
+    # First, get the original message for headers
+    original = _gmail_request(f"messages/{msg_id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Message-ID")
+    if not original:
+        return None
+
+    thread_id = original.get("threadId", "")
+    headers = {h["name"]: h["value"] for h in original.get("payload", {}).get("headers", [])}
+
+    reply_to = headers.get("From", "")
+    subject = headers.get("Subject", "")
+    if not subject.lower().startswith("re:"):
+        subject = f"Re: {subject}"
+    message_id = headers.get("Message-ID", "")
+
+    msg = MIMEText(body_text)
+    msg["To"] = reply_to
+    msg["Subject"] = subject
+    if message_id:
+        msg["In-Reply-To"] = message_id
+        msg["References"] = message_id
+
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    payload = {"raw": raw}
+    if thread_id:
+        payload["threadId"] = thread_id
+
+    return _gmail_request("messages/send", method="POST", body=payload)
+
+
+def _rest_label(msg_id, add=None, remove=None):
+    """Modify labels via Gmail REST API."""
+    body = {}
+    if add:
+        body["addLabelIds"] = [add]
+    if remove:
+        body["removeLabelIds"] = [remove]
+    return _gmail_request(f"messages/{msg_id}/modify", method="POST", body=body)
+
+
+# ---------------------------------------------------------------------------
+# Command implementations (GAS primary, REST fallback)
+# ---------------------------------------------------------------------------
+
+def cmd_search(args):
+    """Search Gmail."""
+    if _mock_dir():
+        return _mock_search(args)
+    result = gas("gmail.search", f"query={args.query}", f"count={args.count}")
+
+    if result is _RATE_LIMITED:
+        result = _rest_search(args.query, args.count)
+
+    if not result:
+        print("[]")
+        return
+
+    output(result)
+
+
+def cmd_get(args):
+    """Get a full email."""
+    if _mock_dir():
+        return _mock_get(args)
+    result = gas("gmail.get", f"id={args.id}")
+
+    if result is _RATE_LIMITED:
+        result = _rest_get(args.id)
+
+    if not result:
+        print("{}")
+        return
+
+    output(result)
+
+
+def cmd_reply(args):
+    """Reply to an email thread."""
+    if _mock_dir():
+        return _mock_reply(args)
+    if args.body_file:
+        try:
+            body_text = Path(args.body_file).read_text()
+        except Exception as e:
+            print(f"error: could not read body file: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif args.body:
+        body_text = args.body
+    else:
+        print("error: --body or --body-file required", file=sys.stderr)
+        sys.exit(1)
+
+    fmt = getattr(args, 'format', 'markdown')
+    raw_html = getattr(args, 'html', None)
+    plain_text, html_content = _render_body(body_text, fmt, raw_html)
+
+    # Cap total arg size to avoid OS limits (data URI images can be large)
+    total_size = len(plain_text) + (len(html_content) if html_content else 0)
+    if total_size > 100000:
+        if html_content:
+            print("gmail: warning: HTML content dropped (REST fallback is plain-text only)", file=sys.stderr)
+        result = _rest_reply(args.id, plain_text)
+    else:
+        gas_args = ["gmail.reply", f"id={args.id}", f"body={plain_text}"]
+        if html_content:
+            gas_args.append(f"html={html_content}")
+        result = gas(*gas_args)
+        if result is _RATE_LIMITED:
+            if html_content:
+                print("gmail: warning: HTML content dropped (REST fallback is plain-text only)", file=sys.stderr)
+            result = _rest_reply(args.id, plain_text)
+
+    if not result:
+        print('{"error": "reply failed"}', file=sys.stderr)
+        sys.exit(1)
+
+    output(result)
+
+
+def cmd_send(args):
+    """Send a new email."""
+    if _mock_dir():
+        return _mock_send(args)
+    if args.body_file:
+        try:
+            body_text = Path(args.body_file).read_text()
+        except Exception as e:
+            print(f"error: could not read body file: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif args.body:
+        body_text = args.body
+    else:
+        print("error: --body or --body-file required", file=sys.stderr)
+        sys.exit(1)
+
+    fmt = getattr(args, 'format', 'markdown')
+    raw_html = getattr(args, 'html', None)
+    plain_text, html_content = _render_body(body_text, fmt, raw_html)
+
+    gas_args = ["gmail.send", f"to={args.to}"]
+    if args.subject:
+        gas_args.append(f"subject={args.subject}")
+
+    total_size = len(plain_text) + (len(html_content) if html_content else 0)
+    if total_size > 100000:
+        # TODO: REST API fallback for large sends
+        print('{"error": "body too large for GAS bridge, REST send not yet implemented"}', file=sys.stderr)
+        sys.exit(1)
+
+    gas_args.append(f"body={plain_text}")
+    if html_content:
+        gas_args.append(f"html={html_content}")
+
+    result = gas(*gas_args)
+
+    if result is _RATE_LIMITED:
+        # TODO: REST API fallback for sends
+        print('{"error": "rate limited, REST send not yet implemented"}', file=sys.stderr)
+        sys.exit(1)
+
+    if not result:
+        print('{"error": "send failed"}', file=sys.stderr)
+        sys.exit(1)
+
+    output(result)
+
+
+def cmd_label(args):
+    """Add or remove a label."""
+    if _mock_dir():
+        return _mock_label(args)
+    if not args.add and not args.remove:
+        print("error: --add or --remove required", file=sys.stderr)
+        sys.exit(1)
+
+    gas_args = ["gmail.label", f"id={args.id}"]
+    if args.add:
+        gas_args.append(f"add={args.add}")
+    if args.remove:
+        gas_args.append(f"remove={args.remove}")
+
+    result = gas(*gas_args)
+
+    if result is _RATE_LIMITED:
+        result = _rest_label(args.id, add=args.add, remove=args.remove)
+
+    if not result:
+        print('{"error": "label operation failed"}', file=sys.stderr)
+        sys.exit(1)
+
+    output(result)
+
+
+# ---------------------------------------------------------------------------
+# Output helper
+# ---------------------------------------------------------------------------
+
+def output(data):
+    """Print JSON — pretty if TTY, compact if piped."""
+    if sys.stdout.isatty():
+        print(json.dumps(data, indent=2))
+    else:
+        print(json.dumps(data))
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="gmail",
+        description="Gmail CLI muscle — GAS bridge with REST API fallback",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # search
+    p_search = sub.add_parser("search", help="Search emails")
+    p_search.add_argument("query", help="Gmail search query")
+    p_search.add_argument("--count", type=int, default=10, help="Max results")
+
+    # get
+    p_get = sub.add_parser("get", help="Get full email by ID")
+    p_get.add_argument("id", help="Message or thread ID")
+
+    # reply
+    p_reply = sub.add_parser("reply", help="Reply to an email thread")
+    p_reply.add_argument("id", help="Thread/message ID to reply to")
+    p_reply.add_argument("--body", help="Reply body text")
+    p_reply.add_argument("--body-file", help="File containing reply body")
+    p_reply.add_argument("--format", choices=["markdown", "plain"], default="markdown",
+                         help="Body format: markdown (default) converts to HTML, plain sends as-is")
+    p_reply.add_argument("--html", help="Pre-rendered HTML to send (bypasses --format)")
+
+    # send
+    p_send = sub.add_parser("send", help="Send a new email")
+    p_send.add_argument("to", help="Recipient email address")
+    p_send.add_argument("--subject", default="", help="Email subject")
+    p_send.add_argument("--body", help="Email body text")
+    p_send.add_argument("--body-file", help="File containing email body")
+    p_send.add_argument("--format", choices=["markdown", "plain"], default="markdown",
+                         help="Body format: markdown (default) converts to HTML, plain sends as-is")
+    p_send.add_argument("--html", help="Pre-rendered HTML to send (bypasses --format)")
+
+    # label
+    p_label = sub.add_parser("label", help="Manage labels on a message")
+    p_label.add_argument("id", help="Message ID")
+    p_label.add_argument("--add", help="Label to add")
+    p_label.add_argument("--remove", help="Label to remove")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    dispatch = {
+        "search": cmd_search,
+        "get": cmd_get,
+        "reply": cmd_reply,
+        "send": cmd_send,
+        "label": cmd_label,
+    }
+    dispatch[args.command](args)
+
+
+if __name__ == "__main__":
+    main()
