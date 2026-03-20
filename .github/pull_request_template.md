@@ -3,6 +3,7 @@
 ### Code Quality
 - [ ] No `__pycache__` or `.pyc` files in git
 - [ ] No hardcoded secrets (API keys, passwords, bridge URLs, MQTT creds)
+- [ ] No PII in committed code or PR description (real emails, phone numbers — use example.com)
 - [ ] No SQL string interpolation (all queries use `?` parameters)
 - [ ] No raw `except:` without specific exception types
 - [ ] No dead imports or unused variables
