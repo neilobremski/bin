@@ -34,10 +34,11 @@ wait_for() {
 TDIR=$(mktemp -d)
 trap 'kill $MQTT_PID 2>/dev/null; rm -rf "$TDIR"' EXIT
 
-# Copy organs, ganglion, and comms into test dir
+# Copy organs, ganglion, comms, and shared libs into test dir
 cp -r "$SCRIPT_DIR/organs" "$SCRIPT_DIR/life.conf" "$TDIR/"
 cp -r "$BIN_ROOT/ganglion" "$TDIR/ganglion"
 cp -r "$BIN_ROOT/comms" "$TDIR/comms"
+cp "$SCRIPT_DIR/organ_lib.py" "$TDIR/"
 chmod +x "$TDIR/organs/"*/live.sh "$TDIR/ganglion/live.sh" "$TDIR/comms/live.sh"
 
 MQTT_PORT=$(free-port)
@@ -270,6 +271,118 @@ if [ -x "$BIN_ROOT/gmail" ]; then
 else
   fail "gmail muscle not found or not executable"
 fi
+
+# ===================================================================
+#  PART 9: Comms→Gmail mock integration (check-email + send-reply)
+# ===================================================================
+
+# Setup mock mailbox
+MOCK_GMAIL="$TDIR/mock_gmail"
+mkdir -p "$MOCK_GMAIL/inbox" "$MOCK_GMAIL/sent"
+python3 -c "
+import json; from pathlib import Path
+email = {'id': 'test001', 'from': 'tester@example.com', 'subject': 'Hello Tadpole',
+         'body': 'Hi there! What do you think about the weather?', 'labels': ['UNREAD', 'Tadpole']}
+Path('$MOCK_GMAIL/inbox/test001.json').write_text(json.dumps(email))
+Path('$MOCK_GMAIL/next_id.txt').write_text('1\n')
+"
+
+# Ensure brain organ dir exists (comms writes stimulus to it)
+BRAIN="$TDIR/organs/brain"
+mkdir -p "$BRAIN"
+
+# Reset comms for this test
+COMMS="$TDIR/comms"
+> "$COMMS/health.txt"
+
+# Write check-email stimulus to comms
+echo "check-email brain" > "$COMMS/stimulus.txt"
+
+# Run comms directly with mock gmail and full test env
+export GMAIL_MOCK_DIR="$MOCK_GMAIL"
+(cd "$TDIR" && \
+  CONF_DIR="$TDIR" \
+  ORGANS="organs/heart:ganglion:organs/tail:organs/lymph:organs/stomach:organs/hippocampus:comms:organs/brain" \
+  CIRC_DIR="$TDIR/.circ" \
+  CIRC_LOCAL_ONLY=1 \
+  MEMORY_DB="$TDIR/organs/hippocampus/memory.db" \
+  python3 "$COMMS/comms.py") 2>/dev/null || true
+
+# Check: brain should have received new-email stimulus
+if grep -q "new-email test001 circ:" "$BRAIN/stimulus.txt" 2>/dev/null; then
+  pass "comms delivered new-email to brain via mock gmail"
+else
+  fail "brain stimulus.txt missing new-email, got: $(cat "$BRAIN/stimulus.txt" 2>/dev/null || echo 'empty')"
+fi
+
+# Check: circ file should exist with email payload
+circ_ref=$(grep -o "circ:[a-f0-9]*" "$BRAIN/stimulus.txt" 2>/dev/null | head -1 | cut -d: -f2)
+if [ -n "$circ_ref" ] && [ -f "$TDIR/.circ/$circ_ref" ]; then
+  pass "email payload stored in circ"
+else
+  fail "circ file missing (ref=$circ_ref)"
+fi
+
+# Verify circ payload contains the email fields
+if [ -n "$circ_ref" ]; then
+  circ_content=$(cat "$TDIR/.circ/$circ_ref" 2>/dev/null)
+  if echo "$circ_content" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['id']=='test001' and 'weather' in d['body']" 2>/dev/null; then
+    pass "circ payload has correct email content"
+  else
+    fail "circ payload malformed: $circ_content"
+  fi
+fi
+
+# --- Test the reply path ---
+
+# Put a reply body into circ
+reply_ref=$(echo "Hello! I love the weather!" | CIRC_DIR="$TDIR/.circ" CIRC_LOCAL_ONLY=1 circ-put -)
+
+# Write send-reply stimulus to comms
+echo "send-reply brain test001 circ:$reply_ref" > "$COMMS/stimulus.txt"
+> "$BRAIN/stimulus.txt"
+
+# Run comms again with full env
+(cd "$TDIR" && \
+  CONF_DIR="$TDIR" \
+  ORGANS="organs/heart:ganglion:organs/tail:organs/lymph:organs/stomach:organs/hippocampus:comms:organs/brain" \
+  CIRC_DIR="$TDIR/.circ" \
+  CIRC_LOCAL_ONLY=1 \
+  MEMORY_DB="$TDIR/organs/hippocampus/memory.db" \
+  python3 "$COMMS/comms.py") 2>/dev/null || true
+
+# Check: sent dir should have a reply
+if ls "$MOCK_GMAIL/sent/"*.json 1>/dev/null 2>&1; then
+  pass "reply sent to mock gmail outbox"
+else
+  fail "no reply in mock_gmail/sent/"
+fi
+
+# Check: sent reply has correct content
+if ls "$MOCK_GMAIL/sent/"*.json 1>/dev/null 2>&1; then
+  sent_file=$(ls "$MOCK_GMAIL/sent/"*.json | head -1)
+  if python3 -c "import sys,json; d=json.load(open('$sent_file')); assert 'weather' in d['body'] and d['to']=='tester@example.com'" 2>/dev/null; then
+    pass "sent reply has correct body and recipient"
+  else
+    fail "sent reply content wrong: $(cat "$sent_file")"
+  fi
+fi
+
+# Check: brain should have received sent confirmation
+if grep -q "sent test001" "$BRAIN/stimulus.txt" 2>/dev/null; then
+  pass "comms confirmed sent to brain"
+else
+  fail "brain stimulus.txt missing sent confirmation, got: $(cat "$BRAIN/stimulus.txt" 2>/dev/null || echo 'empty')"
+fi
+
+# Check: original email should no longer be UNREAD
+if python3 -c "import json; d=json.load(open('$MOCK_GMAIL/inbox/test001.json')); assert 'UNREAD' not in d['labels']" 2>/dev/null; then
+  pass "email marked as read after reply"
+else
+  fail "email still has UNREAD label: $(cat "$MOCK_GMAIL/inbox/test001.json")"
+fi
+
+unset GMAIL_MOCK_DIR
 
 # ===================================================================
 echo ""

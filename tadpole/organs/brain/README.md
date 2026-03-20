@@ -43,6 +43,7 @@ flowchart TD
 |--------|--------|---------|
 | `check-email` | comms | No pending stimulus (idle cycle) |
 | `send-reply <thread_id> circ:<hash>` | comms | Reply generated and stored in circ |
+| `send-email <reply-to> circ:<hash>` | comms | New email composed; circ payload is JSON with `{to, subject, body, format}`. Available but not yet used by the tadpole brain. |
 
 ## Reply Generation
 

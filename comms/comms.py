@@ -149,17 +149,46 @@ def handle_send_reply(reply_to, thread_id, circ_ref):
     return True
 
 
-def handle_send_email(reply_to, to_addr, subject, circ_ref):
-    """Compose and send a new email. Body from circ."""
-    circ_dir = os.environ.get("CIRC_DIR", os.path.expanduser("~/.life/circ"))
-    circ_path = os.path.join(circ_dir, circ_ref)
+def handle_send_email(reply_to, circ_ref):
+    """Compose and send a new email. Full payload (to, subject, body, format) from circ JSON."""
+    import tempfile as _tempfile
 
-    body = organ_lib.circ_get(circ_ref)
-    if not body:
+    raw = organ_lib.circ_get(circ_ref)
+    if not raw:
         log(f"send-email: could not retrieve circ:{circ_ref}")
         return False
 
-    _, ok = organ_lib.run_cli(["gmail", "send", to_addr, "--subject", subject, "--body-file", circ_path])
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        log(f"send-email: circ:{circ_ref} is not valid JSON")
+        return False
+
+    to_addr = payload.get("to", "")
+    subject = payload.get("subject", "")
+    body = payload.get("body", "")
+    fmt = payload.get("format", "markdown")
+
+    if not to_addr or not body:
+        log(f"send-email: payload missing 'to' or 'body' in circ:{circ_ref}")
+        return False
+
+    # Write body to a temp circ file for --body-file
+    tmp = _tempfile.NamedTemporaryFile(
+        mode="w", suffix=".md", delete=False, dir=_tempfile.gettempdir()
+    )
+    try:
+        tmp.write(body)
+        tmp.close()
+
+        cmd = ["gmail", "send", to_addr, "--subject", subject, "--body-file", tmp.name, "--format", fmt]
+        _, ok = organ_lib.run_cli(cmd)
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
     if not ok:
         log(f"send-email: gmail send failed to {to_addr}")
         return False
@@ -203,22 +232,20 @@ def main():
                 processed += 1
 
             elif line.startswith("send-email"):
-                # "send-email <reply-to> <to> <subject> circ:<hash>"
+                # "send-email <reply-to> circ:<hash>"
                 parts = line.split()
-                if len(parts) < 5:
-                    log(f"send-email: bad format: {line}")
+                if len(parts) < 3:
+                    log(f"send-email: bad format (expected: send-email <reply-to> circ:<hash>): {line}")
                     errors += 1
                     continue
                 reply_to = parts[1]
-                to_addr = parts[2]
-                subject = " ".join(parts[3:-1])
-                circ_ref = parts[-1]
+                circ_ref = parts[2]
                 if not circ_ref.startswith("circ:"):
-                    log(f"send-email: expected circ:ref as last token: {line}")
+                    log(f"send-email: expected circ:<hash> as third token: {line}")
                     errors += 1
                     continue
                 ref = circ_ref[5:]
-                ok = handle_send_email(reply_to, to_addr, subject, ref)
+                ok = handle_send_email(reply_to, ref)
                 if ok:
                     processed += 1
                 else:

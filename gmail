@@ -34,6 +34,165 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
+# Mock mode — filesystem-based mailbox for testing
+# ---------------------------------------------------------------------------
+
+def _mock_dir():
+    """Return Path to mock dir, or None if not in mock mode."""
+    d = os.environ.get("GMAIL_MOCK_DIR")
+    return Path(d) if d else None
+
+
+def _mock_next_id(mock):
+    """Return the next integer ID as a string, incrementing the counter."""
+    id_file = mock / "next_id.txt"
+    try:
+        n = int(id_file.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        n = 1
+    id_file.write_text(str(n + 1) + "\n")
+    return str(n)
+
+
+def _mock_search(args):
+    """Mock gmail search: filter inbox/*.json by query tokens."""
+    mock = _mock_dir()
+    inbox = mock / "inbox"
+    if not inbox.is_dir():
+        print("[]")
+        return
+
+    query = args.query
+    results = []
+    for p in sorted(inbox.glob("*.json")):
+        try:
+            email = json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        labels = email.get("labels", [])
+
+        # Filter: is:unread
+        if "is:unread" in query and "UNREAD" not in labels:
+            continue
+
+        # Filter: label:X
+        label_ok = True
+        for m in re.finditer(r'label:(\S+)', query):
+            if m.group(1) not in labels:
+                label_ok = False
+                break
+        if not label_ok:
+            continue
+
+        results.append({
+            "id": email.get("id", p.stem),
+            "from": email.get("from", ""),
+            "subject": email.get("subject", ""),
+            "snippet": email.get("body", "")[:100],
+        })
+
+    output(results[:args.count])
+
+
+def _mock_get(args):
+    """Mock gmail get: read inbox/<id>.json."""
+    mock = _mock_dir()
+    p = mock / "inbox" / f"{args.id}.json"
+    if not p.exists():
+        print("{}")
+        return
+    try:
+        email = json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        print("{}")
+        return
+    output({
+        "id": email.get("id", args.id),
+        "from": email.get("from", ""),
+        "subject": email.get("subject", ""),
+        "body": email.get("body", ""),
+    })
+
+
+def _mock_reply(args):
+    """Mock gmail reply: write to sent/, return status."""
+    mock = _mock_dir()
+    original_path = mock / "inbox" / f"{args.id}.json"
+    try:
+        original = json.loads(original_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        print('{"error": "original email not found"}', file=sys.stderr)
+        sys.exit(1)
+
+    if args.body_file:
+        body_text = Path(args.body_file).read_text()
+    elif args.body:
+        body_text = args.body
+    else:
+        print("error: --body or --body-file required", file=sys.stderr)
+        sys.exit(1)
+
+    new_id = _mock_next_id(mock)
+    sent_dir = mock / "sent"
+    sent_dir.mkdir(parents=True, exist_ok=True)
+    reply = {
+        "id": new_id,
+        "to": original.get("from", ""),
+        "subject": "Re: " + original.get("subject", ""),
+        "body": body_text,
+        "in_reply_to": args.id,
+    }
+    (sent_dir / f"{new_id}.json").write_text(json.dumps(reply))
+    output({"status": "sent", "id": new_id})
+
+
+def _mock_send(args):
+    """Mock gmail send: write to sent/, return status."""
+    mock = _mock_dir()
+
+    if args.body_file:
+        body_text = Path(args.body_file).read_text()
+    elif args.body:
+        body_text = args.body
+    else:
+        print("error: --body or --body-file required", file=sys.stderr)
+        sys.exit(1)
+
+    new_id = _mock_next_id(mock)
+    sent_dir = mock / "sent"
+    sent_dir.mkdir(parents=True, exist_ok=True)
+    email = {
+        "id": new_id,
+        "to": args.to,
+        "subject": args.subject,
+        "body": body_text,
+    }
+    (sent_dir / f"{new_id}.json").write_text(json.dumps(email))
+    output({"status": "sent", "id": new_id})
+
+
+def _mock_label(args):
+    """Mock gmail label: modify labels array in inbox/<id>.json."""
+    mock = _mock_dir()
+    p = mock / "inbox" / f"{args.id}.json"
+    try:
+        email = json.loads(p.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        print('{"error": "email not found"}', file=sys.stderr)
+        sys.exit(1)
+
+    labels = email.get("labels", [])
+    if args.add and args.add not in labels:
+        labels.append(args.add)
+    if args.remove and args.remove in labels:
+        labels.remove(args.remove)
+    email["labels"] = labels
+    p.write_text(json.dumps(email))
+    output({"status": "ok"})
+
+
+# ---------------------------------------------------------------------------
 # Markdown-to-HTML converter (stdlib only, covers the 80% case)
 # ---------------------------------------------------------------------------
 
@@ -500,6 +659,8 @@ def _rest_label(msg_id, add=None, remove=None):
 
 def cmd_search(args):
     """Search Gmail."""
+    if _mock_dir():
+        return _mock_search(args)
     result = gas("gmail.search", f"query={args.query}", f"count={args.count}")
 
     if result is _RATE_LIMITED:
@@ -514,6 +675,8 @@ def cmd_search(args):
 
 def cmd_get(args):
     """Get a full email."""
+    if _mock_dir():
+        return _mock_get(args)
     result = gas("gmail.get", f"id={args.id}")
 
     if result is _RATE_LIMITED:
@@ -528,6 +691,8 @@ def cmd_get(args):
 
 def cmd_reply(args):
     """Reply to an email thread."""
+    if _mock_dir():
+        return _mock_reply(args)
     if args.body_file:
         try:
             body_text = Path(args.body_file).read_text()
@@ -569,6 +734,8 @@ def cmd_reply(args):
 
 def cmd_send(args):
     """Send a new email."""
+    if _mock_dir():
+        return _mock_send(args)
     if args.body_file:
         try:
             body_text = Path(args.body_file).read_text()
@@ -615,6 +782,8 @@ def cmd_send(args):
 
 def cmd_label(args):
     """Add or remove a label."""
+    if _mock_dir():
+        return _mock_label(args)
     if not args.add and not args.remove:
         print("error: --add or --remove required", file=sys.stderr)
         sys.exit(1)
