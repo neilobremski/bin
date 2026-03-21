@@ -677,7 +677,7 @@ def cmd_get(args):
     """Get a full email."""
     if _mock_dir():
         return _mock_get(args)
-    result = gas("gmail.get", f"id={args.id}")
+    result = gas("gmail.get", f"thread_id={args.id}")
 
     if result is _RATE_LIMITED:
         result = _rest_get(args.id)
@@ -716,7 +716,7 @@ def cmd_reply(args):
             print("gmail: warning: HTML content dropped (REST fallback is plain-text only)", file=sys.stderr)
         result = _rest_reply(args.id, plain_text)
     else:
-        gas_args = ["gmail.reply", f"id={args.id}", f"body={plain_text}"]
+        gas_args = ["gmail.reply", f"thread_id={args.id}", f"body={plain_text}"]
         if html_content:
             gas_args.append(f"html={html_content}")
         result = gas(*gas_args)
@@ -788,7 +788,7 @@ def cmd_label(args):
         print("error: --add or --remove required", file=sys.stderr)
         sys.exit(1)
 
-    gas_args = ["gmail.label", f"id={args.id}"]
+    gas_args = ["gmail.label", f"thread_id={args.id}"]
     if args.add:
         gas_args.append(f"add={args.add}")
     if args.remove:
