@@ -92,12 +92,17 @@ def handle_check_email(reply_to, query=None):
         email_from = thread.get("from", "unknown")
         email_subject = thread.get("subject", "(no subject)")
 
-        # Get full email content
+        # Get full email content (GAS bridge returns {thread_id, messages: [...], count})
         full = gmail_get(email_id)
         if full:
-            email_from = full.get("from", email_from)
-            email_subject = full.get("subject", email_subject)
-            email_body = full.get("body", full.get("snippet", ""))
+            msgs = full.get("messages", [])
+            if msgs:
+                msg = msgs[0]  # first message in thread
+                email_from = msg.get("from", email_from)
+                email_subject = msg.get("subject", email_subject)
+                email_body = msg.get("plain", msg.get("html", ""))
+            else:
+                email_body = ""
         else:
             email_body = thread.get("snippet", "")
 
