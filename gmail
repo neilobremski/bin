@@ -13,6 +13,7 @@ Usage:
     gmail send <to> --subject "text" --html "<html>"
     gmail label <id> --add LABEL
     gmail label <id> --remove LABEL
+    gmail read <id>
 
 Secrets resolved via local-secret:
     GAS_BRIDGE_URL, GAS_BRIDGE_KEY
@@ -107,11 +108,18 @@ def _mock_get(args):
     except (json.JSONDecodeError, OSError):
         print("{}")
         return
-    output({
+    # Match real GAS bridge response shape: {thread_id, messages: [...]}
+    msg = {
         "id": email.get("id", args.id),
         "from": email.get("from", ""),
         "subject": email.get("subject", ""),
-        "body": email.get("body", ""),
+        "plain": email.get("body", ""),
+        "html": email.get("body", ""),
+    }
+    output({
+        "thread_id": args.id,
+        "messages": [msg],
+        "count": 1,
     })
 
 
@@ -190,6 +198,24 @@ def _mock_label(args):
     email["labels"] = labels
     p.write_text(json.dumps(email))
     output({"status": "ok"})
+
+
+def _mock_read(args):
+    """Mock gmail read: remove UNREAD from labels in inbox/<id>.json."""
+    mock = _mock_dir()
+    p = mock / "inbox" / f"{args.id}.json"
+    try:
+        email = json.loads(p.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        print('{"error": "email not found"}', file=sys.stderr)
+        sys.exit(1)
+
+    labels = email.get("labels", [])
+    if "UNREAD" in labels:
+        labels.remove("UNREAD")
+    email["labels"] = labels
+    p.write_text(json.dumps(email))
+    output({"status": "marked_read", "id": args.id})
 
 
 # ---------------------------------------------------------------------------
@@ -806,6 +832,24 @@ def cmd_label(args):
     output(result)
 
 
+def cmd_read(args):
+    """Mark a thread as read."""
+    if _mock_dir():
+        return _mock_read(args)
+
+    result = gas("gmail.read", f"thread_id={args.id}")
+
+    if result is _RATE_LIMITED:
+        # REST fallback: remove UNREAD label
+        result = _rest_label(args.id, remove="UNREAD")
+
+    if not result:
+        print('{"error": "mark-read failed"}', file=sys.stderr)
+        sys.exit(1)
+
+    output(result)
+
+
 # ---------------------------------------------------------------------------
 # Output helper
 # ---------------------------------------------------------------------------
@@ -863,6 +907,10 @@ def main():
     p_label.add_argument("--add", help="Label to add")
     p_label.add_argument("--remove", help="Label to remove")
 
+    # read
+    p_read = sub.add_parser("read", help="Mark a thread as read")
+    p_read.add_argument("id", help="Thread/message ID to mark as read")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -875,6 +923,7 @@ def main():
         "reply": cmd_reply,
         "send": cmd_send,
         "label": cmd_label,
+        "read": cmd_read,
     }
     dispatch[args.command](args)
 

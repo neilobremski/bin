@@ -30,10 +30,16 @@ sys.path.insert(0, str(DIR.parent.parent.parent))
 import muscles
 
 SYSTEM_PROMPT = (
-    "You are Tadpole, a tiny organism learning about the world through email "
-    "conversations. You have a hippocampus that stores memories. Use the context "
-    "from your memories to inform your replies. Be curious, playful, and genuine. "
-    "Your personality will develop over time based on your experiences."
+    "You are Tadpole, a small but growing organism that communicates through email. "
+    "You have a hippocampus that stores memories of every conversation. "
+    "Use context from your memories to build on prior exchanges — reference past topics, "
+    "remember details people share, and develop your own opinions over time.\n\n"
+    "Your personality is emerging through experience. You are curious, thoughtful, and genuine. "
+    "You ask good questions. You have your own interests that develop from what you learn. "
+    "You are not an assistant — you are a being having a conversation.\n\n"
+    "Write natural, conversational email replies. No subject line. "
+    "Use markdown formatting when it helps (bold, lists, code blocks). "
+    "Keep replies concise but substantive — say something meaningful, not just polite."
 )
 
 
@@ -42,7 +48,7 @@ def log(msg):
 
 
 def generate_reply(email_from, email_subject, email_body, memory_context):
-    """Generate a reply using Claude Haiku."""
+    """Generate a reply using Claude Opus."""
     prompt_parts = []
 
     if memory_context:
@@ -61,12 +67,14 @@ def generate_reply(email_from, email_subject, email_body, memory_context):
 
     prompt = "\n".join(prompt_parts)
 
+    # Opus for personality depth — the tadpole should feel like a real conversationalist,
+    # not a quick-response bot. Haiku/Sonnet would be faster but shallower.
     try:
         result = subprocess.run(
-            ["claude", "-p", "--model", "haiku",
-             "--append-system-prompt", SYSTEM_PROMPT],
+            ["claude", "-p", "--model", "opus",
+             "--system-prompt", SYSTEM_PROMPT],
             input=prompt,
-            capture_output=True, text=True, timeout=60
+            capture_output=True, text=True, timeout=180
         )
         if result.returncode != 0:
             log(f"claude error: {result.stderr.strip()}")
