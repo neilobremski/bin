@@ -67,6 +67,12 @@ def gmail_label(msg_id, remove=None, add=None):
     return ok
 
 
+def gmail_read(thread_id):
+    """Mark a thread as read via the gmail muscle."""
+    _, ok = muscles.run(["gmail", "read", thread_id])
+    return ok
+
+
 def handle_check_email(reply_to, query=None):
     """Check Gmail for unread emails, notify requesting organ of each."""
     if not query:
@@ -97,7 +103,7 @@ def handle_check_email(reply_to, query=None):
         if full:
             msgs = full.get("messages", [])
             if msgs:
-                msg = msgs[0]  # first message in thread
+                msg = msgs[-1]  # latest message in thread
                 email_from = msg.get("from", email_from)
                 email_subject = msg.get("subject", email_subject)
                 email_body = msg.get("plain", msg.get("html", ""))
@@ -117,6 +123,9 @@ def handle_check_email(reply_to, query=None):
         if not ref:
             log(f"check-email: failed to store email {email_id} in circ")
             continue
+
+        # Mark as read immediately to prevent re-processing on next check
+        gmail_read(email_id)
 
         muscles.stimulus.send(reply_to, f"new-email {email_id} circ:{ref}")
         count += 1
@@ -140,7 +149,8 @@ def handle_send_reply(reply_to, thread_id, circ_ref):
         log(f"send-reply: gmail reply failed for {thread_id}")
         return False
 
-    gmail_label(thread_id, remove="UNREAD")
+    # Note: gmail_read() already called during check-email (mark-as-read before processing)
+    # No need to call again here — email is already read.
 
     muscles.memories.store(
         f"Sent reply to thread {thread_id}: {body[:200]}",

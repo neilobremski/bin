@@ -3,8 +3,12 @@
 
 Scans local organs, journals health changes, broadcasts via MQTT, delivers stimulus.
 One per body part. SQLite registry tracks all known organs.
+
+Persistent listener mode: after quick phases (scan, journal, broadcast), listens on
+MQTT for ~50 seconds. When stimulus arrives, immediately delivers to the target organ
+and sparks it. Also periodically checks for local stimulus during the listen window.
 """
-import os, sys, sqlite3, json, subprocess
+import os, sys, sqlite3, json, subprocess, time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -19,6 +23,9 @@ MQTT_HOST = os.environ.get("MQTT_HOST", "")
 CLIENT_ID = os.environ.get("GANGLION_CLIENT_ID", f"{BODY}-ganglion")
 DIR = Path(__file__).resolve().parent
 CONF_DIR = Path(os.environ["CONF_DIR"]) if "CONF_DIR" in os.environ else DIR.parent
+
+# Path to spark-organ.sh (sibling directory to ganglion)
+SPARK_ORGAN_SCRIPT = DIR.parent / "life" / "spark-organ.sh"
 
 
 def log(msg):
@@ -59,6 +66,39 @@ def resolve_organs():
         path = Path(p) if Path(p).is_absolute() else CONF_DIR / p
         result.append((path, path.name))
     return result
+
+
+def build_organ_lookup(organ_list):
+    """Build {name: Path} map from organ list, excluding ganglion itself."""
+    lookup = {}
+    for path, organ_type in organ_list:
+        if organ_type != "ganglion" and path.is_dir():
+            lookup[organ_type] = path
+    return lookup
+
+
+def spark_organ(organ_path):
+    """Spark a single organ with flock locking. Non-blocking — skips if already running."""
+    name = organ_path.name if isinstance(organ_path, Path) else os.path.basename(organ_path)
+    organ_path_str = str(organ_path)
+
+    if SPARK_ORGAN_SCRIPT.is_file():
+        # Use spark-organ.sh which handles locking, env setup, and execution
+        subprocess.Popen(
+            [str(SPARK_ORGAN_SCRIPT), organ_path_str],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    else:
+        # Fallback: direct launch with flock
+        lock_dir = os.path.expanduser("~/.life/locks")
+        os.makedirs(lock_dir, exist_ok=True)
+        lock_file = os.path.join(lock_dir, f"{name}.lock")
+        subprocess.Popen(
+            f'exec 9>"{lock_file}"; flock -n 9 || exit 0; cd "{organ_path_str}" && bash live.sh >> .spark.log 2>&1',
+            shell=True
+        )
+
+    log(f"sparked {name}")
 
 
 def scan_local(db, organ_list):
@@ -193,48 +233,82 @@ def mqtt_receive(db):
             pass
 
 
-def mqtt_drain_stimulus(db, organ_list):
-    """Phase 3c: Drain stimulus messages from MQTT and deliver to local organs."""
-    if not MQTT_HOST:
-        return 0
-    try:
-        result = subprocess.run(
-            ["mqtt-sub", "-t", "life/+/stimulus/#", "-W", "2", "-C", "10",
-             "-v", "-i", CLIENT_ID, "-c"],
-            capture_output=True, text=True, timeout=15
-        )
-        output = result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return 0
+def check_local_stimulus(organ_lookup):
+    """Check all organs for pending local stimulus and spark any that have content."""
+    sparked = 0
+    for organ_type, organ_path in organ_lookup.items():
+        stim_file = organ_path / "stimulus.txt"
+        if stim_file.exists() and stim_file.stat().st_size > 0:
+            spark_organ(organ_path)
+            sparked += 1
+    return sparked
 
-    if not output:
-        return 0
 
-    # Build local organ lookup: type -> path
-    local_organs = {}
-    for path, organ_type in organ_list:
-        if organ_type != "ganglion" and path.is_dir():
-            local_organs[organ_type] = path
+def mqtt_listen_and_spark(organ_lookup, duration=50):
+    """Listen on MQTT for stimulus, deliver and spark target organs immediately.
+
+    Runs mqtt-sub for `duration` seconds. Each incoming line triggers immediate
+    stimulus delivery + organ spark. Simple readline loop — mqtt-sub outputs
+    one line per message and exits after -W timeout or -C message count.
+    """
+    if not MQTT_HOST or duration <= 0:
+        return 0
 
     routed = 0
-    for line in output.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split(" ", 1)
-        if len(parts) < 2:
-            continue
-        topic, message = parts
-        target_type = topic.rstrip("/").split("/")[-1]
+    proc = None
 
-        if target_type == "ganglion":
-            continue
+    try:
+        proc = subprocess.Popen(
+            ["mqtt-sub", "-t", "life/+/stimulus/#", "-W", str(duration), "-C", "100",
+             "-v", "-i", CLIENT_ID, "-c"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+        )
 
-        if target_type in local_organs:
-            stim_file = local_organs[target_type] / "stimulus.txt"
+        # Simple blocking readline — mqtt-sub flushes each line
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split(" ", 1)
+            if len(parts) < 2:
+                continue
+            topic, payload = parts
+
+            # Extract target organ type from topic: life/<body>/stimulus/<type>
+            segments = topic.split("/")
+            if len(segments) < 4:
+                continue
+            target_type = segments[-1]
+
+            if target_type == "ganglion":
+                continue
+
+            organ_path = organ_lookup.get(target_type)
+            if not organ_path:
+                log(f"stimulus for unknown organ '{target_type}' — ignoring")
+                continue
+
+            # Write stimulus and spark immediately
+            stim_file = organ_path / "stimulus.txt"
             with open(stim_file, "a") as f:
-                f.write(message + "\n")
+                f.write(payload + "\n")
+            spark_organ(organ_path)
             routed += 1
-            log(f"life/stimulus/{target_type} -> {target_type}")
+            log(f"mqtt stimulus -> {target_type} (sparked)")
+
+        proc.wait(timeout=5)
+    except FileNotFoundError:
+        log("mqtt-sub not found — skipping listen phase")
+    except Exception as e:
+        log(f"listen error: {e}")
+    finally:
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
     return routed
 
@@ -245,19 +319,36 @@ def main():
     init_db(db)
 
     organ_list = resolve_organs()
+    organ_lookup = build_organ_lookup(organ_list)
 
     # Phase 1+2: Scan + journal
     scanned = scan_local(db, organ_list)
 
-    # Phase 3: MQTT
+    # Phase 3: MQTT broadcast + receive (quick, ~5 seconds total)
     mqtt_broadcast(db)
     mqtt_receive(db)
-    routed = mqtt_drain_stimulus(db, organ_list)
+
+    # Phase 4: Check for any local stimulus before entering listen mode
+    local_sparked = check_local_stimulus(organ_lookup)
+    if local_sparked > 0:
+        log(f"pre-listen local stimulus: sparked {local_sparked} organs")
+
+    # Phase 5: Persistent MQTT listen (~50 seconds)
+    # Delivers stimulus and sparks organs on-demand as messages arrive
+    listen_duration = int(os.environ.get("GANGLION_LISTEN_DURATION", "50"))
+    routed = mqtt_listen_and_spark(organ_lookup, duration=listen_duration)
+
+    # Final local stimulus check after listen window closes
+    final_sparked = check_local_stimulus(organ_lookup)
+    if final_sparked > 0:
+        log(f"post-listen local stimulus: sparked {final_sparked} organs")
+
+    total_sparked = local_sparked + final_sparked
 
     # Report health
-    health = f"ok scanned {scanned} routed {routed}"
+    health = f"ok scanned {scanned} routed {routed} sparked {total_sparked}"
     (DIR / "health.txt").write_text(health + "\n")
-    log(f"scanned={scanned} routed={routed}")
+    log(f"scanned={scanned} routed={routed} sparked={total_sparked}")
 
     db.close()
 
