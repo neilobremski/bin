@@ -38,13 +38,17 @@ fi
 # Name the container after the identity dir
 CONTAINER_NAME="brain-$(basename "$IDENTITY_DIR")"
 
+CIRC_DIR="${CIRC_DIR:-$HOME/.life/circ}"
+mkdir -p "$CIRC_DIR"
+chmod 1777 "$CIRC_DIR" 2>/dev/null || true
+
 echo "Starting $CONTAINER_NAME (identity: $IDENTITY_DIR/CLAUDE.md)"
 
 exec docker run --rm -it \
     --name "$CONTAINER_NAME" \
     -v "$IDENTITY_DIR:/brain/.claude" \
     -v "brain-${CONTAINER_NAME}-memory:/brain/organs/hippocampus" \
-    -v "brain-${CONTAINER_NAME}-circ:/brain/.life/circ" \
+    -v "${CIRC_DIR:-$HOME/.life/circ}:/brain/.life/circ" \
     -e "MQTT_HOST=${MQTT_HOST:-localhost}" \
     -e "MQTT_PORT=${MQTT_PORT:-1883}" \
     -e "MQTT_USER=${MQTT_USER:-}" \

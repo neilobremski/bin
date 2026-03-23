@@ -1,99 +1,93 @@
 # Tadpole
 
-Life is brutally simple.
+A test organism with two body parts: a brain in Docker and a body on the host, connected by MQTT.
 
-A tadpole is the simplest organism that proves the life system works. It has seven organs, one nervous system, and a short, eventful life.
-
-## The Lifetime Story
-
-A tadpole's life goes like this:
-
-1. **It has a heartbeat.** The heart beats on a cadence. If you spark it again too soon, the cadence blocks the second beat. This proves the spark respects timing.
-
-2. **It can receive signals.** Someone sends "swim now" to the tail via the nervous system. The ganglion picks up the message and delivers it. The tail wakes up and swims. This proves dormant organs wake on stimulus.
-
-3. **It can eat and digest.** The stomach gets food, digests it into a payload (stored in the circulatory system), and sends it to the tail via the `stimulus` CLI. The tail retrieves the payload and swims with it. This proves organs can produce data, store it, and another organ can retrieve it — without either organ knowing about the other.
-
-4. **It can get sick and recover.** The lymph node scans every organ's health. When something reports an error, the lymph node flags the organism as degraded. When stimulus queues overflow, the lymph node truncates them. This proves the immune system detects problems and cleans up.
-
-5. **It can be fed by a human.** The eye organ watches a Google Sheet. When you type a command ("eat", "swim now"), the eye delivers it as stimulus to the right organ. Health status is written back to the sheet so you can watch the tadpole respond in real time. This proves the organism can interact with the outside world.
-
-6. **It remembers.** The hippocampus stores memories in SQLite, deduplicates them, and consolidates over time. Other organs send memories via stimulus (`remember: ate a big meal`). The brain (future) queries memory directly. This proves an organism can accumulate experience across spark cycles.
-
-`lifetime.sh` tests chapters 1-4 automatically. Chapters 5-6 are interactive.
-
-## Organs
-
-| Organ | Role | Cadence |
-|-------|------|---------|
-| heart | Beats, writes health | 1 min |
-| ganglion | Scans health, maintains registry, routes signals | 1 min |
-| hippocampus | Stores and consolidates memories (SQLite + FTS5) | 1 min |
-| eye | Reads commands from Google Sheet, writes health back | 1 min |
-| tail | Swims when told to (dormant until stimulus) | none |
-| stomach | Digests food into circulatory payload (dormant until stimulus) | none |
-| lymph | Scans health, cleans overflows | 1 min |
-
-## Memory
-
-The hippocampus owns `memory.db` — a SQLite database with FTS5 full-text search. Other organs interact through stimulus or the `memories` CLI (a Python script with argparse):
-
-```bash
-# Store a memory (via nervous system)
-stimulus send hippocampus "remember: the stomach ate meal 3"
-stimulus send hippocampus "remember important: learned to swim faster"
-stimulus send hippocampus "remember critical: human fed me for the first time"
-
-# Store directly (same body part, fast path)
-memories store "the tail went splish splash"
-memories store -i 8 "this food was especially good"
-memories store -c food "ate algae at 09:30"
-
-# Search memories (smart ranking: relevance x importance x recency)
-memories search "food"
-memories recent 5
-memories important 8
-memories stats
+```
+                    MQTT (localhost:1883)
+                         |
+        +----------------+----------------+
+        |                                 |
+  [Brain - Docker]                  [Body - Host]
+   PFC (claude -p)                  comms (email I/O)
+   hippocampus                      ganglion (router)
+   ganglion (router)                heart, tail, stomach
+                                    lymph, hippocampus
+        |                                 |
+        +----------- circ (bind) ---------+
+                  ~/.life/circ
 ```
 
-The brain (future organ) reads `memory.db` directly — no network round-trip, no stimulus delay. This is high-bandwidth local access, same as the ganglion reading `health.txt` files.
+The brain thinks (PFC runs `claude -p` to generate replies). The body handles everything else: receiving emails, routing signals, heartbeat, memory, digestion, and immune checks. They share a circulatory directory (`~/.life/circ`) for passing payloads, and communicate signals over MQTT.
 
-### Optional LLM Integration
+## Prerequisites
 
-Set `HIPPOCAMPUS_USE_LLM=1` to enable small-llm powered features:
-- **Auto-importance scoring** — memories without explicit importance get rated by the LLM
-- **Similarity detection** — catches semantic duplicates beyond exact hash matching
+- **Docker** (for the brain container)
+- **mosquitto** (`apt install mosquitto mosquitto-clients`) — local MQTT broker
+- **Bedrock env vars** for the brain's claude CLI: `ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS`, etc.
 
-Off by default. Without it, the hippocampus is pure SQLite — fast and predictable.
-
-## Running
+## Quick Start
 
 ```bash
-# Automated tests (chapters 1-4)
-cd tadpole
-./lifetime.sh
+# Run with mock Gmail (default — no credentials needed)
+./tadpole.sh
 
-# Interactive mode (chapters 5-6) — feed it through the spreadsheet
-SPARK_INTERVAL=10 ../life/spark-loop.sh
+# Run with real Gmail (requires GAS bridge credentials)
+./tadpole.sh --real
 ```
 
-## The Spreadsheet
+One command starts everything: mosquitto broker (if not running), body organs via spark-loop, and brain in Docker. Ctrl-C stops it all.
 
-The eye reads commands from a Google Sheet named "Tadpole" (created automatically).
+## Interacting (Mock Gmail)
 
-| Command | Target | Processed | Response |
-|---------|--------|-----------|----------|
-| eat | stomach | yes | ok yum yum (meal 1) |
-| swim now | tail | yes | ok splish splash |
-| remember: I like algae | hippocampus | yes | ok 1 memories (stored 1) |
+In a second terminal, drop a JSON file into the mock inbox:
+
+```bash
+# Send tadpole an email
+cat > ~/.tadpole/gmail/inbox/001.json <<'EOF'
+{
+  "id": "001",
+  "from": "you@example.com",
+  "subject": "Hello",
+  "body": "Hi tadpole! What are you up to?",
+  "labels": ["UNREAD", "Tadpole"]
+}
+EOF
+
+# Check for replies
+cat ~/.tadpole/gmail/sent/*.json
+```
 
 ## Configuration
 
-In `life.conf`:
+Environment variables (all optional):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SPARK_INTERVAL` | 60 | Seconds between spark cycles |
+| `CIRC_DIR` | `~/.life/circ` | Shared circulatory directory |
+| `GMAIL_MOCK_DIR` | `~/.tadpole/gmail` | Mock email directory |
+| `MQTT_HOST` | localhost | MQTT broker host |
+| `MQTT_PORT` | 1883 | MQTT broker port |
+| `GANGLION_LISTEN_DURATION` | 30 | Seconds ganglion listens per cycle |
+
+## Organs
+
+| Organ | Body Part | Cadence | Role |
+|-------|-----------|---------|------|
+| PFC | brain (Docker) | stimulus | Thinks, generates email replies |
+| hippocampus | both | 1 min | Stores and consolidates memories |
+| ganglion | both | 1 min | Routes signals, maintains registry |
+| heart | body (host) | 1 min | Heartbeat, writes health |
+| comms | body (host) | 1 min | Email I/O (send/receive) |
+| tail | body (host) | stimulus | Swims when told to |
+| stomach | body (host) | stimulus | Digests food into payloads |
+| lymph | body (host) | 1 min | Health checks, overflow cleanup |
+
+## Automated Tests
+
 ```bash
-SHEETS_NAME=Tadpole    # eye finds or creates a sheet with this name
+cd tadpole
+./lifetime.sh
 ```
 
-The eye automatically finds an existing Google Sheet by name, or creates one if none exists. Each person running the tadpole with their own GAS bridge gets their own sheet.
-
-Requires the GAS bridge (`GAS_BRIDGE_URL` and `GAS_BRIDGE_KEY` via `local-secret`). Without it, the eye stays idle — degradation, not failure.
+Tests chapters 1-4 (heartbeat, signals, digestion, immune response) without Docker or credentials.
