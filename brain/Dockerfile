@@ -53,7 +53,6 @@ WORKDIR /brain
 # Create .claude directory for session persistence
 RUN mkdir -p /brain/.claude /brain/.life/locks /brain/.life/circ
 
-# Persistent volumes for session state and memory
-VOLUME ["/brain/.claude", "/brain/organs/hippocampus/memory.db"]
+# Persistent volumes (mounted at runtime, not baked in)
 
 ENTRYPOINT ["bash", "/opt/life/spark-loop.sh", "/brain/life.conf"]

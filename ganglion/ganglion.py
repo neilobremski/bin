@@ -94,7 +94,8 @@ def spark_organ(organ_path):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
 
-    log(f"sparked {name}")
+    organ_name = organ_path.name if hasattr(organ_path, 'name') else os.path.basename(organ_path_str)
+    log(f"sparked {organ_name}")
 
 
 def scan_local(db, organ_list):
