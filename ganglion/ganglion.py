@@ -78,25 +78,17 @@ def build_organ_lookup(organ_list):
 
 
 def spark_organ(organ_path):
-    """Spark a single organ with flock locking. Non-blocking — skips if already running."""
-    name = organ_path.name if isinstance(organ_path, Path) else os.path.basename(organ_path)
+    """Spark a single organ via spark-organ.sh (layer 0). Non-blocking."""
     organ_path_str = str(organ_path)
 
-    if SPARK_ORGAN_SCRIPT.is_file():
-        # Use spark-organ.sh which handles locking, env setup, and execution
-        subprocess.Popen(
-            [str(SPARK_ORGAN_SCRIPT), organ_path_str],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-    else:
-        # Fallback: direct launch with flock
-        lock_dir = os.path.expanduser("~/.life/locks")
-        os.makedirs(lock_dir, exist_ok=True)
-        lock_file = os.path.join(lock_dir, f"{name}.lock")
-        subprocess.Popen(
-            f'exec 9>"{lock_file}"; flock -n 9 || exit 0; cd "{organ_path_str}" && bash live.sh >> .spark.log 2>&1',
-            shell=True
-        )
+    if not SPARK_ORGAN_SCRIPT.is_file():
+        log(f"spark-organ.sh not found at {SPARK_ORGAN_SCRIPT} — cannot spark")
+        return
+
+    subprocess.Popen(
+        [str(SPARK_ORGAN_SCRIPT), organ_path_str],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
 
     log(f"sparked {name}")
 
