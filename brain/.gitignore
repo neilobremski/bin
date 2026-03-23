@@ -1,0 +1,8 @@
+.claude/
+*.db
+health.txt
+stimulus.txt
+.spark.last
+.spark.log
+.life/
+.env

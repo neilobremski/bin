@@ -1,0 +1,31 @@
+services:
+  brain:
+    build:
+      context: ..
+      dockerfile: brain/Dockerfile
+    volumes:
+      - brain-sessions:/brain/.claude
+      - brain-memory:/brain/organs/hippocampus
+      - brain-circ:/brain/.life/circ
+    environment:
+      - MQTT_HOST=${MQTT_HOST:-mqtt}
+      - MQTT_PORT=${MQTT_PORT:-1883}
+      - BODY_PART=brain
+      - MEMORY_DB=/brain/organs/hippocampus/memory.db
+      - CIRC_DIR=/brain/.life/circ
+      - CIRC_LOCAL_ONLY=1
+      - GANGLION_LISTEN_DURATION=50
+      - SPARK_INTERVAL=60
+    env_file:
+      - .env
+    networks:
+      - organism
+
+networks:
+  organism:
+    external: true
+
+volumes:
+  brain-sessions:
+  brain-memory:
+  brain-circ:

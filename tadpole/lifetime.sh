@@ -251,21 +251,28 @@ else
 fi
 
 # ===================================================================
-#  PART 7: Brain organ structure check
+#  PART 7: Brain body part structure check (top-level, peer to tadpole)
 # ===================================================================
 
-BRAIN="$TDIR/organs/brain"
-if [ -x "$BRAIN/live.sh" ] && [ -f "$BRAIN/organ.conf" ] && [ -f "$BRAIN/brain.py" ]; then
-  pass "brain organ has correct structure (live.sh, organ.conf, brain.py)"
+BRAIN_BODY="$BIN_ROOT/brain"
+if [ -d "$BRAIN_BODY" ] && [ -f "$BRAIN_BODY/Dockerfile" ] && [ -f "$BRAIN_BODY/life.conf" ]; then
+  pass "brain body part has correct top-level structure (Dockerfile, life.conf)"
 else
-  fail "brain organ missing files"
+  fail "brain body part missing top-level files"
 fi
 
-brain_cadence=$(CADENCE=""; source "$BRAIN/organ.conf"; echo "${CADENCE:-}")
-if [ "$brain_cadence" = "15" ]; then
-  pass "brain organ cadence is 15 minutes"
+PFC="$BRAIN_BODY/organs/pfc"
+if [ -x "$PFC/live.sh" ] && [ -f "$PFC/organ.conf" ] && [ -f "$PFC/pfc.py" ]; then
+  pass "PFC organ has correct structure (live.sh, organ.conf, pfc.py)"
 else
-  fail "brain cadence should be 15, got: $brain_cadence"
+  fail "PFC organ missing files"
+fi
+
+pfc_cadence=$(CADENCE=""; source "$PFC/organ.conf"; echo "${CADENCE:-}")
+if [ "$pfc_cadence" = "15" ]; then
+  pass "PFC organ cadence is 15 minutes"
+else
+  fail "PFC cadence should be 15, got: $pfc_cadence"
 fi
 
 # ===================================================================
