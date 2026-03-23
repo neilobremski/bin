@@ -2,7 +2,7 @@
 
 Minimal brain for the tadpole test organism. Drives the communication cycle: tells comms to check email, processes incoming emails, generates replies via Claude Haiku, and builds personality through accumulated memories.
 
-This is the tadpole's brain, not Knobert's. It is deliberately simple — a single-loop decision maker that demonstrates the stimulus-driven organ pattern.
+This is a legacy brain organ (pre-body-part architecture). See `brain/` for the Dockerized brain body part. Kept for reference and backward compatibility with tadpole lifetime tests.
 
 ## Cadence
 

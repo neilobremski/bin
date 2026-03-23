@@ -171,7 +171,7 @@ Good morning. Here are today's **highlights**.
 
 - Hippocampus v2 merged (PR #15)
 - GAS Bridge bumped to `v2.7`
-- Fixed [dashboard](https://knobert.dev) rendering bug
+- Fixed [dashboard](https://example.com) rendering bug
 
 ## Health Check
 
@@ -214,7 +214,7 @@ The body is converted from markdown to HTML and wrapped in a responsive email te
 <ul>
   <li>Hippocampus v2 merged (PR #15)</li>
   <li>GAS Bridge bumped to <code>v2.7</code></li>
-  <li>Fixed <a href="https://knobert.dev">dashboard</a> rendering bug</li>
+  <li>Fixed <a href="https://example.com">dashboard</a> rendering bug</li>
 </ul>
 <h2>Health Check</h2>
 <p>All organs running. Uptime: <strong>18 days</strong>.</p>

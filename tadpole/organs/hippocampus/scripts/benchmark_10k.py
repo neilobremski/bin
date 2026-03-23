@@ -30,7 +30,7 @@ DB_PATH = "/tmp/benchmark-10k.db"
 
 # Vocabulary pools for synthetic memories
 SUBJECTS = [
-    "Neil", "the tadpole", "Knobert", "the hippocampus", "the brainstem",
+    "the user", "the tadpole", "the organism", "the hippocampus", "the brainstem",
     "memory system", "MQTT broker", "GAS bridge", "the dashboard",
     "Python script", "Docker container", "AWS instance", "the phone",
     "SQLite database", "FTS5 index", "FSRS algorithm", "the ganglion",

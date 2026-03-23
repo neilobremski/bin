@@ -4,7 +4,7 @@
 # Usage:
 #   brain/run.sh <identity-dir>
 #   brain/run.sh ../tadpole     # run as tadpole
-#   brain/run.sh ~/.claude      # run as Knobert (soul core in ~/.claude/CLAUDE.md)
+#   brain/run.sh ~/.claude      # run with global identity from ~/.claude/CLAUDE.md
 #
 # The identity-dir must contain a CLAUDE.md file. It gets mounted as
 # /brain/.claude/ inside the container, layering identity onto the
