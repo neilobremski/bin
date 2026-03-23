@@ -30,7 +30,7 @@ The comms organ is **stimulus-driven** — it does not poll for messages on its 
 
 | Signal | Description |
 |--------|-------------|
-| `check-email <reply-to> [query]` | Search Gmail for unread emails, report each to `reply-to` organ |
+| `check-email <reply-to> [query]` | Search Gmail for unread emails, mark each as read immediately (via `gmail read`), report each to `reply-to` organ |
 | `send-reply <reply-to> <thread_id> circ:<hash>` | Send the reply body stored at circ hash, confirm to `reply-to` |
 | `send-email <reply-to> circ:<hash>` | Compose and send a new email (circ payload is JSON: `{to, subject, body, format}`), confirm to `reply-to` |
 
@@ -91,6 +91,7 @@ gmail send <to> --subject "text" --body-file <path> [--format markdown|plain]
 gmail reply <thread_id> --body "text" [--format markdown|plain] [--html "<html>"]
 gmail reply <thread_id> --body-file <path> [--format markdown|plain]
 gmail label <thread_id> --remove UNREAD
+gmail read <thread_id>
 ```
 
 ### Format Options
@@ -146,7 +147,7 @@ sequenceDiagram
     C->>G: gmail reply abc --body-file ~/.life/circ/e9d8c7b6
     Note over G: gmail muscle: markdown -> HTML conversion
     G-->>N: Reply delivered (HTML + plain text fallback)
-    C->>G: gmail label abc --remove UNREAD
+    C->>G: gmail read abc
     C->>H: memories store "Replied to Neil about favorite color..."
     C->>B: stimulus "sent abc"
 ```

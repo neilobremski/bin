@@ -40,6 +40,11 @@ cp -r "$BIN_ROOT/ganglion" "$TDIR/ganglion"
 cp -r "$BIN_ROOT/comms" "$TDIR/comms"
 cp "$BIN_ROOT/muscles.py" "$TDIR/"
 chmod +x "$TDIR/organs/"*/live.sh "$TDIR/ganglion/live.sh" "$TDIR/comms/live.sh"
+# Reset runtime state from copied organs (including stale DBs)
+rm -f "$TDIR/organs/"*/{health.txt,beats.count,stimulus.txt,.spark.last,.spark.log,*.db} 2>/dev/null
+rm -f "$TDIR/organs/"*/tests/*.db 2>/dev/null
+rm -f "$TDIR/ganglion"/{health.txt,stimulus.txt,.spark.last,.spark.log,*.db} 2>/dev/null
+rm -f "$TDIR/comms"/{health.txt,stimulus.txt,.spark.last,.spark.log} 2>/dev/null
 
 MQTT_PORT=$(free-port)
 echo "listener $MQTT_PORT 0.0.0.0" > "$TDIR/mosquitto.conf"
@@ -53,6 +58,7 @@ cat >> "$TDIR/life.conf" << EOF
 MQTT_PORT=$MQTT_PORT
 GANGLION_CLIENT_ID=test-$$
 GANGLION_DB=$TDIR/ganglion.db
+GANGLION_LISTEN_DURATION=0
 BODY_PART=test
 CIRC_LOCAL_ONLY=1
 CIRC_DIR=$TDIR/.circ
@@ -382,6 +388,61 @@ if python3 -c "import json; d=json.load(open('$MOCK_GMAIL/inbox/test001.json'));
   pass "email marked as read after reply"
 else
   fail "email still has UNREAD label: $(cat "$MOCK_GMAIL/inbox/test001.json")"
+fi
+
+# ===================================================================
+#  PART 10: gmail read subcommand (mock mode)
+# ===================================================================
+
+# Reset: add a new unread email
+python3 -c "
+import json; from pathlib import Path
+email = {'id': 'test002', 'from': 'reader@example.com', 'subject': 'Read Test',
+         'body': 'Test the read subcommand.', 'labels': ['UNREAD', 'Tadpole']}
+Path('$MOCK_GMAIL/inbox/test002.json').write_text(json.dumps(email))
+"
+
+# Run gmail read directly
+GMAIL_MOCK_DIR="$MOCK_GMAIL" python3 "$BIN_ROOT/gmail" read test002 > /dev/null 2>&1
+
+if python3 -c "import json; d=json.load(open('$MOCK_GMAIL/inbox/test002.json')); assert 'UNREAD' not in d['labels']" 2>/dev/null; then
+  pass "gmail read removes UNREAD label (mock)"
+else
+  fail "gmail read should remove UNREAD: $(cat "$MOCK_GMAIL/inbox/test002.json")"
+fi
+
+# ===================================================================
+#  PART 11: Email marked as read during check-email (dedup)
+# ===================================================================
+
+# Reset: add a new unread email for check-email dedup test
+python3 -c "
+import json; from pathlib import Path
+email = {'id': 'test003', 'from': 'dedup@example.com', 'subject': 'Dedup Test',
+         'body': 'Should be marked read on check, not on reply.', 'labels': ['UNREAD', 'Tadpole']}
+Path('$MOCK_GMAIL/inbox/test003.json').write_text(json.dumps(email))
+"
+
+# Write check-email stimulus to comms
+echo "check-email brain" > "$COMMS/stimulus.txt"
+> "$BRAIN/stimulus.txt"
+
+# Run comms — check-email should mark test003 as read immediately
+(cd "$TDIR" && \
+  CONF_DIR="$TDIR" \
+  ORGANS="organs/heart:ganglion:organs/tail:organs/lymph:organs/stomach:organs/hippocampus:comms:organs/brain" \
+  CIRC_DIR="$TDIR/.circ" \
+  CIRC_LOCAL_ONLY=1 \
+  GMAIL_MOCK_DIR="$MOCK_GMAIL" \
+  MEMORY_DB="$TDIR/organs/hippocampus/memory.db" \
+  PYTHONPATH="$TDIR:${PYTHONPATH:-}" \
+  python3 "$COMMS/comms.py") 2>/dev/null || true
+
+# Email should already be marked as read (by check-email, before any reply)
+if python3 -c "import json; d=json.load(open('$MOCK_GMAIL/inbox/test003.json')); assert 'UNREAD' not in d['labels']" 2>/dev/null; then
+  pass "check-email marks email as read immediately (dedup)"
+else
+  fail "check-email should mark as read: $(cat "$MOCK_GMAIL/inbox/test003.json")"
 fi
 
 unset GMAIL_MOCK_DIR
