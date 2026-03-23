@@ -46,8 +46,7 @@ def generate_reply(prompt_text):
     """
     try:
         result = subprocess.run(
-            ["claude", "-p", "--continue", "--model", "opus",
-             "--dangerously-skip-permissions"],
+            ["claude", "-p", "--continue", "--model", "opus"],
             input=prompt_text,
             capture_output=True, text=True, timeout=180,
             cwd=CONF_DIR,

@@ -50,9 +50,12 @@ ENV CONF_DIR="/brain"
 
 WORKDIR /brain
 
-# Create .claude directory for session persistence
-RUN mkdir -p /brain/.claude /brain/.life/locks /brain/.life/circ
+# Create non-root user (claude CLI refuses --dangerously-skip-permissions as root)
+RUN adduser -D -h /brain brain && chown -R brain:brain /brain /opt
 
-# Persistent volumes (mounted at runtime, not baked in)
+# Create directories for session persistence
+RUN mkdir -p /brain/.claude /brain/.life/locks /brain/.life/circ && chown -R brain:brain /brain
+
+USER brain
 
 ENTRYPOINT ["bash", "/opt/life/spark-loop.sh", "/brain/life.conf"]
