@@ -12,6 +12,7 @@ Each cycle:
 """
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -73,6 +74,83 @@ def gmail_read(thread_id):
     return ok
 
 
+# Audio MIME types that qualify as voice memos
+AUDIO_MIME_PREFIXES = (
+    "audio/", "application/ogg",
+)
+
+
+def is_audio_attachment(att):
+    """Check if an attachment dict looks like an audio file."""
+    mime = (att.get("type", "") or att.get("mimeType", "")).lower()
+    name = (att.get("name", "") or att.get("filename", "")).lower()
+    audio_exts = {".m4a", ".mp3", ".wav", ".ogg", ".opus", ".webm", ".flac", ".aac", ".mp4"}
+
+    if any(mime.startswith(p) for p in AUDIO_MIME_PREFIXES):
+        return True
+    ext = os.path.splitext(name)[1]
+    if ext in audio_exts:
+        return True
+    return False
+
+
+def transcribe_audio(audio_path):
+    """Transcribe a local audio file via the transcribe muscle. Returns text or empty."""
+    result, ok = muscles.run(["transcribe", audio_path], timeout=120)
+    if ok and result:
+        return result.strip()
+    return ""
+
+
+def handle_icloud_maildrop(html):
+    """Extract iCloud Mail Drop URL from email HTML, download, and transcribe."""
+    match = re.search(r'data-url="([^"]+)"', html)
+    if not match:
+        return ""
+
+    download_url = match.group(1)
+    log(f"iCloud Mail Drop detected, transcribing from URL")
+    result, ok = muscles.run(["transcribe", "--url", download_url], timeout=120)
+    if ok and result:
+        return result.strip()
+    return ""
+
+
+def download_and_transcribe(email_id, attachment):
+    """Download an audio attachment and transcribe it. Returns transcript text or empty."""
+    import shutil
+    import tempfile as _tempfile
+
+    dl_dir = _tempfile.mkdtemp(prefix="comms-att-")
+    try:
+        out, ok = muscles.run(
+            ["gmail", "attachments", email_id, "--download-dir", dl_dir],
+            timeout=60,
+        )
+
+        if not ok or not out:
+            log(f"download_and_transcribe: gmail attachments failed for {email_id}")
+            return ""
+
+        try:
+            att_data = json.loads(out)
+        except json.JSONDecodeError:
+            log(f"download_and_transcribe: bad JSON from gmail attachments")
+            return ""
+
+        downloaded = att_data.get("attachments", [])
+        for att in downloaded:
+            local_path = att.get("local_path", "")
+            if local_path and os.path.isfile(local_path):
+                transcript = transcribe_audio(local_path)
+                if transcript:
+                    return transcript
+
+        return ""
+    finally:
+        shutil.rmtree(dl_dir, ignore_errors=True)
+
+
 def handle_check_email(reply_to, query=None):
     """Check Gmail for unread emails, notify requesting organ of each."""
     if not query:
@@ -100,6 +178,8 @@ def handle_check_email(reply_to, query=None):
 
         # Get full email content (GAS bridge returns {thread_id, messages: [...], count})
         full = gmail_get(email_id)
+        email_html = ""
+        attachments = []
         if full:
             msgs = full.get("messages", [])
             if msgs:
@@ -107,18 +187,40 @@ def handle_check_email(reply_to, query=None):
                 email_from = msg.get("from", email_from)
                 email_subject = msg.get("subject", email_subject)
                 email_body = msg.get("plain", msg.get("html", ""))
+                email_html = msg.get("html", "")
+                attachments = msg.get("attachments", [])
             else:
                 email_body = ""
         else:
             email_body = thread.get("snippet", "")
 
+        # Check for voice memo (audio attachment or iCloud Mail Drop)
+        transcript = ""
+        audio_attachments = [a for a in attachments if is_audio_attachment(a)]
+
+        if audio_attachments:
+            log(f"check-email: audio attachment detected in {email_id}, transcribing")
+            transcript = download_and_transcribe(email_id, audio_attachments[0])
+        elif email_html and "x-apple-maildropbanner" in email_html:
+            # iCloud Mail Drop — check unconditionally (don't gate on body emptiness)
+            log(f"check-email: iCloud Mail Drop detected in {email_id}, transcribing")
+            transcript = handle_icloud_maildrop(email_html)
+
         # Build email payload and store in circulatory system
-        payload = json.dumps({
+        payload_dict = {
             "id": email_id,
             "from": email_from,
             "subject": email_subject,
             "body": email_body,
-        })
+        }
+        if transcript:
+            payload_dict["transcript"] = transcript
+            log(f"check-email: transcribed {len(transcript)} chars for {email_id}")
+        elif audio_attachments or (email_html and "x-apple-maildropbanner" in email_html):
+            # Voice memo detected but transcription failed — tell the brain
+            payload_dict["transcript_failed"] = True
+            log(f"check-email: voice memo detected but transcription failed for {email_id}")
+        payload = json.dumps(payload_dict)
         ref = muscles.circ.put(payload)
         if not ref:
             log(f"check-email: failed to store email {email_id} in circ")

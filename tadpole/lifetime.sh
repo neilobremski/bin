@@ -448,6 +448,113 @@ fi
 unset GMAIL_MOCK_DIR
 
 # ===================================================================
+#  PART 12: Voice memo detection in comms (mock mode)
+# ===================================================================
+
+# Setup mock mailbox with audio attachment
+MOCK_GMAIL_VM="$TDIR/mock_gmail_vm"
+mkdir -p "$MOCK_GMAIL_VM/inbox" "$MOCK_GMAIL_VM/sent"
+python3 -c "
+import json; from pathlib import Path
+# Email with an audio attachment
+email = {'id': 'vm001', 'from': 'sender@example.com', 'subject': 'Voice Memo',
+         'body': '', 'html': '',
+         'attachments': [{'name': 'memo.m4a', 'type': 'audio/mp4', 'size': 12345}],
+         'labels': ['UNREAD', 'Tadpole']}
+Path('$MOCK_GMAIL_VM/inbox/vm001.json').write_text(json.dumps(email))
+Path('$MOCK_GMAIL_VM/next_id.txt').write_text('1\n')
+"
+
+# Reset comms
+COMMS="$TDIR/comms"
+> "$COMMS/health.txt"
+BRAIN="$TDIR/organs/brain"
+mkdir -p "$BRAIN"
+> "$BRAIN/stimulus.txt"
+
+echo "check-email brain" > "$COMMS/stimulus.txt"
+
+# Run comms with mock gmail — transcribe will fail (no real audio) but detection should work
+(cd "$TDIR" && \
+  CONF_DIR="$TDIR" \
+  ORGANS="organs/heart:ganglion:organs/tail:organs/lymph:organs/stomach:organs/hippocampus:comms:organs/brain" \
+  CIRC_DIR="$TDIR/.circ" \
+  CIRC_LOCAL_ONLY=1 \
+  GMAIL_MOCK_DIR="$MOCK_GMAIL_VM" \
+  MEMORY_DB="$TDIR/organs/hippocampus/memory.db" \
+  PYTHONPATH="$TDIR:${PYTHONPATH:-}" \
+  python3 "$COMMS/comms.py") 2>/dev/null || true
+
+# Brain should still receive new-email (even if transcription failed — body is still forwarded)
+if grep -q "new-email vm001 circ:" "$BRAIN/stimulus.txt" 2>/dev/null; then
+  pass "comms processes email with audio attachment (voice memo detection path)"
+else
+  fail "brain stimulus.txt missing new-email for vm001, got: $(cat "$BRAIN/stimulus.txt" 2>/dev/null || echo 'empty')"
+fi
+
+# Verify the circ payload was created (email data should be present even without transcript)
+vm_circ_ref=$(grep -o "circ:[a-f0-9]*" "$BRAIN/stimulus.txt" 2>/dev/null | head -1 | cut -d: -f2)
+if [ -n "$vm_circ_ref" ] && [ -f "$TDIR/.circ/$vm_circ_ref" ]; then
+  vm_circ_content=$(cat "$TDIR/.circ/$vm_circ_ref" 2>/dev/null)
+  if echo "$vm_circ_content" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['id']=='vm001' and d['subject']=='Voice Memo'" 2>/dev/null; then
+    pass "voice memo email payload stored correctly in circ"
+  else
+    fail "voice memo circ payload malformed: $vm_circ_content"
+  fi
+else
+  fail "voice memo circ file missing (ref=$vm_circ_ref)"
+fi
+
+# --- Test iCloud Mail Drop detection (HTML parsing only, no download) ---
+python3 -c "
+import json; from pathlib import Path
+# Email with iCloud Mail Drop link in HTML (no regular attachments)
+html = '<div class=\"x-apple-maildropbanner\" data-url=\"https://example.com/dl/memo.m4a\">Download</div>'
+email = {'id': 'vm002', 'from': 'sender@example.com', 'subject': 'Mail Drop Memo',
+         'body': '', 'html': html,
+         'attachments': [],
+         'labels': ['UNREAD', 'Tadpole']}
+Path('$MOCK_GMAIL_VM/inbox/vm002.json').write_text(json.dumps(email))
+"
+
+> "$BRAIN/stimulus.txt"
+echo "check-email brain" > "$COMMS/stimulus.txt"
+
+(cd "$TDIR" && \
+  CONF_DIR="$TDIR" \
+  ORGANS="organs/heart:ganglion:organs/tail:organs/lymph:organs/stomach:organs/hippocampus:comms:organs/brain" \
+  CIRC_DIR="$TDIR/.circ" \
+  CIRC_LOCAL_ONLY=1 \
+  GMAIL_MOCK_DIR="$MOCK_GMAIL_VM" \
+  MEMORY_DB="$TDIR/organs/hippocampus/memory.db" \
+  PYTHONPATH="$TDIR:${PYTHONPATH:-}" \
+  python3 "$COMMS/comms.py") 2>/dev/null || true
+
+# Should still deliver the email to brain even if transcribe --url fails
+if grep -q "new-email vm002 circ:" "$BRAIN/stimulus.txt" 2>/dev/null; then
+  pass "comms detects iCloud Mail Drop in HTML and delivers email"
+else
+  fail "brain stimulus.txt missing new-email for vm002, got: $(cat "$BRAIN/stimulus.txt" 2>/dev/null || echo 'empty')"
+fi
+
+# ===================================================================
+#  PART 13: Transcribe muscle structure check
+# ===================================================================
+
+if [ -x "$BIN_ROOT/transcribe" ]; then
+  pass "transcribe muscle is executable"
+else
+  fail "transcribe muscle not found or not executable"
+fi
+
+# Verify transcribe shows help without crashing
+if python3 "$BIN_ROOT/transcribe" --help 2>/dev/null | grep -q "Groq Whisper"; then
+  pass "transcribe --help works"
+else
+  fail "transcribe --help should mention Groq Whisper"
+fi
+
+# ===================================================================
 echo ""
 echo "# $PASSED/$TESTS passed"
 [ "$FAILED" -gt 0 ] && exit 1

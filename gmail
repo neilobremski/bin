@@ -14,6 +14,7 @@ Usage:
     gmail label <id> --add LABEL
     gmail label <id> --remove LABEL
     gmail read <id>
+    gmail attachments <id> [--download-dir <dir>]
 
 Secrets resolved via local-secret:
     GAS_BRIDGE_URL, GAS_BRIDGE_KEY
@@ -114,7 +115,8 @@ def _mock_get(args):
         "from": email.get("from", ""),
         "subject": email.get("subject", ""),
         "plain": email.get("body", ""),
-        "html": email.get("body", ""),
+        "html": email.get("html", email.get("body", "")),
+        "attachments": email.get("attachments", []),
     }
     output({
         "thread_id": args.id,
@@ -216,6 +218,40 @@ def _mock_read(args):
     email["labels"] = labels
     p.write_text(json.dumps(email))
     output({"status": "marked_read", "id": args.id})
+
+
+def _mock_attachments(args):
+    """Mock gmail attachments: return attachment metadata from inbox/<id>.json."""
+    mock = _mock_dir()
+    p = mock / "inbox" / f"{args.id}.json"
+    if not p.exists():
+        output({"attachments": []})
+        return
+    try:
+        email = json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        output({"attachments": []})
+        return
+
+    attachments = email.get("attachments", [])
+    # In mock mode, if download_dir is set and attachments have "mock_data",
+    # write mock files to simulate download
+    dl_dir = getattr(args, "download_dir", None) or "/tmp"
+    results = []
+    for att in attachments:
+        entry = {
+            "name": att.get("name", "unknown"),
+            "type": att.get("type", "application/octet-stream"),
+            "size": att.get("size", 0),
+        }
+        mock_data = att.get("mock_data")
+        if mock_data:
+            local_path = os.path.join(dl_dir, att.get("name", "attachment"))
+            os.makedirs(dl_dir, exist_ok=True)
+            Path(local_path).write_bytes(mock_data.encode() if isinstance(mock_data, str) else mock_data)
+            entry["local_path"] = local_path
+        results.append(entry)
+    output({"attachments": results})
 
 
 # ---------------------------------------------------------------------------
@@ -850,6 +886,59 @@ def cmd_read(args):
     output(result)
 
 
+def cmd_attachments(args):
+    """Download attachments from an email via GAS bridge (save to Drive, then download)."""
+    if _mock_dir():
+        return _mock_attachments(args)
+
+    # Step 1: Get attachments metadata via GAS (saves to Drive)
+    result = gas("gmail.attachments", f"message_id={args.id}", "save_to_drive=true")
+
+    if result is _RATE_LIMITED or not result:
+        print('{"error": "attachment fetch failed"}', file=sys.stderr)
+        sys.exit(1)
+
+    attachments = result.get("attachments", [])
+    if not attachments:
+        output({"attachments": []})
+        return
+
+    dl_dir = getattr(args, "download_dir", None) or "/tmp"
+    os.makedirs(dl_dir, exist_ok=True)
+
+    # Step 2: Download each attachment from Drive
+    token = _get_token()
+    results = []
+    for att in attachments:
+        entry = {
+            "name": att.get("name", att.get("filename", "attachment")),
+            "type": att.get("mimeType", "application/octet-stream"),
+            "size": att.get("size", 0),
+        }
+        drive_id = att.get("drive_id", att.get("driveId"))
+        if not drive_id or not token:
+            entry["error"] = "no drive_id or token"
+            results.append(entry)
+            continue
+
+        local_path = os.path.join(dl_dir, entry["name"])
+        url = f"https://www.googleapis.com/drive/v3/files/{drive_id}?alt=media"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = resp.read()
+            with open(local_path, "wb") as f:
+                f.write(data)
+            entry["local_path"] = local_path
+            entry["size"] = len(data)
+        except Exception as e:
+            entry["error"] = str(e)
+
+        results.append(entry)
+
+    output({"attachments": results})
+
+
 # ---------------------------------------------------------------------------
 # Output helper
 # ---------------------------------------------------------------------------
@@ -911,6 +1000,11 @@ def main():
     p_read = sub.add_parser("read", help="Mark a thread as read")
     p_read.add_argument("id", help="Thread/message ID to mark as read")
 
+    # attachments
+    p_att = sub.add_parser("attachments", help="Download attachments from an email")
+    p_att.add_argument("id", help="Message or thread ID")
+    p_att.add_argument("--download-dir", default="/tmp", help="Directory to save files (default /tmp)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -924,6 +1018,7 @@ def main():
         "send": cmd_send,
         "label": cmd_label,
         "read": cmd_read,
+        "attachments": cmd_attachments,
     }
     dispatch[args.command](args)
 

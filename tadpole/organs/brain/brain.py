@@ -100,8 +100,18 @@ def handle_new_email(thread_id, circ_ref):
         return False
 
     email_body = email_data.get("body", "")
+    transcript = email_data.get("transcript", "")
     email_from = email_data.get("from", "unknown")
     email_subject = email_data.get("subject", "(no subject)")
+
+    # Voice memo handling
+    transcript_failed = email_data.get("transcript_failed", False)
+    if transcript:
+        email_body = transcript  # use transcript naturally, no clinical prefix
+    elif transcript_failed:
+        email_body = "(This was a voice memo but I couldn't transcribe the audio. Let them know.)"
+    elif not email_body.strip():
+        email_body = "(empty email body)"
 
     # Search memories for context
     search_terms = f"{email_from} {email_subject}"
