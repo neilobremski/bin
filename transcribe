@@ -23,8 +23,10 @@ import urllib.error
 GROQ_TRANSCRIPTION_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 GROQ_MODEL = "whisper-large-v3"
 SUPPORTED_EXTENSIONS = {".m4a", ".mp3", ".wav", ".ogg", ".webm", ".flac", ".mp4"}
-# Groq API file size limit: 25 MB
+# Groq API file size limit: 25 MB. Split threshold slightly lower for safety.
 MAX_FILE_SIZE = 25 * 1024 * 1024
+CHUNK_THRESHOLD = 20 * 1024 * 1024  # split files larger than 20 MB
+CHUNK_DURATION_SECS = 600  # 10-minute chunks
 
 
 def get_api_key():
@@ -87,20 +89,59 @@ def download_url(url):
         return None
 
 
-def transcribe_file(audio_path, api_key):
-    """Transcribe an audio file via Groq Whisper API. Returns transcript text or None."""
-    if not os.path.isfile(audio_path):
-        print(f"error: file not found: {audio_path}", file=sys.stderr)
+def split_audio(audio_path, chunk_secs=CHUNK_DURATION_SECS):
+    """Split an audio file into chunks using ffmpeg. Returns list of temp file paths."""
+    chunk_dir = tempfile.mkdtemp(prefix="transcribe-chunks-")
+    ext = os.path.splitext(audio_path)[1] or ".m4a"
+    pattern = os.path.join(chunk_dir, f"chunk_%03d{ext}")
+
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-i", audio_path, "-f", "segment",
+             "-segment_time", str(chunk_secs), "-c", "copy", pattern],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode != 0:
+            print(f"error: ffmpeg split failed: {result.stderr[:200]}", file=sys.stderr)
+            return []
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"error: ffmpeg not available: {e}", file=sys.stderr)
+        return []
+
+    chunks = sorted(
+        os.path.join(chunk_dir, f) for f in os.listdir(chunk_dir)
+        if f.startswith("chunk_")
+    )
+    print(f"split into {len(chunks)} chunks", file=sys.stderr)
+    return chunks
+
+
+def transcribe_chunked(audio_path, api_key):
+    """Split a large audio file and transcribe each chunk. Returns combined transcript."""
+    import shutil
+    chunks = split_audio(audio_path)
+    if not chunks:
         return None
 
-    file_size = os.path.getsize(audio_path)
-    if file_size == 0:
-        print("error: file is empty", file=sys.stderr)
-        return None
-    if file_size > MAX_FILE_SIZE:
-        print(f"error: file too large ({file_size / (1024*1024):.1f} MB, max 25 MB)", file=sys.stderr)
-        return None
+    chunk_dir = os.path.dirname(chunks[0])
+    try:
+        transcripts = []
+        for i, chunk_path in enumerate(chunks):
+            chunk_size = os.path.getsize(chunk_path)
+            if chunk_size > MAX_FILE_SIZE:
+                print(f"warning: chunk {i} is {chunk_size/(1024*1024):.1f} MB (over 25 MB), skipping", file=sys.stderr)
+                continue
+            print(f"transcribing chunk {i+1}/{len(chunks)} ({chunk_size/(1024*1024):.1f} MB)", file=sys.stderr)
+            text = transcribe_single(chunk_path, api_key)
+            if text:
+                transcripts.append(text)
+        return " ".join(transcripts) if transcripts else None
+    finally:
+        shutil.rmtree(chunk_dir, ignore_errors=True)
 
+
+def transcribe_single(audio_path, api_key):
+    """Transcribe a single audio file (must be under 25MB) via Groq Whisper API."""
     ext = os.path.splitext(audio_path)[1].lower()
     if ext not in SUPPORTED_EXTENSIONS:
         print(f"warning: extension {ext} may not be supported", file=sys.stderr)
@@ -167,6 +208,23 @@ def transcribe_file(audio_path, api_key):
     except Exception as e:
         print(f"error: Groq API request failed: {e}", file=sys.stderr)
         return None
+
+
+def transcribe_file(audio_path, api_key):
+    """Transcribe an audio file — splits into chunks if over 20MB."""
+    if not os.path.isfile(audio_path):
+        print(f"error: file not found: {audio_path}", file=sys.stderr)
+        return None
+
+    file_size = os.path.getsize(audio_path)
+    if file_size == 0:
+        print("error: file is empty", file=sys.stderr)
+        return None
+    if file_size > CHUNK_THRESHOLD:
+        print(f"file is {file_size / (1024*1024):.1f} MB, splitting into chunks", file=sys.stderr)
+        return transcribe_chunked(audio_path, api_key)
+
+    return transcribe_single(audio_path, api_key)
 
 
 def main():
