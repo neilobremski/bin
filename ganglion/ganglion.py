@@ -78,11 +78,15 @@ def build_organ_lookup(organ_list):
 
 
 def spark_organ(organ_path):
-    """Spark a single organ via spark-organ.sh (layer 0). Non-blocking."""
+    """Spark a single organ via spark-organ.sh (layer 0). Non-blocking.
+
+    If spark-organ.sh is unavailable, stimulus is already in stimulus.txt
+    and will be picked up on the next cron/loop/manual spark cycle.
+    """
     organ_path_str = str(organ_path)
 
     if not SPARK_ORGAN_SCRIPT.is_file():
-        log(f"spark-organ.sh not found at {SPARK_ORGAN_SCRIPT} — cannot spark")
+        log(f"spark-organ.sh not found — stimulus queued for next spark cycle")
         return
 
     subprocess.Popen(
