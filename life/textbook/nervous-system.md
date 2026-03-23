@@ -46,6 +46,8 @@ stimulus send tail "food circ:a1b2c3d4"
 
 **Send by type** — "deliver this to any organ of type X." Delivered to the first local match. If no local match, published to MQTT for remote delivery.
 
+**Send by body part** — When stimulus is addressed to a body part name (e.g., "brain") rather than a specific organ type, the ganglion routes it to the `DEFAULT_ORGAN` configured in `life.conf`. This enables external addressing: other body parts send to "brain" without knowing the internal organ structure. If `DEFAULT_ORGAN` is unset or doesn't match a local organ, the stimulus is ignored.
+
 **Query by type** — "give me the health of all organs of type X." Reads from the local registry. No network round-trip — the registry is pre-populated by ganglion-to-ganglion broadcasts.
 
 ## Health Is Local
