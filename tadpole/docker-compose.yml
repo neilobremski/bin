@@ -51,6 +51,8 @@ services:
       - SPARK_INTERVAL=${SPARK_INTERVAL:-10}
       - GANGLION_LISTEN_DURATION=5
       - CIRC_DIR=/opt/circ
+      - GMAIL_MOCK_DIR=/opt/mock-gmail
+      - COMMS_AUTO_CHECK=1
     volumes:
       - circ:/opt/circ
       - ${MOCK_GMAIL_DIR:-./mock-gmail}:/opt/mock-gmail
@@ -59,3 +61,7 @@ services:
 volumes:
   mqtt-data:
   circ:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: mode=1777

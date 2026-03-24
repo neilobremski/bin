@@ -1,0 +1,14 @@
+.git
+.github
+.claude
+__pycache__
+*.pyc
+.spark.log
+.spark.last
+health.txt
+stimulus.txt
+beats.count
+*.db
+docs/journal
+tadpole/mock-gmail
+tadpole/backups
