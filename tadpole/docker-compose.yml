@@ -1,48 +1,75 @@
 services:
   mqtt:
     image: eclipse-mosquitto:2
-    ports:
-      - "${MQTT_PORT:-1883}:1883"
+    command: mosquitto -c /mosquitto/config/mosquitto.conf
     volumes:
-      - ./mosquitto-docker.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     healthcheck:
       test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$$SYS/#", "-W", "1", "-C", "1"]
-      interval: 1s
+      interval: 2s
       timeout: 3s
       retries: 5
 
-  body-a:
+  brain:
     build:
       context: ..
-      dockerfile: tadpole/Dockerfile
+      dockerfile: brain/Dockerfile
     depends_on:
       mqtt:
         condition: service_healthy
-    environment:
-      - MQTT_HOST=mqtt
-      - MQTT_PORT=1883
-      - BODY_PART=body-a
-      - CIRC_LOCAL_ONLY=1
     volumes:
-      - body-a-data:/opt/bin/tadpole/work
-    entrypoint: ["sleep", "infinity"]
+      - .:/brain/.claude
+      - circ:/shared/circ
+    environment:
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+      BODY_PART: brain
+      DEFAULT_ORGAN: pfc
+      MEMORY_DB: /brain/organs/hippocampus/memory.db
+      CIRC_DIR: /shared/circ
+      CIRC_LOCAL_ONLY: "1"
+      SPARK_INTERVAL: "${SPARK_INTERVAL:-30}"
+      GANGLION_LISTEN_DURATION: "15"
+      PFC_CADENCE: "${PFC_CADENCE:-1}"
 
-  body-b:
+  comms:
     build:
       context: ..
       dockerfile: tadpole/Dockerfile
     depends_on:
       mqtt:
         condition: service_healthy
-    environment:
-      - MQTT_HOST=mqtt
-      - MQTT_PORT=1883
-      - BODY_PART=body-b
-      - CIRC_LOCAL_ONLY=1
     volumes:
-      - body-b-data:/opt/bin/tadpole/work
-    entrypoint: ["sleep", "infinity"]
+      - circ:/shared/circ
+      - ${GMAIL_MOCK_DIR:-./.mock_gmail}:/mock_gmail
+    environment:
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+      BODY_PART: comms-body
+      COMMS_AUTO_CHECK: "1"
+      CIRC_DIR: /shared/circ
+      CIRC_LOCAL_ONLY: "1"
+      SPARK_INTERVAL: "${SPARK_INTERVAL:-30}"
+      GANGLION_LISTEN_DURATION: "15"
+      GMAIL_MOCK_DIR: /mock_gmail
+    entrypoint:
+      - bash
+      - -c
+      - |
+        cat > /tmp/comms.conf <<CONF
+        ORGANS=/opt/bin/ganglion:/opt/bin/comms
+        BODY_PART=comms-body
+        DEFAULT_ORGAN=comms
+        MQTT_HOST=mqtt
+        MQTT_PORT=1883
+        CONF
+        echo "CADENCE=1" > /opt/bin/comms/organ.conf
+        chmod 1777 /shared/circ 2>/dev/null || true
+        exec bash /opt/bin/life/spark-loop.sh /tmp/comms.conf
 
 volumes:
-  body-a-data:
-  body-b-data:
+  circ:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "uid=0,gid=0,mode=1777"

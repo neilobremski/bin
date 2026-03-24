@@ -323,6 +323,12 @@ def main():
     lines = muscles.stimulus.consume(str(DIR)).strip().splitlines()
 
     if not lines:
+        # No stimulus — but if we're the comms organ, check email anyway.
+        # This prevents the tadpole from going silent if MQTT breaks or brain is slow.
+        auto_check = os.environ.get("COMMS_AUTO_CHECK", "")
+        if auto_check:
+            log("idle — auto-checking email")
+            handle_check_email("brain")
         (DIR / "health.txt").write_text("ok idle\n")
         return
 
