@@ -43,7 +43,10 @@ else
     mkdir -p "$GMAIL_MOCK_DIR/inbox" "$GMAIL_MOCK_DIR/sent"
     [ -f "$GMAIL_MOCK_DIR/next_id.txt" ] || echo "1" > "$GMAIL_MOCK_DIR/next_id.txt"
     export GMAIL_MOCK_DIR
-    echo "Using mock Gmail at $GMAIL_MOCK_DIR"
+    # In mock mode, default to faster cycles (no quota concern)
+    SPARK_INTERVAL="${SPARK_INTERVAL:-15}"
+    PFC_CADENCE="${PFC_CADENCE:-1}"
+    echo "Using mock Gmail at $GMAIL_MOCK_DIR (fast mode: ${SPARK_INTERVAL}s spark, ${PFC_CADENCE}m PFC)"
 fi
 
 # --- Mosquitto broker ---
@@ -81,13 +84,22 @@ BODY_PID=""
 cleanup() {
     echo ""
     echo "Shutting down tadpole..."
-    [ -n "$BODY_PID" ] && kill "$BODY_PID" 2>/dev/null
+    # Kill body process group (spark-loop + all child organs)
+    [ -n "$BODY_PID" ] && kill -- -"$BODY_PID" 2>/dev/null || kill "$BODY_PID" 2>/dev/null
     docker rm -f "$BRAIN_CONTAINER" 2>/dev/null
     [ -n "$MOSQUITTO_PID" ] && kill "$MOSQUITTO_PID" 2>/dev/null
     [ -n "$MOSQUITTO_CONF" ] && rm -f "$MOSQUITTO_CONF"
+    # Clean up seeded stimulus
+    rm -f "$SCRIPT_DIR/comms/stimulus.txt" 2>/dev/null
+    wait 2>/dev/null
     echo "Tadpole stopped."
 }
 trap cleanup EXIT INT TERM
+
+# --- Seed initial stimulus ---
+# Tell comms to check email immediately (don't wait for brain's first 15-min cycle)
+mkdir -p "$SCRIPT_DIR/comms"
+echo "check-email brain" > "$SCRIPT_DIR/comms/stimulus.txt"
 
 # --- Start body (host) ---
 echo "Starting body (comms + ganglion + organs)..."
@@ -110,6 +122,7 @@ docker run --rm \
     ${MQTT_PASS:+-e "MQTT_PASS=$MQTT_PASS"} \
     -e "BODY_PART=brain" \
     -e "DEFAULT_ORGAN=pfc" \
+    ${PFC_CADENCE:+-e "PFC_CADENCE=$PFC_CADENCE"} \
     -e "MEMORY_DB=/brain/organs/hippocampus/memory.db" \
     -e "CIRC_DIR=/brain/.life/circ" \
     -e "CIRC_LOCAL_ONLY=1" \

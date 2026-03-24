@@ -58,4 +58,7 @@ RUN mkdir -p /brain/.claude /brain/.life/locks /brain/.life/circ && chown -R bra
 
 USER brain
 
-ENTRYPOINT ["bash", "/opt/life/spark-loop.sh", "/brain/life.conf"]
+# Entrypoint: apply runtime overrides, then start spark
+ENTRYPOINT ["bash", "-c", "\
+    [ -n \"${PFC_CADENCE:-}\" ] && echo \"CADENCE=$PFC_CADENCE\" > /brain/organs/pfc/organ.conf; \
+    exec bash /opt/life/spark-loop.sh /brain/life.conf"]
