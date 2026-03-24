@@ -20,11 +20,10 @@ RUN chmod +x /opt/bin/stimulus /opt/bin/mqtt-pub /opt/bin/mqtt-sub \
 ENV PATH="/opt/bin:/opt/bin/life:$PATH"
 ENV PYTHONPATH="/opt/bin"
 
-# Non-root user (claude CLI refuses --dangerously-skip-permissions as root)
-RUN adduser -D -h /tadpole tadpole
+# Runtime user is set via --user at docker run (matches host UID).
+# Make everything writable so any UID works.
 RUN mkdir -p /tadpole/.claude /tadpole/.life/locks /tadpole/.life/circ \
-    && chown -R tadpole:tadpole /tadpole /opt/bin
+    && chmod -R a+rwX /tadpole /opt/bin
 
-USER tadpole
 ENV HOME="/tadpole"
 WORKDIR /opt/bin
