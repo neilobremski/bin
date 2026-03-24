@@ -23,9 +23,6 @@ RUN chmod +x /opt/bin/stimulus /opt/bin/mqtt-pub /opt/bin/mqtt-sub \
     /opt/bin/local-secret \
     /opt/bin/life/spark.sh /opt/bin/life/spark-loop.sh /opt/bin/life/spark-organ.sh \
     /opt/bin/ganglion/live.sh \
-    /opt/bin/comms/live.sh \
-    /opt/bin/gmail \
-    /opt/bin/tadpole/organs/*/live.sh \
     && chmod -R a+rwX /opt/bin
 
 # Writable HOME for any UID
@@ -33,5 +30,5 @@ ENV HOME=/tmp/home
 RUN mkdir -p /tmp/home/.life/locks && chmod -R 777 /tmp/home
 
 ENV PATH="/opt/bin:$PATH"
-WORKDIR /opt/bin/tadpole
+WORKDIR /opt/bin/brain
 ENTRYPOINT ["/opt/bin/life/spark-loop.sh"]

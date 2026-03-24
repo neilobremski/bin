@@ -46,6 +46,8 @@ stimulus send tail "food circ:a1b2c3d4"
 
 **Send by type** — "deliver this to any organ of type X." Delivered to the first local match. If no local match, published to MQTT for remote delivery.
 
+**Send by body part** — "deliver this to `brain`" when you don't know which organ handles it. If the target matches the body part name (e.g., `brain`) and no organ of that type exists, the system falls back to the `DEFAULT_ORGAN` configured in `life.conf`. For example, `DEFAULT_ORGAN=pfc` in the brain means `stimulus send brain "think about this"` routes to the `pfc` organ. This lets other body parts address a whole body part without knowing its internal organ layout.
+
 **Query by type** — "give me the health of all organs of type X." Reads from the local registry. No network round-trip — the registry is pre-populated by ganglion-to-ganglion broadcasts.
 
 ## Health Is Local

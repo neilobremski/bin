@@ -281,6 +281,12 @@ def mqtt_listen_and_spark(organ_lookup, duration=50):
                 continue
 
             organ_path = organ_lookup.get(target_type)
+            if not organ_path and target_type == BODY:
+                default = os.environ.get("DEFAULT_ORGAN", "")
+                if default:
+                    organ_path = organ_lookup.get(default)
+                    if organ_path:
+                        log(f"body-part stimulus -> default organ '{default}'")
             if not organ_path:
                 log(f"stimulus for unknown organ '{target_type}' — ignoring")
                 continue

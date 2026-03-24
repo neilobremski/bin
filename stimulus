@@ -52,6 +52,24 @@ case "$cmd" in
       done
     fi
 
+    # Fall back to DEFAULT_ORGAN if target is the body part name
+    if [ "$delivered" = false ] && [ "$target_type" = "$BODY" ] && [ -n "${DEFAULT_ORGAN:-}" ]; then
+      if [ -n "${ORGANS:-}" ]; then
+        IFS=':' read -ra _paths <<< "$ORGANS"
+        for op in "${_paths[@]}"; do
+          op="${op#"${op%%[![:space:]]*}"}"
+          op="${op%"${op##*[![:space:]]}"}"
+          [ -z "$op" ] && continue
+          [[ "$op" != /* ]] && op="$conf_dir/$op"
+          if [ "$(basename "$op")" = "$DEFAULT_ORGAN" ] && [ -d "$op" ]; then
+            echo "$message" >> "$op/stimulus.txt"
+            delivered=true
+            break
+          fi
+        done
+      fi
+    fi
+
     # Fall back to MQTT for remote delivery
     if [ "$delivered" = false ]; then
       if [ -n "${MQTT_HOST:-}" ] && command -v mqtt-pub >/dev/null 2>&1; then

@@ -4,45 +4,58 @@ services:
     ports:
       - "${MQTT_PORT:-1883}:1883"
     volumes:
-      - ./mosquitto-docker.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt-data:/mosquitto/data
     healthcheck:
       test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$$SYS/#", "-W", "1", "-C", "1"]
       interval: 1s
       timeout: 3s
       retries: 5
 
-  body-a:
+  brain:
     build:
       context: ..
-      dockerfile: tadpole/Dockerfile
+      dockerfile: brain/Dockerfile
     depends_on:
       mqtt:
         condition: service_healthy
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     environment:
       - MQTT_HOST=mqtt
       - MQTT_PORT=1883
-      - BODY_PART=body-a
-      - CIRC_LOCAL_ONLY=1
+      - BODY_PART=brain
+      - SPARK_INTERVAL=${SPARK_INTERVAL:-10}
+      - DEFAULT_ORGAN=pfc
+      - GANGLION_LISTEN_DURATION=5
+      - CIRC_DIR=/opt/circ
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-}
     volumes:
-      - body-a-data:/opt/bin/tadpole/work
-    entrypoint: ["sleep", "infinity"]
+      - circ:/opt/circ
+      - ./CLAUDE.md:/opt/bin/brain/CLAUDE.md:ro
+    entrypoint: ["/opt/bin/life/spark-loop.sh"]
 
-  body-b:
+  body:
     build:
       context: ..
       dockerfile: tadpole/Dockerfile
     depends_on:
       mqtt:
         condition: service_healthy
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     environment:
       - MQTT_HOST=mqtt
       - MQTT_PORT=1883
-      - BODY_PART=body-b
-      - CIRC_LOCAL_ONLY=1
+      - BODY_PART=body
+      - SPARK_INTERVAL=${SPARK_INTERVAL:-10}
+      - GANGLION_LISTEN_DURATION=5
+      - CIRC_DIR=/opt/circ
     volumes:
-      - body-b-data:/opt/bin/tadpole/work
-    entrypoint: ["sleep", "infinity"]
+      - circ:/opt/circ
+      - ${MOCK_GMAIL_DIR:-./mock-gmail}:/opt/mock-gmail
+    entrypoint: ["/bin/bash", "-c", "cat > /opt/bin/tadpole/life.conf <<'CONF'\nORGANS=../ganglion:../comms\nMQTT_HOST=mqtt\nMQTT_PORT=1883\nBODY_PART=body\nDEFAULT_ORGAN=comms\nCONF\nexec /opt/bin/life/spark-loop.sh"]
 
 volumes:
-  body-a-data:
-  body-b-data:
+  mqtt-data:
+  circ:
