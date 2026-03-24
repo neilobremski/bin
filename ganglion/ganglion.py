@@ -94,7 +94,7 @@ def spark_organ(organ_path):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
 
-    log(f"sparked {name}")
+    log(f"sparked {Path(organ_path_str).name}")
 
 
 def scan_local(db, organ_list):
