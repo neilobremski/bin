@@ -1,25 +1,32 @@
 #!/usr/bin/env python3
 """Comms organ — stimulus-driven communication I/O.
 
-The comms organ does NOT check email on its own. It processes stimulus signals:
-  - "check-email [query]" -> search Gmail, notify brain of new emails
-  - "send-reply <thread_id> circ:<hash>" -> send a reply, notify brain
+Supports two modes:
+  - Live: uses gmail muscle (default)
+  - Mock: when GMAIL_MOCK_DIR is set, reads .json from inbox/, moves to
+    inbox/.processed/, writes replies to sent/
 
-Each cycle:
-1. Consume stimulus
-2. Process each signal
-3. Write health and exit
+Stimulus contract:
+  IN:  "check-email <reply-to> [query]"
+  IN:  "send-reply <reply-to> <thread_id> circ:<hash>"
+  IN:  "send-email <reply-to> circ:<hash>"
+  OUT: "new-email <id> circ:<hash>"     (to reply-to organ)
+  OUT: "sent <thread_id>"               (to reply-to organ)
+
+When COMMS_AUTO_CHECK=1, comms checks for new emails every cycle
+even without stimulus (useful in tadpole container).
 """
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
 DIR = Path(__file__).resolve().parent
 CONF_DIR = os.environ.get("CONF_DIR", "")
+MOCK_DIR = os.environ.get("GMAIL_MOCK_DIR", "")
 
 # muscles.py lives at BIN_ROOT (peer to comms/). Spark sets PYTHONPATH.
-# Fallback: comms/ is one level below BIN_ROOT, so DIR.parent works.
 sys.path.insert(0, str(DIR.parent))
 import muscles
 
@@ -27,6 +34,69 @@ import muscles
 def log(msg):
     muscles.log("comms", msg)
 
+
+# ---- Mock Gmail backend ----
+
+def mock_check_email(reply_to):
+    """Scan MOCK_DIR/inbox/ for .json files, store in circ, move to processed."""
+    inbox = Path(MOCK_DIR) / "inbox"
+    if not inbox.is_dir():
+        log("mock check-email: no inbox directory")
+        return 0
+
+    processed_dir = inbox / ".processed"
+    processed_dir.mkdir(exist_ok=True)
+
+    count = 0
+    for fp in sorted(inbox.glob("*.json")):
+        try:
+            data = json.loads(fp.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            log(f"mock check-email: bad file {fp.name}: {e}")
+            continue
+
+        email_id = data.get("id", fp.stem)
+        payload = json.dumps({
+            "id": email_id,
+            "from": data.get("from", "unknown"),
+            "subject": data.get("subject", "(no subject)"),
+            "body": data.get("body", ""),
+        })
+
+        ref = muscles.circ.put(payload)
+        if not ref:
+            log(f"mock check-email: failed to store {email_id} in circ")
+            continue
+
+        # Move to processed
+        shutil.move(str(fp), str(processed_dir / fp.name))
+
+        muscles.stimulus.send(reply_to, f"new-email {email_id} circ:{ref}")
+        count += 1
+
+    log(f"mock check-email: notified {reply_to} of {count} emails")
+    return count
+
+
+def mock_send_reply(reply_to, thread_id, circ_ref):
+    """Write reply body from circ to MOCK_DIR/sent/."""
+    body = muscles.circ.get(circ_ref)
+    if not body:
+        log(f"mock send-reply: could not retrieve circ:{circ_ref}")
+        return False
+
+    sent_dir = Path(MOCK_DIR) / "sent"
+    sent_dir.mkdir(exist_ok=True)
+
+    out_file = sent_dir / f"{thread_id}.txt"
+    out_file.write_text(body)
+
+    muscles.stimulus.send(reply_to, f"sent {thread_id}")
+    log(f"mock send-reply: wrote reply to {out_file}")
+    return True
+
+
+# ---- Live Gmail backend ----
 
 def gmail_search(query, count=5):
     """Search Gmail via the gmail muscle. Returns parsed JSON or None."""
@@ -56,17 +126,6 @@ def gmail_reply(thread_id, body_file):
     return ok
 
 
-def gmail_label(msg_id, remove=None, add=None):
-    """Modify labels on a message."""
-    cmd = ["gmail", "label", msg_id]
-    if remove:
-        cmd.extend(["--remove", remove])
-    if add:
-        cmd.extend(["--add", add])
-    _, ok = muscles.run(cmd)
-    return ok
-
-
 def gmail_read(thread_id):
     """Mark a thread as read via the gmail muscle."""
     _, ok = muscles.run(["gmail", "read", thread_id])
@@ -74,7 +133,10 @@ def gmail_read(thread_id):
 
 
 def handle_check_email(reply_to, query=None):
-    """Check Gmail for unread emails, notify requesting organ of each."""
+    """Check for unread emails, notify requesting organ of each."""
+    if MOCK_DIR:
+        return mock_check_email(reply_to)
+
     if not query:
         query = "label:Tadpole is:unread"
 
@@ -83,7 +145,6 @@ def handle_check_email(reply_to, query=None):
         log("check-email: no results")
         return 0
 
-    # Handle both array and {threads/messages: [...]} shapes
     threads = data if isinstance(data, list) else data.get("threads", data.get("messages", []))
     if not threads:
         log("check-email: no unread emails")
@@ -98,12 +159,11 @@ def handle_check_email(reply_to, query=None):
         email_from = thread.get("from", "unknown")
         email_subject = thread.get("subject", "(no subject)")
 
-        # Get full email content (GAS bridge returns {thread_id, messages: [...], count})
         full = gmail_get(email_id)
         if full:
             msgs = full.get("messages", [])
             if msgs:
-                msg = msgs[-1]  # latest message in thread
+                msg = msgs[-1]
                 email_from = msg.get("from", email_from)
                 email_subject = msg.get("subject", email_subject)
                 email_body = msg.get("plain", msg.get("html", ""))
@@ -112,7 +172,6 @@ def handle_check_email(reply_to, query=None):
         else:
             email_body = thread.get("snippet", "")
 
-        # Build email payload and store in circulatory system
         payload = json.dumps({
             "id": email_id,
             "from": email_from,
@@ -124,9 +183,7 @@ def handle_check_email(reply_to, query=None):
             log(f"check-email: failed to store email {email_id} in circ")
             continue
 
-        # Mark as read immediately to prevent re-processing on next check
         gmail_read(email_id)
-
         muscles.stimulus.send(reply_to, f"new-email {email_id} circ:{ref}")
         count += 1
 
@@ -135,7 +192,10 @@ def handle_check_email(reply_to, query=None):
 
 
 def handle_send_reply(reply_to, thread_id, circ_ref):
-    """Send reply from circ, mark as read, store memory. Uses circ cache path directly."""
+    """Send reply from circ."""
+    if MOCK_DIR:
+        return mock_send_reply(reply_to, thread_id, circ_ref)
+
     circ_dir = os.environ.get("CIRC_DIR", os.path.expanduser("~/.life/circ"))
     circ_path = os.path.join(circ_dir, circ_ref)
 
@@ -149,16 +209,12 @@ def handle_send_reply(reply_to, thread_id, circ_ref):
         log(f"send-reply: gmail reply failed for {thread_id}")
         return False
 
-    # Note: gmail_read() already called during check-email (mark-as-read before processing)
-    # No need to call again here — email is already read.
-
     muscles.memories.store(
         f"Sent reply to thread {thread_id}: {body[:200]}",
         importance=5, env=muscles.memory_env(CONF_DIR),
     )
 
     muscles.stimulus.send(reply_to, f"sent {thread_id}")
-
     log(f"send-reply: replied to {thread_id}")
     return True
 
@@ -187,7 +243,6 @@ def handle_send_email(reply_to, circ_ref):
         log(f"send-email: payload missing 'to' or 'body' in circ:{circ_ref}")
         return False
 
-    # Write body to a temp circ file for --body-file
     tmp = _tempfile.NamedTemporaryFile(
         mode="w", suffix=".md", delete=False, dir=_tempfile.gettempdir()
     )
@@ -220,7 +275,12 @@ def handle_send_email(reply_to, circ_ref):
 def main():
     lines = muscles.stimulus.consume(str(DIR)).strip().splitlines()
 
-    if not lines:
+    # Auto-check mode: when COMMS_AUTO_CHECK=1, check inbox every cycle
+    auto_check = os.environ.get("COMMS_AUTO_CHECK", "") == "1"
+    if auto_check and not any(l.strip().startswith("check-email") for l in lines if l.strip()):
+        lines.append("check-email pfc")
+
+    if not lines or not any(l.strip() for l in lines):
         (DIR / "health.txt").write_text("ok idle\n")
         return
 
@@ -234,7 +294,6 @@ def main():
 
         try:
             if line.startswith("check-email"):
-                # "check-email <reply-to> [query]"
                 parts = line.split(None, 2)
                 if len(parts) < 2:
                     log(f"check-email: missing reply-to: {line}")
@@ -242,20 +301,19 @@ def main():
                     continue
                 reply_to = parts[1]
                 query = parts[2] if len(parts) > 2 else None
-                n = handle_check_email(reply_to, query)
+                handle_check_email(reply_to, query)
                 processed += 1
 
             elif line.startswith("send-email"):
-                # "send-email <reply-to> circ:<hash>"
                 parts = line.split()
                 if len(parts) < 3:
-                    log(f"send-email: bad format (expected: send-email <reply-to> circ:<hash>): {line}")
+                    log(f"send-email: bad format: {line}")
                     errors += 1
                     continue
                 reply_to = parts[1]
                 circ_ref = parts[2]
                 if not circ_ref.startswith("circ:"):
-                    log(f"send-email: expected circ:<hash> as third token: {line}")
+                    log(f"send-email: expected circ:<hash>: {line}")
                     errors += 1
                     continue
                 ref = circ_ref[5:]
@@ -266,7 +324,6 @@ def main():
                     errors += 1
 
             elif line.startswith("send-reply"):
-                # "send-reply <reply-to> <thread_id> circ:<hash>"
                 parts = line.split()
                 if len(parts) < 4:
                     log(f"send-reply: bad format: {line}")
@@ -279,7 +336,7 @@ def main():
                     log(f"send-reply: expected circ:ref, got: {circ_ref}")
                     errors += 1
                     continue
-                ref = circ_ref[5:]  # strip "circ:"
+                ref = circ_ref[5:]
                 ok = handle_send_reply(reply_to, thread_id, ref)
                 if ok:
                     processed += 1
