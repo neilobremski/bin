@@ -116,7 +116,7 @@ for dir in "${ORGAN_DIRS[@]}"; do
 
     log "$name: launching"
     date +%s > "$dir/.spark.last"
-    "$dir/live.sh" >> "$dir/.spark.log" 2>&1
+    "$dir/live.sh" 2>&1 | tee -a "$dir/.spark.log"
     log "$name: finished"
   ) 9>"$lock_file" &
 
