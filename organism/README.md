@@ -1,4 +1,5 @@
 # Synthetic Organism Biology: A Technical Field Manual
+By Neil C. Obremski and Knobert Esquire
 
 ## Table of Contents
 
@@ -26,7 +27,7 @@ Every functional capability in the organism is an **Organ** -- a standalone exec
 
 - **Nervous System (Layer 1): The Spinal Cord** This is the signaling abstraction. While often implemented via protocols like **MQTT**, the **Spinal Cord** is conceptually any bus that allows a **Ganglion** (local proxy) to route asynchronous stimuli. It facilitates long-range communication between isolated body parts, allowing the "head" of the organism to signal a "limb" across network boundaries.
 
-- **Circulatory System (Layer 2): The Heart** The **Heart** is the transport abstraction for high-bandwidth data (**Blobs**). The specific implementation -- be it **NATS**, **S3**, **Google Drive**, or a local shared volume -- is irrelevant to the organ. The Heart allows an **Artery** to circulate content-addressed data via **SHA-256 hashes**. It ensures that data is ephemeral and mobile, moving to where it is needed without filling up the storage of any single body part.
+- **Circulatory System (Layer 2): The Heart** The **Heart** is the transport abstraction for high-bandwidth data (**Blobs**). The specific implementation -- be it **NATS**, S3, Google Drive, or a local shared volume -- is irrelevant to the organ. The Heart allows an **Artery** to circulate content-addressed data via **SHA-256 hashes**. It ensures that data is ephemeral and mobile, moving to where it is needed without filling up the storage of any single body part.
 
 ### The CLI Contract: The Universal Interface
 
@@ -44,8 +45,6 @@ Metabolism is the base layer of the organism. It governs the transition from sta
 
 The Spark ensures that an organ runs **if and only if** it is not already running and its required **Cadence** has been met.
 
----
-
 ### 1.1 The Metabolic Entry Point: `live.sh`
 
 Every organ is a directory identified by its name. Within that directory, the file `live.sh` serves as the universal entry point. Whether the organ is written in Python, Node.js, or C#, the `live.sh` script acts as the cell membrane, encapsulating the internal complexity and presenting a standard execution interface to the Spark.
@@ -59,29 +58,27 @@ The organism utilizes three specific CLI programs to drive metabolism, depending
 This is the standard driver for a stable organism. It is designed to be triggered by a system-level scheduler (like `crontab`) once per minute.
 
 - **Role:** It iterates through the `$ORGANS` path and attempts to spark every recognized organ.
-- **Usage:** Typically installed as `* * * * * /path/to/organism/bin/spark-cron.sh`.
+- **Usage:** `* * * * * /path/to/organism/bin/spark-cron.sh`.
 
 **B. `spark-loop.sh` (Hyper-Metabolism)**
 
 In environments where a one-minute resolution is too slow, or during active development, `spark-loop.sh` provides a continuous heartbeat.
 
 - **Role:** A simple `while true` loop that calls the spark logic, sleeps for a few seconds, and repeats.
-- **Usage:** Run manually in a terminal or as a managed background service to keep the organism "awake" and highly responsive.
+- **Usage:** `spark-loop.sh <sleep-seconds>`.
 
 **C. `spark-one.sh` (Adrenaline / Excitation)**
 
 This is the manual or programmatic override. It targets a specific organ for immediate execution.
 
 - **Role:** It bypasses the standard cron schedule. It is primarily used by the **Ganglion** (Nervous System) to "excite" a dormant organ the moment a stimulus arrives.
-- **Usage:** `spark-one.sh mail_processor`.
-
----
+- **Usage:** `spark-one.sh <organ_name>`.
 
 ### 1.3 Logic and Concurrency: `flock`
 
 To prevent "Auto-Immune" overlap -- where multiple instances of the same organ compete for the same local resources -- all three Spark drivers rely on `flock`.
 
-Before execution, the Spark attempts to acquire a non-blocking lock on a file representing that organ (usually in `/tmp/`).
+Before execution, the Spark attempts to acquire a non-blocking lock on a file representing that organ (usually in `/tmp/<organ_name>.lock`).
 
 - If the lock is acquired: The `live.sh` script is executed.
 - If the lock fails: The Spark silently exits, acknowledging that the organ is already "metabolizing."
@@ -90,12 +87,10 @@ Before execution, the Spark attempts to acquire a non-blocking lock on a file re
 
 Not every organ needs to run every minute. An organ defines its "metabolic rate" by placing a `cadence` file in its directory.
 
-- **Calculation:** The Spark maintains a "tick" counter for each organ in a temporary state directory.
+- **Calculation:** The Spark maintains a "tick" counter for each organ (usually in `/tmp/<organ_name>.tick`).
 - **Logic:** 1. If `current_tick >= cadence_value`, the organ is sparked and the tick is reset to `0`. 2. Otherwise, the tick is incremented and the organ remains dormant.
 
 This mechanism allows the organism to host dozens of organs -- from high-frequency monitors (`cadence: 1`) to daily cleanup tasks (`cadence: 1440`) -- without saturating the host's CPU.
-
----
 
 ### 1.5 Implementation Example (Bash)
 
@@ -125,23 +120,19 @@ If Metabolism is the energy of the organism, the **Nervous System** is its inten
 
 The Nervous System allows an organism to coordinate across body parts that are physically isolated by firewalls or container boundaries.
 
----
-
 ### 2.1 The Spinal Cord: Global Signaling
 
 The **Spinal Cord** is the abstract central bus of the organism. While typically implemented using a protocol like **MQTT**, its primary function is to act as a persistent relay. It does not store data; it simply ensures that a stimulus published by a "Hand" organ reaches the "Brain" organ, regardless of where those organs are currently metabolizing.
 
 ### 2.2 The Ganglion: The Local Nerve Center
 
-In biological systems, a ganglion is a cluster of nerve cells that processes local reflexes. In our architecture, the **Ganglion** is a specialized, always-on Organ. It is the only component that maintains a persistent connection to the Spinal Cord.
+In biological systems, a ganglion is a cluster of nerve cells acting as a local relay and reflex center, enabling the peripheral nervous system to respond to stimuli without waiting for a signal to traverse the entire spinal cord. In our architecture, the **Ganglion** is a specialized, always-on Organ that mediates this "Reflex Arc." It maintains the sole persistent connection to the Spinal Cord, translating global pulses into local file-system events and triggering immediate metabolic excitation via `spark-one.sh`.
 
 **The Ganglion's Responsibilities:**
 
 - **Persistent Listening:** It holds the connection "open" so that ephemeral organs don't have to.
 - **Signal Translation:** It converts network packets into local filesystem events.
 - **Local Discovery:** It uses the `$ORGANS` environment variable to "know" which parts of the body are currently attached to the local host.
-
----
 
 ### 2.3 The Excitatory Path (Routing)
 
@@ -155,14 +146,14 @@ When a Stimulus arrives at a Ganglion, a deterministic routing logic -- the **Re
 | **4. Activation** | Excitation | It immediately calls `spark-one.sh [organ_name]` to force a metabolic spike. |
 | **5. Propagation** | Broadcast | If the target is *not* local, the Ganglion (optionally) relays the signal back to the Spinal Cord for other body parts. |
 
+If no organ exists to handle the message then it is simply dropped.
+
 ### 2.4 The `stimulus` CLI Contract
 
 To keep organs agnostic of the networking stack, they interact with the Nervous System exclusively through the `stimulus` CLI.
 
 - **`stimulus send --to [organ_name] --body [json_payload]`**: An organ calls this to "fire" a nerve impulse. It doesn't need to know where the target is; the local Ganglion handles the transmission.
 - **Digest Mode**: When an organ is sparked (Metabolism), it checks its `./.stimulus/` folder. If files exist, it "digests" them and then deletes them, clearing the synapse for the next signal.
-
----
 
 ### 2.5 Decoupling and Resilience
 
@@ -175,8 +166,6 @@ This architecture ensures that even if the Spinal Cord (network) is momentarily 
 ## Chapter 3: Layer 2 -- Circulatory System (The Artery)
 
 While the Nervous System carries the "intent" of the organism, the **Circulatory System** carries its "substance." It is the data plane responsible for moving high-bandwidth payloads -- referred to as **Blobs** -- between isolated body parts. In this layer, data is not a message to be read; it is a resource to be consumed, stored, and eventually recycled.
-
----
 
 ### 3.1 The Heart: The Central Relay
 
@@ -194,8 +183,6 @@ Each body part hosts an **Artery** -- a specialized process or sidecar that mana
 - **Buffering:** It manages a local `./.circulatory/` cache to provide organs with near-instant access to frequently used data.
 - **Transmission:** It handles the complex logic of chunking and uploading data to the Heart and fetching missing Blobs on demand.
 
----
-
 ### 3.3 Content Addressing: The "Red Blood Cell"
 
 In the Circulatory System, filenames are irrelevant. Every piece of data is a **Blob** identified solely by its cryptographic hash. This provides two critical biological advantages:
@@ -212,8 +199,6 @@ Organs interact with the Circulatory System through the `circ` CLI. This keeps t
 | **`circ push [path]`** | Hashes the file, moves it to local cache, and registers it with the Heart. | **Oxygenation:** Preparing data for circulation. |
 | **`circ get [hash]`** | Checks local cache; if missing, pulls from the Heart and returns the local path. | **Absorption:** Pulling nutrients into the local tissue. |
 | **`circ status`** | Returns the health of the connection to the Heart. | **Blood Pressure:** Monitoring system flow. |
-
----
 
 ### 3.5 The Circ Flow: From Push to Pull
 
@@ -242,8 +227,6 @@ The **CLI Contract** is the definitive "truth" of the organism. It is the bounda
 
 By interacting solely through standardized command-line interfaces, an organ remains "ignorant" of whether the Spinal Cord is a high-end MQTT broker or a simple local file-drop. This decoupling allows for rapid evolution, easy mocking, and extreme portability.
 
----
-
 ### 4.1 The Universal Handshake
 
 Every organ, regardless of its language (Python, Node.js, Bash), uses the same three tools to interact with the world. These tools must exist in the `$PATH` of the body part.
@@ -271,8 +254,6 @@ stimulus send --to [organ_name] --body '[json_payload]'
 - **Format**: JSON files.
 - **Cleanup**: The organ is responsible for deleting the file after processing to prevent "re-stimulation."
 
----
-
 ### 4.3 The Circulatory Contract: `circ`
 
 The `circ` CLI manages the "oxygenation" and "absorption" of data blobs. It abstracts away the complexity of SHA-256 hashing, chunking, and remote storage.
@@ -295,8 +276,6 @@ circ get [hash]
 - **Output**: Returns the **absolute path** to the file in the local filesystem.
 - **Internal logic**: If the hash is not in the local cache, the Artery blocks until it retrieves the blob from the Heart. If retrieval fails, the CLI returns a non-zero exit code.
 
----
-
 ### 4.4 The Metabolic Contract: `spark-one.sh`
 
 While `spark-cron.sh` handles the natural heartbeat, `spark-one.sh` is the interface for immediate **Excitation**.
@@ -307,8 +286,6 @@ spark-one.sh [organ_name]
 
 - **Behavior**: Attempts to execute the target organ's `live.sh`.
 - **Constraint**: It must still respect the `flock` concurrency gate. If the organ is already metabolizing, `spark-one.sh` does nothing. This ensures that a burst of stimuli doesn't cause a "seizure" by spawning fifty identical processes.
-
----
 
 ### 4.5 The "Local Lab" Mocking Strategy
 
@@ -325,8 +302,6 @@ This allows the developer to verify the "Biology" of the organs before deploying
 ## Chapter 5: Organ Anatomy (Implementation Guide)
 
 In the Synthetic Organism, an **Organ** is the fundamental unit of specialized function. Physically, an organ is a self-contained directory residing within the `$ORGANS` path. It is defined not by its internal "biochemistry" (the programming language) but by its adherence to the structural and behavioral standards of the organism.
-
----
 
 ### 5.1 The Anatomical Structure
 
@@ -348,8 +323,6 @@ organ_name/
 - **`.stimulus/`**: A "synapse" directory. The Ganglion drops JSON files here. The organ must treat this as a volatile buffer.
 - **`.memory/`**: If an organ needs to remember something between sparks (e.g., a "last\_seen\_id"), it should store it here. The organism does not guarantee the persistence of this folder across "body part" migrations, so it should be used for non-critical state.
 
----
-
 ### 5.2 The Entry Point (`live.sh`)
 
 The `live.sh` file is the bridge between the **Metabolism** and the **Code**. Its primary job is to set up the environment and execute the primary logic.
@@ -368,8 +341,6 @@ source ./venv/bin/activate
 # Execute the logic
 python3 src/main.py
 ```
-
----
 
 ### 5.3 Implementation Conventions
 
@@ -415,8 +386,6 @@ Python organs should utilize a local `venv` within the organ directory to ensure
 - **Indentation:** 4 spaces (Standard PEP 8).
 - **Context:** Use the `circ` and `stimulus` CLI tools via `subprocess` to interact with the body.
 
----
-
 ### 5.4 The "Digest and Circulate" Pattern
 
 Most organs follow a standard operational cycle once sparked:
@@ -443,8 +412,6 @@ This ensures that moving an organ to a new "Body Part" (container) is as simple 
 
 The true strength of the CLI Contract is **Simulated Biochemistry**. You do not need a cloud-native Spinal Cord (MQTT) or a high-speed Heart (NATS) to develop and test your Organs. In the **Local Lab**, we replace these complex systems with simple Bash scripts that mimic the behavior of the global organism using nothing but the local filesystem.
 
----
-
 ### 6.1 The Mock Environment
 
 To stand up a local organism, create a central directory with the following structure:
@@ -452,7 +419,7 @@ To stand up a local organism, create a central directory with the following stru
 ```text
 organism/
  |-- bin/              # The Mock CLI Tools (stimulus, circ, spark)
- |-- organs/           # Your Organ directories (e.g., logger, processor)
+ |-- organs/           # Your Organ directories (e.g., brain, comms, mouth)
  |-- .circulatory/     # The "Heart" (Local Shared Folder)
  |-- .ticks/           # Metabolic state tracking
 ```
@@ -460,11 +427,11 @@ organism/
 Ensure your environment is aware of the anatomy:
 
 ```bash
-export ORGANS="./organs/logger:./organs/processor"
+export ORGANS="./organs/brain:./organs/mouth"
 export PATH="$PATH:$(pwd)/bin"
 ```
 
----
+Relative directories are always resolved based on the organism root directory.
 
 ### 6.2 The Nervous Mock (`bin/stimulus`)
 
@@ -488,8 +455,6 @@ echo "$BODY" > "$STIM_DIR/$(date +%s)_$RANDOM.json"
 # Trigger immediate excitation
 spark-one.sh "$TARGET"
 ```
-
----
 
 ### 6.3 The Circulatory Mock (`bin/circ`)
 
@@ -516,8 +481,6 @@ elif [ "$CMD" == "get" ]; then
   fi
 fi
 ```
-
----
 
 ### 6.4 The Metabolic Mock (`bin/spark-cron.sh`)
 
@@ -564,8 +527,6 @@ for path in "${ADDR[@]}"; do
 done
 ```
 
----
-
 ### 6.6 Running a Lab Test
 
 Once your mocks are in place, you can verify a full biological cycle:
@@ -576,7 +537,3 @@ Once your mocks are in place, you can verify a full biological cycle:
 4. **Trace Circulation:** If the organ performed a `circ push`, check the `./.circulatory/` folder for the hashed file.
 
 This local setup ensures that when you finally move your organs into a "Production Body" with HiveMQ and Synadia, the only thing that changes is the binary behind the command -- **the Organ never knows the difference.**
-
----
-
-This concludes the **Synthetic Organism Biology: A Technical Field Manual**. Your organism is now ready for implementation.
