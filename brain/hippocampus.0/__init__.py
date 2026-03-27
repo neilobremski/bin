@@ -1,1 +1,0 @@
-"""Hippocampus — memory organ package."""
