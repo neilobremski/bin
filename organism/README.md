@@ -53,7 +53,7 @@ spark-cron.sh        # tick 1 >= cadence 1 -> fires both organs
 
 ## Architecture Overview
 
-The organism treats autonomous programs as **organs** within **body parts** (containers, VMs, or local environments). A body part needs only a **filesystem** and **program execution**.
+The organism treats autonomous programs as **organs** within **body parts** (containers, VMs, or local environments). Organs are portable, self-contained, and infrastructure-agnostic — swap MQTT for local files, S3 for a shared folder, without changing a single line of organ code. A body part needs only a **filesystem** and **program execution**.
 
 ### The Three Layers
 
@@ -87,7 +87,13 @@ All spark drivers use `flock -n` on `/tmp/organ_<name>.lock`. If the lock is hel
 
 ### Cadence
 
-An organ defines its rate via a `cadence` file (single integer). The spark tracks ticks in `/tmp/<organ_name>.tick` (or `.ticks/` locally). Logic uses 0-based counting with `>=`: if `tick >= cadence`, fire and reset to 0; otherwise increment. With `cadence=1`, the organ fires every other tick. With `cadence=5`, every 5th.
+An organ defines its rate via a `cadence` file (single integer). The spark tracks ticks in `/tmp/<organ_name>.tick` (or `.ticks/` locally). Logic: if `tick >= cadence`, fire and reset to 0; otherwise increment.
+
+| Cadence | Behavior | Ticks: 0 → 1 → 2 → 3 → 4 → 5 |
+|---------|----------|-------------------------------|
+| **1** | Every other tick | skip, **fire**, skip, **fire**, skip, **fire** |
+| **3** | Every 4th tick | skip, skip, skip, **fire**, skip, skip |
+| **0** | Every tick | **fire**, **fire**, **fire**, **fire**, **fire**, **fire** |
 
 ```bash
 # Core spark logic
@@ -227,6 +233,8 @@ echo "$BODY" > "$TMPFILE"
 
 spark-one.sh "$TARGET"
 ```
+
+> **Note:** This mock calls `spark-one.sh` synchronously — `stimulus send` blocks until the target organ completes. In production, stimulus delivery is async (the ganglion handles routing in the background).
 
 ### Mock `bin/circ`
 
