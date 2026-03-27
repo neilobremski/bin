@@ -1,6 +1,19 @@
 #!/bin/bash
 cd "$(dirname "$0")"
 for f in $(ls .stimulus/*.json 2>/dev/null | sort); do
-  echo "[pong] got: $(cat "$f")"
+  HASH=$(jq -r '.hash' "$f")
   rm "$f"
+
+  if [ -z "$HASH" ] || [ "$HASH" = "null" ]; then
+    echo "[pong] stimulus missing hash, skipping"
+    continue
+  fi
+
+  FILE_PATH=$(circ get "$HASH")
+  if [ $? -ne 0 ]; then
+    echo "[pong] circ get failed for $HASH"
+    continue
+  fi
+
+  echo "[pong] got: $(cat "$FILE_PATH")"
 done

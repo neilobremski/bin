@@ -1,7 +1,8 @@
 #!/bin/bash
 # Mock Circulatory System
 CMD=$1
-HEART_DIR="./.circulatory"
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+HEART_DIR="$DIR/../.circulatory"
 mkdir -p "$HEART_DIR"
 
 if [ "$CMD" == "push" ]; then

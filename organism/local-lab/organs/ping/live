@@ -1,4 +1,12 @@
 #!/bin/bash
 cd "$(dirname "$0")"
 echo "[ping] fired"
-stimulus send --to pong --body '{"msg": "hello from ping"}'
+
+# Write a message and push it into the circulatory system
+MSG_FILE=$(mktemp)
+echo "hello from ping at $(date +%s)" > "$MSG_FILE"
+HASH=$(circ push "$MSG_FILE")
+rm "$MSG_FILE"
+
+echo "[ping] pushed payload: $HASH"
+stimulus send --to pong --body "{\"hash\": \"$HASH\"}"

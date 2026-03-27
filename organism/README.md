@@ -20,23 +20,44 @@ organism/
  |-- .circulatory/
 ```
 
-**`organs/ping/live`** -- sends a stimulus to pong:
+**`organs/ping/live`** -- pushes a payload and signals pong:
 
 ```bash
 #!/bin/bash
 cd "$(dirname "$0")"
 echo "[ping] fired"
-stimulus send --to pong --body '{"msg": "hello from ping"}'
+
+# Write a message and push it into the circulatory system
+MSG_FILE=$(mktemp)
+echo "hello from ping at $(date +%s)" > "$MSG_FILE"
+HASH=$(circ push "$MSG_FILE")
+rm "$MSG_FILE"
+
+echo "[ping] pushed payload: $HASH"
+stimulus send --to pong --body "{\"hash\": \"$HASH\"}"
 ```
 
-**`organs/pong/live`** -- digests stimuli in sorted order:
+**`organs/pong/live`** -- pulls payloads from the circulatory system:
 
 ```bash
 #!/bin/bash
 cd "$(dirname "$0")"
 for f in $(ls .stimulus/*.json 2>/dev/null | sort); do
-  echo "[pong] got: $(cat "$f")"
+  HASH=$(jq -r '.hash' "$f")
   rm "$f"
+
+  if [ -z "$HASH" ] || [ "$HASH" = "null" ]; then
+    echo "[pong] stimulus missing hash, skipping"
+    continue
+  fi
+
+  FILE_PATH=$(circ get "$HASH")
+  if [ $? -ne 0 ]; then
+    echo "[pong] circ get failed for $HASH"
+    continue
+  fi
+
+  echo "[pong] got: $(cat "$FILE_PATH")"
 done
 ```
 
@@ -50,7 +71,8 @@ spark-cron # .ticks = 0 -> increments to 1
 spark-cron # .ticks = 1 >= cadence 1 -> fires both organs
 sleep 1
 # [ping] fired
-# [pong] got: {"msg": "hello from ping"}
+# [ping] pushed payload: 52921...
+# [pong] got: hello from ping at 1774627933
 ```
 
 ---
@@ -248,7 +270,8 @@ spark-one "$TARGET"
 #!/bin/bash
 # Mock Circulatory System
 CMD=$1
-HEART_DIR="./.circulatory"
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+HEART_DIR="$DIR/../.circulatory"
 mkdir -p "$HEART_DIR"
 
 if [ "$CMD" == "push" ]; then
