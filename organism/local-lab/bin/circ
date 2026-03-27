@@ -7,6 +7,10 @@ mkdir -p "$HEART_DIR"
 
 if [ "$CMD" == "push" ]; then
   FILE_PATH=$2
+  if [ ! -f "$FILE_PATH" ]; then
+    echo "circ push: file not found: $FILE_PATH" >&2
+    exit 1
+  fi
   HASH=$(sha256sum "$FILE_PATH" | awk '{print $1}')
   TMPFILE=$(mktemp "$HEART_DIR/.tmp.XXXXXX")
   cp "$FILE_PATH" "$TMPFILE"
@@ -20,4 +24,7 @@ elif [ "$CMD" == "get" ]; then
     echo "circ get: hash not found: $HASH" >&2
     exit 1
   fi
+else
+  echo "Usage: circ push <path> | circ get <hash>" >&2
+  exit 1
 fi

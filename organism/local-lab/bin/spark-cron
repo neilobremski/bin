@@ -1,9 +1,9 @@
 #!/bin/bash
 # Mock Spark (Cron)
+# Note: runs organs sequentially (production spark backgrounds them)
 IFS=':' read -ra ADDR <<< "$ORGANS"
 
 for organ_path in "${ADDR[@]}"; do
-  organ_name=$(basename "$organ_path")
   CADENCE=$(cat "$organ_path/cadence" 2>/dev/null || echo 1)
   TICK_FILE="$organ_path/.ticks"
   CURRENT_TICK=$(cat "$TICK_FILE" 2>/dev/null || echo 0)
@@ -11,7 +11,7 @@ for organ_path in "${ADDR[@]}"; do
   if [ "$CURRENT_TICK" -ge "$CADENCE" ]; then
     echo "0" > "$TICK_FILE"
     LOCK_FILE="$organ_path/.lock"
-    flock -n "$LOCK_FILE" -c "$organ_path/live" &
+    flock -n "$LOCK_FILE" -c "$organ_path/live"
   else
     echo $((CURRENT_TICK + 1)) > "$TICK_FILE"
   fi

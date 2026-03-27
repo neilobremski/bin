@@ -18,7 +18,22 @@ if [ "$CMD" != "send" ]; then
   exit 1
 fi
 
-STIM_DIR="./organs/$TARGET/.stimulus"
+# Resolve organ path from $ORGANS (same as spark-one)
+IFS=':' read -ra ADDR <<< "$ORGANS"
+ORGAN_PATH=""
+for path in "${ADDR[@]}"; do
+  if [[ $(basename "$path") == "$TARGET" ]]; then
+    ORGAN_PATH="$path"
+    break
+  fi
+done
+
+if [ -z "$ORGAN_PATH" ]; then
+  echo "stimulus: organ not found: $TARGET" >&2
+  exit 1
+fi
+
+STIM_DIR="$ORGAN_PATH/.stimulus"
 mkdir -p "$STIM_DIR"
 TMPFILE=$(mktemp "$STIM_DIR/XXXXXX.json")
 echo "$BODY" > "$TMPFILE"

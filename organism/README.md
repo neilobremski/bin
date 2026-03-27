@@ -1,23 +1,35 @@
 # Synthetic Organism: A Technical Field Manual
 By Neil C. Obremski and Knobert Esquire
 
-## Quickstart: Two Organs in 60 Seconds
+## Quickstart
+
+```bash
+cd organism/local-lab && bash local-lab.sh
+# === Local Lab: ping/pong demo ===
+# [ping] fired
+# [ping] pushed payload: 6d9409f85229...
+# [pong] retrieved 6d9409f85229...
+# [pong] got: hello from ping at Fri Mar 27 09:18:26 AM PDT 2026
+# === Done ===
+```
+
+**What just happened:** Ping wrote a message, pushed it into the circulatory system (`circ push`), and sent the content hash to pong via the nervous system (`stimulus send`). Pong received the hash, pulled the payload (`circ get`), and read the message. All three layers -- spark, stimulus, circ -- working together.
+
+**Prerequisites:** bash, flock, jq, sha256sum.
+
+### How it works
 
 ```text
-organism/
+local-lab/
  |-- bin/              # Mock CLIs (see Local Lab section)
  |-- organs/
  |   |-- ping/
  |   |   |-- live
  |   |   |-- cadence       # contains: 1
- |   |   |-- .lock         # created by spark-cron
- |   |   |-- .ticks        # created by spark-cron
  |   |-- pong/
  |       |-- live
  |       |-- cadence       # contains: 1
- |       |-- .lock         # created by spark-cron
- |       |-- .ticks        # created by spark-cron
- |-- .circulatory/
+ |-- .circulatory/         # content-addressed blob store
 ```
 
 **`organs/ping/live`** -- pushes a payload and signals pong:
@@ -27,13 +39,17 @@ organism/
 cd "$(dirname "$0")"
 echo "[ping] fired"
 
-# Write a message and push it into the circulatory system
 MSG_FILE=$(mktemp)
-echo "hello from ping at $(date +%s)" > "$MSG_FILE"
+echo "hello from ping at $(date)" > "$MSG_FILE"
 HASH=$(circ push "$MSG_FILE")
 rm "$MSG_FILE"
 
-echo "[ping] pushed payload: $HASH"
+if [ -z "$HASH" ]; then
+  echo "[ping] circ push failed" >&2
+  exit 1
+fi
+
+echo "[ping] pushed payload: ${HASH:0:12}..."
 stimulus send --to pong --body "{\"hash\": \"$HASH\"}"
 ```
 
@@ -42,37 +58,30 @@ stimulus send --to pong --body "{\"hash\": \"$HASH\"}"
 ```bash
 #!/bin/bash
 cd "$(dirname "$0")"
-for f in $(ls .stimulus/*.json 2>/dev/null | sort); do
-  HASH=$(jq -r '.hash' "$f")
-  rm "$f"
+shopt -s nullglob
+files=(.stimulus/*.json)
+shopt -u nullglob
+
+for f in "${files[@]}"; do
+  HASH=$(jq -r '.hash' "$f" 2>/dev/null)
 
   if [ -z "$HASH" ] || [ "$HASH" = "null" ]; then
     echo "[pong] stimulus missing hash, skipping"
+    rm "$f"
     continue
   fi
 
   FILE_PATH=$(circ get "$HASH")
   if [ $? -ne 0 ]; then
-    echo "[pong] circ get failed for $HASH"
+    echo "[pong] circ get failed for ${HASH:0:12}..."
+    rm "$f"
     continue
   fi
 
+  rm "$f"
+  echo "[pong] retrieved ${HASH:0:12}..."
   echo "[pong] got: $(cat "$FILE_PATH")"
 done
-```
-
-Run it (after creating mock CLIs from the Local Lab section):
-
-```bash
-chmod +x organs/*/live
-export ORGANS="./organs/ping:./organs/pong"
-export PATH="$(pwd)/bin:$PATH"
-spark-cron # .ticks = 0 -> increments to 1
-spark-cron # .ticks = 1 >= cadence 1 -> fires both organs
-sleep 1
-# [ping] fired
-# [ping] pushed payload: 52921...
-# [pong] got: hello from ping at 1774627933
 ```
 
 ---
@@ -120,6 +129,8 @@ An organ defines its rate via a `cadence` file (single integer). The spark track
 | **1** | Every other tick | skip, **fire**, skip, **fire**, skip, **fire** |
 | **3** | Every 4th tick | skip, skip, skip, **fire**, skip, skip |
 | **0** | Every tick | **fire**, **fire**, **fire**, **fire**, **fire**, **fire** |
+
+> **Note:** Cadence is a threshold, not a frequency. Cadence 0 means fire every tick (tick always meets threshold). Cadence 1 means fire every *other* tick. Set cadence to 0 for maximum firing rate.
 
 ```bash
 # Core spark logic
@@ -224,14 +235,18 @@ Organs carry their own dependencies: `node_modules/` for Node.js, `venv/` for Py
 
 ## Local Lab
 
-Replace production binaries with bash mocks for local development with no network.
+These four scripts replace production infrastructure (MQTT, S3, cron) with local filesystem operations. Put them in `bin/` and add to your `$PATH`. No network required.
 
 ```bash
 export ORGANS="./organs/brain:./organs/mouth"
-export PATH="$PATH:$(pwd)/bin"
+export PATH="$(pwd)/bin:$PATH"
 ```
 
+> **Important:** The local lab mocks run organs synchronously for deterministic output. In production, spark backgrounds organs with `flock -n ... &` and stimulus delivery is async via the ganglion. An organ that sends a stimulus to itself will block in the local lab but work in production.
+
 ### Mock `bin/stimulus`
+
+Resolves the target organ from `$ORGANS`, writes the payload to `.stimulus/`, and fires the organ via `spark-one`.
 
 ```bash
 #!/bin/bash
@@ -254,7 +269,22 @@ if [ "$CMD" != "send" ]; then
   exit 1
 fi
 
-STIM_DIR="./organs/$TARGET/.stimulus"
+# Resolve organ path from $ORGANS
+IFS=':' read -ra ADDR <<< "$ORGANS"
+ORGAN_PATH=""
+for path in "${ADDR[@]}"; do
+  if [[ $(basename "$path") == "$TARGET" ]]; then
+    ORGAN_PATH="$path"
+    break
+  fi
+done
+
+if [ -z "$ORGAN_PATH" ]; then
+  echo "stimulus: organ not found: $TARGET" >&2
+  exit 1
+fi
+
+STIM_DIR="$ORGAN_PATH/.stimulus"
 mkdir -p "$STIM_DIR"
 TMPFILE=$(mktemp "$STIM_DIR/XXXXXX.json")
 echo "$BODY" > "$TMPFILE"
@@ -262,9 +292,9 @@ echo "$BODY" > "$TMPFILE"
 spark-one "$TARGET"
 ```
 
-> **Note:** This mock calls `spark-one` synchronously — `stimulus send` blocks until the target organ completes. In production, stimulus delivery is async (the ganglion handles routing in the background).
-
 ### Mock `bin/circ`
+
+Content-addressed blob store backed by a local `.circulatory/` directory. Atomic writes via tmp+mv.
 
 ```bash
 #!/bin/bash
@@ -276,6 +306,10 @@ mkdir -p "$HEART_DIR"
 
 if [ "$CMD" == "push" ]; then
   FILE_PATH=$2
+  if [ ! -f "$FILE_PATH" ]; then
+    echo "circ push: file not found: $FILE_PATH" >&2
+    exit 1
+  fi
   HASH=$(sha256sum "$FILE_PATH" | awk '{print $1}')
   TMPFILE=$(mktemp "$HEART_DIR/.tmp.XXXXXX")
   cp "$FILE_PATH" "$TMPFILE"
@@ -289,6 +323,9 @@ elif [ "$CMD" == "get" ]; then
     echo "circ get: hash not found: $HASH" >&2
     exit 1
   fi
+else
+  echo "Usage: circ push <path> | circ get <hash>" >&2
+  exit 1
 fi
 ```
 
@@ -297,6 +334,7 @@ fi
 ```bash
 #!/bin/bash
 # Mock Spark (Cron)
+# Note: runs organs sequentially (production backgrounds them)
 IFS=':' read -ra ADDR <<< "$ORGANS"
 
 for organ_path in "${ADDR[@]}"; do
@@ -307,7 +345,7 @@ for organ_path in "${ADDR[@]}"; do
   if [ "$CURRENT_TICK" -ge "$CADENCE" ]; then
     echo "0" > "$TICK_FILE"
     LOCK_FILE="$organ_path/.lock"
-    flock -n "$LOCK_FILE" -c "$organ_path/live" &
+    flock -n "$LOCK_FILE" -c "$organ_path/live"
   else
     echo $((CURRENT_TICK + 1)) > "$TICK_FILE"
   fi
@@ -319,16 +357,20 @@ done
 ```bash
 #!/bin/bash
 # Immediate Excitation (best-effort: silently skips if organ is busy)
+# Note: runs synchronously in mock (production backgrounds with &)
 ORGAN_NAME=$1
 IFS=':' read -ra ADDR <<< "$ORGANS"
 
 for path in "${ADDR[@]}"; do
   if [[ $(basename "$path") == "$ORGAN_NAME" ]]; then
     LOCK_FILE="$path/.lock"
-    flock -n "$LOCK_FILE" -c "$path/live" &
+    flock -n "$LOCK_FILE" -c "$path/live"
     exit 0
   fi
 done
+
+echo "spark-one: organ not found: $ORGAN_NAME" >&2
+exit 1
 ```
 
 ---

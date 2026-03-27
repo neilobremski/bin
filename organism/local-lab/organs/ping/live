@@ -4,9 +4,14 @@ echo "[ping] fired"
 
 # Write a message and push it into the circulatory system
 MSG_FILE=$(mktemp)
-echo "hello from ping at $(date +%s)" > "$MSG_FILE"
+echo "hello from ping at $(date)" > "$MSG_FILE"
 HASH=$(circ push "$MSG_FILE")
 rm "$MSG_FILE"
 
-echo "[ping] pushed payload: $HASH"
+if [ -z "$HASH" ]; then
+  echo "[ping] circ push failed" >&2
+  exit 1
+fi
+
+echo "[ping] pushed payload: ${HASH:0:12}..."
 stimulus send --to pong --body "{\"hash\": \"$HASH\"}"
