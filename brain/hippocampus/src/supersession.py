@@ -1,18 +1,16 @@
-"""Auto-supersession: explicit references, Jaccard similarity, rolling windows."""
+"""Auto-supersession: explicit references and Jaccard similarity."""
 import re
 
-from config import ROLLING_PATTERNS, log
+from constants import log
 
 
 def jaccard_similarity(text_a, text_b):
-    """Word-level Jaccard similarity: |A intersect B| / |A union B|."""
+    """Word-level Jaccard similarity: |A & B| / |A | B|."""
     words_a = set(text_a.lower().split())
     words_b = set(text_b.lower().split())
     if not words_a or not words_b:
         return 0.0
-    intersection = words_a & words_b
-    union = words_a | words_b
-    return len(intersection) / len(union)
+    return len(words_a & words_b) / len(words_a | words_b)
 
 
 def supersede(db, old_id, new_id):
@@ -27,20 +25,21 @@ def check_supersession(db, new_id, content, category, importance):
     """Check if this new memory supersedes an existing one.
 
     Mechanism 1: Explicit reference ("supersedes memory #NNN")
-    Mechanism 2: High Jaccard similarity with same-category memories
-    Mechanism 3: Pattern-based rolling windows
+    Mechanism 2: High Jaccard similarity (>= 0.85) with recent memories
     """
     # Mechanism 1: Explicit reference
-    match = re.search(r"supersedes?\s+(?:memory\s+)?#?(\d+)", content, re.IGNORECASE)
+    match = re.search(
+        r"supersedes?\s+(?:memory\s+)?#?(\d+)", content, re.IGNORECASE)
     if match:
         old_id = int(match.group(1))
-        # Verify old_id exists
-        exists = db.execute("SELECT id FROM memories WHERE id=?", (old_id,)).fetchone()
+        exists = db.execute(
+            "SELECT id FROM memories WHERE id=?", (old_id,)
+        ).fetchone()
         if exists:
             supersede(db, old_id, new_id)
             return old_id
 
-    # Mechanism 2: Jaccard similarity (any category, importance < 9)
+    # Mechanism 2: Jaccard similarity (skip for critical memories)
     if importance < 9:
         candidates = db.execute("""
             SELECT id, content FROM memories
@@ -54,21 +53,6 @@ def check_supersession(db, new_id, content, category, importance):
                 supersede(db, old_id, new_id)
                 log(f"auto-superseded #{old_id} (jaccard={sim:.2f})")
                 return old_id
-
-    # Mechanism 3: Rolling windows for recurring patterns
-    content_lower = content.lower()
-    for pattern, keep_n in ROLLING_PATTERNS.items():
-        if pattern in content_lower:
-            old_memories = db.execute("""
-                SELECT id FROM memories
-                WHERE is_active=1 AND content LIKE ?
-                ORDER BY created_at DESC LIMIT 100
-            """, (f"%{pattern}%",)).fetchall()
-
-            if len(old_memories) > keep_n:
-                for excess in old_memories[keep_n:]:
-                    supersede(db, excess[0], new_id)
-            break
 
     return None
 
