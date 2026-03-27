@@ -1,0 +1,4 @@
+#!/bin/bash
+cd "$(dirname "$0")"
+echo "[ping] fired"
+stimulus send --to pong --body '{"msg": "hello from ping"}'

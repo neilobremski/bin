@@ -8,16 +8,20 @@ organism/
  |-- bin/              # Mock CLIs (see Local Lab section)
  |-- organs/
  |   |-- ping/
- |   |   |-- live.sh
+ |   |   |-- live
  |   |   |-- cadence       # contains: 1
+ |   |   |-- .lock         # created by spark-cron
+ |   |   |-- .ticks        # created by spark-cron
  |   |-- pong/
- |       |-- live.sh
+ |       |-- live
  |       |-- cadence       # contains: 1
+ |   |   |-- .lock         # created by spark-cron
+ |       |-- .ticks        # created by spark-cron
  |-- .circulatory/
  |-- .ticks/
 ```
 
-**`organs/ping/live.sh`** -- sends a stimulus to pong:
+**`organs/ping/live`** -- sends a stimulus to pong:
 
 ```bash
 #!/bin/bash
@@ -26,7 +30,7 @@ echo "[ping] fired"
 stimulus send --to pong --body '{"msg": "hello from ping"}'
 ```
 
-**`organs/pong/live.sh`** -- digests stimuli in sorted order:
+**`organs/pong/live`** -- digests stimuli in sorted order:
 
 ```bash
 #!/bin/bash
@@ -40,11 +44,12 @@ done
 Run it (after creating mock CLIs from the Local Lab section):
 
 ```bash
-chmod +x organs/*/live.sh
+chmod +x organs/*/live
 export ORGANS="./organs/ping:./organs/pong"
-export PATH="$PATH:$(pwd)/bin"
-spark-cron.sh        # tick 0 -> increments to 1
-spark-cron.sh        # tick 1 >= cadence 1 -> fires both organs
+export PATH="$(pwd)/bin:$PATH"
+spark-cron # .ticks = 0 -> increments to 1
+spark-cron # .ticks = 1 >= cadence 1 -> fires both organs
+sleep 1
 # [ping] fired
 # [pong] got: {"msg": "hello from ping"}
 ```
@@ -65,29 +70,29 @@ The organism treats autonomous programs as **organs** within **body parts** (con
 
 ### The CLI Contract
 
-Organs interact with all layers through three CLI tools on `$PATH`: `stimulus`, `circ`, and `spark-one.sh`. Swap infrastructure (MQTT to local files, S3 to shared volume) without changing organ code.
+Organs interact with all layers through three CLI tools on `$PATH`: `stimulus`, `circ`, and `spark-one`. Swap infrastructure (MQTT to local files, S3 to shared volume) without changing organ code.
 
 ---
 
 ## The Spark (Layer 0)
 
-The spark manages organ lifecycle: an organ runs **if and only if** it is not already running and its cadence has been met. Every organ is a directory containing `live.sh` -- the universal entry point.
+The spark manages organ lifecycle: an organ runs **if and only if** it is not already running and its cadence has been met. Every organ is a directory containing `live` -- the universal entry point.
 
 ### Three Spark Drivers
 
-**`spark-cron.sh` (Standard)** -- Triggered by `crontab` once per minute. Iterates `$ORGANS` and sparks each organ whose cadence is met.
+**`spark-cron` (Standard)** -- Triggered by `crontab` once per minute. Iterates `$ORGANS` and sparks each organ whose cadence is met.
 
-**`spark-loop.sh` (Fast cycle)** -- A `while true` loop with configurable sleep. Usage: `spark-loop.sh <sleep-seconds>`.
+**`spark-loop` (Fast cycle)** -- A `while true` loop with configurable sleep. Usage: `spark-loop <sleep-seconds>`.
 
-**`spark-one.sh` (Immediate)** -- Targets a single organ for immediate execution. Used by the ganglion to excite an organ when a stimulus arrives. Excitation is **best-effort**: `flock -n` silently skips if the organ is already running.
+**`spark-one` (Immediate)** -- Targets a single organ for immediate execution. Used by the ganglion to excite an organ when a stimulus arrives. Excitation is **best-effort**: `flock -n` silently skips if the organ is already running.
 
 ### Concurrency: `flock`
 
-All spark drivers use `flock -n` on `/tmp/organ_<name>.lock`. If the lock is held, the spark silently exits -- no duplicate processes.
+All spark drivers use `flock -n` on `<organ_dir>/.lock`. If the lock is held, the spark silently exits -- no duplicate processes.
 
 ### Cadence
 
-An organ defines its rate via a `cadence` file (single integer). The spark tracks ticks in `/tmp/<organ_name>.tick` (or `.ticks/` locally). Logic: if `tick >= cadence`, fire and reset to 0; otherwise increment.
+An organ defines its rate via a `cadence` file (single integer). The spark tracks ticks in `<organ_dir>/.ticks`. Logic: if `tick >= cadence`, fire and reset to 0; otherwise increment.
 
 | Cadence | Behavior | Ticks: 0 → 1 → 2 → 3 → 4 → 5 |
 |---------|----------|-------------------------------|
@@ -98,15 +103,14 @@ An organ defines its rate via a `cadence` file (single integer). The spark track
 ```bash
 # Core spark logic
 for organ_path in ${ORGANS//:/ }; do
-  organ_name=$(basename "$organ_path")
   CADENCE=$(cat "$organ_path/cadence" 2>/dev/null || echo 1)
-  TICK_FILE="/tmp/organ_$organ_name.tick"
+  TICK_FILE="$organ_path/.ticks"
   CURRENT_TICK=$(cat "$TICK_FILE" 2>/dev/null || echo 0)
 
   if [ "$CURRENT_TICK" -ge "$CADENCE" ]; then
     echo "0" > "$TICK_FILE"
-    LOCK_FILE="/tmp/organ_$organ_name.lock"
-    flock -n "$LOCK_FILE" -c "$organ_path/live.sh" &
+    LOCK_FILE="$organ_path/.lock"
+    flock -n "$LOCK_FILE" -c "$organ_path/live" &
   else
     echo $((CURRENT_TICK + 1)) > "$TICK_FILE"
   fi
@@ -132,7 +136,7 @@ Returns exit `0` if handed to the ganglion. Does not guarantee delivery. When sp
 The ganglion bridges the network bus (MQTT, etc.) to the local filesystem:
 
 1. Read destination organ from stimulus header.
-2. If target exists in local `$ORGANS`: write payload to `<organ>/.stimulus/` as JSON, call `spark-one.sh <organ>`.
+2. If target exists in local `$ORGANS`: write payload to `<organ>/.stimulus/` as JSON, call `spark-one <organ_name>`.
 3. If not local: relay to the bus for other body parts.
 4. If no match: drop the message.
 
@@ -164,14 +168,14 @@ Each body part runs an **artery** managing the local `.circulatory/` cache and s
 
 ```text
 organ_name/
- |-- live.sh          # Entry point (required, must be executable)
+ |-- live             # Entry point (required, must be executable)
  |-- cadence           # Firing rate as integer (optional, defaults to 1)
  |-- src/              # Internal logic (any language)
  |-- .stimulus/        # Incoming signals (volatile, created by ganglion)
  |-- .memory/          # Persistent local state (non-critical, may not survive migration)
 ```
 
-### Example `live.sh` (Python)
+### Example `live` (Python)
 
 ```bash
 #!/bin/bash
@@ -184,7 +188,7 @@ python3 src/main.py
 
 The standard organ cycle:
 
-1. **Awaken** -- `live.sh` triggered by spark.
+1. **Awaken** -- `live` triggered by spark.
 2. **Digest** -- read `.stimulus/*.json` in sorted order, delete after processing.
 3. **Process** -- run internal logic. Pull data with `circ get` if needed.
 4. **Respond** -- signal other organs with `stimulus send`.
@@ -212,6 +216,9 @@ export PATH="$PATH:$(pwd)/bin"
 #!/bin/bash
 # Mock Nervous System
 CMD=""
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+cd "$DIR/.."
+
 while [[ $# -gt 0 ]]; do
   case $1 in
     send) CMD="send"; shift ;;
@@ -231,10 +238,10 @@ mkdir -p "$STIM_DIR"
 TMPFILE=$(mktemp "$STIM_DIR/XXXXXX.json")
 echo "$BODY" > "$TMPFILE"
 
-spark-one.sh "$TARGET"
+spark-one "$TARGET"
 ```
 
-> **Note:** This mock calls `spark-one.sh` synchronously — `stimulus send` blocks until the target organ completes. In production, stimulus delivery is async (the ganglion handles routing in the background).
+> **Note:** This mock calls `spark-one` synchronously — `stimulus send` blocks until the target organ completes. In production, stimulus delivery is async (the ganglion handles routing in the background).
 
 ### Mock `bin/circ`
 
@@ -263,31 +270,30 @@ elif [ "$CMD" == "get" ]; then
 fi
 ```
 
-### Mock `bin/spark-cron.sh`
+### Mock `bin/spark-cron`
 
 ```bash
 #!/bin/bash
 # Mock Spark (Cron)
 IFS=':' read -ra ADDR <<< "$ORGANS"
-TICK_DIR="./.ticks"
 mkdir -p "$TICK_DIR"
 
 for organ_path in "${ADDR[@]}"; do
   organ_name=$(basename "$organ_path")
   CADENCE=$(cat "$organ_path/cadence" 2>/dev/null || echo 1)
-  TICK_FILE="$TICK_DIR/$organ_name"
+  TICK_FILE="$organ_path/.ticks"
   CURRENT_TICK=$(cat "$TICK_FILE" 2>/dev/null || echo 0)
 
   if [ "$CURRENT_TICK" -ge "$CADENCE" ]; then
     echo "0" > "$TICK_FILE"
-    spark-one.sh "$organ_name"
+    spark-one "$organ_name"
   else
     echo $((CURRENT_TICK + 1)) > "$TICK_FILE"
   fi
 done
 ```
 
-### Mock `bin/spark-one.sh`
+### Mock `bin/spark-one`
 
 ```bash
 #!/bin/bash
@@ -297,8 +303,8 @@ IFS=':' read -ra ADDR <<< "$ORGANS"
 
 for path in "${ADDR[@]}"; do
   if [[ $(basename "$path") == "$ORGAN_NAME" ]]; then
-    LOCK_FILE="/tmp/organ_$ORGAN_NAME.lock"
-    flock -n "$LOCK_FILE" -c "$path/live.sh" &
+    LOCK_FILE="$path/.lock"
+    flock -n "$LOCK_FILE" -c "$path/live" &
     exit 0
   fi
 done
@@ -308,7 +314,7 @@ done
 
 ## Error Handling
 
-### `live.sh` exits non-zero
+### `live` exits non-zero
 
 The spark does not retry. The `flock` lock is released and the organ waits for its next cadence tick (or next excitation). Organs should handle their own retries internally or write failure state to `.memory/`.
 

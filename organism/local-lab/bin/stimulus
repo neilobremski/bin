@@ -1,0 +1,26 @@
+#!/bin/bash
+# Mock Nervous System
+CMD=""
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+cd "$DIR/.."
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    send) CMD="send"; shift ;;
+    --to) TARGET="$2"; shift 2 ;;
+    --body) BODY="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+if [ "$CMD" != "send" ]; then
+  echo "Usage: stimulus send --to <organ> --body '<json>'" >&2
+  exit 1
+fi
+
+STIM_DIR="./organs/$TARGET/.stimulus"
+mkdir -p "$STIM_DIR"
+TMPFILE=$(mktemp "$STIM_DIR/XXXXXX.json")
+echo "$BODY" > "$TMPFILE"
+
+spark-one "$TARGET"

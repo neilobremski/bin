@@ -1,0 +1,22 @@
+#!/bin/bash
+# Mock Circulatory System
+CMD=$1
+HEART_DIR="./.circulatory"
+mkdir -p "$HEART_DIR"
+
+if [ "$CMD" == "push" ]; then
+  FILE_PATH=$2
+  HASH=$(sha256sum "$FILE_PATH" | awk '{print $1}')
+  TMPFILE=$(mktemp "$HEART_DIR/.tmp.XXXXXX")
+  cp "$FILE_PATH" "$TMPFILE"
+  mv "$TMPFILE" "$HEART_DIR/$HASH"
+  echo "$HASH"
+elif [ "$CMD" == "get" ]; then
+  HASH=$2
+  if [ -f "$HEART_DIR/$HASH" ]; then
+    echo "$(realpath "$HEART_DIR/$HASH")"
+  else
+    echo "circ get: hash not found: $HASH" >&2
+    exit 1
+  fi
+fi
