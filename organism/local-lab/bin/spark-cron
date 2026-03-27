@@ -10,7 +10,8 @@ for organ_path in "${ADDR[@]}"; do
 
   if [ "$CURRENT_TICK" -ge "$CADENCE" ]; then
     echo "0" > "$TICK_FILE"
-    spark-one "$organ_name"
+    LOCK_FILE="$organ_path/.lock"
+    flock -n "$LOCK_FILE" -c "$organ_path/live" &
   else
     echo $((CURRENT_TICK + 1)) > "$TICK_FILE"
   fi
