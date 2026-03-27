@@ -6,10 +6,7 @@ How to test and stress-test the memory organ. Use this when evaluating changes, 
 
 ```bash
 # Unit tests (64 tests, <1s)
-cd tadpole/organs/hippocampus && python -m pytest tests/ -v
-
-# Integration tests (11 tests, includes store + dedup)
-cd /path/to/bin && bash tadpole/lifetime.sh
+python -m pytest tests/ -v
 ```
 
 ## Real-World Memory Test

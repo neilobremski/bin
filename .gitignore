@@ -1,12 +1,11 @@
-memory.db
-memory.db-wal
-memory.db-shm
-*.count
-health.txt
-stimulus.txt
-.spark.last
-.spark.log
+# Javascript
+node_modules/
+
+# Organism
 .lock*
+.memory*
 .stimulus*
 .tick*
+
+# Python
 __pycache__/
