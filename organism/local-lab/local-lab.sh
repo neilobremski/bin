@@ -14,6 +14,6 @@ rm -rf .circulatory
 
 echo "=== Local Lab: ping/pong demo ==="
 spark-cron # .ticks = 0 -> increments to 1
-spark-cron # .ticks = 1 >= cadence 1 -> fires both organs
+spark-cron # .ticks = 1 >= cooldown 1 -> fires both organs
 wait
 echo "=== Done ==="

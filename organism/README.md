@@ -15,7 +15,7 @@ cd organism/local-lab && bash local-lab.sh
 
 **What just happened:** Ping wrote a message, pushed it into the circulatory system (`circ push`), and sent the content hash to pong via the nervous system (`stimulus send`). Pong received the hash, pulled the payload (`circ get`), and read the message. All three layers -- spark, stimulus, circ -- working together.
 
-**Prerequisites:** bash, flock, jq, sha256sum.
+**Prerequisites:** bash, flock, jq.
 
 ---
 
@@ -27,9 +27,9 @@ The organism treats autonomous programs as **organs** within **body parts** (con
 
 | Layer | Name | Purpose |
 |-------|------|---------|
-| **0** | **Spark** (Metabolism) | Lifecycle and scheduling. Time-based cadence, `flock` concurrency. |
+| **0** | **Spark** (Metabolism) | Lifecycle and scheduling. Cooldown-based firing, `flock` concurrency. |
 | **1** | **Stimulus** (Nervous System) | Async signaling. Low-latency nerve impulses between organs via **ganglion** routing. |
-| **2** | **Circ** (Circulatory System) | Data transport. Content-addressed blobs (SHA-256) moved between body parts via **artery** caching. |
+| **2** | **Circ** (Circulatory System) | Data transport. Content-addressed blobs moved between body parts via **artery** caching. |
 
 ### The CLI Contract
 
@@ -39,11 +39,11 @@ Organs interact with all layers through three CLI tools on `$PATH`: `stimulus`, 
 
 ## The Spark (Layer 0)
 
-The spark manages organ lifecycle: an organ runs **if and only if** it is not already running and its cadence has been met. Every organ is a directory containing `live` -- the universal entry point.
+The spark manages organ lifecycle: an organ runs **if and only if** it is not already running and its cooldown has been met. Every organ is a directory containing `live` -- the universal entry point.
 
 ### Three Spark Drivers
 
-**`spark-cron` (Standard)** -- Triggered by `crontab` once per minute. Iterates `$ORGANS` (colon-delimited list of organ paths) and sparks each organ whose cadence is met.
+**`spark-cron` (Standard)** -- Triggered by `crontab` once per minute. Iterates `$ORGANS` (colon-delimited list of organ paths) and sparks each organ whose cooldown is met.
 
 **`spark-loop` (Fast cycle)** -- A `while true` loop with configurable sleep. Usage: `spark-loop <sleep-seconds>`.
 
@@ -53,26 +53,26 @@ The spark manages organ lifecycle: an organ runs **if and only if** it is not al
 
 All spark drivers use `flock -n` on `<organ_dir>/.lock`. If the lock is held, the spark silently exits -- no duplicate processes.
 
-### Cadence
+### Cooldown
 
-An organ defines its rate via a `cadence` file (single integer). The spark tracks ticks in `<organ_dir>/.ticks`. Logic: if `tick >= cadence`, fire and reset to 0; otherwise increment.
+An organ defines its rate via a `cooldown` file (single integer). The spark tracks ticks in `<organ_dir>/.ticks`. Logic: if `tick >= cooldown`, fire and reset to 0; otherwise increment.
 
-| Cadence | Behavior | Ticks: 0 → 1 → 2 → 3 → 4 → 5 |
-|---------|----------|-------------------------------|
+| Cooldown | Behavior | Ticks: 0 → 1 → 2 → 3 → 4 → 5 |
+|----------|----------|-------------------------------|
 | **1** | Every other tick | skip, **fire**, skip, **fire**, skip, **fire** |
 | **3** | Every 4th tick | skip, skip, skip, **fire**, skip, skip |
 | **0** | Every tick | **fire**, **fire**, **fire**, **fire**, **fire**, **fire** |
 
-> **Note:** Cadence is a threshold, not a frequency. Cadence 0 means fire every tick (tick always meets threshold). Cadence 1 means fire every *other* tick. Set cadence to 0 for maximum firing rate.
+> **Note:** Cooldown is a threshold, not a frequency. Cooldown 0 means fire every tick (tick always meets threshold). Cooldown 1 means fire every *other* tick. Set cooldown to 0 for maximum firing rate.
 
 ```bash
 # Core spark logic (production version backgrounds with &)
 for organ_path in ${ORGANS//:/ }; do
-  CADENCE=$(cat "$organ_path/cadence" 2>/dev/null || echo 1)
+  COOLDOWN=$(cat "$organ_path/cooldown" 2>/dev/null || echo 1)
   TICK_FILE="$organ_path/.ticks"
   CURRENT_TICK=$(cat "$TICK_FILE" 2>/dev/null || echo 0)
 
-  if [ "$CURRENT_TICK" -ge "$CADENCE" ]; then
+  if [ "$CURRENT_TICK" -ge "$COOLDOWN" ]; then
     echo "0" > "$TICK_FILE"
     LOCK_FILE="$organ_path/.lock"
     flock -n "$LOCK_FILE" -c "$organ_path/live" &
@@ -124,15 +124,14 @@ Stimuli are buffered on disk -- if an organ is dormant, signals wait until it fi
 
 ## The Circulatory System (Layer 2)
 
-The circulatory system moves large data blobs between body parts using content-addressed storage (SHA-256).
+The circulatory system moves large data blobs between body parts using content-addressed storage.
 
 ### The `circ` CLI Contract
 
 | Command | Returns |
 |---------|---------|
-| `circ push <path>` | SHA-256 hash to stdout. Stores in local cache, registers with remote relay. Non-zero exit if file not found. |
+| `circ push <path>` | Content hash to stdout. Stores in local cache, registers with remote relay. Non-zero exit if file not found. |
 | `circ get <hash>` | Absolute file path to stdout. Non-zero exit if hash not found. |
-| `circ status` | Connection health string. |
 
 Unknown commands must exit non-zero with usage information.
 
@@ -142,7 +141,7 @@ Unknown commands must exit non-zero with usage information.
 
 A `circ` implementation must:
 
-1. **push**: Validate the file exists. Compute SHA-256 hash. Store the file content-addressed (atomic write: temp file + rename). Print the hash to stdout.
+1. **push**: Validate the file exists. Compute a content hash (algorithm is implementation-defined). Store the file content-addressed (atomic write: temp file + rename). Print the hash to stdout.
 2. **get**: Look up the hash in local cache. If found, print the absolute path to stdout. If not found, exit non-zero with error to stderr.
 3. Resolve the `.circulatory/` storage directory relative to the implementation's install location (not the caller's working directory), so all organs on the same body part share one cache.
 
@@ -157,7 +156,7 @@ Each body part runs an **artery** managing the local `.circulatory/` cache and s
 ```text
 organ_name/
  |-- live             # Entry point (required, must be executable)
- |-- cadence           # Firing rate as integer (optional, defaults to 1)
+ |-- cooldown          # Firing threshold as integer (optional, defaults to 1)
  |-- src/              # Internal logic (any language)
  |-- .stimulus/        # Incoming signals (volatile, created by ganglion)
  |-- .memory/          # Persistent local state (non-critical, may not survive migration)
@@ -200,7 +199,7 @@ local-lab/
  |-- bin/
  |   |-- stimulus          # Mock nervous system (writes to .stimulus/, calls spark-one)
  |   |-- circ              # Mock circulatory system (content-addressed .circulatory/ dir)
- |   |-- spark-cron        # Mock spark (iterates $ORGANS, checks cadence, fires organs)
+ |   |-- spark-cron        # Mock spark (iterates $ORGANS, checks cooldown, fires organs)
  |   |-- spark-one         # Mock immediate excitation (fires one organ by name)
  |-- organs/
  |   |-- ping/live         # Pushes a payload via circ, sends hash via stimulus
@@ -224,7 +223,7 @@ To build your own organ, copy `organs/ping/` as a template. Your `live` script m
 
 ### `live` exits non-zero
 
-The spark does not retry. The `flock` lock is released and the organ waits for its next cadence tick (or next excitation). Organs should handle their own retries internally or write failure state to `.memory/`.
+The spark does not retry. The `flock` lock is released and the organ waits for its next cooldown tick (or next excitation). Organs should handle their own retries internally or write failure state to `.memory/`.
 
 ### `circ get` fails
 

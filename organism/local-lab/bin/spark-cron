@@ -4,11 +4,11 @@
 IFS=':' read -ra ADDR <<< "$ORGANS"
 
 for organ_path in "${ADDR[@]}"; do
-  CADENCE=$(cat "$organ_path/cadence" 2>/dev/null || echo 1)
+  COOLDOWN=$(cat "$organ_path/cooldown" 2>/dev/null || echo 1)
   TICK_FILE="$organ_path/.ticks"
   CURRENT_TICK=$(cat "$TICK_FILE" 2>/dev/null || echo 0)
 
-  if [ "$CURRENT_TICK" -ge "$CADENCE" ]; then
+  if [ "$CURRENT_TICK" -ge "$COOLDOWN" ]; then
     echo "0" > "$TICK_FILE"
     LOCK_FILE="$organ_path/.lock"
     flock -n "$LOCK_FILE" -c "$organ_path/live"
