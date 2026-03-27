@@ -4,33 +4,32 @@ Memory organ for the synthetic organism. Stores, retrieves, and consolidates mem
 
 ## Quick Start
 
+From this directory:
 ```bash
-cd brain/hippocampus
-
 # Store a memory
-python3 bin/memories store "FSRS uses a power-law forgetting curve" --importance 8 --category technical
+bin/memories store "FSRS uses a power-law forgetting curve" --importance 8 --category technical
 
 # Store another
-python3 bin/memories store "Entity linking connects memories to known concepts" --importance 6
+bin/memories store "Entity linking connects memories to known concepts" --importance 6
 
 # Search
-python3 bin/memories search "forgetting curve"
+bin/memories search "forgetting curve"
 
 # Recall recent + important memories
-python3 bin/memories recall --limit 5
+bin/memories recall --limit 5
 
 # Stats
-python3 bin/memories stats
+bin/memories stats
 
 # Create an entity and link it
-python3 bin/memories entity create neil "Neil" --type person --summary "Neil Obremski, partner"
-python3 bin/memories store "Neil designed the synthetic organism architecture" --importance 9
+bin/memories entity create neil "Neil" --type person --summary "Neil Obremski, partner"
+bin/memories store "Neil designed the synthetic organism architecture" --importance 9
 
 # List entities
-python3 bin/memories entity list
+bin/memories entity list
 
 # Entity detail (shows linked memories)
-python3 bin/memories entity get neil
+bin/memories entity get neil
 ```
 
 All output is JSON. The database lives at `.memory/memories.db` and is created automatically on first use.
@@ -43,7 +42,7 @@ hippocampus/
 ├── cooldown          # 0 = fire every tick
 ├── bin/memories      # Synchronous CLI for testing
 ├── src/              # Python modules
-├── tests/            # pytest suite (70 tests)
+├── tests/            # pytest suite
 ├── .stimulus/        # Incoming signals (created by ganglion)
 └── .memory/          # Persistent state (memories.db)
 ```
