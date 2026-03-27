@@ -1,0 +1,12 @@
+#!/bin/bash
+# Immediate Excitation (best-effort: silently skips if organ is busy)
+ORGAN_NAME=$1
+IFS=':' read -ra ADDR <<< "$ORGANS"
+
+for path in "${ADDR[@]}"; do
+  if [[ $(basename "$path") == "$ORGAN_NAME" ]]; then
+    LOCK_FILE="$path/.lock"
+    flock -n "$LOCK_FILE" -c "$path/live" &
+    exit 0
+  fi
+done

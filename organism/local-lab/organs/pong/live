@@ -1,0 +1,6 @@
+#!/bin/bash
+cd "$(dirname "$0")"
+for f in $(ls .stimulus/*.json 2>/dev/null | sort); do
+  echo "[pong] got: $(cat "$f")"
+  rm "$f"
+done
