@@ -17,78 +17,11 @@ cd organism/local-lab && bash local-lab.sh
 
 **Prerequisites:** bash, flock, jq, sha256sum.
 
-### How it works
-
-```text
-local-lab/
- |-- bin/              # Mock CLIs (see Local Lab section)
- |-- organs/
- |   |-- ping/
- |   |   |-- live
- |   |   |-- cadence       # contains: 1
- |   |-- pong/
- |       |-- live
- |       |-- cadence       # contains: 1
- |-- .circulatory/         # content-addressed blob store
-```
-
-**`organs/ping/live`** -- pushes a payload and signals pong:
-
-```bash
-#!/bin/bash
-cd "$(dirname "$0")"
-echo "[ping] fired"
-
-MSG_FILE=$(mktemp)
-echo "hello from ping at $(date)" > "$MSG_FILE"
-HASH=$(circ push "$MSG_FILE")
-rm "$MSG_FILE"
-
-if [ -z "$HASH" ]; then
-  echo "[ping] circ push failed" >&2
-  exit 1
-fi
-
-echo "[ping] pushed payload: ${HASH:0:12}..."
-stimulus send --to pong --body "{\"hash\": \"$HASH\"}"
-```
-
-**`organs/pong/live`** -- pulls payloads from the circulatory system:
-
-```bash
-#!/bin/bash
-cd "$(dirname "$0")"
-shopt -s nullglob
-files=(.stimulus/*.json)
-shopt -u nullglob
-
-for f in "${files[@]}"; do
-  HASH=$(jq -r '.hash' "$f" 2>/dev/null)
-
-  if [ -z "$HASH" ] || [ "$HASH" = "null" ]; then
-    echo "[pong] stimulus missing hash, skipping"
-    rm "$f"
-    continue
-  fi
-
-  FILE_PATH=$(circ get "$HASH")
-  if [ $? -ne 0 ]; then
-    echo "[pong] circ get failed for ${HASH:0:12}..."
-    rm "$f"
-    continue
-  fi
-
-  rm "$f"
-  echo "[pong] retrieved ${HASH:0:12}..."
-  echo "[pong] got: $(cat "$FILE_PATH")"
-done
-```
-
 ---
 
 ## Architecture Overview
 
-The organism treats autonomous programs as **organs** within **body parts** (containers, VMs, or local environments). Organs are portable, self-contained, and infrastructure-agnostic — swap MQTT for local files, S3 for a shared folder, without changing a single line of organ code. A body part needs only a **filesystem** and **program execution**.
+The organism treats autonomous programs as **organs** within **body parts** (containers, VMs, or local environments). Organs are portable, self-contained, and infrastructure-agnostic -- swap MQTT for local files, S3 for a shared folder, without changing a single line of organ code. A body part needs only a **filesystem** and **program execution**.
 
 ### The Three Layers
 
@@ -110,11 +43,11 @@ The spark manages organ lifecycle: an organ runs **if and only if** it is not al
 
 ### Three Spark Drivers
 
-**`spark-cron` (Standard)** -- Triggered by `crontab` once per minute. Iterates `$ORGANS` and sparks each organ whose cadence is met.
+**`spark-cron` (Standard)** -- Triggered by `crontab` once per minute. Iterates `$ORGANS` (colon-delimited list of organ paths) and sparks each organ whose cadence is met.
 
 **`spark-loop` (Fast cycle)** -- A `while true` loop with configurable sleep. Usage: `spark-loop <sleep-seconds>`.
 
-**`spark-one` (Immediate)** -- Targets a single organ for immediate execution. Used by the ganglion to excite an organ when a stimulus arrives. Excitation is **best-effort**: `flock -n` silently skips if the organ is already running.
+**`spark-one` (Immediate)** -- Targets a single organ by name for immediate execution. Resolves the organ path by searching `$ORGANS`. Used by the ganglion to excite an organ when a stimulus arrives. Excitation is **best-effort**: `flock -n` silently skips if the organ is already running. Exits non-zero if the organ name is not found in `$ORGANS`.
 
 ### Concurrency: `flock`
 
@@ -133,7 +66,7 @@ An organ defines its rate via a `cadence` file (single integer). The spark track
 > **Note:** Cadence is a threshold, not a frequency. Cadence 0 means fire every tick (tick always meets threshold). Cadence 1 means fire every *other* tick. Set cadence to 0 for maximum firing rate.
 
 ```bash
-# Core spark logic
+# Core spark logic (production version backgrounds with &)
 for organ_path in ${ORGANS//:/ }; do
   CADENCE=$(cat "$organ_path/cadence" 2>/dev/null || echo 1)
   TICK_FILE="$organ_path/.ticks"
@@ -161,7 +94,20 @@ The nervous system carries **intent** -- small async signals between organs.
 stimulus send --to <organ_name> --body '<json_payload>'
 ```
 
-Returns exit `0` if handed to the ganglion. Does not guarantee delivery. When sparked, an organ checks `.stimulus/` for JSON files, processes them in **lexicographic order** (sorted by filename), and deletes each after processing.
+Returns exit `0` if handed to the ganglion (or written to the target's `.stimulus/` directory in the local mock). Returns non-zero if the target organ is not found in `$ORGANS`. Does not guarantee delivery.
+
+When sparked, an organ checks `.stimulus/` for JSON files, processes them in **lexicographic order** (sorted by filename), and deletes each after processing.
+
+### Stimulus Implementation Requirements
+
+A `stimulus` implementation must:
+
+1. Parse `send --to <name> --body '<json>'` from arguments.
+2. Resolve the target organ's path by searching `$ORGANS` (colon-delimited) for a matching `basename`.
+3. Create the target's `.stimulus/` directory if it does not exist.
+4. Write the JSON body to a unique file in `.stimulus/` (use `mktemp` with `.json` suffix for lexicographic ordering).
+5. Call `spark-one <organ_name>` to excite the target organ.
+6. Exit non-zero if the target organ is not found.
 
 ### The Ganglion
 
@@ -184,11 +130,21 @@ The circulatory system moves large data blobs between body parts using content-a
 
 | Command | Returns |
 |---------|---------|
-| `circ push <path>` | SHA-256 hash to stdout. Stores in local cache, registers with remote relay. |
-| `circ get <hash>` | Absolute file path to stdout. Non-zero exit on failure. |
+| `circ push <path>` | SHA-256 hash to stdout. Stores in local cache, registers with remote relay. Non-zero exit if file not found. |
+| `circ get <hash>` | Absolute file path to stdout. Non-zero exit if hash not found. |
 | `circ status` | Connection health string. |
 
+Unknown commands must exit non-zero with usage information.
+
 **Flow:** Organ A runs `circ push data.txt`, gets a hash, sends it via stimulus to Organ B. Organ B runs `circ get <hash>` and gets a local path.
+
+### Circ Implementation Requirements
+
+A `circ` implementation must:
+
+1. **push**: Validate the file exists. Compute SHA-256 hash. Store the file content-addressed (atomic write: temp file + rename). Print the hash to stdout.
+2. **get**: Look up the hash in local cache. If found, print the absolute path to stdout. If not found, exit non-zero with error to stderr.
+3. Resolve the `.circulatory/` storage directory relative to the implementation's install location (not the caller's working directory), so all organs on the same body part share one cache.
 
 Each body part runs an **artery** managing the local `.circulatory/` cache and syncing with the remote relay (S3, NATS, shared volume). Blobs are ephemeral -- TTLs and pruning prevent storage exhaustion.
 
@@ -221,11 +177,12 @@ python3 src/main.py
 The standard organ cycle:
 
 1. **Awaken** -- `live` triggered by spark.
-2. **Digest** -- read `.stimulus/*.json` in sorted order, delete after processing.
-3. **Process** -- run internal logic. Pull data with `circ get` if needed.
-4. **Respond** -- signal other organs with `stimulus send`.
+2. **Digest** -- read `.stimulus/*.json` in sorted order. Parse each payload. On parse failure, log and delete the file.
+3. **Process** -- run internal logic. Pull data with `circ get` if needed. Check exit codes.
+4. **Respond** -- signal other organs with `stimulus send`. Check exit codes.
 5. **Output** -- push new data with `circ push`, send hash via stimulus.
-6. **Exit** -- process ends, `flock` lock released.
+6. **Cleanup** -- delete each stimulus file only after it has been fully processed. Never delete before processing completes.
+7. **Exit** -- process ends, `flock` lock released.
 
 ### Dependencies
 
@@ -235,143 +192,31 @@ Organs carry their own dependencies: `node_modules/` for Node.js, `venv/` for Py
 
 ## Local Lab
 
-These four scripts replace production infrastructure (MQTT, S3, cron) with local filesystem operations. Put them in `bin/` and add to your `$PATH`. No network required.
+The `local-lab/` directory contains a complete working mock of the organism. It replaces production infrastructure (MQTT, S3, cron) with local filesystem operations. No network required.
 
-```bash
-export ORGANS="./organs/brain:./organs/mouth"
-export PATH="$(pwd)/bin:$PATH"
+```text
+local-lab/
+ |-- local-lab.sh         # Resets state and runs the ping/pong demo
+ |-- bin/
+ |   |-- stimulus          # Mock nervous system (writes to .stimulus/, calls spark-one)
+ |   |-- circ              # Mock circulatory system (content-addressed .circulatory/ dir)
+ |   |-- spark-cron        # Mock spark (iterates $ORGANS, checks cadence, fires organs)
+ |   |-- spark-one         # Mock immediate excitation (fires one organ by name)
+ |-- organs/
+ |   |-- ping/live         # Pushes a payload via circ, sends hash via stimulus
+ |   |-- pong/live         # Receives stimulus, pulls payload via circ, prints it
+ |-- .circulatory/         # Content-addressed blob store (created at runtime)
 ```
 
-> **Important:** The local lab mocks run organs synchronously for deterministic output. In production, spark backgrounds organs with `flock -n ... &` and stimulus delivery is async via the ganglion. An organ that sends a stimulus to itself will block in the local lab but work in production.
+The mock CLIs implement the contracts described above with these simplifications:
 
-### Mock `bin/stimulus`
+- **Synchronous execution.** Production spark backgrounds organs with `flock -n ... &`. The mocks run organs sequentially for deterministic output. An organ that sends a stimulus to itself will block in the local lab but work in production.
+- **Local-only routing.** The mock stimulus resolves organ paths from `$ORGANS` and writes directly to the filesystem. No ganglion, no network bus.
+- **No TTL/pruning.** The mock circ stores blobs indefinitely in `.circulatory/`. `local-lab.sh` cleans this directory on each run.
 
-Resolves the target organ from `$ORGANS`, writes the payload to `.stimulus/`, and fires the organ via `spark-one`.
+To run: `cd local-lab && bash local-lab.sh`
 
-```bash
-#!/bin/bash
-# Mock Nervous System
-CMD=""
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-cd "$DIR/.."
-
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    send) CMD="send"; shift ;;
-    --to) TARGET="$2"; shift 2 ;;
-    --body) BODY="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-
-if [ "$CMD" != "send" ]; then
-  echo "Usage: stimulus send --to <organ> --body '<json>'" >&2
-  exit 1
-fi
-
-# Resolve organ path from $ORGANS
-IFS=':' read -ra ADDR <<< "$ORGANS"
-ORGAN_PATH=""
-for path in "${ADDR[@]}"; do
-  if [[ $(basename "$path") == "$TARGET" ]]; then
-    ORGAN_PATH="$path"
-    break
-  fi
-done
-
-if [ -z "$ORGAN_PATH" ]; then
-  echo "stimulus: organ not found: $TARGET" >&2
-  exit 1
-fi
-
-STIM_DIR="$ORGAN_PATH/.stimulus"
-mkdir -p "$STIM_DIR"
-TMPFILE=$(mktemp "$STIM_DIR/XXXXXX.json")
-echo "$BODY" > "$TMPFILE"
-
-spark-one "$TARGET"
-```
-
-### Mock `bin/circ`
-
-Content-addressed blob store backed by a local `.circulatory/` directory. Atomic writes via tmp+mv.
-
-```bash
-#!/bin/bash
-# Mock Circulatory System
-CMD=$1
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-HEART_DIR="$DIR/../.circulatory"
-mkdir -p "$HEART_DIR"
-
-if [ "$CMD" == "push" ]; then
-  FILE_PATH=$2
-  if [ ! -f "$FILE_PATH" ]; then
-    echo "circ push: file not found: $FILE_PATH" >&2
-    exit 1
-  fi
-  HASH=$(sha256sum "$FILE_PATH" | awk '{print $1}')
-  TMPFILE=$(mktemp "$HEART_DIR/.tmp.XXXXXX")
-  cp "$FILE_PATH" "$TMPFILE"
-  mv "$TMPFILE" "$HEART_DIR/$HASH"
-  echo "$HASH"
-elif [ "$CMD" == "get" ]; then
-  HASH=$2
-  if [ -f "$HEART_DIR/$HASH" ]; then
-    echo "$(realpath "$HEART_DIR/$HASH")"
-  else
-    echo "circ get: hash not found: $HASH" >&2
-    exit 1
-  fi
-else
-  echo "Usage: circ push <path> | circ get <hash>" >&2
-  exit 1
-fi
-```
-
-### Mock `bin/spark-cron`
-
-```bash
-#!/bin/bash
-# Mock Spark (Cron)
-# Note: runs organs sequentially (production backgrounds them)
-IFS=':' read -ra ADDR <<< "$ORGANS"
-
-for organ_path in "${ADDR[@]}"; do
-  CADENCE=$(cat "$organ_path/cadence" 2>/dev/null || echo 1)
-  TICK_FILE="$organ_path/.ticks"
-  CURRENT_TICK=$(cat "$TICK_FILE" 2>/dev/null || echo 0)
-
-  if [ "$CURRENT_TICK" -ge "$CADENCE" ]; then
-    echo "0" > "$TICK_FILE"
-    LOCK_FILE="$organ_path/.lock"
-    flock -n "$LOCK_FILE" -c "$organ_path/live"
-  else
-    echo $((CURRENT_TICK + 1)) > "$TICK_FILE"
-  fi
-done
-```
-
-### Mock `bin/spark-one`
-
-```bash
-#!/bin/bash
-# Immediate Excitation (best-effort: silently skips if organ is busy)
-# Note: runs synchronously in mock (production backgrounds with &)
-ORGAN_NAME=$1
-IFS=':' read -ra ADDR <<< "$ORGANS"
-
-for path in "${ADDR[@]}"; do
-  if [[ $(basename "$path") == "$ORGAN_NAME" ]]; then
-    LOCK_FILE="$path/.lock"
-    flock -n "$LOCK_FILE" -c "$path/live"
-    exit 0
-  fi
-done
-
-echo "spark-one: organ not found: $ORGAN_NAME" >&2
-exit 1
-```
+To build your own organ, copy `organs/ping/` as a template. Your `live` script must be executable, start with `cd "$(dirname "$0")"`, and interact only through `stimulus`, `circ`, and the filesystem.
 
 ---
 
@@ -385,13 +230,17 @@ The spark does not retry. The `flock` lock is released and the organ waits for i
 
 Returns non-zero exit code. The organ should check the return code and handle gracefully -- skip processing, log the error, or write to `.memory/` for retry on next spark.
 
+### `circ push` fails
+
+Returns non-zero exit code if the file does not exist or cannot be stored. The organ should check the return code and bail rather than sending an empty hash downstream.
+
 ### Bad JSON in `.stimulus/`
 
 Organs are responsible for validating stimulus payloads. If a file fails to parse, the organ should log the error, delete the file (to prevent re-processing), and continue with remaining stimuli.
 
 ### `stimulus send` fails
 
-Returns non-zero if the ganglion rejected the message. In the local lab mock, this only happens if the `send` subcommand is missing. The organ should check the exit code.
+Returns non-zero if the target organ is not found in `$ORGANS` or if the ganglion rejected the message. The organ should check the exit code.
 
 ### Organ already running (flock contention)
 
