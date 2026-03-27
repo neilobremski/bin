@@ -15,10 +15,9 @@ organism/
  |   |-- pong/
  |       |-- live
  |       |-- cadence       # contains: 1
- |   |   |-- .lock         # created by spark-cron
+ |       |-- .lock         # created by spark-cron
  |       |-- .ticks        # created by spark-cron
  |-- .circulatory/
- |-- .ticks/
 ```
 
 **`organs/ping/live`** -- sends a stimulus to pong:
@@ -276,17 +275,16 @@ fi
 #!/bin/bash
 # Mock Spark (Cron)
 IFS=':' read -ra ADDR <<< "$ORGANS"
-mkdir -p "$TICK_DIR"
 
 for organ_path in "${ADDR[@]}"; do
-  organ_name=$(basename "$organ_path")
   CADENCE=$(cat "$organ_path/cadence" 2>/dev/null || echo 1)
   TICK_FILE="$organ_path/.ticks"
   CURRENT_TICK=$(cat "$TICK_FILE" 2>/dev/null || echo 0)
 
   if [ "$CURRENT_TICK" -ge "$CADENCE" ]; then
     echo "0" > "$TICK_FILE"
-    spark-one "$organ_name"
+    LOCK_FILE="$organ_path/.lock"
+    flock -n "$LOCK_FILE" -c "$organ_path/live" &
   else
     echo $((CURRENT_TICK + 1)) > "$TICK_FILE"
   fi
