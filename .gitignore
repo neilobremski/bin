@@ -2,6 +2,7 @@
 node_modules/
 
 # Organism
+.circulatory*
 .lock*
 .memory*
 .stimulus*
