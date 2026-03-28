@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Synchronous CLI for ear testing. No stimulus protocol needed.
+
+Usage:
+    transcribe <audio_file> [--language en] [--prompt "Knobert"] [--model whisper-large-v3]
+    transcribe --json <audio_file>    # full JSON output
+"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+SRC = Path(__file__).resolve().parent.parent / "src"
+sys.path.insert(0, str(SRC))
+
+from transcribe import transcribe
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="transcribe",
+                                     description="Transcribe audio via Groq Whisper")
+    parser.add_argument("audio_file", help="Path to audio file")
+    parser.add_argument("--language", default="en", help="Language code (default: en)")
+    parser.add_argument("--prompt", default="Knobert", help="Prompt hint for proper nouns")
+    parser.add_argument("--model", default=None, help="Whisper model (default: whisper-large-v3)")
+    parser.add_argument("--json", action="store_true", dest="json_output",
+                        help="Output full JSON response")
+
+    args = parser.parse_args()
+
+    try:
+        result = transcribe(args.audio_file, language=args.language,
+                           prompt=args.prompt, model=args.model)
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print(result.get("text", ""))
+
+
+if __name__ == "__main__":
+    main()
