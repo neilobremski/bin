@@ -1,0 +1,4 @@
+#!/bin/bash
+# PFC organ entry point — called by spark.
+cd "$(dirname "$0")"
+exec python3 src/pfc.py

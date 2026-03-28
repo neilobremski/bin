@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Synchronous CLI for PFC testing. No stimulus protocol needed.
+
+Usage:
+    think "What should we focus on today?"
+    think --stimulus '{"action":"summarize","content":"..."}'
+    think --provider claude "How are the organs doing?"
+    echo "context" | think "What do you make of this?"
+"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+SRC = Path(__file__).resolve().parent.parent / "src"
+sys.path.insert(0, str(SRC))
+
+from llm import get_provider, invoke, log
+from stimulus import think, SYSTEM_PROMPT
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="think",
+                                     description="PFC thinking CLI")
+    parser.add_argument("prompt", nargs="?", help="Direct prompt to think about")
+    parser.add_argument("--stimulus", help="JSON stimulus to process")
+    parser.add_argument("--provider", help="Force LLM provider (claude/gemini/codex)")
+    parser.add_argument("--detect", action="store_true",
+                        help="Detect and display available LLM provider")
+    parser.add_argument("--json", action="store_true", dest="json_output",
+                        help="Output full JSON (reply + signals)")
+
+    args = parser.parse_args()
+
+    if args.detect:
+        provider = get_provider()
+        if provider:
+            print(f"provider: {provider}")
+        else:
+            print("no provider available", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # Read stdin if piped
+    context = ""
+    if not sys.stdin.isatty():
+        context = sys.stdin.read().strip()
+
+    if args.stimulus:
+        try:
+            stim_data = json.loads(args.stimulus)
+        except json.JSONDecodeError as e:
+            print(f"bad JSON: {e}", file=sys.stderr)
+            sys.exit(1)
+        result = think(stim_data, provider=args.provider)
+    elif args.prompt:
+        prompt = args.prompt
+        if context:
+            prompt = f"Context:\n{context}\n\n---\n{prompt}"
+        # Direct prompt mode — just invoke the LLM
+        try:
+            text = invoke(prompt, system=SYSTEM_PROMPT, provider=args.provider)
+        except RuntimeError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        # Try to parse as structured response
+        from stimulus import _parse_llm_response
+        result = _parse_llm_response(text)
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print(result.get("reply", ""))
+        if result.get("signals"):
+            print(f"\n[{len(result['signals'])} signal(s) to send]", file=sys.stderr)
+            for s in result["signals"]:
+                print(f"  -> {s.get('to')}: {json.dumps(s.get('body', {}), default=str)[:100]}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
