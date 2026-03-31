@@ -162,7 +162,7 @@ def _transcribe_whisper_cpp(audio_path, language="en", model=None):
     return {"text": result.stdout.strip(), "provider": "whisper.cpp"}
 
 
-def _transcribe_api(audio_path, language="en", prompt="Knobert",
+def _transcribe_api(audio_path, language="en", prompt=None,
                     model=None, provider="groq"):
     """Transcribe via Groq or OpenAI-compatible API."""
     cfg = PROVIDER_CONFIG[provider]
@@ -203,7 +203,7 @@ def _transcribe_api(audio_path, language="en", prompt="Knobert",
 
 # --- Public API ---
 
-def transcribe(audio_path, language="en", prompt="Knobert",
+def transcribe(audio_path, language="en", prompt=None,
                model=None, provider=None):
     """Transcribe an audio file.
 

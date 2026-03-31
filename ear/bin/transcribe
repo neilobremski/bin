@@ -3,7 +3,7 @@
 
 Usage:
     transcribe <audio_file>
-    transcribe <audio_file> --provider groq --language en --prompt "Knobert"
+    transcribe <audio_file> --provider groq --language en --prompt "proper nouns"
     transcribe --json <audio_file>
     transcribe --detect
 """
@@ -23,7 +23,7 @@ def main():
                                      description="Transcribe audio via Whisper")
     parser.add_argument("audio_file", nargs="?", help="Path to audio file")
     parser.add_argument("--language", default="en", help="Language code (default: en)")
-    parser.add_argument("--prompt", default="Knobert", help="Prompt hint for proper nouns")
+    parser.add_argument("--prompt", default=None, help="Prompt hint for proper nouns")
     parser.add_argument("--model", default=None, help="Whisper model override")
     parser.add_argument("--provider", default=None,
                         choices=PROVIDERS, help="Force provider")

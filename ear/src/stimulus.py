@@ -80,7 +80,7 @@ def handle_transcribe(stim):
         result = transcribe(
             audio_path,
             language=stim.get("language", "en"),
-            prompt=stim.get("prompt", "Knobert"),
+            prompt=stim.get("prompt"),
             model=stim.get("model"),
             provider=stim.get("provider"),
         )

@@ -13,7 +13,7 @@ bin/transcribe --detect
 bin/transcribe recording.mp3
 
 # With options
-bin/transcribe recording.mp3 --language en --prompt "Knobert, Neil"
+bin/transcribe recording.mp3 --language en --prompt "proper nouns here"
 
 # Force a specific provider
 bin/transcribe recording.mp3 --provider groq
@@ -56,7 +56,7 @@ stimulus send --to ear --body '{
   "action": "transcribe",
   "audio_path": "/path/to/recording.mp3",
   "language": "en",
-  "prompt": "Knobert, Neil",
+  "prompt": "proper nouns here",
   "provider": "groq",
   "id": "corr-001",
   "from": "brain"
