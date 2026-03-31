@@ -15,6 +15,7 @@ import subprocess
 import sys
 import urllib.request
 import urllib.error
+import uuid
 from pathlib import Path
 
 DIR = Path(__file__).resolve().parent.parent
@@ -99,7 +100,7 @@ def _multipart_post(url, api_key, fields, files, timeout=120):
     files: dict of name -> (filename, data, content_type)
     Returns parsed JSON response.
     """
-    boundary = "----EarOrganBoundary9876543210"
+    boundary = uuid.uuid4().hex
     body = io.BytesIO()
 
     for name, value in fields.items():
@@ -135,11 +136,9 @@ def _multipart_post(url, api_key, fields, files, timeout=120):
             msg = err.get("error", {})
             if isinstance(msg, dict):
                 msg = msg.get("message", str(msg))
-            raise RuntimeError(f"API error ({e.code}): {msg}")
-        except (json.JSONDecodeError, RuntimeError):
-            if isinstance(e, RuntimeError):
-                raise
-            raise RuntimeError(f"HTTP {e.code}: {error_body}")
+        except json.JSONDecodeError:
+            msg = error_body
+        raise RuntimeError(f"API error ({e.code}): {msg}")
     except urllib.error.URLError as e:
         raise RuntimeError(f"connection error: {e.reason}")
 

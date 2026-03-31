@@ -34,7 +34,7 @@ Checked in order. First available wins, cached in `.memory/whisper-provider`.
 | `groq` | `GROQ_API_KEY` | Free tier: 2,000 req/day |
 | `openai` | `OPENAI_API_KEY` | Supports `OPENAI_BASE_URL` for proxies |
 
-Cache auto-clears when a provider stops working.
+Cache is re-validated on each use; if the cached provider is unavailable, a new one is detected.
 
 ## Organ Contract
 
