@@ -1,9 +1,12 @@
-"""Ear organ: listen to audio files via Groq Whisper.
+"""Ear organ: audio transcription via Whisper (Groq, OpenAI, or local).
 
 Cycle: consume stimuli -> transcribe -> respond.
 """
 import sys
-from stimulus import consume_stimulus_files, process_stimuli, log
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from stimulus import consume_stimulus_files, process_stimuli
+from transcribe import log
 
 
 def run_cycle():

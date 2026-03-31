@@ -1,13 +1,13 @@
 # Ear
 
-Audio transcription organ using Groq Whisper API.
+Audio transcription organ. Auto-detects the best available Whisper provider.
 
 ## Quick Start
 
 From this directory:
 ```bash
-# Set your Groq API key
-export GROQ_API_KEY="your-key-here"
+# Detect which provider is available
+bin/transcribe --detect
 
 # Transcribe an audio file
 bin/transcribe recording.mp3
@@ -15,11 +15,26 @@ bin/transcribe recording.mp3
 # With options
 bin/transcribe recording.mp3 --language en --prompt "Knobert, Neil"
 
-# Full JSON output
+# Force a specific provider
+bin/transcribe recording.mp3 --provider groq
+
+# Full JSON output (includes provider used)
 bin/transcribe --json recording.mp3
 ```
 
 Output is plain text by default, or JSON with `--json`.
+
+## Providers
+
+Checked in order. First available wins, cached in `.memory/whisper-provider`.
+
+| Provider | Requires | Notes |
+|----------|----------|-------|
+| `whisper.cpp` | Binary on PATH | Local, no network, no API key |
+| `groq` | `GROQ_API_KEY` | Free tier: 2,000 req/day |
+| `openai` | `OPENAI_API_KEY` | Supports `OPENAI_BASE_URL` for proxies |
+
+Cache auto-clears when a provider stops working.
 
 ## Organ Contract
 
@@ -30,44 +45,38 @@ ear/
 ├── bin/transcribe    # Synchronous CLI for testing
 ├── src/              # Python modules
 ├── tests/            # pytest suite
-└── .stimulus/        # Incoming signals
+├── .stimulus/        # Incoming signals
+└── .memory/          # Provider cache
 ```
-
-## Environment
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GROQ_API_KEY` | Yes | Groq API key for Whisper access |
 
 ## Stimulus Protocol
 
 ```bash
-# Transcribe from file path
 stimulus send --to ear --body '{
   "action": "transcribe",
   "audio_path": "/path/to/recording.mp3",
-  "id": "corr-001",
-  "from": "brain"
-}'
-
-# Transcribe from circ hash (audio pushed via circ)
-stimulus send --to ear --body '{
-  "action": "transcribe",
-  "audio_hash": "abc123def456",
   "language": "en",
   "prompt": "Knobert, Neil",
-  "id": "corr-002",
+  "provider": "groq",
+  "id": "corr-001",
   "from": "brain"
 }'
 ```
 
+Also accepts `audio_hash` for circ-pushed audio.
+
 Response:
 ```json
-{"id": "corr-001", "action": "transcribe", "status": "ok", "text": "transcribed text..."}
+{"id": "corr-001", "action": "transcribe", "status": "ok", "text": "...", "provider": "groq"}
 ```
 
 ## Limits
 
 - Max file size: 25 MB
-- Supported formats: FLAC, MP3, M4A, MPEG, MPGA, OGG, WAV, WEBM
-- Groq free tier: 2,000 requests/day
+- Supported formats: FLAC, MP3, M4A, OGG, WAV, WEBM
+
+## Tests
+
+```bash
+python3 -m pytest tests/ -v
+```

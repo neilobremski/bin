@@ -10,13 +10,14 @@ import stimulus as mod
 
 def test_handle_transcribe_success():
     with patch("stimulus.transcribe") as mock_t:
-        mock_t.return_value = {"text": "hello from the test"}
+        mock_t.return_value = {"text": "hello from the test", "provider": "groq"}
         stim = {"action": "transcribe", "audio_path": "/tmp/test.mp3",
                 "id": "corr-1", "from": "brain"}
         response = mod.handle_transcribe(stim)
         assert response["status"] == "ok"
         assert response["text"] == "hello from the test"
         assert response["id"] == "corr-1"
+        assert response["provider"] == "groq"
 
 
 def test_handle_transcribe_error():

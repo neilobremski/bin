@@ -1,32 +1,28 @@
 """Stimulus handling for the ear organ.
 
-Protocol:
-    Request:  {"action":"transcribe", "audio_path":"/path/to/file.mp3",
-               "id":"corr-1", "from":"brain"}
-    Or with circ: {"action":"transcribe", "audio_hash":"abc123",
-                   "id":"corr-1", "from":"brain"}
+Request:  {"action":"transcribe", "audio_path":"/path/file.mp3",
+           "id":"corr-1", "from":"brain"}
+  Or:     {"action":"transcribe", "audio_hash":"abc123",
+           "id":"corr-1", "from":"brain"}
+  Optional: language, prompt, provider, model
 
-    Optional fields: language (default "en"), prompt (default "Knobert")
-
-    Response: {"id":"corr-1", "action":"transcribe", "status":"ok",
-               "text":"transcribed text..."}
-    On error: {"id":"corr-1", "action":"transcribe", "status":"error",
-               "error":"message"}
+Response: {"id":"corr-1", "action":"transcribe", "status":"ok",
+           "text":"...", "provider":"groq"}
+  Error:  {"id":"corr-1", "action":"transcribe", "status":"error",
+           "error":"message"}
 """
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
-from transcribe import transcribe
+# Ensure sibling modules importable regardless of cwd
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from transcribe import transcribe, log
 
 DIR = Path(__file__).resolve().parent.parent
 STIMULUS_DIR = DIR / ".stimulus"
-
-
-def log(msg):
-    import sys
-    print(f"ear: {msg}", file=sys.stderr)
 
 
 def consume_stimulus_files():
@@ -81,16 +77,19 @@ def handle_transcribe(stim):
     """Handle a transcribe action."""
     try:
         audio_path = _resolve_audio_path(stim)
-        language = stim.get("language", "en")
-        prompt = stim.get("prompt", "Knobert")
-
-        result = transcribe(audio_path, language=language, prompt=prompt)
-
+        result = transcribe(
+            audio_path,
+            language=stim.get("language", "en"),
+            prompt=stim.get("prompt", "Knobert"),
+            model=stim.get("model"),
+            provider=stim.get("provider"),
+        )
         return {
             "id": stim.get("id"),
             "action": "transcribe",
             "status": "ok",
             "text": result.get("text", ""),
+            "provider": result.get("provider", ""),
         }
     except Exception as e:
         return {
