@@ -1,8 +1,51 @@
 #!/usr/bin/env bash
+# llm
+#
+# Lightweight CLI wrapper around `ollama run` for prompt-oriented local LLM calls.
+#
+# What this script does:
+# - Accepts prompt input from either command arguments, stdin, or both.
+# - Runs `ollama run` with a default model (`qwen3.5`) and streaming output.
+# - Optionally shows a live one-line gray preview of generated text on stderr.
+# - Preserves the model process exit code as this script's exit code.
+#
+# Input behavior and precedence:
+# - If `-p/--prompt` is NOT provided:
+#   - Reads stdin when piped.
+#   - Uses stdin content as the full prompt.
+# - If `-p/--prompt` IS provided and stdin is also piped:
+#   - Prepends stdin content to the `-p` prompt text.
+# - If neither stdin nor `-p` provides text:
+#   - Sends an empty prompt to the model.
+#
+# Arguments:
+# - `-p, --prompt <text>`  Prompt text.
+# - `-t, -type, --type`    Response type: `list` or `bool`.
+# - `-i, -instruction`     Instruction text used to frame the prompt.
+# - `-c, -context <file>`  Read context from file and wrap in <Context> tags.
+# - `-e, -echo`            Echo final prompt to stdout before model output.
+# - `--preview`            Show a truncated (80 chars) live preview on stderr.
+# - `-s, --silent`         Suppress passthrough of ollama stderr.
+#
+# Notes:
+# - Streaming is handled through a FIFO to keep stdout clean while preview updates.
+# - Temporary files/FIFO are cleaned up automatically via trap on exit.
+# - Unknown flags are ignored by the parser as currently implemented.
+#
+# Examples:
+# - llm -p "Summarize this note"
+# - echo "Explain this code:" | llm
+# - cat context.txt | llm -p "Refine this draft" --preview
+# - llm --silent "Quick answer"
 MODEL="qwen3.5"
 prompt=""
 use_preview=false
 silent=false
+echo_prompt=false
+response_type=""
+instruction=""
+context_file=""
+context=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -10,6 +53,22 @@ while [[ $# -gt 0 ]]; do
         -p|--prompt)
             prompt="$2"
             shift 2
+            ;;
+        -t|-type|--type)
+            response_type="$2"
+            shift 2
+            ;;
+        -i|-instruction|--instruction)
+            instruction="$2"
+            shift 2
+            ;;
+        -c|-context|--context)
+            context_file="$2"
+            shift 2
+            ;;
+        -e|-echo|--echo)
+            echo_prompt=true
+            shift
             ;;
         --preview)
             use_preview=true
@@ -50,6 +109,57 @@ if [ -z "$prompt" ]; then
 elif [ -n "$stdin_content" ]; then
     # Both: prepend stdin to -p argument
     prompt="$stdin_content$prompt"
+fi
+
+# Load optional context file into an XML-like envelope for prompt injection.
+if [ -n "$context_file" ]; then
+    if [ ! -f "$context_file" ]; then
+        echo "Context file not found: $context_file" >&2
+        exit 2
+    fi
+
+    context="<Context>
+$(cat "$context_file")
+</Context>"
+fi
+
+# Apply instruction framing when both response type and instruction are provided.
+if [ -n "$response_type" ] && [ -n "$instruction" ]; then
+    prefix=""
+    suffix=""
+
+    case "$response_type" in
+        list)
+            prefix="Answer with a list of items, one per line"
+            suffix=". Answer with a list of items, one per line"
+            ;;
+        bool)
+            prefix="Answer only YES or NO."
+            suffix="? Answer only YES or NO"
+            ;;
+        *)
+            echo "Invalid type: $response_type (expected: list or bool)" >&2
+            exit 2
+            ;;
+    esac
+
+    prompt="INSTRUCTION: ${prefix}${instruction}:
+
+${prompt}
+${context}
+${instruction}: <Prompt>${prompt}</Prompt>${suffix}"
+fi
+
+# If no response type is specified but context exists, sandwich context with prompt.
+if [ -z "$response_type" ] && [ -n "$context" ]; then
+    prompt="${prompt}
+${context}
+${prompt}"
+fi
+
+# Optional debug output of the fully assembled prompt.
+if [ "$echo_prompt" = true ]; then
+    printf '%s\n' "$prompt"
 fi
 
 # Show preview if requested
