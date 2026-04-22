@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+MODEL="qwen3.5"
+prompt=""
+use_preview=false
+silent=false
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -p|--prompt)
+            prompt="$2"
+            shift 2
+            ;;
+        --preview)
+            use_preview=true
+            shift
+            ;;
+        -s|--silent)
+            silent=true
+            shift
+            ;;
+        [!-./]*)
+            if [ -z "$prompt" ]; then
+                prompt="$1"
+            fi
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+# Read stdin only if -p was not specified, OR if -p was specified and stdin is piped
+stdin_content=""
+if [ -z "$prompt" ]; then
+    # No -p argument provided: read stdin if available
+    if [ ! -t 0 ]; then
+        stdin_content=$(cat)
+    fi
+elif [ ! -t 0 ]; then
+    # -p specified but stdin is piped: read and prepend it
+    stdin_content=$(cat)
+fi
+
+# Combine inputs appropriately
+if [ -z "$prompt" ]; then
+    # No -p: use stdin
+    prompt="$stdin_content"
+elif [ -n "$stdin_content" ]; then
+    # Both: prepend stdin to -p argument
+    prompt="$stdin_content$prompt"
+fi
+
+# Show preview if requested
+if [ "$use_preview" = true ]; then
+    initial_preview="${prompt%%$'\n'*}"
+    suffix=""
+    if ((${#initial_preview} > 80)); then
+        initial_preview=${initial_preview:0:80}
+        suffix="..."
+    fi
+    printf '\r\033[K\033[0;90m%s%s\033[0m' "$initial_preview" "$suffix" >&2
+fi
+
+tmpstderr=$(mktemp)
+tmpstream=$(mktemp -u)
+exit_code_file=$(mktemp)
+mkfifo "$tmpstream"
+trap "rm -f '$tmpstderr' '$exit_code_file' '$tmpstream'" EXIT
+
+# Stream ollama output through a FIFO so preview can update without corrupting stdout.
+{
+    printf '%s' "$prompt" | ollama run --think=false --hidethinking --nowordwrap $MODEL >"$tmpstream" 2>"$tmpstderr"
+    echo $? > "$exit_code_file"
+} &
+ollama_pid=$!
+
+if [ "$use_preview" = true ]; then
+    current_line=""
+    while IFS= read -r -n 1 char; do
+        if [ -z "$char" ]; then
+            printf '\r\033[K' >&2
+            printf '%s\n' "$current_line"
+            current_line=""
+            continue
+        fi
+
+        current_line+="$char"
+        preview=${current_line//$'\r'/}
+        suffix=""
+        if ((${#preview} > 80)); then
+            preview=${preview:0:80}
+            suffix="..."
+        fi
+        printf '\r\033[K\033[0;90m%s%s\033[0m' "$preview" "$suffix" >&2
+    done < "$tmpstream"
+
+    if [ -n "$current_line" ]; then
+        printf '\r\033[K' >&2
+        printf '%s\n' "$current_line"
+    fi
+    printf '\r\033[K' >&2
+else
+    cat "$tmpstream"
+fi
+
+wait "$ollama_pid"
+
+exit_code=$(cat "$exit_code_file")
+
+
+# Pass stderr to stderr unless silent flag is set
+if [ "$silent" = false ] && [ -s "$tmpstderr" ]; then
+    cat "$tmpstderr" >&2
+fi
+
+exit $exit_code
