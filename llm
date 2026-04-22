@@ -129,16 +129,20 @@ if [ -n "$response_type" ] && [ -n "$instruction" ]; then
     suffix=""
 
     case "$response_type" in
-        list)
-            prefix="Answer with a list of items, one per line"
-            suffix=". Answer with a list of items, one per line"
+        bash)
+            prefix="Answer with only the bash command, no explanation."
+            suffix=". Answer with only the bash command, no explanation"
             ;;
         bool)
             prefix="Answer only YES or NO."
             suffix="? Answer only YES or NO"
             ;;
+        list)
+            prefix="Answer with a list of items, one per line"
+            suffix=". Answer with a list of items, one per line"
+            ;;
         *)
-            echo "Invalid type: $response_type (expected: list or bool)" >&2
+            echo "Invalid type: $response_type" >&2
             exit 2
             ;;
     esac
