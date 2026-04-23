@@ -14,7 +14,7 @@
 #   - Reads stdin when piped.
 #   - Uses stdin content as the full prompt.
 # - If `-p/--prompt` IS provided and stdin is also piped:
-#   - Prepends stdin content to the `-p` prompt text.
+#   - Uses stdin content as context (equivalent to `-c` content).
 # - If neither stdin nor `-p` provides text:
 #   - Sends an empty prompt to the model.
 #
@@ -39,6 +39,7 @@
 # - llm --silent "Quick answer"
 MODEL="qwen3.5"
 prompt=""
+prompt_flag=false
 use_preview=false
 silent=false
 echo_prompt=false
@@ -52,6 +53,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -p|--prompt)
             prompt="$2"
+            prompt_flag=true
             shift 2
             ;;
         -t|-type|--type)
@@ -90,36 +92,50 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Read stdin only if -p was not specified, OR if -p was specified and stdin is piped
+# Read stdin content with mode-dependent behavior.
 stdin_content=""
-if [ -z "$prompt" ]; then
-    # No -p argument provided: read stdin if available
+stdin_context=""
+if [ "$prompt_flag" = true ]; then
+    # -p was explicitly provided: piped stdin becomes context payload.
+    if [ ! -t 0 ]; then
+        stdin_context=$(cat)
+    fi
+elif [ -z "$prompt" ]; then
+    # No prompt argument provided: read stdin into prompt.
     if [ ! -t 0 ]; then
         stdin_content=$(cat)
     fi
-elif [ ! -t 0 ]; then
-    # -p specified but stdin is piped: read and prepend it
-    stdin_content=$(cat)
 fi
 
 # Combine inputs appropriately
 if [ -z "$prompt" ]; then
-    # No -p: use stdin
+    # No prompt argument: use stdin.
     prompt="$stdin_content"
-elif [ -n "$stdin_content" ]; then
-    # Both: prepend stdin to -p argument
-    prompt="$stdin_content$prompt"
 fi
 
-# Load optional context file into an XML-like envelope for prompt injection.
+# Load context from file and/or stdin into an XML-like envelope for prompt injection.
+context_payload=""
 if [ -n "$context_file" ]; then
     if [ ! -f "$context_file" ]; then
         echo "Context file not found: $context_file" >&2
         exit 2
     fi
 
+    context_payload=$(cat "$context_file")
+fi
+
+if [ -n "$stdin_context" ]; then
+    if [ -n "$context_payload" ]; then
+        context_payload="${stdin_context}
+${context_payload}"
+    else
+        context_payload="$stdin_context"
+    fi
+fi
+
+if [ -n "$context_payload" ]; then
     context="<Memories>
-$(cat "$context_file")
+${context_payload}
 </Memories>"
 fi
 
