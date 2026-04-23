@@ -118,9 +118,9 @@ if [ -n "$context_file" ]; then
         exit 2
     fi
 
-    context="<Context>
+    context="<Memories>
 $(cat "$context_file")
-</Context>"
+</Memories>"
 fi
 
 # Apply instruction framing when both response type and instruction are provided.
@@ -130,16 +130,16 @@ if [ -n "$response_type" ] && [ -n "$instruction" ]; then
 
     case "$response_type" in
         bash)
-            prefix="Answer with only the bash command, no explanation."
-            suffix=". Answer with only the bash command, no explanation"
+            prefix="Answer ONLY with the bash command, no explanation. "
+            suffix=". Answer ONLY with the bash command, no explanation"
             ;;
         bool)
-            prefix="Answer only YES or NO."
-            suffix="? Answer only YES or NO"
+            prefix="Answer ONLY YES or NO. "
+            suffix="? Answer ONLY YES or NO"
             ;;
         list)
-            prefix="Answer with a list of items, one per line"
-            suffix=". Answer with a list of items, one per line"
+            prefix="Answer ONLY with a list of items, one per line. "
+            suffix=". Answer ONLY with a list of items, one per line"
             ;;
         *)
             echo "Invalid type: $response_type" >&2
