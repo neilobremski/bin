@@ -754,7 +754,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("step",    "",                  "Run one routing pass (deliver outboxes, drain inboxes)."),
     ("loop",    "",                  "Run continuously until Ctrl+C or `a8s stop`."),
     ("stop",    "",                  "Signal a running `a8s loop` to exit."),
-    ("prompt",  "<name> <message>",  'Wake <name> directly with this prompt (raw — no "from" wrapper).'),
+    ("prompt",  "<name|all> <message>",  'Wake <name> (or every participant if "all") with this raw prompt — no "from" wrapper. "all" wakes concurrently.'),
     ("tell",    "<name> <message>",  "Direct routed message to <name>. Sender = participant enclosing CWD."),
     ("says",    "<message>",         "Broadcast routed message to every other participant. Sender = participant enclosing CWD."),
     ("clear",   "",                  "Wipe all mailboxes and flag every participant for fresh conversation on next wake."),
@@ -855,22 +855,43 @@ def repl(scan_dir: Path, interval: float) -> int:
 
 # ---------- CLI ----------
 
+def _wake_with_prompt(p: Participant, prompt: str) -> int:
+    fresh = consume_fresh(p.root)
+    out(f"[{p.name}] direct prompt" + (" (fresh)" if fresh else ""))
+    cmd = build_command(p.kind, prompt, fresh=fresh)
+    return run_with_prefix(p.name, cmd, p.root)
+
+
 def cmd_prompt(scan_dir: Path, args: list[str]) -> int:
     if len(args) < 2:
-        print("usage: a8s prompt <name> <message>", file=sys.stderr)
+        print("usage: a8s prompt <name|all> <message>", file=sys.stderr)
         return 2
     name, *rest = args
     prompt = " ".join(rest)
     parts = discover(scan_dir)
     register_discovered(parts)
+
+    if name.strip().lower() == "all":
+        if not parts:
+            print("no participants found", file=sys.stderr)
+            return 1
+        global PRINT_LOCK
+        if PRINT_LOCK is None:
+            PRINT_LOCK = threading.Lock()
+        threads: list[threading.Thread] = []
+        for p in parts:
+            t = threading.Thread(target=_wake_with_prompt, args=(p, prompt), daemon=False)
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+        return 0
+
     target = find_participant(parts, name)
     if target is None:
         print(f"no participant named {name!r}", file=sys.stderr)
         return 1
-    fresh = consume_fresh(target.root)
-    out(f"[{target.name}] direct prompt" + (" (fresh)" if fresh else ""))
-    cmd = build_command(target.kind, prompt, fresh=fresh)
-    return run_with_prefix(target.name, cmd, target.root)
+    return _wake_with_prompt(target, prompt)
 
 
 def main(argv: list[str]) -> int:
