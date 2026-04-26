@@ -101,6 +101,7 @@ A participant woken by a8s can run arbitrary commands within whatever permission
 | `a8s` (no arguments)                  | **Step mode.** Run one pass of the routing loop, prompt for input, repeat — similar to `psql`. Good for interactive testing without multiple terminals. |
 | `a8s loop [names...]`                 | Run continuously until `Ctrl+C` or a sibling `a8s stop`.                                                                                                |
 | `a8s prompt <name> "<message>"`       | Wake `<name>` directly with this prompt (no inbox routing, no `from:` wrapping). Useful for human-driven testing or one-shot instructions.              |
+| `a8s prompt all "<message>"`          | Same as above but wakes **every** discovered participant concurrently with the same prompt. Useful for roll calls and global instructions.              |
 | `a8s clear`                           | Wipe every `.inbox/`, `.outbox/`, `.trash/` and flag every participant for a fresh conversation on its next wake.                                       |
 | `a8s install`                         | Install every skill under `apps/a8s/skills/` into each supported tool's user scope. Idempotent.                                                         |
 | `a8s stop`                            | Signal any running `a8s loop` to exit.                                                                                                                  |
@@ -213,7 +214,9 @@ description: "Send a message ... mentioning FILE: paths and other tricky chars."
 
 ## Local-model participants (Claude Code → Ollama)
 
-Claude Code can be pointed at a local Ollama endpoint by setting `ANTHROPIC_BASE_URL=http://localhost:11434` (Ollama's native `/v1/messages` endpoint speaks Anthropic protocol, including `tool_use` blocks). See `tests/agents/llama-agent/.claude/settings.json` for the working config.
+Local-model agents live in `tests/experimental-agents/` rather than the default `tests/agents/` mesh, because the skill abstraction doesn't reach the model through ollama and tool-use is unreliable enough that they're a noise source in protocol tests. Run `a8s --dir tests/experimental-agents` to engage with them.
+
+Claude Code can be pointed at a local Ollama endpoint by setting `ANTHROPIC_BASE_URL=http://localhost:11434` (Ollama's native `/v1/messages` endpoint speaks Anthropic protocol, including `tool_use` blocks). See `tests/experimental-agents/llama-agent/.claude/settings.json` for the working config.
 
 **What works.** Direct shell-command tool use (`Run: tell GEMINI hi`) works fine through Claude Code → Ollama, including with relatively small models (qwen3.5:latest reliably produces correctly-shaped Bash tool calls).
 
@@ -226,7 +229,7 @@ If you're asked to message someone privately by name, run: `tell <NAME> "<MESSAG
 If you're asked to address everyone, run: `says "<MESSAGE>"`
 ```
 
-`tests/agents/llama-agent/CLAUDE.md` does this. Routing then works end-to-end.
+`tests/experimental-agents/llama-agent/CLAUDE.md` does this. Routing then works end-to-end.
 
 **Model recommendation.** `llama3.2:3b` is too small for reliable tool use even with direct instructions. Use `qwen3.5:latest` or comparable as the default for local-model participants. Adjust `model` in the participant's `.claude/settings.json`.
 
