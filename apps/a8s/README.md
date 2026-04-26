@@ -15,7 +15,7 @@ Filesystem-based message routing between independent Claude Code, Gemini, and Co
 
    a8s never writes into the user's project directories — with one exception below.
 
-4. **Mailboxes travel with the participant.** `.inbox/`, `.outbox/`, and `.trash/` live *inside* each participant's own directory so that messages move with the directory if it is copied, archived, or relocated.
+4. **Mailboxes are isolated from agents.** `.inbox/`, `.outbox/`, and `.trash/` live under `~/.a8s/mailboxes/<NAME>/`, *not* inside the participant's project directory. Agents see messaging only through the `tell` / `says` skills — they can't `ls` their own mailbox or peek at other agents' traffic. Messages no longer follow the agent dir if it's copied/relocated; that's an accepted tradeoff for v1 (messages were already documented as transient).
 
 5. **Each participant runs with CWD set to its own root** so its own settings (`.claude/settings*`, `.gemini/`, etc.) load correctly.
 
@@ -23,10 +23,10 @@ Filesystem-based message routing between independent Claude Code, Gemini, and Co
 
 - Scans one or more directories for participant roots — directories containing `CLAUDE.md`, `GEMINI.md`, or `CODEX.md`. Default scan root is the current directory; override with `--dir <path>`.
 - Maps each participant's name (and aliases) to its directory.
-- Watches each `.outbox/` for outgoing message JSON; routes them to the recipient's `.inbox/`.
-- When a participant's `.inbox/` has messages, launches the participant with a prompt built from the **first** message and immediately moves that message to `.trash/`.
+- Watches each participant's `~/.a8s/mailboxes/<NAME>/.outbox/` for outgoing message JSON; routes them to the recipient's inbox at the same scope.
+- When a participant's inbox has messages, launches the participant with a prompt built from the **first** message and immediately moves that message to its `.trash/` (also under `~/.a8s/mailboxes/<NAME>/`).
 - Enforces single-instance-per-name (the same name cannot run concurrently with itself).
-- After a participant process exits, re-checks its `.inbox/`; if more messages remain, prompt again.
+- After a participant process exits, re-checks its inbox; if more messages remain, prompt again.
 - Captures stdout/stderr and prefixes each line with `NAME> `.
 
 ### Name parsing
@@ -100,10 +100,11 @@ A participant woken by a8s can run arbitrary commands within whatever permission
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s` (no arguments)                  | **Step mode.** Run one pass of the routing loop, prompt for input, repeat — similar to `psql`. Good for interactive testing without multiple terminals. |
 | `a8s loop [names...]`                 | Run continuously until `Ctrl+C` or a sibling `a8s stop`.                                                                                                |
-| `a8s prompt <name> "<message>"`       | Queue a **senderless** message in `<name>`'s `.inbox/`. The next `step`/`loop` pass wakes `<name>` and delivers the raw prompt (no `from:` wrapper). Safe to run while `a8s loop` is active in another terminal. |
-| `a8s prompt all "<message>"`          | Same, but queue the message in **every** discovered participant's `.inbox/`. Useful for roll calls and global instructions.                             |
-| `a8s clear`                           | Wipe every `.inbox/`, `.outbox/`, `.trash/` and flag every participant for a fresh conversation on its next wake.                                       |
+| `a8s prompt <name> "<message>"`       | Queue a **senderless** message in `<name>`'s inbox. The next `step`/`loop` pass wakes `<name>` and delivers the raw prompt (no `from:` wrapper). Safe to run while `a8s loop` is active in another terminal. |
+| `a8s prompt all "<message>"`          | Same, but queue the message in **every** discovered participant's inbox. Useful for roll calls and global instructions.                                 |
+| `a8s clear`                           | Wipe every participant's mailbox dirs and flag each for a fresh conversation on its next wake.                                                          |
 | `a8s install`                         | Install every skill under `apps/a8s/skills/` into each supported tool's user scope. Idempotent.                                                         |
+| `a8s logs <name> [--tail N] [-f]`     | Print supervisor-log lines mentioning `<name>` (like `docker logs`). `--tail N` limits output, `-f` follows.                                            |
 | `a8s stop`                            | Signal any running `a8s loop` to exit.                                                                                                                  |
 | `a8s --dir <path>`                    | Set the scan root for participant discovery.                                                                                                            |
 | `a8s --interval <seconds>`            | Loop poll interval (default `1.0`).                                                                                                                     |
@@ -113,7 +114,7 @@ Without `loop`, a8s makes one pass and waits for any launched processes to exit 
 
 ## Message format
 
-Messages are JSON files dropped into `.outbox/`:
+Messages are JSON files dropped into the sender's outbox at `~/.a8s/mailboxes/<NAME>/.outbox/`:
 
 ```json
 {
@@ -141,7 +142,7 @@ FILE: {files[0].path}
 
 ## The `tell` and `says` CLIs and the registry
 
-a8s ships two sender-side shell commands, both siblings of `a8s` in `~/bin/`. Both write a message JSON into the **caller's** `.outbox/` and exit — routing happens later when `a8s` next runs (step or loop).
+a8s ships two sender-side shell commands, both siblings of `a8s` in `~/bin/`. Both write a message JSON into the **caller's** outbox at `~/.a8s/mailboxes/<NAME>/.outbox/` and exit — routing happens later when `a8s` next runs (step or loop).
 
 | Command | What it does                                                      | Outbox `to` field |
 | ------- | ----------------------------------------------------------------- | ----------------- |
@@ -182,11 +183,16 @@ If `$PWD` is not inside any registered participant, `tell` fails with a clear er
 ```
 projects/
   my-claude-project/
-    CLAUDE.md
-    .inbox/    .outbox/    .trash/      ← created by a8s on first run
+    CLAUDE.md      ← agent dirs stay clean — only marker files and project content
   my-gemini-project/
     GEMINI.md
-    .inbox/    .outbox/    .trash/
+
+~/.a8s/                              ← all a8s state lives here
+  a8s.json                           ← participant registry
+  log.txt                            ← supervisor log (ISO-timestamped lines)
+  mailboxes/
+    CLAUDE/.inbox/.outbox/.trash/    ← keyed by the registered name (sanitized)
+    GEMINI/.inbox/.outbox/.trash/
 ```
 
 ```
@@ -195,6 +201,22 @@ $ a8s loop
 $ a8s prompt my-claude-project "Ask my-gemini-project to summarize ./notes.md"
 $ a8s stop
 ```
+
+### Supervisor log
+
+Every line a8s prints (system messages, routing decisions, prefixed agent output) is also appended to `~/.a8s/log.txt` with an ISO-8601 UTC timestamp. The same `PRINT_LOCK` that keeps stdout interleaving clean across concurrent loop workers also guards the log file, so log lines stay atomic.
+
+Use `a8s logs <name>` to filter the log for a specific participant — same shape as `docker logs`:
+
+```bash
+a8s logs CLAUDE              # all log lines mentioning CLAUDE
+a8s logs CLAUDE --tail 100   # last 100
+a8s logs CLAUDE -f           # tail-follow new lines as they're written
+```
+
+Matching is case-insensitive on word boundaries, so a lookup for `CLAUDE` catches `CLAUDE> ...`, `[CLAUDE] waking ...`, and `routed: GEMINI -> CLAUDE` lines alike.
+
+The log grows without rotation in v1 — truncate or rotate manually if needed.
 
 ### Reset / fresh start
 
