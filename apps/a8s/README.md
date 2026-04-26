@@ -64,7 +64,7 @@ Headless tool use is the whole point of waking a participant — to deliver a me
 Default flags: `--permission-mode dontAsk --allowedTools "<list>"`. `dontAsk` denies everything by default (silently — no prompts that would hang in `-p` mode), and `--allowedTools` pre-approves the tools we ship with. The current default list:
 
 ```
-Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite
+Bash(tell:*) Bash(says:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite
 ```
 
 To extend per project, add to `<participant>/.claude/settings.json`:
@@ -126,19 +126,27 @@ Messages are JSON files dropped into `.outbox/`:
 }
 ```
 
-When delivered, the participant is woken with a recipient-neutral prompt:
+When delivered, the participant is woken with a recipient-neutral prompt. The verb depends on whether the message was direct (`tell`) or a broadcast (`says`):
 
 ```
-{from} messaged: {content}
+[{date}] {from} told you: {content}      # direct (to is set to the recipient's name)
+[{date}] {from} says: {content}          # broadcast (to is empty / missing)
 
 FILE: {files[0].path}
 ```
 
-`FILE:` lines are omitted when there are no files. The template never identifies the sender as human or AI.
+`FILE:` lines are omitted when there are no files. Recipients of a broadcast are not told who else got it (the recipient list is implicit and ephemeral). The template never identifies the sender as human or AI.
 
-## The `tell` CLI and the registry
+## The `tell` and `says` CLIs and the registry
 
-`tell <name> <message>` is a shell command (sibling to `a8s` in `~/bin/`). It writes a message JSON into the **caller's** `.outbox/` and exits — routing happens later when `a8s` next runs (step or loop).
+a8s ships two sender-side shell commands, both siblings of `a8s` in `~/bin/`. Both write a message JSON into the **caller's** `.outbox/` and exit — routing happens later when `a8s` next runs (step or loop).
+
+| Command | What it does                                                      | Outbox `to` field |
+| ------- | ----------------------------------------------------------------- | ----------------- |
+| `tell <name> <message>` | Direct message to a specific named recipient.       | the recipient name |
+| `says <message>`        | Broadcast to every other registered participant.    | empty (`""`)       |
+
+The room metaphor: `tell` is whispering to one person; `says` is speaking up so the room hears. The CLI is named `says` (third-person) rather than `say` to avoid clashing with macOS's `/usr/bin/say` (text-to-speech).
 
 To know who the *caller* is, `tell` walks up from `$PWD` looking for a directory whose absolute path matches an entry in the **registry** at `~/.a8s/a8s.json`. The registry is populated automatically every time `a8s` runs:
 
@@ -211,12 +219,11 @@ Claude Code can be pointed at a local Ollama endpoint by setting `ANTHROPIC_BASE
 
 **What doesn't.** Claude Code's *skill abstraction* (loading `~/.claude/skills/<name>/SKILL.md` and asking the model to "use the tell skill") is unreliable with local models — even capable ones often produce a final answer like "DONE" without ever emitting the tool call. The skill abstraction relies on a system-prompt translation step that local models flub.
 
-**Workaround.** Bypass the skill abstraction in the agent's own `CLAUDE.md` by instructing it about the `tell` shell command directly:
+**Workaround.** Bypass the skill abstraction in the agent's own `CLAUDE.md` by instructing it about the `tell` and `says` shell commands directly:
 
 ```markdown
-If you're asked to pass a message along to someone by name, run this shell command:
-
-    tell <NAME> "<MESSAGE>"
+If you're asked to message someone privately by name, run: `tell <NAME> "<MESSAGE>"`
+If you're asked to address everyone, run: `says "<MESSAGE>"`
 ```
 
 `tests/agents/llama-agent/CLAUDE.md` does this. Routing then works end-to-end.

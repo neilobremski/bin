@@ -1,0 +1,1 @@
+../apps/a8s/skills/says/SKILL.md
