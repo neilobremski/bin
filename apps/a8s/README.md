@@ -100,8 +100,8 @@ A participant woken by a8s can run arbitrary commands within whatever permission
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s` (no arguments)                  | **Step mode.** Run one pass of the routing loop, prompt for input, repeat — similar to `psql`. Good for interactive testing without multiple terminals. |
 | `a8s loop [names...]`                 | Run continuously until `Ctrl+C` or a sibling `a8s stop`.                                                                                                |
-| `a8s prompt <name> "<message>"`       | Wake `<name>` directly with this prompt (no inbox routing, no `from:` wrapping). Useful for human-driven testing or one-shot instructions.              |
-| `a8s prompt all "<message>"`          | Same as above but wakes **every** discovered participant concurrently with the same prompt. Useful for roll calls and global instructions.              |
+| `a8s prompt <name> "<message>"`       | Queue a **senderless** message in `<name>`'s `.inbox/`. The next `step`/`loop` pass wakes `<name>` and delivers the raw prompt (no `from:` wrapper). Safe to run while `a8s loop` is active in another terminal. |
+| `a8s prompt all "<message>"`          | Same, but queue the message in **every** discovered participant's `.inbox/`. Useful for roll calls and global instructions.                             |
 | `a8s clear`                           | Wipe every `.inbox/`, `.outbox/`, `.trash/` and flag every participant for a fresh conversation on its next wake.                                       |
 | `a8s install`                         | Install every skill under `apps/a8s/skills/` into each supported tool's user scope. Idempotent.                                                         |
 | `a8s stop`                            | Signal any running `a8s loop` to exit.                                                                                                                  |
@@ -127,16 +127,17 @@ Messages are JSON files dropped into `.outbox/`:
 }
 ```
 
-When delivered, the participant is woken with a recipient-neutral prompt. The verb phrase depends on whether the message was direct (`tell`) or a broadcast (`says`):
+When delivered, the participant is woken with a recipient-neutral prompt. The shape depends on `from` and `to`:
 
 ```
-[{date}] {from} tells you ({to}): {content}    # direct
-[{date}] {from} says: {content}                # broadcast (to is empty / missing)
+[{date}] {from} tells you ({to}): {content}    # direct       (from set, to set)
+[{date}] {from} says: {content}                # broadcast    (from set, to empty)
+{content}                                      # raw prompt   (from empty)
 
 FILE: {files[0].path}
 ```
 
-`FILE:` lines are omitted when there are no files. The direct template includes the recipient's own name in parens so the wake context is unambiguous about who is being addressed. Recipients of a broadcast are not told who else got it (the recipient list is implicit and ephemeral). The template never identifies the sender as human or AI.
+`FILE:` lines are omitted when there are no files. The direct template includes the recipient's own name in parens so the wake context is unambiguous about who is being addressed. Recipients of a broadcast are not told who else got it (the recipient list is implicit and ephemeral). A senderless message (queued by `a8s prompt`) is delivered as raw content — no wrapper. The template never identifies the sender as human or AI.
 
 ## The `tell` and `says` CLIs and the registry
 
