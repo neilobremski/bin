@@ -152,6 +152,17 @@ def route_outboxes(participants: list[Participant]) -> int:
                 out(f"[{sender.name}] outbox parse error on {f.name}: {e}")
                 continue
             recipient_name = (msg.get("to") or "").strip()
+            if not recipient_name:
+                # broadcast: fan out to every other participant.
+                others = [p for p in participants if p.name != sender.name]
+                for recipient in others:
+                    ensure_mailboxes(recipient)
+                    dest = unique_path(recipient.root / ".inbox" / f.name)
+                    shutil.copyfile(f, dest)
+                f.unlink()
+                out(f"broadcast: {sender.name} -> {len(others)} ({f.name})")
+                routed += len(others)
+                continue
             recipient = by_name.get(recipient_name.lower())
             if recipient is None:
                 out(f"[{sender.name}] unknown recipient {recipient_name!r} in {f.name}")
@@ -175,7 +186,18 @@ def next_inbox_message(p: Participant) -> Path | None:
 def build_prompt(msg: dict) -> str:
     sender = msg.get("from", "")
     content = msg.get("content", "")
-    parts = [f"{sender} messaged: {content}"]
+    date = msg.get("date", "")
+    recipient = (msg.get("to") or "").strip()
+    if recipient:
+        verb_phrase = f"tells you ({recipient})"
+    else:
+        verb_phrase = "says"
+    header = (
+        f"[{date}] {sender} {verb_phrase}: {content}"
+        if date
+        else f"{sender} {verb_phrase}: {content}"
+    )
+    parts = [header]
     files = msg.get("files") or []
     if files:
         parts.append("")
@@ -187,7 +209,7 @@ def build_prompt(msg: dict) -> str:
 
 
 CLAUDE_DEFAULT_ALLOWED_TOOLS = (
-    "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite"
+    "Bash(tell:*) Bash(says:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite"
 )
 
 
@@ -600,20 +622,41 @@ def cmd_install() -> int:
     return 0
 
 
-def cmd_tell(args: list[str]) -> int:
-    if len(args) < 2:
-        print("usage: tell <name> <message>", file=sys.stderr)
-        return 2
-    target_query, *rest = args
-    raw = " ".join(rest)
-
+def _split_content_and_files(raw: str) -> tuple[str, list[dict]]:
     lines = raw.splitlines()
     files: list[dict] = []
     while lines and lines[-1].strip().startswith("FILE:"):
         path = lines.pop().strip()[len("FILE:"):].strip()
         if path:
             files.insert(0, {"filename": Path(path).name, "path": path})
-    content = "\n".join(lines).rstrip()
+    return "\n".join(lines).rstrip(), files
+
+
+def _write_outbox(sender_name: str, sender_root: Path, to: str, content: str, files: list[dict]) -> Path:
+    outbox = sender_root / ".outbox"
+    outbox.mkdir(exist_ok=True)
+    now = datetime.now(timezone.utc)
+    msg = {
+        "date": now.isoformat().replace("+00:00", "Z"),
+        "from": sender_name,
+        "to": to,
+        "content": content,
+        "files": files,
+    }
+    safe_sender = re.sub(r"[^A-Za-z0-9_-]", "_", sender_name)
+    fname = f"{now.strftime('%Y%m%dT%H%M%S%f')}_{safe_sender}.json"
+    dest = unique_path(outbox / fname)
+    with dest.open("w", encoding="utf-8") as f:
+        json.dump(msg, f, indent=2)
+    return dest
+
+
+def cmd_tell(args: list[str]) -> int:
+    if len(args) < 2:
+        print("usage: tell <name> <message>", file=sys.stderr)
+        return 2
+    target_query, *rest = args
+    content, files = _split_content_and_files(" ".join(rest))
 
     sender = sender_from_cwd()
     if sender is None:
@@ -628,26 +671,28 @@ def cmd_tell(args: list[str]) -> int:
         return 1
     target_name, _target_info = target
 
-    sender_root = Path(sender_info["root"])
-    outbox = sender_root / ".outbox"
-    outbox.mkdir(exist_ok=True)
-
-    now = datetime.now(timezone.utc)
-    msg = {
-        "date": now.isoformat().replace("+00:00", "Z"),
-        "from": sender_name,
-        "to": target_name,
-        "content": content,
-        "files": files,
-    }
-    safe_sender = re.sub(r"[^A-Za-z0-9_-]", "_", sender_name)
-    fname = f"{now.strftime('%Y%m%dT%H%M%S%f')}_{safe_sender}.json"
-    dest = unique_path(outbox / fname)
-    with dest.open("w", encoding="utf-8") as f:
-        json.dump(msg, f, indent=2)
-
+    _write_outbox(sender_name, Path(sender_info["root"]), target_name, content, files)
     preview = (content[:60] + "…") if len(content) > 60 else content
     print(f"tell -> {target_name}: {preview}")
+    return 0
+
+
+def cmd_says(args: list[str]) -> int:
+    if not args:
+        print("usage: says <message>", file=sys.stderr)
+        return 2
+    content, files = _split_content_and_files(" ".join(args))
+
+    sender = sender_from_cwd()
+    if sender is None:
+        print("says: current directory is not inside any registered participant", file=sys.stderr)
+        print("hint: run `a8s` from a parent of your participants to register them", file=sys.stderr)
+        return 1
+    sender_name, sender_info = sender
+
+    _write_outbox(sender_name, Path(sender_info["root"]), "", content, files)
+    preview = (content[:60] + "…") if len(content) > 60 else content
+    print(f"says: {preview}")
     return 0
 
 
@@ -709,8 +754,9 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("step",    "",                  "Run one routing pass (deliver outboxes, drain inboxes)."),
     ("loop",    "",                  "Run continuously until Ctrl+C or `a8s stop`."),
     ("stop",    "",                  "Signal a running `a8s loop` to exit."),
-    ("prompt",  "<name> <message>",  'Wake <name> directly with this prompt (raw — no "from" wrapper).'),
-    ("tell",    "<name> <message>",  "Drop a routed message into the caller's .outbox/ (sender = participant enclosing CWD)."),
+    ("prompt",  "<name|all> <message>",  'Wake <name> (or every participant if "all") with this raw prompt — no "from" wrapper. "all" wakes concurrently.'),
+    ("tell",    "<name> <message>",  "Direct routed message to <name>. Sender = participant enclosing CWD."),
+    ("says",    "<message>",         "Broadcast routed message to every other participant. Sender = participant enclosing CWD."),
     ("clear",   "",                  "Wipe all mailboxes and flag every participant for fresh conversation on next wake."),
     ("install", "",                  "Install canonical skills from apps/a8s/skills/ into each supported tool's user scope."),
 ]
@@ -755,6 +801,8 @@ def dispatch(cmd: str, args: list[str], scan_dir: Path, interval: float) -> int:
         return cmd_prompt(scan_dir, args)
     if cmd == "tell":
         return cmd_tell(args)
+    if cmd == "says":
+        return cmd_says(args)
     if cmd == "clear":
         return cmd_clear(scan_dir)
     if cmd == "install":
@@ -807,22 +855,43 @@ def repl(scan_dir: Path, interval: float) -> int:
 
 # ---------- CLI ----------
 
+def _wake_with_prompt(p: Participant, prompt: str) -> int:
+    fresh = consume_fresh(p.root)
+    out(f"[{p.name}] direct prompt" + (" (fresh)" if fresh else ""))
+    cmd = build_command(p.kind, prompt, fresh=fresh)
+    return run_with_prefix(p.name, cmd, p.root)
+
+
 def cmd_prompt(scan_dir: Path, args: list[str]) -> int:
     if len(args) < 2:
-        print("usage: a8s prompt <name> <message>", file=sys.stderr)
+        print("usage: a8s prompt <name|all> <message>", file=sys.stderr)
         return 2
     name, *rest = args
     prompt = " ".join(rest)
     parts = discover(scan_dir)
     register_discovered(parts)
+
+    if name.strip().lower() == "all":
+        if not parts:
+            print("no participants found", file=sys.stderr)
+            return 1
+        global PRINT_LOCK
+        if PRINT_LOCK is None:
+            PRINT_LOCK = threading.Lock()
+        threads: list[threading.Thread] = []
+        for p in parts:
+            t = threading.Thread(target=_wake_with_prompt, args=(p, prompt), daemon=False)
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+        return 0
+
     target = find_participant(parts, name)
     if target is None:
         print(f"no participant named {name!r}", file=sys.stderr)
         return 1
-    fresh = consume_fresh(target.root)
-    out(f"[{target.name}] direct prompt" + (" (fresh)" if fresh else ""))
-    cmd = build_command(target.kind, prompt, fresh=fresh)
-    return run_with_prefix(target.name, cmd, target.root)
+    return _wake_with_prompt(target, prompt)
 
 
 def main(argv: list[str]) -> int:
