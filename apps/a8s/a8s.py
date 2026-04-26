@@ -1,12 +1,25 @@
 """a8s — Agent Infinity System.
 
-Discovery, step REPL, outbox->inbox routing, subprocess waking, loop/stop,
-clear (with one-shot fresh flag), and a participant registry under
-~/.a8s/a8s.json that backs the `tell` CLI.
+Filesystem-based message router for independent Claude Code, Gemini CLI,
+and Codex CLI project directories ("participants") to communicate.
 
-Per-tool skill installation for Gemini/Codex is not yet implemented; the
-Claude install path piggybacks on ~/bin/install.sh via a symlink in
-~/bin/docs/.
+Surface (CLI):
+  step / loop / stop          — one routing pass / continuous mode / signal stop
+  prompt <name|all> <msg>     — queue a senderless message to inbox(es)
+  tell <name> <msg>           — direct routed message (sibling CLI ~/bin/tell)
+  says <msg>                  — broadcast routed message (sibling CLI ~/bin/says)
+  clear                       — wipe mailboxes + log; flag fresh on next wake
+  install                     — install canonical skills into Claude / Gemini /
+                                Codex user scope
+  logs <name> [--tail N] [-f] — docker-logs-style filter on the supervisor log
+
+State (all under ~/.a8s/):
+  a8s.json                    — participant registry (name -> kind, root, aliases)
+  mailboxes/<NAME>/           — .inbox / .outbox / .trash, isolated from agent dirs
+                                so participants only see messaging via their skills
+  log.txt                     — supervisor log: ISO-timestamped, captures every line
+                                that goes through `out()` (including subprocess
+                                output captured by `run_with_prefix`)
 """
 
 from __future__ import annotations
@@ -37,15 +50,63 @@ PRINT_LOCK: threading.Lock | None = None
 UNRESTRICTED: bool = False
 
 
+def _a8s_dir() -> Path:
+    base = Path.home() / ".a8s"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _log_path() -> Path:
+    return _a8s_dir() / "log.txt"
+
+
+def _safe_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "_", name)
+
+
+def _preview(content: str, n: int = 80) -> str:
+    """Single-line snippet of `content` for log readability."""
+    s = (content or "").replace("\n", " ").replace("\r", " ").strip()
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def mailbox_dir(name: str) -> Path:
+    return _a8s_dir() / "mailboxes" / _safe_name(name)
+
+
+def inbox_dir(name: str) -> Path:
+    return mailbox_dir(name) / ".inbox"
+
+
+def outbox_dir(name: str) -> Path:
+    return mailbox_dir(name) / ".outbox"
+
+
+def trash_dir(name: str) -> Path:
+    return mailbox_dir(name) / ".trash"
+
+
+def _emit(line: str) -> None:
+    """Write `line` (already terminated) to stdout and append a timestamped
+    copy to the supervisor log at ~/.a8s/log.txt."""
+    ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    log_line = f"{ts} {line}" if not line.endswith("\n") else f"{ts} {line}"
+    sys.stdout.write(line)
+    sys.stdout.flush()
+    try:
+        with _log_path().open("a", encoding="utf-8") as f:
+            f.write(log_line if log_line.endswith("\n") else log_line + "\n")
+    except OSError:
+        pass
+
+
 def out(text: str = "", end: str = "\n") -> None:
     line = text + end
     if PRINT_LOCK is not None:
         with PRINT_LOCK:
-            sys.stdout.write(line)
-            sys.stdout.flush()
+            _emit(line)
     else:
-        sys.stdout.write(line)
-        sys.stdout.flush()
+        _emit(line)
 
 
 @dataclass(frozen=True)
@@ -119,8 +180,9 @@ def find_participant(parts: list[Participant], query: str) -> Participant | None
 # ---------- mailboxes ----------
 
 def ensure_mailboxes(p: Participant) -> None:
-    for sub in (".inbox", ".outbox", ".trash"):
-        (p.root / sub).mkdir(exist_ok=True)
+    """Create the centralized mailbox dirs for `p` under ~/.a8s/mailboxes/."""
+    for d in (inbox_dir(p.name), outbox_dir(p.name), trash_dir(p.name)):
+        d.mkdir(parents=True, exist_ok=True)
 
 
 def unique_path(p: Path) -> Path:
@@ -141,7 +203,7 @@ def route_outboxes(participants: list[Participant]) -> int:
     routed = 0
     for sender in participants:
         ensure_mailboxes(sender)
-        outbox = sender.root / ".outbox"
+        outbox = outbox_dir(sender.name)
         for f in sorted(outbox.iterdir()):
             if not (f.is_file() and f.name.endswith(".json")):
                 continue
@@ -157,10 +219,10 @@ def route_outboxes(participants: list[Participant]) -> int:
                 others = [p for p in participants if p.name != sender.name]
                 for recipient in others:
                     ensure_mailboxes(recipient)
-                    dest = unique_path(recipient.root / ".inbox" / f.name)
+                    dest = unique_path(inbox_dir(recipient.name) / f.name)
                     shutil.copyfile(f, dest)
                 f.unlink()
-                out(f"broadcast: {sender.name} -> {len(others)} ({f.name})")
+                out(f"broadcast: {sender.name} -> {len(others)}: {_preview(msg.get('content', ''))}")
                 routed += len(others)
                 continue
             recipient = by_name.get(recipient_name.lower())
@@ -168,15 +230,15 @@ def route_outboxes(participants: list[Participant]) -> int:
                 out(f"[{sender.name}] unknown recipient {recipient_name!r} in {f.name}")
                 continue
             ensure_mailboxes(recipient)
-            dest = unique_path(recipient.root / ".inbox" / f.name)
+            dest = unique_path(inbox_dir(recipient.name) / f.name)
             f.rename(dest)
-            out(f"routed: {sender.name} -> {recipient.name} ({dest.name})")
+            out(f"routed: {sender.name} -> {recipient.name}: {_preview(msg.get('content', ''))}")
             routed += 1
     return routed
 
 
 def next_inbox_message(p: Participant) -> Path | None:
-    inbox = p.root / ".inbox"
+    inbox = inbox_dir(p.name)
     if not inbox.is_dir():
         return None
     files = sorted(f for f in inbox.iterdir() if f.is_file() and f.name.endswith(".json"))
@@ -407,15 +469,16 @@ def wake_once(p: Participant, msg_path: Path) -> None:
             msg = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
         out(f"[{p.name}] inbox parse error on {msg_path.name}: {e}")
-        bad = unique_path(p.root / ".trash" / msg_path.name)
+        bad = unique_path(trash_dir(p.name) / msg_path.name)
         msg_path.rename(bad)
         return
 
     prompt = build_prompt(msg)
-    trashed = unique_path(p.root / ".trash" / msg_path.name)
+    trashed = unique_path(trash_dir(p.name) / msg_path.name)
     msg_path.rename(trashed)
     fresh = consume_fresh(p.root)
-    out(f"[{p.name}] waking from {trashed.name}" + (" (fresh)" if fresh else ""))
+    flag = " (fresh)" if fresh else ""
+    out(f"[{p.name}] waking from {trashed.name}{flag}: {_preview(msg.get('content', ''))}")
     cmd = build_command(p.kind, prompt, fresh=fresh)
     run_with_prefix(p.name, cmd, p.root)
 
@@ -633,9 +696,9 @@ def _split_content_and_files(raw: str) -> tuple[str, list[dict]]:
     return "\n".join(lines).rstrip(), files
 
 
-def _write_outbox(sender_name: str, sender_root: Path, to: str, content: str, files: list[dict]) -> Path:
-    outbox = sender_root / ".outbox"
-    outbox.mkdir(exist_ok=True)
+def _write_outbox(sender_name: str, _sender_root: Path, to: str, content: str, files: list[dict]) -> Path:
+    outbox = outbox_dir(sender_name)
+    outbox.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
     msg = {
         "date": now.isoformat().replace("+00:00", "Z"),
@@ -644,7 +707,7 @@ def _write_outbox(sender_name: str, sender_root: Path, to: str, content: str, fi
         "content": content,
         "files": files,
     }
-    safe_sender = re.sub(r"[^A-Za-z0-9_-]", "_", sender_name)
+    safe_sender = _safe_name(sender_name)
     fname = f"{now.strftime('%Y%m%dT%H%M%S%f')}_{safe_sender}.json"
     dest = unique_path(outbox / fname)
     with dest.open("w", encoding="utf-8") as f:
@@ -673,8 +736,7 @@ def cmd_tell(args: list[str]) -> int:
     target_name, _target_info = target
 
     _write_outbox(sender_name, Path(sender_info["root"]), target_name, content, files)
-    preview = (content[:60] + "…") if len(content) > 60 else content
-    print(f"tell -> {target_name}: {preview}")
+    out(f"tell -> {target_name}: {_preview(content)}")
     return 0
 
 
@@ -692,8 +754,7 @@ def cmd_says(args: list[str]) -> int:
     sender_name, sender_info = sender
 
     _write_outbox(sender_name, Path(sender_info["root"]), "", content, files)
-    preview = (content[:60] + "…") if len(content) > 60 else content
-    print(f"says: {preview}")
+    out(f"says ({sender_name}): {_preview(content)}")
     return 0
 
 
@@ -705,15 +766,95 @@ def cmd_clear(scan_dir: Path) -> int:
     cleared = 0
     for p in parts:
         ensure_mailboxes(p)
-        for sub in (".inbox", ".outbox", ".trash"):
-            for f in (p.root / sub).iterdir():
+        for d in (inbox_dir(p.name), outbox_dir(p.name), trash_dir(p.name)):
+            for f in d.iterdir():
                 if f.is_file():
                     f.unlink()
                     cleared += 1
+        # Defensive: also wipe legacy mailbox dirs that may still sit inside
+        # the agent root from older a8s versions.
+        for sub in (".inbox", ".outbox", ".trash"):
+            legacy = p.root / sub
+            if legacy.is_dir():
+                for f in legacy.iterdir():
+                    if f.is_file():
+                        f.unlink()
+                        cleared += 1
     mark_fresh([p.root for p in parts])
+    log = _log_path()
+    log_size = log.stat().st_size if log.is_file() else 0
+    log.write_text("")
     print(f"cleared {cleared} message(s) across {len(parts)} participant(s)")
+    if log_size:
+        print(f"truncated supervisor log ({log_size} bytes)")
     print("next wake for each will start a new conversation")
     return 0
+
+
+def cmd_logs(args: list[str]) -> int:
+    if not args:
+        print("usage: a8s logs <name> [--tail N] [-f|--follow]", file=sys.stderr)
+        return 2
+    name = args[0]
+    tail_n: int | None = None
+    follow = False
+    i = 1
+    while i < len(args):
+        a = args[i]
+        if a in ("-f", "--follow"):
+            follow = True
+            i += 1
+        elif a == "--tail" and i + 1 < len(args):
+            try:
+                tail_n = int(args[i + 1])
+            except ValueError:
+                print(f"--tail: not an integer: {args[i + 1]!r}", file=sys.stderr)
+                return 2
+            i += 2
+        elif a.startswith("--tail="):
+            try:
+                tail_n = int(a.split("=", 1)[1])
+            except ValueError:
+                print(f"--tail: not an integer: {a!r}", file=sys.stderr)
+                return 2
+            i += 1
+        else:
+            print(f"unknown logs arg: {a!r}", file=sys.stderr)
+            return 2
+
+    log = _log_path()
+    if not log.is_file():
+        print(f"no log yet at {log}", file=sys.stderr)
+        return 1
+
+    pattern = re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
+
+    with log.open("r", encoding="utf-8", errors="replace") as f:
+        existing = [ln for ln in f if pattern.search(ln)]
+    if tail_n is not None:
+        existing = existing[-tail_n:]
+    for ln in existing:
+        sys.stdout.write(ln)
+    sys.stdout.flush()
+
+    if not follow:
+        return 0
+
+    # Follow: re-open and seek to end, then poll for new lines.
+    try:
+        with log.open("r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, 2)  # SEEK_END
+            while True:
+                line = f.readline()
+                if not line:
+                    import time
+                    time.sleep(0.25)
+                    continue
+                if pattern.search(line):
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+    except KeyboardInterrupt:
+        return 0
 
 
 def cmd_stop() -> int:
@@ -760,6 +901,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("says",    "<message>",         "Broadcast routed message to every other participant. Sender = participant enclosing CWD."),
     ("clear",   "",                  "Wipe all mailboxes and flag every participant for fresh conversation on next wake."),
     ("install", "",                  "Install canonical skills from apps/a8s/skills/ into each supported tool's user scope."),
+    ("logs",    "<name> [--tail N] [-f]",  "Show recent supervisor-log lines mentioning <name> (like `docker logs`). -f follows."),
 ]
 
 REPL_EXTRAS: list[tuple[str, str, str]] = [
@@ -808,6 +950,8 @@ def dispatch(cmd: str, args: list[str], scan_dir: Path, interval: float) -> int:
         return cmd_clear(scan_dir)
     if cmd == "install":
         return cmd_install()
+    if cmd == "logs":
+        return cmd_logs(args)
     raise ValueError(f"unknown command: {cmd!r}")
 
 
@@ -873,7 +1017,7 @@ def _queue_prompt(p: Participant, content: str) -> Path:
         "files": [],
     }
     fname = f"{now.strftime('%Y%m%dT%H%M%S%f')}_PROMPT.json"
-    dest = unique_path(p.root / ".inbox" / fname)
+    dest = unique_path(inbox_dir(p.name) / fname)
     with dest.open("w", encoding="utf-8") as f:
         json.dump(msg, f, indent=2)
     return dest
@@ -894,7 +1038,7 @@ def cmd_prompt(scan_dir: Path, args: list[str]) -> int:
             return 1
         for p in parts:
             _queue_prompt(p, prompt)
-        out(f"queued prompt to {len(parts)} participant(s); next step/loop will wake them")
+        out(f"queued prompt to {len(parts)} participant(s): {_preview(prompt)}")
         return 0
 
     target = find_participant(parts, name)
@@ -902,7 +1046,7 @@ def cmd_prompt(scan_dir: Path, args: list[str]) -> int:
         print(f"no participant named {name!r}", file=sys.stderr)
         return 1
     _queue_prompt(target, prompt)
-    out(f"queued prompt to {target.name}; next step/loop will wake")
+    out(f"queued prompt to {target.name}: {_preview(prompt)}")
     return 0
 
 
