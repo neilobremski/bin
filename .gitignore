@@ -10,3 +10,9 @@ node_modules/
 
 # Python
 __pycache__/
+
+# A8S
+**/.inbox/
+**/.outbox/
+**/.trash/
+**/.claude/settings.local.json
