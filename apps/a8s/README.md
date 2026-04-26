@@ -15,7 +15,7 @@ Filesystem-based message routing between independent Claude Code, Gemini, and Co
 
    a8s never writes into the user's project directories — with one exception below.
 
-4. **Mailboxes are isolated from agents.** `.inbox/`, `.outbox/`, and `.trash/` live under `~/.a8s/mailboxes/<NAME>/`, *not* inside the participant's project directory. Agents see messaging only through the `tell` / `says` skills — they can't `ls` their own mailbox or peek at other agents' traffic. Messages no longer follow the agent dir if it's copied/relocated; that's an accepted tradeoff for v1 (messages were already documented as transient).
+4. **Mailboxes are split: outbox local, inbox/trash isolated.** `.inbox/` and `.trash/` live under `~/.a8s/mailboxes/<NAME>/` — the agent never sees them and only interacts with messaging through the `tell` / `says` skills. `.outbox/` lives **inside** the agent's project root because the agent has to write to it, and a strict workspace sandbox (e.g. codex `--full-auto`) can only write within its own workdir. Routing re-stamps the `from` field to the enclosing participant's name on every read, so an agent can't spoof a senderless prompt or impersonate another sender by writing a hand-crafted JSON.
 
 5. **Each participant runs with CWD set to its own root** so its own settings (`.claude/settings*`, `.gemini/`, etc.) load correctly.
 
@@ -23,7 +23,7 @@ Filesystem-based message routing between independent Claude Code, Gemini, and Co
 
 - Scans one or more directories for participant roots — directories containing `CLAUDE.md`, `GEMINI.md`, or `CODEX.md`. Default scan root is the current directory; override with `--dir <path>`.
 - Maps each participant's name (and aliases) to its directory.
-- Watches each participant's `~/.a8s/mailboxes/<NAME>/.outbox/` for outgoing message JSON; routes them to the recipient's inbox at the same scope.
+- Watches each participant's `<root>/.outbox/` for outgoing message JSON; routes them to the recipient's `~/.a8s/mailboxes/<NAME>/.inbox/`. On read, the `from` field is force-set to the actual enclosing participant's name (defense against an agent spoofing the sender by hand-writing JSON).
 - When a participant's inbox has messages, launches the participant with a prompt built from the **first** message and immediately moves that message to its `.trash/` (also under `~/.a8s/mailboxes/<NAME>/`).
 - Enforces single-instance-per-name (the same name cannot run concurrently with itself).
 - After a participant process exits, re-checks its inbox; if more messages remain, prompt again.
@@ -114,7 +114,7 @@ Without `loop`, a8s makes one pass and waits for any launched processes to exit 
 
 ## Message format
 
-Messages are JSON files dropped into the sender's outbox at `~/.a8s/mailboxes/<NAME>/.outbox/`:
+Messages are JSON files dropped into the sender's outbox at `<sender-root>/.outbox/`:
 
 ```json
 {
@@ -142,7 +142,7 @@ FILE: {files[0].path}
 
 ## The `tell` and `says` CLIs and the registry
 
-a8s ships two sender-side shell commands, both siblings of `a8s` in `~/bin/`. Both write a message JSON into the **caller's** outbox at `~/.a8s/mailboxes/<NAME>/.outbox/` and exit — routing happens later when `a8s` next runs (step or loop).
+a8s ships two sender-side shell commands, both siblings of `a8s` in `~/bin/`. Both write a message JSON into the **caller's** local `<root>/.outbox/` and exit — routing happens later when `a8s` next runs (step or loop) and re-stamps the message with the actual sender name.
 
 | Command | What it does                                                      | Outbox `to` field |
 | ------- | ----------------------------------------------------------------- | ----------------- |
@@ -183,16 +183,18 @@ If `$PWD` is not inside any registered participant, `tell` fails with a clear er
 ```
 projects/
   my-claude-project/
-    CLAUDE.md      ← agent dirs stay clean — only marker files and project content
+    CLAUDE.md
+    .outbox/                       ← agent writes here (sandbox-writable)
   my-gemini-project/
     GEMINI.md
+    .outbox/
 
-~/.a8s/                              ← all a8s state lives here
-  a8s.json                           ← participant registry
-  log.txt                            ← supervisor log (ISO-timestamped lines)
+~/.a8s/                            ← supervisor-only state
+  a8s.json                         ← participant registry
+  log.txt                          ← supervisor log (ISO-timestamped lines)
   mailboxes/
-    CLAUDE/.inbox/.outbox/.trash/    ← keyed by the registered name (sanitized)
-    GEMINI/.inbox/.outbox/.trash/
+    CLAUDE/.inbox/.trash/          ← keyed by registered name (sanitized);
+    GEMINI/.inbox/.trash/            agents never see these
 ```
 
 ```

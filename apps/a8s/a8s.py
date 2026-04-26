@@ -13,13 +13,15 @@ Surface (CLI):
                                 Codex user scope
   logs <name> [--tail N] [-f] — docker-logs-style filter on the supervisor log
 
-State (all under ~/.a8s/):
-  a8s.json                    — participant registry (name -> kind, root, aliases)
-  mailboxes/<NAME>/           — .inbox / .outbox / .trash, isolated from agent dirs
-                                so participants only see messaging via their skills
-  log.txt                     — supervisor log: ISO-timestamped, captures every line
+State:
+  ~/.a8s/a8s.json             — participant registry (name -> kind, root, aliases)
+  ~/.a8s/mailboxes/<NAME>/    — .inbox / .trash, isolated from the agent itself
+  ~/.a8s/log.txt              — supervisor log: ISO-timestamped, captures every line
                                 that goes through `out()` (including subprocess
                                 output captured by `run_with_prefix`)
+  <agent-root>/.outbox/       — agent writes here; route_outboxes re-stamps `from`
+                                to the enclosing participant on every read so an
+                                agent can't spoof the sender by hand-writing JSON
 """
 
 from __future__ import annotations
@@ -78,12 +80,20 @@ def inbox_dir(name: str) -> Path:
     return mailbox_dir(name) / ".inbox"
 
 
-def outbox_dir(name: str) -> Path:
-    return mailbox_dir(name) / ".outbox"
-
-
 def trash_dir(name: str) -> Path:
     return mailbox_dir(name) / ".trash"
+
+
+def outbox_dir(root: Path) -> Path:
+    """Outbox lives **inside the agent's own dir** so the agent can write to it
+    even under a strict workspace sandbox (codex --full-auto). Inbox and trash
+    stay isolated under ~/.a8s/ where the agent never sees them.
+
+    `route_outboxes()` re-stamps the `from` field to the enclosing participant's
+    name on every read, so an agent can't spoof a senderless prompt by writing
+    a JSON with `from: ""`.
+    """
+    return root / ".outbox"
 
 
 def _emit(line: str) -> None:
@@ -180,9 +190,12 @@ def find_participant(parts: list[Participant], query: str) -> Participant | None
 # ---------- mailboxes ----------
 
 def ensure_mailboxes(p: Participant) -> None:
-    """Create the centralized mailbox dirs for `p` under ~/.a8s/mailboxes/."""
-    for d in (inbox_dir(p.name), outbox_dir(p.name), trash_dir(p.name)):
+    """Create mailbox dirs for `p`. Inbox and trash live under ~/.a8s/ (hidden
+    from the agent); outbox lives in the agent's own root (so the agent can
+    actually write to it under a workspace sandbox)."""
+    for d in (inbox_dir(p.name), trash_dir(p.name)):
         d.mkdir(parents=True, exist_ok=True)
+    outbox_dir(p.root).mkdir(parents=True, exist_ok=True)
 
 
 def unique_path(p: Path) -> Path:
@@ -203,7 +216,7 @@ def route_outboxes(participants: list[Participant]) -> int:
     routed = 0
     for sender in participants:
         ensure_mailboxes(sender)
-        outbox = outbox_dir(sender.name)
+        outbox = outbox_dir(sender.root)
         for f in sorted(outbox.iterdir()):
             if not (f.is_file() and f.name.endswith(".json")):
                 continue
@@ -213,6 +226,11 @@ def route_outboxes(participants: list[Participant]) -> int:
             except (OSError, json.JSONDecodeError) as e:
                 out(f"[{sender.name}] outbox parse error on {f.name}: {e}")
                 continue
+            # Defense: the outbox is writable by the agent, so it could try to
+            # spoof a senderless prompt with `from: ""` or impersonate someone
+            # else. Force `from` to the actual enclosing participant — outbox
+            # location is the unforgeable identity.
+            msg["from"] = sender.name
             recipient_name = (msg.get("to") or "").strip()
             if not recipient_name:
                 # broadcast: fan out to every other participant.
@@ -220,7 +238,8 @@ def route_outboxes(participants: list[Participant]) -> int:
                 for recipient in others:
                     ensure_mailboxes(recipient)
                     dest = unique_path(inbox_dir(recipient.name) / f.name)
-                    shutil.copyfile(f, dest)
+                    with dest.open("w", encoding="utf-8") as out_f:
+                        json.dump(msg, out_f, indent=2)
                 f.unlink()
                 out(f"broadcast: {sender.name} -> {len(others)}: {_preview(msg.get('content', ''))}")
                 routed += len(others)
@@ -231,7 +250,9 @@ def route_outboxes(participants: list[Participant]) -> int:
                 continue
             ensure_mailboxes(recipient)
             dest = unique_path(inbox_dir(recipient.name) / f.name)
-            f.rename(dest)
+            with dest.open("w", encoding="utf-8") as out_f:
+                json.dump(msg, out_f, indent=2)
+            f.unlink()
             out(f"routed: {sender.name} -> {recipient.name}: {_preview(msg.get('content', ''))}")
             routed += 1
     return routed
@@ -696,8 +717,8 @@ def _split_content_and_files(raw: str) -> tuple[str, list[dict]]:
     return "\n".join(lines).rstrip(), files
 
 
-def _write_outbox(sender_name: str, _sender_root: Path, to: str, content: str, files: list[dict]) -> Path:
-    outbox = outbox_dir(sender_name)
+def _write_outbox(sender_name: str, sender_root: Path, to: str, content: str, files: list[dict]) -> Path:
+    outbox = outbox_dir(sender_root)
     outbox.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
     msg = {
@@ -766,14 +787,14 @@ def cmd_clear(scan_dir: Path) -> int:
     cleared = 0
     for p in parts:
         ensure_mailboxes(p)
-        for d in (inbox_dir(p.name), outbox_dir(p.name), trash_dir(p.name)):
+        for d in (inbox_dir(p.name), trash_dir(p.name), outbox_dir(p.root)):
             for f in d.iterdir():
                 if f.is_file():
                     f.unlink()
                     cleared += 1
-        # Defensive: also wipe legacy mailbox dirs that may still sit inside
-        # the agent root from older a8s versions.
-        for sub in (".inbox", ".outbox", ".trash"):
+        # Defensive: wipe legacy <root>/.inbox / .trash dirs from before the
+        # mailbox-isolation change. (`.outbox` is current, handled above.)
+        for sub in (".inbox", ".trash"):
             legacy = p.root / sub
             if legacy.is_dir():
                 for f in legacy.iterdir():
