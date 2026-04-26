@@ -11,6 +11,9 @@ node_modules/
 # Python
 __pycache__/
 
+# Claude
+.claude/scheduled_tasks.lock
+
 # A8S
 **/.inbox/
 **/.outbox/

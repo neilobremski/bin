@@ -203,6 +203,28 @@ description: "Send a message ... mentioning FILE: paths and other tricky chars."
 ---
 ```
 
+## Local-model participants (Claude Code → Ollama)
+
+Claude Code can be pointed at a local Ollama endpoint by setting `ANTHROPIC_BASE_URL=http://localhost:11434` (Ollama's native `/v1/messages` endpoint speaks Anthropic protocol, including `tool_use` blocks). See `tests/agents/llama-agent/.claude/settings.json` for the working config.
+
+**What works.** Direct shell-command tool use (`Run: tell GEMINI hi`) works fine through Claude Code → Ollama, including with relatively small models (qwen3.5:latest reliably produces correctly-shaped Bash tool calls).
+
+**What doesn't.** Claude Code's *skill abstraction* (loading `~/.claude/skills/<name>/SKILL.md` and asking the model to "use the tell skill") is unreliable with local models — even capable ones often produce a final answer like "DONE" without ever emitting the tool call. The skill abstraction relies on a system-prompt translation step that local models flub.
+
+**Workaround.** Bypass the skill abstraction in the agent's own `CLAUDE.md` by instructing it about the `tell` shell command directly:
+
+```markdown
+If you're asked to pass a message along to someone by name, run this shell command:
+
+    tell <NAME> "<MESSAGE>"
+```
+
+`tests/agents/llama-agent/CLAUDE.md` does this. Routing then works end-to-end.
+
+**Model recommendation.** `llama3.2:3b` is too small for reliable tool use even with direct instructions. Use `qwen3.5:latest` or comparable as the default for local-model participants. Adjust `model` in the participant's `.claude/settings.json`.
+
+**Auth-conflict warning.** Claude Code will print `Auth conflict: Both a token (ANTHROPIC_AUTH_TOKEN) and an API key (/login managed key) are set` if you've ever run `claude /login` previously. Functionality is unaffected, but to silence the warning, run `claude /logout` once at the user level.
+
 ## Recovery model (v1)
 
 Messages are transient. The inbox file is moved to `.trash/` *before* the participant has produced a response. If the participant crashes or gets wedged mid-prompt, the message is gone — re-prompting is just as risky as loss (it can pile state on top of a broken conversation). v1 documents the gap and leaves recovery to the human operator. A future version will need a real recovery story (see below).
