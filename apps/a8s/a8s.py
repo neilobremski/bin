@@ -184,19 +184,20 @@ def next_inbox_message(p: Participant) -> Path | None:
 
 
 def build_prompt(msg: dict) -> str:
-    sender = msg.get("from", "")
+    sender = (msg.get("from") or "").strip()
     content = msg.get("content", "")
     date = msg.get("date", "")
     recipient = (msg.get("to") or "").strip()
-    if recipient:
-        verb_phrase = f"tells you ({recipient})"
+    if not sender:
+        # No sender = a direct prompt (queued by `a8s prompt`); deliver raw.
+        header = content
     else:
-        verb_phrase = "says"
-    header = (
-        f"[{date}] {sender} {verb_phrase}: {content}"
-        if date
-        else f"{sender} {verb_phrase}: {content}"
-    )
+        verb_phrase = f"tells you ({recipient})" if recipient else "says"
+        header = (
+            f"[{date}] {sender} {verb_phrase}: {content}"
+            if date
+            else f"{sender} {verb_phrase}: {content}"
+        )
     parts = [header]
     files = msg.get("files") or []
     if files:
@@ -754,7 +755,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("step",    "",                  "Run one routing pass (deliver outboxes, drain inboxes)."),
     ("loop",    "",                  "Run continuously until Ctrl+C or `a8s stop`."),
     ("stop",    "",                  "Signal a running `a8s loop` to exit."),
-    ("prompt",  "<name|all> <message>",  'Wake <name> (or every participant if "all") with this raw prompt — no "from" wrapper. "all" wakes concurrently.'),
+    ("prompt",  "<name|all> <message>",  'Queue a senderless message in <name>\'s inbox (or all). Wakes via the next step/loop pass. Use "all" to broadcast a prompt.'),
     ("tell",    "<name> <message>",  "Direct routed message to <name>. Sender = participant enclosing CWD."),
     ("says",    "<message>",         "Broadcast routed message to every other participant. Sender = participant enclosing CWD."),
     ("clear",   "",                  "Wipe all mailboxes and flag every participant for fresh conversation on next wake."),
@@ -855,11 +856,27 @@ def repl(scan_dir: Path, interval: float) -> int:
 
 # ---------- CLI ----------
 
-def _wake_with_prompt(p: Participant, prompt: str) -> int:
-    fresh = consume_fresh(p.root)
-    out(f"[{p.name}] direct prompt" + (" (fresh)" if fresh else ""))
-    cmd = build_command(p.kind, prompt, fresh=fresh)
-    return run_with_prefix(p.name, cmd, p.root)
+def _queue_prompt(p: Participant, content: str) -> Path:
+    """Drop a senderless message JSON directly into <p>/.inbox/.
+
+    The empty `from` is the signal to `build_prompt` to deliver the
+    raw content without a `tells you` / `says` wrapper. The next
+    inbox-drain (via `step` or `loop`) wakes the participant.
+    """
+    ensure_mailboxes(p)
+    now = datetime.now(timezone.utc)
+    msg = {
+        "date": now.isoformat().replace("+00:00", "Z"),
+        "from": "",
+        "to": p.name,
+        "content": content,
+        "files": [],
+    }
+    fname = f"{now.strftime('%Y%m%dT%H%M%S%f')}_PROMPT.json"
+    dest = unique_path(p.root / ".inbox" / fname)
+    with dest.open("w", encoding="utf-8") as f:
+        json.dump(msg, f, indent=2)
+    return dest
 
 
 def cmd_prompt(scan_dir: Path, args: list[str]) -> int:
@@ -875,23 +892,18 @@ def cmd_prompt(scan_dir: Path, args: list[str]) -> int:
         if not parts:
             print("no participants found", file=sys.stderr)
             return 1
-        global PRINT_LOCK
-        if PRINT_LOCK is None:
-            PRINT_LOCK = threading.Lock()
-        threads: list[threading.Thread] = []
         for p in parts:
-            t = threading.Thread(target=_wake_with_prompt, args=(p, prompt), daemon=False)
-            t.start()
-            threads.append(t)
-        for t in threads:
-            t.join()
+            _queue_prompt(p, prompt)
+        out(f"queued prompt to {len(parts)} participant(s); next step/loop will wake them")
         return 0
 
     target = find_participant(parts, name)
     if target is None:
         print(f"no participant named {name!r}", file=sys.stderr)
         return 1
-    return _wake_with_prompt(target, prompt)
+    _queue_prompt(target, prompt)
+    out(f"queued prompt to {target.name}; next step/loop will wake")
+    return 0
 
 
 def main(argv: list[str]) -> int:
