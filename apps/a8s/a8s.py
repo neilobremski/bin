@@ -1,12 +1,25 @@
 """a8s — Agent Infinity System.
 
-Discovery, step REPL, outbox->inbox routing, subprocess waking, loop/stop,
-clear (with one-shot fresh flag), and a participant registry under
-~/.a8s/a8s.json that backs the `tell` CLI.
+Filesystem-based message router for independent Claude Code, Gemini CLI,
+and Codex CLI project directories ("participants") to communicate.
 
-Per-tool skill installation for Gemini/Codex is not yet implemented; the
-Claude install path piggybacks on ~/bin/install.sh via a symlink in
-~/bin/docs/.
+Surface (CLI):
+  step / loop / stop          — one routing pass / continuous mode / signal stop
+  prompt <name|all> <msg>     — queue a senderless message to inbox(es)
+  tell <name> <msg>           — direct routed message (sibling CLI ~/bin/tell)
+  says <msg>                  — broadcast routed message (sibling CLI ~/bin/says)
+  clear                       — wipe mailboxes + log; flag fresh on next wake
+  install                     — install canonical skills into Claude / Gemini /
+                                Codex user scope
+  logs <name> [--tail N] [-f] — docker-logs-style filter on the supervisor log
+
+State (all under ~/.a8s/):
+  a8s.json                    — participant registry (name -> kind, root, aliases)
+  mailboxes/<NAME>/           — .inbox / .outbox / .trash, isolated from agent dirs
+                                so participants only see messaging via their skills
+  log.txt                     — supervisor log: ISO-timestamped, captures every line
+                                that goes through `out()` (including subprocess
+                                output captured by `run_with_prefix`)
 """
 
 from __future__ import annotations
@@ -49,6 +62,12 @@ def _log_path() -> Path:
 
 def _safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", name)
+
+
+def _preview(content: str, n: int = 80) -> str:
+    """Single-line snippet of `content` for log readability."""
+    s = (content or "").replace("\n", " ").replace("\r", " ").strip()
+    return s if len(s) <= n else s[: n - 1] + "…"
 
 
 def mailbox_dir(name: str) -> Path:
@@ -203,7 +222,7 @@ def route_outboxes(participants: list[Participant]) -> int:
                     dest = unique_path(inbox_dir(recipient.name) / f.name)
                     shutil.copyfile(f, dest)
                 f.unlink()
-                out(f"broadcast: {sender.name} -> {len(others)} ({f.name})")
+                out(f"broadcast: {sender.name} -> {len(others)}: {_preview(msg.get('content', ''))}")
                 routed += len(others)
                 continue
             recipient = by_name.get(recipient_name.lower())
@@ -213,7 +232,7 @@ def route_outboxes(participants: list[Participant]) -> int:
             ensure_mailboxes(recipient)
             dest = unique_path(inbox_dir(recipient.name) / f.name)
             f.rename(dest)
-            out(f"routed: {sender.name} -> {recipient.name} ({dest.name})")
+            out(f"routed: {sender.name} -> {recipient.name}: {_preview(msg.get('content', ''))}")
             routed += 1
     return routed
 
@@ -458,7 +477,8 @@ def wake_once(p: Participant, msg_path: Path) -> None:
     trashed = unique_path(trash_dir(p.name) / msg_path.name)
     msg_path.rename(trashed)
     fresh = consume_fresh(p.root)
-    out(f"[{p.name}] waking from {trashed.name}" + (" (fresh)" if fresh else ""))
+    flag = " (fresh)" if fresh else ""
+    out(f"[{p.name}] waking from {trashed.name}{flag}: {_preview(msg.get('content', ''))}")
     cmd = build_command(p.kind, prompt, fresh=fresh)
     run_with_prefix(p.name, cmd, p.root)
 
@@ -716,8 +736,7 @@ def cmd_tell(args: list[str]) -> int:
     target_name, _target_info = target
 
     _write_outbox(sender_name, Path(sender_info["root"]), target_name, content, files)
-    preview = (content[:60] + "…") if len(content) > 60 else content
-    print(f"tell -> {target_name}: {preview}")
+    out(f"tell -> {target_name}: {_preview(content)}")
     return 0
 
 
@@ -735,8 +754,7 @@ def cmd_says(args: list[str]) -> int:
     sender_name, sender_info = sender
 
     _write_outbox(sender_name, Path(sender_info["root"]), "", content, files)
-    preview = (content[:60] + "…") if len(content) > 60 else content
-    print(f"says: {preview}")
+    out(f"says ({sender_name}): {_preview(content)}")
     return 0
 
 
@@ -763,7 +781,12 @@ def cmd_clear(scan_dir: Path) -> int:
                         f.unlink()
                         cleared += 1
     mark_fresh([p.root for p in parts])
+    log = _log_path()
+    log_size = log.stat().st_size if log.is_file() else 0
+    log.write_text("")
     print(f"cleared {cleared} message(s) across {len(parts)} participant(s)")
+    if log_size:
+        print(f"truncated supervisor log ({log_size} bytes)")
     print("next wake for each will start a new conversation")
     return 0
 
@@ -1015,7 +1038,7 @@ def cmd_prompt(scan_dir: Path, args: list[str]) -> int:
             return 1
         for p in parts:
             _queue_prompt(p, prompt)
-        out(f"queued prompt to {len(parts)} participant(s); next step/loop will wake them")
+        out(f"queued prompt to {len(parts)} participant(s): {_preview(prompt)}")
         return 0
 
     target = find_participant(parts, name)
@@ -1023,7 +1046,7 @@ def cmd_prompt(scan_dir: Path, args: list[str]) -> int:
         print(f"no participant named {name!r}", file=sys.stderr)
         return 1
     _queue_prompt(target, prompt)
-    out(f"queued prompt to {target.name}; next step/loop will wake")
+    out(f"queued prompt to {target.name}: {_preview(prompt)}")
     return 0
 
 
