@@ -126,16 +126,16 @@ Messages are JSON files dropped into `.outbox/`:
 }
 ```
 
-When delivered, the participant is woken with a recipient-neutral prompt. The verb depends on whether the message was direct (`tell`) or a broadcast (`says`):
+When delivered, the participant is woken with a recipient-neutral prompt. The verb phrase depends on whether the message was direct (`tell`) or a broadcast (`says`):
 
 ```
-[{date}] {from} told you: {content}      # direct (to is set to the recipient's name)
-[{date}] {from} says: {content}          # broadcast (to is empty / missing)
+[{date}] {from} tells you ({to}): {content}    # direct
+[{date}] {from} says: {content}                # broadcast (to is empty / missing)
 
 FILE: {files[0].path}
 ```
 
-`FILE:` lines are omitted when there are no files. Recipients of a broadcast are not told who else got it (the recipient list is implicit and ephemeral). The template never identifies the sender as human or AI.
+`FILE:` lines are omitted when there are no files. The direct template includes the recipient's own name in parens so the wake context is unambiguous about who is being addressed. Recipients of a broadcast are not told who else got it (the recipient list is implicit and ephemeral). The template never identifies the sender as human or AI.
 
 ## The `tell` and `says` CLIs and the registry
 

@@ -188,8 +188,15 @@ def build_prompt(msg: dict) -> str:
     content = msg.get("content", "")
     date = msg.get("date", "")
     recipient = (msg.get("to") or "").strip()
-    verb = "told you" if recipient else "says"
-    header = f"[{date}] {sender} {verb}: {content}" if date else f"{sender} {verb}: {content}"
+    if recipient:
+        verb_phrase = f"tells you ({recipient})"
+    else:
+        verb_phrase = "says"
+    header = (
+        f"[{date}] {sender} {verb_phrase}: {content}"
+        if date
+        else f"{sender} {verb_phrase}: {content}"
+    )
     parts = [header]
     files = msg.get("files") or []
     if files:

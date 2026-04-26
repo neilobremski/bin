@@ -13,7 +13,7 @@ says <message>
 
 - `<message>` is the body. To attach files, append one or more `FILE: <absolute-path>` lines at the end. Lines starting with `FILE: ` are stripped from the body and added as attachments.
 - The recipient list is implicit: every currently-registered participant other than yourself receives a copy. You do not name recipients with `says`.
-- Each recipient sees the message wrapped in a "says" header (vs `tell`'s "told you"), making the broadcast nature explicit. Recipients are not told who else got the message.
+- Each recipient sees the message wrapped in a "says" header (vs `tell`'s "tells you (<your-name>)"), making the broadcast nature explicit. Recipients are not told who else got the message.
 
 The command returns immediately; delivery is asynchronous.
 
