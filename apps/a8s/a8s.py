@@ -10,13 +10,13 @@ Surface (CLI):
                                 add/define commands (read-only, no mutation)
   define <name> [<path>]      — show or set the JSON definition that drives an
                                 agent's wake invocation + prompt formatting
-  start <name>                — spawn a detached daemon owning <name>
-  run <name>                  — foreground attached loop owning <name>
-  step <name>                 — take ownership, one route+drain pass, release
-  stop <name>                 — SIGTERM the owner of <name> (graceful detach)
+  start <name>                — spawn a detached daemon to handle <name>
+  run <name>                  — foreground attached loop handling <name>
+  step <name>                 — take handling, one route+drain pass, release
+  stop <name>                 — SIGTERM the handler of <name> (graceful detach)
   kill <name>                 — graceful SIGTERM, then forced subprocess-group kill
-  exit                        — SIGTERM every running owner
-  ls                          — list only running agents (with PIDs)
+  exit                        — SIGTERM every running handler
+  ls                          — list only running agents (with handler PIDs)
   prompt <name|all> <msg>     — queue a senderless message to inbox(es)
   tell <name> <msg>           — direct routed message (sibling CLI ~/bin/tell)
   says <msg>                  — broadcast routed message (sibling CLI ~/bin/says)
@@ -36,9 +36,12 @@ State:
     trash/                    — processed messages
     log.txt                   — agent-scoped log (wake events, subprocess output,
                                 routing involving this agent)
-    pid                       — current owner process; written via O_CREAT|O_EXCL
+    pid                       — current handler process; written via O_CREAT|O_EXCL
                                 atomic claim. `start`/`run`/`step` always win,
-                                asking any prior owner to detach first.
+                                asking any prior handler to detach first. (Once
+                                aliases land, multiple agents may share the same
+                                handler PID — an agent is *handled by* a process,
+                                not captured by it.)
   ~/.a8s/log.txt              — supervisor log: process-scoped events only
                                 (loop lifecycle, registration, etc.)
   <agent-root>/.outbox/       — agent writes here; route_outboxes re-stamps `from`
@@ -290,9 +293,9 @@ def route_outboxes(senders: list[Participant], all_agents: list[Participant] | N
     """Route each sender's outbox to recipients found in `all_agents`.
 
     Mailbox routing is process-agnostic: a per-agent daemon may write into any
-    other agent's inbox even though it doesn't own them. Only `wake_once` requires
-    ownership. `all_agents` is the recipient lookup pool (defaults to senders for
-    self-contained calls)."""
+    other agent's inbox even though it isn't handling them. Only `wake_once`
+    requires the handler attachment. `all_agents` is the recipient lookup pool
+    (defaults to senders for self-contained calls)."""
     if all_agents is None:
         all_agents = senders
     by_name = {p.name.lower(): p for p in all_agents}
@@ -617,8 +620,9 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
-def _read_owner_pid(name: str) -> int | None:
-    """Return the live PID owning <name>, or None. Cleans up stale pid files."""
+def _read_handler_pid(name: str) -> int | None:
+    """Return the live PID currently handling <name>, or None. Cleans up stale
+    pid files."""
     p = pid_path(name)
     if not p.is_file():
         return None
@@ -641,7 +645,7 @@ def _read_owner_pid(name: str) -> int | None:
 
 def _try_atomic_claim(name: str, pid: int) -> bool:
     """Attempt to write `pid` into `pid_path(name)` using O_CREAT|O_EXCL.
-    Returns True iff this process now owns the file."""
+    Returns True iff this process now holds the handler attachment."""
     p = pid_path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -655,22 +659,22 @@ def _try_atomic_claim(name: str, pid: int) -> bool:
     return True
 
 
-# Wait up to this long for an existing owner to release after SIGTERM.
+# Wait up to this long for an existing handler to release after SIGTERM.
 ACQUIRE_TIMEOUT_S = 30.0
 ACQUIRE_POLL_S = 0.1
 
 
 def acquire(name: str) -> None:
-    """Take exclusive ownership of <name>. If another live process owns the
-    pid file, send it SIGTERM (graceful detach) and wait for release. Always
-    wins (per locked design). Raises TimeoutError if the owner doesn't release
-    within ACQUIRE_TIMEOUT_S."""
+    """Attach this process as the handler of <name>. If another live process
+    is currently handling it, send SIGTERM (graceful detach) and wait for
+    release. Always wins (per locked design). Raises TimeoutError if the prior
+    handler doesn't release within ACQUIRE_TIMEOUT_S."""
     import time as _time
     me = os.getpid()
     while True:
         if _try_atomic_claim(name, me):
             return
-        existing = _read_owner_pid(name)
+        existing = _read_handler_pid(name)
         if existing is None:
             continue  # stale or freed; retry
         if existing == me:
@@ -769,7 +773,7 @@ def _make_signal_handler(name: str):
 
 def attached_loop(name: str, interval: float, *, single_pass: bool = False) -> int:
     """Body of `a8s run` / `a8s start` (and `a8s step` when single_pass=True).
-    Acquires exclusive ownership of <name>, then in-loop:
+    Attaches as handler of <name>, then in-loop:
       - reload registry (so newly-added agents become routable recipients)
       - route this agent's outbox
       - drain this agent's inbox (one wake at a time)
@@ -1250,9 +1254,9 @@ def _resolve_agent(name: str) -> Participant | None:
 
 
 def cmd_run(args: list[str], interval: float) -> int:
-    """`a8s run <name>` — foreground attached loop. Takes ownership (asks any
-    existing owner to detach). Ctrl+C: graceful detach. Second Ctrl+C: kills
-    the wake subprocess group."""
+    """`a8s run <name>` — foreground attached loop. Attaches as the handler
+    (asks any existing handler to detach). Ctrl+C: graceful detach. Second
+    Ctrl+C: kills the wake subprocess group."""
     if len(args) != 1:
         print("usage: a8s run <name>", file=sys.stderr)
         return 2
@@ -1286,8 +1290,9 @@ def cmd_start(args: list[str]) -> int:
 
 
 def cmd_step(args: list[str], interval: float) -> int:
-    """`a8s step <name>` — take ownership, do one full pass (route + drain),
-    release. Heavyweight: if a daemon owns the agent, this detaches it."""
+    """`a8s step <name>` — attach as handler, do one full pass (route +
+    drain), release. Heavyweight: if a daemon is already handling the agent,
+    this detaches it."""
     if len(args) != 1:
         print("usage: a8s step <name>", file=sys.stderr)
         return 2
@@ -1299,13 +1304,13 @@ def cmd_step(args: list[str], interval: float) -> int:
 
 
 def cmd_stop(args: list[str]) -> int:
-    """`a8s stop <name>` — SIGTERM the owning process. Graceful detach: the
-    daemon finishes its current wake before exiting."""
+    """`a8s stop <name>` — SIGTERM the process handling <name>. Graceful
+    detach: the daemon finishes its current wake before exiting."""
     if len(args) != 1:
         print("usage: a8s stop <name>", file=sys.stderr)
         return 2
     name = args[0]
-    pid = _read_owner_pid(name)
+    pid = _read_handler_pid(name)
     if pid is None:
         print(f"{name}: not running", file=sys.stderr)
         return 1
@@ -1326,7 +1331,7 @@ def cmd_kill(args: list[str]) -> int:
         print("usage: a8s kill <name>", file=sys.stderr)
         return 2
     name = args[0]
-    pid = _read_owner_pid(name)
+    pid = _read_handler_pid(name)
     if pid is None:
         print(f"{name}: not running", file=sys.stderr)
         return 1
@@ -1350,7 +1355,7 @@ def cmd_kill(args: list[str]) -> int:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    # Pid file may stick around if the owner was force-killed before its
+    # Pid file may stick around if the handler was force-killed before its
     # finally-block ran. Clean up if still there.
     p = pid_path(name)
     if p.is_file():
@@ -1363,12 +1368,12 @@ def cmd_kill(args: list[str]) -> int:
 
 
 def cmd_exit() -> int:
-    """`a8s exit` — SIGTERM every running agent's owner. Each daemon detaches
-    gracefully on its own."""
+    """`a8s exit` — SIGTERM every running agent's handler. Each daemon
+    detaches gracefully on its own."""
     parts = participants_from_registry()
     sent = 0
     for p in parts:
-        pid = _read_owner_pid(p.name)
+        pid = _read_handler_pid(p.name)
         if pid is None:
             continue
         try:
@@ -1383,11 +1388,11 @@ def cmd_exit() -> int:
 
 
 def cmd_ls() -> int:
-    """`a8s ls` — list only running agents and their owning PIDs."""
+    """`a8s ls` — list only running agents and their handler PIDs."""
     parts = participants_from_registry()
     running: list[tuple[str, int, Path]] = []
     for p in parts:
-        pid = _read_owner_pid(p.name)
+        pid = _read_handler_pid(p.name)
         if pid is not None:
             running.append((p.name, pid, p.root))
     if not running:
@@ -1406,13 +1411,13 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("agents",   "",                     "List every registered agent and definition status."),
     ("discover", "<path>",               "Walk <path> for marker files; print suggested `a8s add`/`a8s define` commands. Read-only."),
     ("define",   "<name> [<path>]",      "Show or set <name>'s definition JSON. Without <path>, prints the effective definition."),
-    ("start",    "<name>",               "Run a detached background process owning <name>. Takes ownership from any prior owner."),
-    ("run",      "<name>",               "Run a foreground attached loop owning <name>. Ctrl+C: graceful detach. 2nd Ctrl+C: kill subprocess group."),
-    ("step",     "<name>",               "Take ownership, do one route+drain pass for <name>, release. Heavyweight: detaches any current owner."),
-    ("stop",     "<name>",               "SIGTERM the process owning <name>. Graceful detach (waits for current wake)."),
+    ("start",    "<name>",               "Run a detached background process handling <name>. Detaches any prior handler."),
+    ("run",      "<name>",               "Run a foreground attached loop handling <name>. Ctrl+C: graceful detach. 2nd Ctrl+C: kill subprocess group."),
+    ("step",     "<name>",               "Attach as handler, do one route+drain pass for <name>, release. Heavyweight: detaches any current handler."),
+    ("stop",     "<name>",               "SIGTERM the process handling <name>. Graceful detach (waits for current wake)."),
     ("kill",     "<name>",               "SIGTERM (graceful), brief grace, then 2nd SIGTERM (kills subprocess group), final SIGKILL fallback."),
-    ("exit",     "",                     "SIGTERM every running agent's owner. Each detaches gracefully on its own."),
-    ("ls",       "",                     "List only running agents and their owning PIDs."),
+    ("exit",     "",                     "SIGTERM every running handler. Each detaches gracefully on its own."),
+    ("ls",       "",                     "List only running agents and their handler PIDs."),
     ("prompt",   "<name|all> <message>", "Queue a senderless message in <name>'s inbox (or all)."),
     ("tell",     "<name> <message>",     "Direct routed message to <name>. Sender = agent enclosing CWD."),
     ("says",     "<message>",            "Broadcast routed message to every other agent. Sender = agent enclosing CWD."),
