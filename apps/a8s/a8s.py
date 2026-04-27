@@ -4,20 +4,27 @@ Filesystem-based message router for independent Claude Code, Gemini CLI,
 and Codex CLI project directories ("participants") to communicate.
 
 Surface (CLI):
+  add <name> <dir>            — explicit agent registration (errors on dup)
+  agents                      — list every registered agent + definition status
+  discover <path>             — walk dir tree for marker files; print suggested
+                                add/define commands (read-only, no mutation)
+  define <name> [<path>]      — show or set the JSON definition that drives an
+                                agent's wake invocation + prompt formatting
   step / loop / stop          — one routing pass / continuous mode / signal stop
   prompt <name|all> <msg>     — queue a senderless message to inbox(es)
   tell <name> <msg>           — direct routed message (sibling CLI ~/bin/tell)
   says <msg>                  — broadcast routed message (sibling CLI ~/bin/says)
-  clear                       — wipe mailboxes + log; flag fresh on next wake
+  clear <name>                — wipe <name>'s mailboxes; flag fresh on next wake
   install                     — install canonical skills into Claude / Gemini /
                                 Codex user scope
   logs <name> [--tail N] [-f] — docker-logs-style filter on the supervisor log
-  define <name> [<path>]      — show or set the JSON definition driving an agent's
-                                wake invocation + prompt formatting
+
+`a8s` with no command prints help. There is no auto-discovery — agents must be
+explicitly registered with `a8s add` (use `a8s discover` to find candidates).
 
 State:
-  ~/.a8s/a8s.json             — participant registry (name -> kind, root, aliases,
-                                optional `definition` path overriding the built-in)
+  ~/.a8s/a8s.json             — registry (name -> {root, aliases, definition?}).
+                                Agents without `definition` cannot wake.
   ~/.a8s/mailboxes/<NAME>/    — .inbox / .trash, isolated from the agent itself
   ~/.a8s/log.txt              — supervisor log: ISO-timestamped, captures every line
                                 that goes through `out()` (including subprocess
@@ -131,10 +138,7 @@ def out(text: str = "", end: str = "\n") -> None:
 @dataclass(frozen=True)
 class Participant:
     name: str
-    kind: str
     root: Path
-    marker: Path
-    birthtime: float
 
 
 # ---------- discovery ----------
@@ -154,25 +158,42 @@ def parse_name(marker_path: Path) -> str | None:
     return None
 
 
-def _number_duplicates(parts: list[Participant]) -> list[Participant]:
-    by_name: dict[str, list[Participant]] = {}
+def find_participant(parts: list[Participant], query: str) -> Participant | None:
+    q = query.strip().lower()
     for p in parts:
-        by_name.setdefault(p.name, []).append(p)
-    out_list: list[Participant] = []
-    for group in by_name.values():
-        if len(group) == 1:
-            out_list.append(group[0])
+        if p.name.lower() == q:
+            return p
+    return None
+
+
+def participants_from_registry() -> list[Participant]:
+    """Build Participants from the registry — the single source of truth for
+    which agents exist. No filesystem walk; explicit `a8s add` is required."""
+    reg = load_registry()
+    parts: list[Participant] = []
+    for name, info in reg.items():
+        root_str = info.get("root", "")
+        if not root_str:
             continue
-        for i, p in enumerate(sorted(group, key=lambda x: x.birthtime), start=1):
-            out_list.append(Participant(f"{p.name} {i}", p.kind, p.root, p.marker, p.birthtime))
-    return out_list
+        try:
+            root = Path(root_str).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        parts.append(Participant(name=name, root=root))
+    return parts
 
 
-def discover(root: Path) -> list[Participant]:
+# ---------- discover (suggestions only) ----------
+
+def _scan_for_markers(root: Path) -> list[tuple[str, str, Path]]:
+    """Walk `root` (and its immediate children) for marker files. Returns
+    `(name, kind, dir)` triples. Read-only; used by `a8s discover`."""
     candidates: list[Path] = [root]
-    candidates.extend(p for p in sorted(root.iterdir()) if p.is_dir())
-
-    found: list[Participant] = []
+    try:
+        candidates.extend(p for p in sorted(root.iterdir()) if p.is_dir())
+    except OSError:
+        pass
+    found: list[tuple[str, str, Path]] = []
     for d in candidates:
         for marker_name, kind in MARKER_FILES.items():
             marker = d / marker_name
@@ -181,19 +202,9 @@ def discover(root: Path) -> list[Participant]:
             name = parse_name(marker)
             if not name:
                 continue
-            stat = d.stat()
-            birthtime = getattr(stat, "st_birthtime", stat.st_ctime)
-            found.append(Participant(name, kind, d.resolve(), marker.resolve(), birthtime))
+            found.append((name, kind, d.resolve()))
             break
-    return _number_duplicates(found)
-
-
-def find_participant(parts: list[Participant], query: str) -> Participant | None:
-    q = query.strip().lower()
-    for p in parts:
-        if p.name.lower() == q:
-            return p
-    return None
+    return found
 
 
 # ---------- mailboxes ----------
@@ -282,31 +293,29 @@ def default_definition_path(kind: str) -> Path:
     return DEFINITIONS_DIR / f"{kind}.json"
 
 
-def load_definition(name: str, kind: str) -> dict:
-    """Load the JSON definition for `name`. The registry may carry an explicit
-    `definition` path; otherwise fall back to the built-in default for `kind`.
+def load_definition(name: str) -> dict:
+    """Load the JSON definition for `name` from the path stored in the registry.
+    Errors loudly if no definition is set — agents are not runnable until
+    `a8s define <name> <path>` has been called.
 
     Definitions encode argv (with `$PROMPT` placeholder), message templates,
-    and per-tool quirks. See apps/a8s/definitions/*.json.
+    and per-tool quirks. See apps/a8s/definitions/*.json for built-in shapes.
     """
     reg = load_registry()
     info = reg.get(name) or {}
     custom = info.get("definition")
-    candidates: list[Path] = []
-    if custom:
-        candidates.append(Path(custom).expanduser())
-    candidates.append(default_definition_path(kind))
-    for path in candidates:
-        if path.is_file():
-            try:
-                with path.open("r", encoding="utf-8") as f:
-                    return json.loads(f.read())
-            except (OSError, json.JSONDecodeError) as e:
-                raise RuntimeError(f"definition load failed for {path}: {e}") from e
-    raise FileNotFoundError(
-        f"no definition for {name!r} (kind={kind}); "
-        f"looked in: {', '.join(str(c) for c in candidates)}"
-    )
+    if not custom:
+        raise FileNotFoundError(
+            f"{name!r} has no definition; run `a8s define {name} <path>`"
+        )
+    path = Path(custom).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"definition file missing: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.loads(f.read())
+    except (OSError, json.JSONDecodeError) as e:
+        raise RuntimeError(f"definition load failed for {path}: {e}") from e
 
 
 def build_prompt(msg: dict, definition: dict) -> str:
@@ -437,31 +446,6 @@ def save_registry(reg: dict) -> None:
     registry_path().write_text(json.dumps(reg, indent=2, sort_keys=True))
 
 
-def register_discovered(parts: list[Participant]) -> None:
-    """Add new participants to the registry. Warn-and-skip on name conflicts."""
-    reg = load_registry()
-    changed = False
-    for p in parts:
-        existing = reg.get(p.name)
-        if existing is None:
-            reg[p.name] = {"kind": p.kind, "root": str(p.root), "aliases": []}
-            changed = True
-            out(f"[a8s] registered {p.name} -> {p.root}")
-            continue
-        try:
-            existing_root = Path(existing.get("root", "")).resolve()
-        except (OSError, RuntimeError):
-            existing_root = Path(existing.get("root", ""))
-        if existing_root != p.root.resolve():
-            out(f"[a8s] WARNING: {p.name} already registered to {existing_root}; ignoring duplicate at {p.root}")
-            continue
-        if existing.get("kind") != p.kind:
-            existing["kind"] = p.kind
-            changed = True
-    if changed:
-        save_registry(reg)
-
-
 def resolve_recipient(query: str) -> tuple[str, dict] | None:
     reg = load_registry()
     q = query.strip().lower()
@@ -524,7 +508,7 @@ def wake_once(p: Participant, msg_path: Path) -> None:
         return
 
     try:
-        definition = load_definition(p.name, p.kind)
+        definition = load_definition(p.name)
     except (FileNotFoundError, RuntimeError) as e:
         out(f"[{p.name}] {e}")
         bad = unique_path(trash_dir(p.name) / msg_path.name)
@@ -540,9 +524,10 @@ def wake_once(p: Participant, msg_path: Path) -> None:
     run_with_prefix(p.name, cmd, p.root)
 
 
-def step(scan_dir: Path) -> None:
-    parts = discover(scan_dir)
-    register_discovered(parts)
+def step() -> None:
+    """One routing pass over every registered agent. No filesystem walk —
+    agents are explicit (`a8s add`) and the registry is the source of truth."""
+    parts = participants_from_registry()
     for p in parts:
         ensure_mailboxes(p)
     route_outboxes(parts)
@@ -581,7 +566,7 @@ def _read_pid_file(path: Path) -> dict | None:
         return None
 
 
-def loop_mode(scan_dir: Path, interval: float) -> int:
+def loop_mode(interval: float) -> int:
     global PRINT_LOCK
     PRINT_LOCK = threading.Lock()
 
@@ -593,7 +578,6 @@ def loop_mode(scan_dir: Path, interval: float) -> int:
 
     pid_file.write_text(json.dumps({
         "pid": os.getpid(),
-        "scan_dir": str(scan_dir),
         "started": datetime.now(timezone.utc).isoformat(),
     }))
 
@@ -620,12 +604,11 @@ def loop_mode(scan_dir: Path, interval: float) -> int:
             with busy_lock:
                 busy.discard(p.name)
 
-    out(f"[a8s] loop started (pid {os.getpid()}, scan_dir {scan_dir}, interval {interval}s)")
+    out(f"[a8s] loop started (pid {os.getpid()}, interval {interval}s)")
     try:
         while not stop_event.is_set():
             try:
-                participants = discover(scan_dir)
-                register_discovered(participants)
+                participants = participants_from_registry()
                 for p in participants:
                     ensure_mailboxes(p)
                 route_outboxes(participants)
@@ -723,6 +706,81 @@ def _install_skill_codex(skill_dir: Path) -> str:
     return f"  codex: linked '{skill_name}' at {target}"
 
 
+def cmd_add(args: list[str]) -> int:
+    """`a8s add <name> <dir>` — explicitly register a new agent. Errors on
+    duplicate name or non-directory path. New entries have no definition;
+    `a8s define <name> <path>` is required before the agent can wake."""
+    if len(args) != 2:
+        print("usage: a8s add <name> <dir>", file=sys.stderr)
+        return 2
+    name, dir_str = args
+    if not NAME_RE.fullmatch(name):
+        print(f"name must be alphanumeric: {name!r}", file=sys.stderr)
+        return 2
+    root = Path(dir_str).expanduser()
+    if not root.is_dir():
+        print(f"not a directory: {root}", file=sys.stderr)
+        return 1
+    root = root.resolve()
+    reg = load_registry()
+    for k in reg:
+        if k.lower() == name.lower():
+            print(f"agent already exists with name: {k}", file=sys.stderr)
+            return 1
+    reg[name] = {"root": str(root), "aliases": []}
+    save_registry(reg)
+    print(f"added {name} -> {root}")
+    print(f"next: a8s define {name} <path-to-definition.json>")
+    return 0
+
+
+def cmd_agents() -> int:
+    """`a8s agents` — list every registered agent with status (defined/undefined)."""
+    reg = load_registry()
+    if not reg:
+        print("(no agents registered — use `a8s add <name> <dir>`)")
+        return 0
+    width = max(len(name) for name in reg)
+    for name in sorted(reg, key=str.lower):
+        info = reg[name]
+        root = info.get("root", "?")
+        if info.get("definition"):
+            status = f"defined ({info['definition']})"
+        else:
+            status = "UNDEFINED — run `a8s define`"
+        print(f"  {name.ljust(width)}  {root}  [{status}]")
+    return 0
+
+
+def cmd_discover(args: list[str]) -> int:
+    """`a8s discover <path>` — read-only walk for marker files. Prints suggested
+    `a8s add` / `a8s define` commands; never mutates the registry."""
+    if len(args) != 1:
+        print("usage: a8s discover <path>", file=sys.stderr)
+        return 2
+    root = Path(args[0]).expanduser()
+    if not root.is_dir():
+        print(f"not a directory: {root}", file=sys.stderr)
+        return 1
+    found = _scan_for_markers(root.resolve())
+    if not found:
+        print(f"no marker files (CLAUDE.md/GEMINI.md/CODEX.md with `# Name` line) found under {root}")
+        return 0
+    reg = load_registry()
+    registered_names = {n.lower() for n in reg}
+    registered_roots = {Path(v.get("root", "")).resolve() for v in reg.values() if v.get("root")}
+    print(f"found {len(found)} candidate(s) under {root}:\n")
+    for name, kind, dir_path in found:
+        already = name.lower() in registered_names or dir_path in registered_roots
+        marker = "  [already registered]" if already else ""
+        print(f"# {name} ({kind}) at {dir_path}{marker}")
+        if not already:
+            print(f"a8s add {name} {dir_path}")
+            print(f"a8s define {name} {default_definition_path(kind)}")
+        print()
+    return 0
+
+
 def cmd_define(args: list[str]) -> int:
     """`a8s define <name>`           — show <name>'s effective definition + source.
     `a8s define <name> <path>`       — set <name>'s definition file path in the registry.
@@ -741,14 +799,14 @@ def cmd_define(args: list[str]) -> int:
         print(f"no agent named {name!r}", file=sys.stderr)
         return 1
     info = reg[target_key]
-    kind = info.get("kind", "")
 
     if len(args) == 1:
         custom = info.get("definition")
-        if custom:
-            source = Path(custom).expanduser()
-        else:
-            source = default_definition_path(kind)
+        if not custom:
+            print(f"{target_key}: no definition set", file=sys.stderr)
+            print(f"hint: a8s define {target_key} apps/a8s/definitions/<kind>.json", file=sys.stderr)
+            return 1
+        source = Path(custom).expanduser()
         print(f"{target_key}: {source}")
         try:
             with source.open("r", encoding="utf-8") as f:
@@ -835,8 +893,8 @@ def cmd_tell(args: list[str]) -> int:
 
     sender = sender_from_cwd()
     if sender is None:
-        print("tell: current directory is not inside any registered participant", file=sys.stderr)
-        print("hint: run `a8s` from a parent of your participants to register them", file=sys.stderr)
+        print("tell: current directory is not inside any registered agent", file=sys.stderr)
+        print("hint: register the enclosing dir with `a8s add <name> <dir>`", file=sys.stderr)
         return 1
     sender_name, sender_info = sender
 
@@ -859,8 +917,8 @@ def cmd_says(args: list[str]) -> int:
 
     sender = sender_from_cwd()
     if sender is None:
-        print("says: current directory is not inside any registered participant", file=sys.stderr)
-        print("hint: run `a8s` from a parent of your participants to register them", file=sys.stderr)
+        print("says: current directory is not inside any registered agent", file=sys.stderr)
+        print("hint: register the enclosing dir with `a8s add <name> <dir>`", file=sys.stderr)
         return 1
     sender_name, sender_info = sender
 
@@ -869,36 +927,29 @@ def cmd_says(args: list[str]) -> int:
     return 0
 
 
-def cmd_clear(scan_dir: Path) -> int:
-    parts = discover(scan_dir)
-    if not parts:
-        print("no participants found")
-        return 0
+def cmd_clear(args: list[str]) -> int:
+    """`a8s clear <name>` wipes that agent's mailboxes and flags fresh on next wake.
+    Bare `a8s clear` errors with usage. (Phase 2: per-name only — was: wipe everyone.)"""
+    if not args:
+        print("usage: a8s clear <name>", file=sys.stderr)
+        print("       wipes <name>'s inbox, trash, and outbox; next wake starts fresh.", file=sys.stderr)
+        return 2
+    name = args[0]
+    parts = participants_from_registry()
+    target = find_participant(parts, name)
+    if target is None:
+        print(f"clear: no agent named {name!r}", file=sys.stderr)
+        return 1
+    ensure_mailboxes(target)
     cleared = 0
-    for p in parts:
-        ensure_mailboxes(p)
-        for d in (inbox_dir(p.name), trash_dir(p.name), outbox_dir(p.root)):
-            for f in d.iterdir():
-                if f.is_file():
-                    f.unlink()
-                    cleared += 1
-        # Defensive: wipe legacy <root>/.inbox / .trash dirs from before the
-        # mailbox-isolation change. (`.outbox` is current, handled above.)
-        for sub in (".inbox", ".trash"):
-            legacy = p.root / sub
-            if legacy.is_dir():
-                for f in legacy.iterdir():
-                    if f.is_file():
-                        f.unlink()
-                        cleared += 1
-    mark_fresh([p.root for p in parts])
-    log = _log_path()
-    log_size = log.stat().st_size if log.is_file() else 0
-    log.write_text("")
-    print(f"cleared {cleared} message(s) across {len(parts)} participant(s)")
-    if log_size:
-        print(f"truncated supervisor log ({log_size} bytes)")
-    print("next wake for each will start a new conversation")
+    for d in (inbox_dir(target.name), trash_dir(target.name), outbox_dir(target.root)):
+        for f in d.iterdir():
+            if f.is_file():
+                f.unlink()
+                cleared += 1
+    mark_fresh([target.root])
+    print(f"cleared {cleared} message(s) for {target.name}")
+    print("next wake will start a new conversation")
     return 0
 
 
@@ -993,34 +1044,20 @@ def cmd_stop() -> int:
 
 # ---------- presentation ----------
 
-def render_participants(parts: list[Participant]) -> str:
-    if not parts:
-        return "  (no participants found)"
-    width = max(len(p.name) for p in parts)
-    lines = []
-    for p in sorted(parts, key=lambda x: x.name.lower()):
-        lines.append(f"  {p.name.ljust(width)}  [{p.kind}]  {p.root}")
-    return "\n".join(lines)
-
-
 COMMANDS: list[tuple[str, str, str]] = [
-    ("step",    "",                  "Run one routing pass (deliver outboxes, drain inboxes)."),
-    ("loop",    "",                  "Run continuously until Ctrl+C or `a8s stop`."),
-    ("stop",    "",                  "Signal a running `a8s loop` to exit."),
-    ("prompt",  "<name|all> <message>",  'Queue a senderless message in <name>\'s inbox (or all). Wakes via the next step/loop pass. Use "all" to broadcast a prompt.'),
-    ("tell",    "<name> <message>",  "Direct routed message to <name>. Sender = participant enclosing CWD."),
-    ("says",    "<message>",         "Broadcast routed message to every other participant. Sender = participant enclosing CWD."),
-    ("clear",   "",                  "Wipe all mailboxes and flag every participant for fresh conversation on next wake."),
-    ("install", "",                  "Install canonical skills from apps/a8s/skills/ into each supported tool's user scope."),
-    ("logs",    "<name> [--tail N] [-f]",  "Show recent supervisor-log lines mentioning <name> (like `docker logs`). -f follows."),
-    ("define",  "<name> [<path>]",   "Show or set <name>'s definition JSON. Without <path>, prints the effective definition. With <path>, sets it in the registry."),
-]
-
-REPL_EXTRAS: list[tuple[str, str, str]] = [
-    ("(empty)", "",  "Same as `step`."),
-    ("list",    "",  "Re-discover and list participants. Alias: ls."),
-    ("help",    "",  "Show this help."),
-    ("quit",    "",  "Leave the REPL. Alias: exit."),
+    ("add",      "<name> <dir>",         "Register a new agent. Errors on duplicate name. Run `a8s define` next."),
+    ("agents",   "",                     "List every registered agent and definition status."),
+    ("discover", "<path>",               "Walk <path> for marker files; print suggested `a8s add`/`a8s define` commands. Read-only."),
+    ("define",   "<name> [<path>]",      "Show or set <name>'s definition JSON. Without <path>, prints the effective definition."),
+    ("step",     "",                     "Run one routing pass over every registered agent."),
+    ("loop",     "",                     "Run continuously until Ctrl+C or `a8s stop`."),
+    ("stop",     "",                     "Signal a running `a8s loop` to exit."),
+    ("prompt",   "<name|all> <message>", "Queue a senderless message in <name>'s inbox (or all)."),
+    ("tell",     "<name> <message>",     "Direct routed message to <name>. Sender = agent enclosing CWD."),
+    ("says",     "<message>",            "Broadcast routed message to every other agent. Sender = agent enclosing CWD."),
+    ("clear",    "<name>",               "Wipe <name>'s mailboxes and flag fresh on next wake."),
+    ("install",  "",                     "Install canonical skills into each supported tool's user scope."),
+    ("logs",     "<name> [--tail N] [-f]", "Filter the supervisor log for lines mentioning <name>."),
 ]
 
 KNOWN_COMMANDS = {name for name, _, _ in COMMANDS}
@@ -1035,81 +1072,38 @@ def _format_commands(rows: list[tuple[str, str, str]], indent: int = 2) -> str:
     )
 
 
-CLI_EPILOG = "Commands (omit for an interactive step REPL):\n" + _format_commands(COMMANDS)
-REPL_HELP = (
-    "Commands:\n"
-    + _format_commands(COMMANDS)
-    + "\n\nREPL extras:\n"
-    + _format_commands(REPL_EXTRAS)
-)
+CLI_EPILOG = "Commands:\n" + _format_commands(COMMANDS)
 
 
-def dispatch(cmd: str, args: list[str], scan_dir: Path, interval: float) -> int:
+def dispatch(cmd: str, args: list[str], interval: float) -> int:
+    if cmd == "add":
+        return cmd_add(args)
+    if cmd == "agents":
+        return cmd_agents()
+    if cmd == "discover":
+        return cmd_discover(args)
+    if cmd == "define":
+        return cmd_define(args)
     if cmd == "step":
-        step(scan_dir)
+        step()
         return 0
     if cmd == "loop":
-        return loop_mode(scan_dir, interval)
+        return loop_mode(interval)
     if cmd == "stop":
         return cmd_stop()
     if cmd == "prompt":
-        return cmd_prompt(scan_dir, args)
+        return cmd_prompt(args)
     if cmd == "tell":
         return cmd_tell(args)
     if cmd == "says":
         return cmd_says(args)
     if cmd == "clear":
-        return cmd_clear(scan_dir)
+        return cmd_clear(args)
     if cmd == "install":
         return cmd_install()
     if cmd == "logs":
         return cmd_logs(args)
-    if cmd == "define":
-        return cmd_define(args)
     raise ValueError(f"unknown command: {cmd!r}")
-
-
-# ---------- REPL ----------
-
-def repl(scan_dir: Path, interval: float) -> int:
-    print(f"a8s — scanning {scan_dir}")
-    parts = discover(scan_dir)
-    register_discovered(parts)
-    print(render_participants(parts))
-    while True:
-        try:
-            line = input("a8s> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 0
-        if not line:
-            step(scan_dir)
-            continue
-        try:
-            tokens = shlex.split(line)
-        except ValueError as e:
-            print(f"parse error: {e}")
-            continue
-        cmd, *args = tokens
-        cmd = cmd.lower()
-
-        if cmd in ("quit", "exit"):
-            return 0
-        if cmd == "help":
-            print(REPL_HELP)
-            continue
-        if cmd in ("list", "ls"):
-            print(render_participants(discover(scan_dir)))
-            continue
-        if cmd in KNOWN_COMMANDS:
-            try:
-                dispatch(cmd, args, scan_dir, interval)
-            except SystemExit:
-                raise
-            except Exception as e:
-                print(f"error: {e}")
-            continue
-        print(f"unknown command: {cmd!r} (try 'help')")
 
 
 # ---------- CLI ----------
@@ -1137,27 +1131,26 @@ def _queue_prompt(p: Participant, content: str) -> Path:
     return dest
 
 
-def cmd_prompt(scan_dir: Path, args: list[str]) -> int:
+def cmd_prompt(args: list[str]) -> int:
     if len(args) < 2:
         print("usage: a8s prompt <name|all> <message>", file=sys.stderr)
         return 2
     name, *rest = args
     prompt = " ".join(rest)
-    parts = discover(scan_dir)
-    register_discovered(parts)
+    parts = participants_from_registry()
 
     if name.strip().lower() == "all":
         if not parts:
-            print("no participants found", file=sys.stderr)
+            print("no agents registered (use `a8s add`)", file=sys.stderr)
             return 1
         for p in parts:
             _queue_prompt(p, prompt)
-        out(f"queued prompt to {len(parts)} participant(s): {_preview(prompt)}")
+        out(f"queued prompt to {len(parts)} agent(s): {_preview(prompt)}")
         return 0
 
     target = find_participant(parts, name)
     if target is None:
-        print(f"no participant named {name!r}", file=sys.stderr)
+        print(f"no agent named {name!r}", file=sys.stderr)
         return 1
     _queue_prompt(target, prompt)
     out(f"queued prompt to {target.name}: {_preview(prompt)}")
@@ -1171,7 +1164,6 @@ def main(argv: list[str]) -> int:
         epilog=CLI_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--dir", default=".", help="scan root (default: cwd)")
     parser.add_argument("--interval", type=float, default=1.0, help="loop poll interval seconds (default: 1.0)")
     parser.add_argument("--unrestricted", action="store_true",
                         help="drop per-tool gating where possible: claude switches to "
@@ -1182,20 +1174,17 @@ def main(argv: list[str]) -> int:
     parser.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
-    scan_dir = Path(args.dir).resolve()
-    if not scan_dir.is_dir():
-        print(f"not a directory: {scan_dir}", file=sys.stderr)
-        return 2
+    if args.command is None:
+        parser.print_help()
+        return 0
 
     global UNRESTRICTED
     UNRESTRICTED = bool(args.unrestricted)
     if UNRESTRICTED:
         print("[a8s] UNRESTRICTED: claude --dangerously-skip-permissions, codex --dangerously-bypass-approvals-and-sandbox", file=sys.stderr)
 
-    if args.command is None:
-        return repl(scan_dir, args.interval)
     if args.command in KNOWN_COMMANDS:
-        return dispatch(args.command, args.rest, scan_dir, args.interval)
+        return dispatch(args.command, args.rest, args.interval)
 
     print(f"unknown command: {args.command!r}", file=sys.stderr)
     return 2
