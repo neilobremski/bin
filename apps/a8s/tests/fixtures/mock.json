@@ -1,0 +1,9 @@
+{
+  "description": "Test-only mock CLI definition. Each invoke* runs the bundled mock-cli script which echoes its argv.",
+  "invokePrompt":       ["$A8S_DIR/tests/fixtures/mock-cli", "verb=prompt", "$PROMPT"],
+  "invokeMessage":      ["$A8S_DIR/tests/fixtures/mock-cli", "verb=message", "$PROMPT"],
+  "invokeMessageAlias": ["$A8S_DIR/tests/fixtures/mock-cli", "verb=messageAlias", "$PROMPT"],
+  "invokeClear":        ["$A8S_DIR/tests/fixtures/mock-cli", "verb=clear"],
+  "promptMessage": "FROM:{sender}|TO:{recipient}|MSG:{message}",
+  "promptMessageAlias": "FROM:{sender}|TO:{recipient}|ALIAS:{alias}|OTHERS:{others_count}|MSG:{message}"
+}
