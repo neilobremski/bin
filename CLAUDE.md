@@ -1,0 +1,382 @@
+# CLAUDE.md — onboarding for Claude Code (and humans) working in `~/bin/`
+
+This file captures conventions, decisions, and gotchas accumulated across the
+development of this repo. Read it before making changes. Update it when you
+learn something a future contributor would have wanted to know.
+
+## Repo shape
+
+`~/bin/` is a personal utilities repo plus one substantive sub-project (`apps/a8s/`).
+
+- **Top level** — small single-file CLIs (`tell`, `aztail`, `speak`, `ltx-video`,
+  `h`, `NMP.py`, `py-json-tool`, etc.). Each is independently usable. `install.sh`
+  adds the dir to `$PATH` and links docs/skills.
+- **`apps/a8s/`** — Agent Infinity System. Multi-module Python project, ~2200
+  LOC across 8 modules, full pytest suite. The bulk of recent work.
+- **`docs/`** — markdown for each top-level command + symlinks for skill install.
+- **`venv/`** — local Python virtualenv (gitignored). Pytest is installed there.
+  Run `python3 -m pytest ...` from anywhere; it picks up `venv` automatically
+  via the wrapper at `bin/python3`.
+
+## Conventions
+
+### Shebangs
+
+All bash scripts use `#!/usr/bin/env bash` (not `#!/bin/bash`). macOS ships
+bash 3.2.57; users with Homebrew bash get a modern version this way. Don't
+introduce `#!/bin/bash`.
+
+### Polyglot bash + PowerShell scripts
+
+Cross-platform CLIs (`a8s`, `tell`) are polyglots — the same file is valid
+bash AND PowerShell. The bash side `exec`s into Python; the PowerShell side
+finds `python3`/`python`/`py` via `Get-Command`. The pattern uses
+`echo \`# <#` >/dev/null` as a no-op for bash that opens a PowerShell
+multi-line comment. Don't add new polyglots without reading an existing one
+(e.g., `~/bin/tell`) first.
+
+### Install hook
+
+`install.sh` is sourced from a shell rc. It adds `~/bin/` to `$PATH` AND
+auto-links each `docs/<name>.md` into `~/.claude/skills/` if Claude Code is
+detected. Adding a new top-level CLI: write the script, write `docs/<name>.md`,
+the next shell session gets it as a Claude skill.
+
+### Workflow
+
+**Issues + feature branches off `main`. No direct commits to `main`.** Every
+change goes through a PR. The user squash-merges fast. After a squash, rebase
+follow-up work onto fresh `main` rather than stacking — squash hashes don't
+match the original branch's commits and stacking causes conflicts.
+
+Recovering from "PR conflicts after the previous PR squash-merged":
+
+```bash
+git checkout main && git pull --ff-only
+git branch -D <stale-branch> 2>&1 || true   # if it was already merged via squash
+git checkout -b <branch>-rebased main
+git cherry-pick <last-good-commit-from-stale-branch>
+git push --force-with-lease origin <branch>
+```
+
+Then update the PR's branch on the GitHub side.
+
+### Pre-v1 / scorch-the-earth (a8s only)
+
+`a8s` is explicitly pre-v1. **Do not write migration code.** When the schema
+changes, the user wipes `~/.a8s/` and re-derives state via `a8s discover` +
+`a8s add`. This applies to registry shape, mailbox layout, definition schema,
+and on-disk pid/log paths. The contract changes only when the user declares v1.
+
+Ask before adding any "if old field, infer new field" fallback. The right
+answer is almost always "drop the old, error on it." This is a stated user
+preference, not a hunch — see the merged history of phases 2 / 3a / 3b / 4 / 5.
+
+### Commit style
+
+- Commits prefixed `feat(a8s)` / `fix(a8s)` / `refactor(a8s)` / `test(a8s)` /
+  `docs(a8s)` per Conventional Commits. The `(a8s)` scope appears for a8s
+  changes; smaller top-level scripts use `feat(<script>)` etc.
+- Body explains the *why* and the design decision, not just the mechanical
+  *what*. The locked-design discussion in #52 was preserved across phases by
+  including the decision rationale in commit bodies.
+- Co-author trailer for AI-assisted work:
+  `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`
+
+### Code style
+
+- Default to no comments. Names should explain what; comments are only for
+  *why* something non-obvious is done. The user explicitly dislikes
+  comment-noise.
+- Avoid emojis in source unless asked.
+- Don't add abstractions that aren't being used today. Three similar lines is
+  fine; abstract on the fourth.
+- Don't add error handling for cases that can't happen. Trust internal
+  guarantees; validate at boundaries (CLI input, external APIs, filesystem).
+- Don't add backwards-compat hacks. See pre-v1 above.
+
+## a8s sub-project
+
+### What it is
+
+Filesystem-based message router that lets independent CLI sessions
+(Claude Code, Gemini CLI, Codex CLI, future humans/scripts) talk to each
+other as a team. The README in `apps/a8s/README.md` is the design overview;
+read it first.
+
+Key invariants:
+
+- **Recipient opacity** — sender doesn't know whether the recipient is a
+  Claude session, a script, or a human. Never leak this through skill
+  descriptions, prompt templates, or routing metadata.
+- **Members don't know about a8s** — drop in any project unchanged.
+  An agent just sees a `tell` shell command and wakes to messages.
+- **The filesystem is the IPC, the outbox location is the unforgeable identity.**
+  Routing force-overwrites the `from` field to the enclosing agent — agents
+  cannot spoof. Don't bypass this.
+- **One agent, one handler at a time. One handler can serve many agents.**
+  pid file at `~/.a8s/agents/<NAME>/pid` is the attachment; multiple agents
+  can point at the same PID (multi-agent handler via alias).
+
+### Module map
+
+| File | What's in it | Entry points other modules import |
+|---|---|---|
+| `apps/a8s/a8s.py` | thin entry shim (~30 lines) | `cli.main` invocation only |
+| `apps/a8s/core.py` | paths, logging, helpers, `Participant`, mutable `PRINT_LOCK`, path constants (`SCRIPT_DIR`, `DEFINITIONS_DIR`, `ENTRYPOINT`) | leaf module — no a8s imports |
+| `apps/a8s/registry.py` | `~/.a8s/a8s.json` I/O, `resolve_name` (alias resolution with diamond/cycle detection), `sender_from_cwd`, `_scan_for_markers` | depends on `core` |
+| `apps/a8s/mailbox.py` | `route_outboxes`, `ensure_mailboxes`, `_queue_prompt`, `_queue_clear_sentinel`, `_split_content_and_files`, `_write_outbox` | depends on `core`, `registry` |
+| `apps/a8s/definitions.py` | `select_verb`, `build_prompt`, `build_command`, `_expand_argv` ($PROMPT/$A8S_DIR), `load_definition`, `_autodiscover_definition` | depends on `core`, `registry` |
+| `apps/a8s/daemon.py` | `acquire`/`release` (pid files), `attached_loop`, signal handling (`_make_signal_handler`, `_kill_wake_subprocess_group`), `run_with_prefix`, `wake_once`. Mutable globals `_STOP_EVENT`/`_SIGNAL_COUNT`/`_CURRENT_WAKE_PROC` live here. Sets `core.PRINT_LOCK`. | depends on everything above |
+| `apps/a8s/commands.py` | every `cmd_*`, `_install_skill_*` for Claude/Gemini/Codex, `_expand_to_agents` | depends on everything above |
+| `apps/a8s/cli.py` | `COMMANDS` table (the source of truth for help text), `dispatch`, `main` | depends on `commands` only |
+
+### Hard constraints when refactoring
+
+- **`cmd_start` re-execs via `core.ENTRYPOINT`**, not `__file__`. After the
+  modular split, `__file__` inside `commands.py` resolves to the wrong path.
+  `core.ENTRYPOINT = SCRIPT_DIR / "a8s.py"` is the canonical re-exec target.
+- **`$A8S_DIR` placeholder** in definition argv expands via
+  `definitions._expand_argv`. Used by `default.json` to point at the bundled
+  `dummy-cli`. Don't introduce more placeholders without checking they make
+  sense across all four `invoke*` verbs.
+- **`core.PRINT_LOCK` is the cross-module log lock.** It's `None` at module
+  load and only set when `daemon.attached_loop` starts. Threading is intentional:
+  multi-agent handlers may interleave wake events. If you write a new code path
+  that calls `core.out_agent` from a new thread, make sure attached_loop is
+  the one running.
+- **`run_with_prefix` uses `start_new_session=True`** so SIGKILL targets the
+  whole subprocess group (claude/gemini/codex CLI plus any helpers it spawned).
+  Don't drop this — it's the only way the second-signal kill path works.
+
+### Surface
+
+```
+add <name> <dir> [<def>]    register an agent (auto-detects definition from marker)
+agents                       list all registered
+discover <path>              read-only scan; suggests add+define commands
+define <name> [<path>]       show or set definition
+alias <alias> <member>       add to alias (creates if new); cycles rejected
+unalias <alias> [<member>]   remove member or whole alias
+aliases                      list aliases + resolved members
+start <name>                 detached background handler (alias = ONE process for N agents)
+run <name>                   foreground handler
+step <name>                  attach, one route+drain pass, release
+stop <name>                  SIGTERM the handler (graceful; alias dedupes by PID)
+kill <name>                  etiquette-then-force: SIGTERM, grace, 2nd SIGTERM, SIGKILL
+exit                         SIGTERM every running handler
+ls                           list only running agents + their handler PIDs
+prompt <name> <message>      senderless supervisor message (raw delivery)
+tell <name> <message>        routed message (sender = agent enclosing CWD)
+clear <name>                 queue CLEAR sentinel (write-time + read-time inbox wipe)
+logs <name>... [--tail N] [-f]   merge-sorted per-agent logs
+install                      install canonical skills
+```
+
+`a8s` no-args prints help. There is no auto-discovery of agents from CWD.
+
+### State on disk
+
+```
+~/.a8s/
+├── a8s.json                  registry: { agents: {...}, aliases: {...} }
+├── log.txt                   process-scoped supervisor log (loop lifecycle, registration)
+└── agents/
+    └── <NAME>/
+        ├── inbox/            pending JSON messages (drained by wake_once)
+        ├── trash/            processed messages
+        ├── log.txt           agent-scoped log (merge-sorted by `a8s logs`)
+        └── pid               handler attachment (one or more agents may share a PID)
+
+<agent-root>/
+└── .outbox/                  agent writes here; route_outboxes re-stamps `from`
+```
+
+### The four invoke verbs
+
+`select_verb(msg)` picks one based on the message's shape:
+
+| Verb | Trigger | Body |
+|---|---|---|
+| `invokePrompt` | `from` is empty (queued by `a8s prompt`) | raw `content`, no template |
+| `invokeMessage` | `from` set, no `alias` field | `promptMessage` template formatted |
+| `invokeMessageAlias` | `from` set, `alias` field set | `promptMessageAlias` template (with `{others_count}`, `{alias}`) |
+| `invokeClear` | `clear: true` field set | no prompt; runs the CLI fresh |
+
+`build_command(definition, prompt, verb)` reads the matching `invoke*` argv
+from the definition JSON and substitutes `$PROMPT` and `$A8S_DIR`.
+
+### Definition fallback
+
+Every agent always has a definition. If the registry has no `definition` field,
+`load_definition` falls back to `apps/a8s/definitions/default.json`, which
+runs `apps/a8s/dummy-cli` (a bash script that prints "no real CLI configured"
+and echoes the prompt). Wakes never crash on missing config.
+
+`a8s add` auto-detects:
+- single marker file in dir → matching `<kind>.json`
+- multiple/no markers → `default.json` with a note in the output
+
+### Per-tool quirks
+
+- **Claude Code** — granular permissions via `--permission-mode dontAsk`
+  + `--allowedTools "Bash(tell:*) Read Edit Write ..."`. `--continue` for
+  conversation continuity. `--dangerously-skip-permissions` for unrestricted
+  (no longer baked into a8s; create a custom definition if you want it).
+- **Gemini CLI** — `--yolo` is REQUIRED in headless mode. The Policy Engine
+  TOML files at `~/.gemini/policies/*.toml` don't apply to non-interactive
+  `-p` mode (tracked upstream as `google-gemini/gemini-cli#20469`). Don't
+  remove `--yolo` until that issue is resolved.
+- **Codex CLI** — `--full-auto` for workspace-write sandbox. `resume --last`
+  for continuity. `--skip-git-repo-check` to allow running outside a git
+  repo. `stdin=subprocess.DEVNULL` is REQUIRED — codex hangs otherwise
+  (learned the hard way; see `daemon.run_with_prefix`).
+
+### SKILL.md YAML — quoted scalars only
+
+Codex's YAML parser is strict and fails silently on unquoted descriptions
+containing colons or `FILE:` lines. Always quote `name:` and `description:`
+in skill frontmatter. Tested with `apps/a8s/skills/tell/SKILL.md` — unquoted
+values silently dropped the skill on codex.
+
+### Testing
+
+```bash
+python3 -m pytest apps/a8s/tests/
+```
+
+98 tests, runs in <100ms. Test scaffold:
+
+- `apps/a8s/tests/conftest.py` — adds `apps/a8s/` to sys.path, provides
+  `fake_home` fixture that monkey-patches `HOME` to a tmp dir so tests
+  never touch the real `~/.a8s/`. Resets `core.PRINT_LOCK` between tests.
+- `apps/a8s/tests/fixtures/mock-cli` — deterministic bash echo script for
+  end-to-end daemon tests. Each argv element printed on its own line with
+  `MOCK-CLI:` prefix; tests grep the per-agent log to assert what the wake
+  subprocess actually received.
+- `apps/a8s/tests/fixtures/mock.json` — definition that routes all four
+  verbs through `mock-cli` with deterministic templates like
+  `FROM:{sender}|TO:{recipient}|MSG:{message}` so log assertions are stable.
+
+When you change behavior in `core` / `registry` / `mailbox` / `definitions` /
+`daemon`, add or modify the corresponding `test_*.py`. The pytest suite is
+fast enough to be the first feedback loop.
+
+## Active design threads
+
+The locked-design refactor (#52) is closed. The following are open:
+
+| # | State | Topic |
+|---|---|---|
+| #39 | open enhancement | Copilot CLI as 4th tool kind. Trivial after the refactor: write `copilot.json`, add `COPILOT.md` → `copilot` to `core.MARKER_FILES`. |
+| #62 | open enhancement | File transfer: `FILE:` payloads must be staged into `<recipient>/.files/`. Path-validation defense is critical (post-#62 without it = sandbox escape). |
+| #63 | open enhancement | Transparent multi-cluster routing (peer mesh). MQTT + ephemeral payload host as initial transports. Spec is implementation-agnostic. Armstrong's 5-item retrofit list (UUIDs, expiry, priority, dedup, acks) lands locally first. |
+| #65 | open bug | Agent name case-collision (`claude` vs `Claude` produces two dirs but lookups conflate them). Canonicalize at registration. |
+| #66 | open bug | pid file integrity — `os.fsync` after write + validate parsed pid. |
+| #67 | open bug | Atomic alias fan-out — adopt maildir-style `tmp/` → `new/` rename. Crash mid-fan-out leaves inconsistent state today. |
+| #68 | open enhancement | Per-agent attachment (replace process-level pid). Fixes "take-over collateral" footgun. Multiple reviewers flagged this. |
+| #69–72 | open question | Design discussions surfaced by the review panel: verb-scheme collapse vs eliminate; opacity strictness; supervision model; mailbox file format. Resolve before #63 hardens. |
+
+### What I tried that didn't work (concrete)
+
+- **Synchronous `a8s prompt`** — initial implementation woke the agent
+  directly; raced with the loop. Fixed in #45 by queueing into the inbox
+  with empty `from` and letting the normal drain pass handle it.
+- **Auto-discovery on every `step`** — early phase 2 still walked the
+  filesystem each iteration; performance was fine but the model leaked
+  (an agent dir mid-creation got picked up incomplete). Replaced with
+  registry-only iteration in phase 2.
+- **Mailboxes inside agent dirs (`<root>/.inbox/`, `<root>/.trash/`)** —
+  initial layout. Gemini agents would `ls` their own directory and surface
+  the inbox to the model. Moved to `~/.a8s/agents/<NAME>/{inbox,trash}/`
+  in phase 3a. Outbox stayed at `<root>/.outbox/` because codex's
+  `--full-auto` sandbox can only write inside the workspace.
+- **Single `--continue` argv path** — initial Claude wake used
+  `claude --resume <session-id> -p "..."` which requires explicit IDs.
+  Switched to `--continue` (resumes most recent). Don't try to use
+  `--resume` without a session ID; it errors on parse.
+- **Headless tool-use without auto-approval** — Gemini and Claude both
+  silently deny tools in headless `-p` mode without explicit flags. Symptom:
+  the wake hangs indefinitely or returns empty. `--yolo` (gemini),
+  `--permission-mode dontAsk --allowedTools "..."` (claude) are required.
+- **`a8s loop` as a singleton** — earlier design had one daemon process
+  scanning all agents. Replaced in phase 3b with per-agent (or per-alias)
+  handlers. The singleton had no path to remote (#63).
+- **The `says` broadcast verb** — phase 4 retired it. LLMs struggled to
+  pick `tell` vs `says` consistently; the dual API confused agents. Now
+  group sends use `tell <alias>` and the system fans out.
+- **The `fresh` flag** (`~/.cache/a8s/fresh.json`) — phase 5 retired it
+  along with the `consume_fresh` mechanism. Replaced with the explicit
+  CLEAR sentinel that `a8s clear` queues into the inbox.
+- **`--unrestricted` global flag** — phase 5 retired. Users wanting the
+  dangerous mode create a custom definition file and `a8s define <name>
+  <path>`. Don't add the flag back; the definition system subsumes it.
+
+### Top-level scripts: `tell`
+
+`~/bin/tell` is the polyglot shim that agents use to send messages. It
+execs into `apps/a8s/a8s.py tell ...`. There used to be a `says` polyglot
+too; it's gone. If you're considering re-adding any "broadcast" command,
+read phase-4's PR description (#58) first — the consensus was that aliases
+subsume it and the dual-verb API confuses LLMs.
+
+### When using subagents (Agent tool) for review
+
+The "review panel" exercise (5 simulated reviewers — Carmack, Spolsky, Pike,
+Armstrong, DJB) was high-signal. To repeat it for future design decisions:
+
+1. Pick reviewers whose published work directly maps to the design space.
+   For a8s the picks were: low-level pragmatism (Carmack), DX/surface (Spolsky),
+   namespace abstractions (Pike), distributed messaging (Armstrong), filesystem
+   security (DJB). Avoid overlap.
+2. Per-reviewer prompts: anchor in their published positions, not caricature.
+   Specify exact files to read, focus areas to prioritize, length cap (~500
+   words). Different reviewers get different focus areas to avoid redundant
+   feedback.
+3. Synthesize convergent findings (multiple reviewers same diagnosis = strong
+   signal) separately from unique findings (one reviewer's specific catch
+   = often a real bug). DJB's case-collision and pid race were unique and
+   real.
+
+The synthesis from this exercise lives in issues #65–72.
+
+## Common operations cheat-sheet
+
+```bash
+# Start fresh after a schema change (pre-v1 scorch-the-earth)
+rm -rf ~/.a8s/agents/ ~/.a8s/a8s.json
+a8s discover apps/a8s/tests/agents
+# (paste the suggested add commands)
+
+# Run the test suite
+python3 -m pytest apps/a8s/tests/
+
+# Smoke-test wake without burning real LLM tokens — stub run_with_prefix
+python3 -c "
+import sys; sys.path.insert(0, 'apps/a8s')
+import daemon
+captured = []
+daemon.run_with_prefix = lambda n, c, w: captured.append(c) or 0
+daemon.attached_loop(['CLAUDE'], 1.0, single_pass=True)
+print(captured)
+"
+
+# Tail the supervisor log (process-scoped events)
+tail -f ~/.a8s/log.txt
+
+# Tail per-agent activity
+a8s logs CLAUDE GEMINI -f
+```
+
+## Memory note
+
+The user has a private memory system at
+`~/.claude/projects/-Users-neilo-bin/memory/` — that's separate from this
+file. Personal preferences, ongoing project state, and feedback rules live
+there. THIS file (`CLAUDE.md`) is the public-checked-in onboarding doc.
+Don't put anything in it that would be inappropriate for a public repo.
+
+The two intersect: anything in private memory that constrains how a8s is
+designed (e.g., "no back-compat shims pre-v1") is duplicated here as a
+project rule, because contributors who don't share the memory still need
+to know it.
