@@ -12,9 +12,12 @@ Surface (CLI):
   install                     — install canonical skills into Claude / Gemini /
                                 Codex user scope
   logs <name> [--tail N] [-f] — docker-logs-style filter on the supervisor log
+  define <name> [<path>]      — show or set the JSON definition driving an agent's
+                                wake invocation + prompt formatting
 
 State:
-  ~/.a8s/a8s.json             — participant registry (name -> kind, root, aliases)
+  ~/.a8s/a8s.json             — participant registry (name -> kind, root, aliases,
+                                optional `definition` path overriding the built-in)
   ~/.a8s/mailboxes/<NAME>/    — .inbox / .trash, isolated from the agent itself
   ~/.a8s/log.txt              — supervisor log: ISO-timestamped, captures every line
                                 that goes through `out()` (including subprocess
@@ -22,6 +25,12 @@ State:
   <agent-root>/.outbox/       — agent writes here; route_outboxes re-stamps `from`
                                 to the enclosing participant on every read so an
                                 agent can't spoof the sender by hand-writing JSON
+
+Definitions:
+  apps/a8s/definitions/{claude,gemini,codex}.json — built-in defaults selected by
+                                kind; encode argv (with `$PROMPT` placeholder) for
+                                each (fresh × unrestricted) variant plus prompt
+                                templates. Override per-agent via `a8s define`.
 """
 
 from __future__ import annotations
@@ -266,21 +275,63 @@ def next_inbox_message(p: Participant) -> Path | None:
     return files[0] if files else None
 
 
-def build_prompt(msg: dict) -> str:
+DEFINITIONS_DIR = Path(__file__).resolve().parent / "definitions"
+
+
+def default_definition_path(kind: str) -> Path:
+    return DEFINITIONS_DIR / f"{kind}.json"
+
+
+def load_definition(name: str, kind: str) -> dict:
+    """Load the JSON definition for `name`. The registry may carry an explicit
+    `definition` path; otherwise fall back to the built-in default for `kind`.
+
+    Definitions encode argv (with `$PROMPT` placeholder), message templates,
+    and per-tool quirks. See apps/a8s/definitions/*.json.
+    """
+    reg = load_registry()
+    info = reg.get(name) or {}
+    custom = info.get("definition")
+    candidates: list[Path] = []
+    if custom:
+        candidates.append(Path(custom).expanduser())
+    candidates.append(default_definition_path(kind))
+    for path in candidates:
+        if path.is_file():
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    return json.loads(f.read())
+            except (OSError, json.JSONDecodeError) as e:
+                raise RuntimeError(f"definition load failed for {path}: {e}") from e
+    raise FileNotFoundError(
+        f"no definition for {name!r} (kind={kind}); "
+        f"looked in: {', '.join(str(c) for c in candidates)}"
+    )
+
+
+def build_prompt(msg: dict, definition: dict) -> str:
+    """Format a queued message into the prompt string handed to the agent CLI.
+
+    `definition` provides:
+      - `promptMessage`           — used when sender + recipient are both set (direct tell)
+      - `promptMessageBroadcast`  — used when sender is set but recipient is empty (broadcast)
+    Senderless messages (queued by `a8s prompt`) deliver `content` raw.
+    """
     sender = (msg.get("from") or "").strip()
     content = msg.get("content", "")
     date = msg.get("date", "")
     recipient = (msg.get("to") or "").strip()
     if not sender:
-        # No sender = a direct prompt (queued by `a8s prompt`); deliver raw.
+        # `a8s prompt` queued this; supervisor-direct, no template wrapping.
         header = content
     else:
-        verb_phrase = f"tells you ({recipient})" if recipient else "says"
-        header = (
-            f"[{date}] {sender} {verb_phrase}: {content}"
-            if date
-            else f"{sender} {verb_phrase}: {content}"
-        )
+        if recipient:
+            tmpl = definition.get("promptMessage") or "{sender} tells you ({recipient}): {message}"
+        else:
+            tmpl = definition.get("promptMessageBroadcast") or "{sender} says: {message}"
+        header = tmpl.format(sender=sender, recipient=recipient, message=content, date=date)
+        if date and "{date}" not in tmpl:
+            header = f"[{date}] {header}"
     parts = [header]
     files = msg.get("files") or []
     if files:
@@ -292,55 +343,33 @@ def build_prompt(msg: dict) -> str:
     return "\n".join(parts)
 
 
-CLAUDE_DEFAULT_ALLOWED_TOOLS = (
-    "Bash(tell:*) Bash(says:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite"
-)
+def _expand_argv(argv: list[str], prompt: str) -> list[str]:
+    """Expand `$PROMPT` placeholder in argv. Other env-var-style placeholders
+    are reserved for future verbs."""
+    return [a.replace("$PROMPT", prompt) for a in argv]
 
 
-def build_command(kind: str, prompt: str, fresh: bool = False) -> list[str]:
-    """Build the subprocess command for waking a participant.
+def build_command(definition: dict, prompt: str, fresh: bool = False) -> list[str]:
+    """Pick the right `invoke*` argv from `definition` based on (fresh, UNRESTRICTED)
+    and expand `$PROMPT`.
 
-    Default mode bakes in just enough permission to make headless tool use
-    work for `/tell` and routine file ops:
-      - Claude: `--permission-mode dontAsk --allowedTools <list>` so denials
-        are silent (headless prompts would hang). Per-project `.claude/settings.json`
-        permissions.allow rules layer additively on top.
-      - Gemini: `--yolo` (full auto-approval) because the Policy Engine
-        doesn't apply in headless `-p` mode (tracked upstream as
-        google-gemini/gemini-cli#20469). To revisit when fixed.
-      - Codex: `--full-auto` (workspace-write sandbox, auto-approval).
-
-    `--unrestricted` drops the gating where a stronger mode exists:
-      - Claude: `--dangerously-skip-permissions`
-      - Codex:  `--dangerously-bypass-approvals-and-sandbox`
-      - Gemini: no change (already unrestricted by necessity).
+    Phase 1 schema:
+      invoke                    — default mode, continues prior session
+      invokeFresh               — default mode, starts fresh
+      invokeUnrestricted        — `--unrestricted`, continues
+      invokeUnrestrictedFresh   — `--unrestricted`, fresh
     """
-    if kind == "claude":
-        cmd = ["claude"]
-        if UNRESTRICTED:
-            cmd.append("--dangerously-skip-permissions")
-        else:
-            cmd += ["--permission-mode", "dontAsk",
-                    "--allowedTools", CLAUDE_DEFAULT_ALLOWED_TOOLS]
-        if not fresh:
-            cmd.append("--continue")
-        cmd += ["-p", prompt]
-        return cmd
-    if kind == "gemini":
-        cmd = ["gemini", "--yolo"]
-        if not fresh:
-            cmd += ["--resume", "latest"]
-        cmd += ["--prompt", prompt]
-        return cmd
-    if kind == "codex":
-        cmd = ["codex", "exec"]
-        if not fresh:
-            cmd += ["resume", "--last"]
-        cmd.append("--dangerously-bypass-approvals-and-sandbox" if UNRESTRICTED else "--full-auto")
-        cmd.append("--skip-git-repo-check")
-        cmd.append(prompt)
-        return cmd
-    raise ValueError(f"unknown kind: {kind}")
+    if UNRESTRICTED:
+        key = "invokeUnrestrictedFresh" if fresh else "invokeUnrestricted"
+    else:
+        key = "invokeFresh" if fresh else "invoke"
+    argv = definition.get(key)
+    if not argv:
+        # Fallback: try the non-fresh variant of the same mode.
+        argv = definition.get("invokeUnrestricted" if UNRESTRICTED else "invoke")
+    if not argv:
+        raise ValueError(f"definition missing {key!r} (and fallback)")
+    return _expand_argv(list(argv), prompt)
 
 
 def _cache_dir() -> Path:
@@ -494,13 +523,20 @@ def wake_once(p: Participant, msg_path: Path) -> None:
         msg_path.rename(bad)
         return
 
-    prompt = build_prompt(msg)
+    try:
+        definition = load_definition(p.name, p.kind)
+    except (FileNotFoundError, RuntimeError) as e:
+        out(f"[{p.name}] {e}")
+        bad = unique_path(trash_dir(p.name) / msg_path.name)
+        msg_path.rename(bad)
+        return
+    prompt = build_prompt(msg, definition)
     trashed = unique_path(trash_dir(p.name) / msg_path.name)
     msg_path.rename(trashed)
     fresh = consume_fresh(p.root)
     flag = " (fresh)" if fresh else ""
     out(f"[{p.name}] waking from {trashed.name}{flag}: {_preview(msg.get('content', ''))}")
-    cmd = build_command(p.kind, prompt, fresh=fresh)
+    cmd = build_command(definition, prompt, fresh=fresh)
     run_with_prefix(p.name, cmd, p.root)
 
 
@@ -685,6 +721,60 @@ def _install_skill_codex(skill_dir: Path) -> str:
         return f"  codex: {target} exists and is not a symlink; refusing to overwrite"
     target.symlink_to(src)
     return f"  codex: linked '{skill_name}' at {target}"
+
+
+def cmd_define(args: list[str]) -> int:
+    """`a8s define <name>`           — show <name>'s effective definition + source.
+    `a8s define <name> <path>`       — set <name>'s definition file path in the registry.
+    """
+    if not args:
+        print("usage: a8s define <name> [<path-to-definition.json>]", file=sys.stderr)
+        return 2
+    name = args[0]
+    reg = load_registry()
+    target_key: str | None = None
+    for k in reg:
+        if k.lower() == name.lower():
+            target_key = k
+            break
+    if target_key is None:
+        print(f"no agent named {name!r}", file=sys.stderr)
+        return 1
+    info = reg[target_key]
+    kind = info.get("kind", "")
+
+    if len(args) == 1:
+        custom = info.get("definition")
+        if custom:
+            source = Path(custom).expanduser()
+        else:
+            source = default_definition_path(kind)
+        print(f"{target_key}: {source}")
+        try:
+            with source.open("r", encoding="utf-8") as f:
+                sys.stdout.write(f.read())
+        except OSError as e:
+            print(f"(could not read: {e})", file=sys.stderr)
+            return 1
+        return 0
+
+    if len(args) > 2:
+        print("usage: a8s define <name> [<path-to-definition.json>]", file=sys.stderr)
+        return 2
+    path = Path(args[1]).expanduser().resolve()
+    if not path.is_file():
+        print(f"not a file: {path}", file=sys.stderr)
+        return 1
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            json.loads(f.read())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"definition is not valid JSON: {e}", file=sys.stderr)
+        return 1
+    info["definition"] = str(path)
+    save_registry(reg)
+    print(f"{target_key}: definition set to {path}")
+    return 0
 
 
 def cmd_install() -> int:
@@ -923,6 +1013,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("clear",   "",                  "Wipe all mailboxes and flag every participant for fresh conversation on next wake."),
     ("install", "",                  "Install canonical skills from apps/a8s/skills/ into each supported tool's user scope."),
     ("logs",    "<name> [--tail N] [-f]",  "Show recent supervisor-log lines mentioning <name> (like `docker logs`). -f follows."),
+    ("define",  "<name> [<path>]",   "Show or set <name>'s definition JSON. Without <path>, prints the effective definition. With <path>, sets it in the registry."),
 ]
 
 REPL_EXTRAS: list[tuple[str, str, str]] = [
@@ -973,6 +1064,8 @@ def dispatch(cmd: str, args: list[str], scan_dir: Path, interval: float) -> int:
         return cmd_install()
     if cmd == "logs":
         return cmd_logs(args)
+    if cmd == "define":
+        return cmd_define(args)
     raise ValueError(f"unknown command: {cmd!r}")
 
 

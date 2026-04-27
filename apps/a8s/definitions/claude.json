@@ -1,0 +1,29 @@
+{
+  "description": "Claude Code default — granular permissions, continues prior session.",
+  "invoke": [
+    "claude",
+    "--permission-mode", "dontAsk",
+    "--allowedTools", "Bash(tell:*) Bash(says:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
+    "--continue",
+    "-p", "$PROMPT"
+  ],
+  "invokeFresh": [
+    "claude",
+    "--permission-mode", "dontAsk",
+    "--allowedTools", "Bash(tell:*) Bash(says:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
+    "-p", "$PROMPT"
+  ],
+  "invokeUnrestricted": [
+    "claude",
+    "--dangerously-skip-permissions",
+    "--continue",
+    "-p", "$PROMPT"
+  ],
+  "invokeUnrestrictedFresh": [
+    "claude",
+    "--dangerously-skip-permissions",
+    "-p", "$PROMPT"
+  ],
+  "promptMessage": "{sender} tells you ({recipient}): {message}",
+  "promptMessageBroadcast": "{sender} says: {message}"
+}
