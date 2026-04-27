@@ -17,22 +17,33 @@ The win at scale: a team of agents that share knowledge through ordinary convers
 
 ## Mental model
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        ~/.a8s/                                      │
-│                                                                     │
-│   a8s.json     ┌─────── agents/CLAUDE/ ─────┐  ┌── log.txt ──┐      │
-│   (registry)   │ inbox/ trash/ log.txt pid │  │  process    │      │
-│                └────────────────────────────┘  │  events     │      │
-│   { agents,    ┌─────── agents/GEMINI/ ─────┐  └─────────────┘      │
-│     aliases }  │ inbox/ trash/ log.txt pid │                        │
-│                └────────────────────────────┘                       │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph A["Agent's own dir &nbsp;<i>(~/projects/foo/)</i>"]
+        direction TB
+        marker["CLAUDE.md / GEMINI.md / CODEX.md<br/><i>marker file</i>"]
+        outbox[".outbox/<br/><i>agent writes here</i>"]
+    end
 
-┌──────────── agent root: ~/projects/foo/ ─────────────┐
-│   CLAUDE.md  (or GEMINI.md, CODEX.md — marker file)  │
-│   .outbox/   (agent writes JSON; routed by handler)  │
-└──────────────────────────────────────────────────────┘
+    subgraph H["~/.a8s/ &nbsp;<i>(a8s-managed state)</i>"]
+        direction TB
+        reg["a8s.json<br/><i>registry — agents + aliases</i>"]
+        slog["log.txt<br/><i>process-scoped supervisor log</i>"]
+        subgraph AG["agents/&lt;NAME&gt;/"]
+            direction TB
+            ib["inbox/"]
+            tr["trash/"]
+            alog["log.txt"]
+            pid["pid"]
+        end
+    end
+
+    handler(("handler<br/>process"))
+
+    outbox ==>|"route_outboxes"| ib
+    ib ==>|"wake_once<br/>(after subprocess returns)"| tr
+    pid -.-|"holds attachment"| handler
+    handler -.-|"writes"| alog
 ```
 
 Three concepts:
