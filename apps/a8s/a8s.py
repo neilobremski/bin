@@ -835,7 +835,7 @@ def release(name: str) -> None:
         pass
 
 
-# ---------- attached loop (the daemon body for one agent) ----------
+# ---------- attached loop (the daemon body for one or more agents) ----------
 
 # Shared state for the signal handler. Set when an attached loop is running.
 _STOP_EVENT: threading.Event | None = None
@@ -866,76 +866,119 @@ def _kill_wake_subprocess_group() -> None:
             pass
 
 
-def _make_signal_handler(name: str):
+def _make_signal_handler(label: str):
     def handle(signum, _frame):
         global _SIGNAL_COUNT
         _SIGNAL_COUNT += 1
         if _SIGNAL_COUNT == 1:
             sys.stderr.write(
-                f"[a8s] {name}: received signal {signum}; detaching after current wake\n"
+                f"[a8s] {label}: received signal {signum}; detaching after current wake\n"
             )
             sys.stderr.flush()
             if _STOP_EVENT is not None:
                 _STOP_EVENT.set()
         else:
             sys.stderr.write(
-                f"[a8s] {name}: second signal — killing wake subprocess group\n"
+                f"[a8s] {label}: second signal — killing wake subprocess group\n"
             )
             sys.stderr.flush()
             _kill_wake_subprocess_group()
     return handle
 
 
-def attached_loop(name: str, interval: float, *, single_pass: bool = False) -> int:
-    """Body of `a8s run` / `a8s start` (and `a8s step` when single_pass=True).
-    Attaches as handler of <name>, then in-loop:
+def attached_loop(names: list[str], interval: float, *, single_pass: bool = False) -> int:
+    """Body of `a8s run` / `a8s start` / `a8s step`. ONE process handles every
+    name in `names` (multiple agents share the same handler PID, recorded in
+    each agent's `~/.a8s/agents/<NAME>/pid`).
+
+    Per iteration:
       - reload registry (so newly-added agents become routable recipients)
-      - route this agent's outbox
-      - drain this agent's inbox (one wake at a time)
-      - sleep `interval` (skipped if single_pass)
-    On signal, finishes the current wake, releases, exits."""
+      - check each handled agent's pid file is still ours (drop if taken over)
+      - route each handled agent's outbox to recipients
+      - drain each handled agent's inbox
+
+    On 1st signal: detach all currently-handled agents (graceful — finish the
+    in-flight wake first). On 2nd signal: SIGTERM-then-SIGKILL the wake
+    subprocess group.
+
+    Take-over collateral: SIGTERM is process-level, so when one of our handled
+    agents is targeted by another `a8s start`, this whole handler detaches
+    everything. Other agents in our set become orphaned. The user's footgun;
+    document and move on (documented in #52)."""
     global _STOP_EVENT, _SIGNAL_COUNT, PRINT_LOCK
     PRINT_LOCK = threading.Lock()
     _STOP_EVENT = threading.Event()
     _SIGNAL_COUNT = 0
 
+    if not names:
+        print("attached_loop: empty names list", file=sys.stderr)
+        return 2
+
+    # Acquire each pid file. If any fails (timeout), release whatever we got.
+    acquired: list[str] = []
     try:
-        acquire(name)
+        for name in names:
+            acquire(name)
+            acquired.append(name)
     except TimeoutError as e:
         print(str(e), file=sys.stderr)
+        for n in acquired:
+            release(n)
         return 1
 
-    handler = _make_signal_handler(name)
+    label = names[0] if len(names) == 1 else f"[{', '.join(names)}]"
+    handler = _make_signal_handler(label)
     prev_sigterm = signal.signal(signal.SIGTERM, handler)
     prev_sigint = signal.signal(signal.SIGINT, handler)
 
-    out_agent(name, f"[a8s] {name}: attached (PID {os.getpid()})")
+    pid = os.getpid()
+    for n in names:
+        out_agent(n, f"[a8s] {n}: attached (PID {pid}{', shared' if len(names) > 1 else ''})")
     try:
         while not _STOP_EVENT.is_set():
             try:
                 all_agents = participants_from_registry()
-                me = next((p for p in all_agents if p.name == name), None)
-                if me is None:
-                    out_agent(name, f"[a8s] {name}: agent removed from registry; exiting")
+                # Filter to agents we still hold and that still exist.
+                handled: list[Participant] = []
+                for name in list(names):
+                    p = next((q for q in all_agents if q.name == name), None)
+                    if p is None:
+                        out_agent(name, f"[a8s] {name}: removed from registry; dropping")
+                        names.remove(name)
+                        continue
+                    holder = _read_handler_pid(name)
+                    if holder is not None and holder != pid:
+                        out_agent(name, f"[a8s] {name}: detaching (taken over by PID {holder})")
+                        names.remove(name)
+                        continue
+                    handled.append(p)
+                if not handled:
+                    out_agent(label, f"[a8s] {label}: nothing left to handle; exiting")
                     break
-                ensure_mailboxes(me)
-                route_outboxes([me], all_agents=all_agents)
-                while not _STOP_EVENT.is_set():
-                    msg = next_inbox_message(me)
-                    if msg is None:
-                        break
-                    wake_once(me, msg)
+                for p in handled:
+                    ensure_mailboxes(p)
+                route_outboxes(handled, all_agents=all_agents)
+                for p in handled:
+                    while not _STOP_EVENT.is_set():
+                        msg = next_inbox_message(p)
+                        if msg is None:
+                            break
+                        wake_once(p, msg)
             except Exception as e:
-                out_agent(name, f"[a8s] {name}: iteration error: {e}")
+                out_agent(label, f"[a8s] {label}: iteration error: {e}")
             if single_pass:
                 break
             _STOP_EVENT.wait(interval)
     finally:
-        release(name)
+        # Release every pid file we still hold.
+        for n in acquired:
+            holder = _read_handler_pid(n)
+            if holder is None or holder == pid:
+                release(n)
+                out_agent(n, f"[a8s] {n}: detached")
         signal.signal(signal.SIGTERM, prev_sigterm)
         signal.signal(signal.SIGINT, prev_sigint)
         _STOP_EVENT = None
-        out_agent(name, f"[a8s] {name}: detached")
     return 0
 
 
@@ -1534,132 +1577,149 @@ def _expand_to_agents(name: str) -> list[str] | None:
 
 
 def cmd_run(args: list[str], interval: float) -> int:
-    """`a8s run <name>` — foreground attached loop. Attaches as the handler
-    (asks any existing handler to detach). Aliases are not allowed in run —
-    use `a8s start <alias>` for backgrounded multi-agent. Ctrl+C: graceful
-    detach. Second Ctrl+C: kills the wake subprocess group."""
+    """`a8s run <name>` — foreground attached loop. <name> may be an agent or
+    an alias; aliases produce ONE process that handles every member (each
+    member's pid file points at this PID). Ctrl+C: graceful detach. 2nd
+    Ctrl+C: kills the wake subprocess group."""
     if len(args) != 1:
         print("usage: a8s run <name>", file=sys.stderr)
-        return 2
-    name = args[0]
-    try:
-        kind, members = resolve_name(name)
-    except KeyError:
-        print(f"run: no agent or alias named {name!r}", file=sys.stderr)
-        return 1
-    except ValueError as e:
-        print(f"run: {e}", file=sys.stderr)
-        return 1
-    if kind == "alias":
-        print(f"run: {name!r} is an alias of {len(members)} — use `a8s start {name}` for multi-agent", file=sys.stderr)
-        return 1
-    return attached_loop(members[0], interval)
-
-
-def cmd_start(args: list[str]) -> int:
-    """`a8s start <name>` — spawn a detached background process. If <name> is
-    an alias, fork one process per member (per locked design Q4: 'same as
-    starting twice')."""
-    if len(args) != 1:
-        print("usage: a8s start <name>", file=sys.stderr)
         return 2
     members = _expand_to_agents(args[0])
     if members is None:
         return 1
-    for member in members:
-        cmd = [sys.executable, str(Path(__file__).resolve()), "run", member]
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        print(f"started {member} as PID {proc.pid}")
+    return attached_loop(members, interval)
+
+
+def cmd_start(args: list[str]) -> int:
+    """`a8s start <name>` — spawn ONE detached background process. The child
+    runs `a8s run <name>` and (if <name> is an alias) handles every member in
+    a single process. Returns the child's PID."""
+    if len(args) != 1:
+        print("usage: a8s start <name>", file=sys.stderr)
+        return 2
+    name = args[0]
+    # Validate (resolve_name raises if unknown / cycle).
+    try:
+        _, members = resolve_name(name)
+    except KeyError:
+        print(f"start: no agent or alias named {name!r}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"start: {e}", file=sys.stderr)
+        return 1
+    if not members:
+        print(f"start: {name!r} resolves to no agents", file=sys.stderr)
+        return 1
+    cmd = [sys.executable, str(Path(__file__).resolve()), "run", name]
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    if len(members) == 1:
+        print(f"started {members[0]} as PID {proc.pid}")
+    else:
+        print(f"started {name} (alias of {len(members)}) as PID {proc.pid}")
     return 0
 
 
 def cmd_step(args: list[str], interval: float) -> int:
     """`a8s step <name>` — attach as handler, one route+drain pass, release.
-    For aliases, repeats sequentially across each member."""
+    Aliases handled in a single process: one acquire across all members, one
+    pass, one release."""
     if len(args) != 1:
         print("usage: a8s step <name>", file=sys.stderr)
         return 2
     members = _expand_to_agents(args[0])
     if members is None:
         return 1
-    for member in members:
-        rc = attached_loop(member, interval, single_pass=True)
-        if rc != 0:
-            return rc
-    return 0
+    return attached_loop(members, interval, single_pass=True)
 
 
 def cmd_stop(args: list[str]) -> int:
-    """`a8s stop <name>` — SIGTERM the handler. For aliases, signals each
-    member's handler. Graceful detach: each daemon finishes its current wake."""
+    """`a8s stop <name>` — SIGTERM the handler(s). One handler may serve
+    multiple members of an alias; we dedupe by PID so we signal each unique
+    handler exactly once. Detaches the WHOLE handler (collateral on any other
+    members it was handling)."""
     if len(args) != 1:
         print("usage: a8s stop <name>", file=sys.stderr)
         return 2
     members = _expand_to_agents(args[0])
     if members is None:
         return 1
-    sent = 0
-    for member in members:
-        pid = _read_handler_pid(member)
+    seen_pids: dict[int, str] = {}
+    not_running: list[str] = []
+    for name in members:
+        pid = _read_handler_pid(name)
         if pid is None:
-            print(f"{member}: not running", file=sys.stderr)
+            not_running.append(name)
             continue
+        if pid not in seen_pids:
+            seen_pids[pid] = name
+    if not seen_pids:
+        for n in not_running:
+            print(f"{n}: not running", file=sys.stderr)
+        return 1
+    for pid, label in seen_pids.items():
         try:
             os.kill(pid, signal.SIGTERM)
+            print(f"{label}: sent SIGTERM to PID {pid}")
         except OSError as e:
-            print(f"{member}: could not signal PID {pid}: {e}", file=sys.stderr)
-            continue
-        print(f"{member}: sent SIGTERM to PID {pid}")
-        sent += 1
-    return 0 if sent > 0 or not members else 1
+            print(f"{label}: could not signal PID {pid}: {e}", file=sys.stderr)
+    for n in not_running:
+        print(f"{n}: not running")
+    return 0
 
 
 def cmd_kill(args: list[str]) -> int:
-    """`a8s kill <name>` — etiquette-then-force per member."""
+    """`a8s kill <name>` — etiquette-then-force per unique handler PID."""
     if len(args) != 1:
         print("usage: a8s kill <name>", file=sys.stderr)
         return 2
     members = _expand_to_agents(args[0])
     if members is None:
         return 1
+    seen_pids: dict[int, str] = {}
+    for name in members:
+        pid = _read_handler_pid(name)
+        if pid is not None and pid not in seen_pids:
+            seen_pids[pid] = name
+    if not seen_pids:
+        for name in members:
+            print(f"{name}: not running", file=sys.stderr)
+        return 1
     import time as _time
-    for member in members:
-        pid = _read_handler_pid(member)
-        if pid is None:
-            print(f"{member}: not running", file=sys.stderr)
-            continue
-        print(f"{member}: SIGTERM PID {pid} (graceful)")
+    for pid, label in seen_pids.items():
+        print(f"{label}: SIGTERM PID {pid} (graceful)")
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             continue
         _time.sleep(0.5)
         if _pid_alive(pid):
-            print(f"{member}: still alive — second SIGTERM (forces subprocess group kill)")
+            print(f"{label}: still alive — second SIGTERM (forces subprocess group kill)")
             try:
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
                 continue
             _time.sleep(0.5)
         if _pid_alive(pid):
-            print(f"{member}: still alive — SIGKILL")
+            print(f"{label}: still alive — SIGKILL")
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        p = pid_path(member)
-        if p.is_file():
-            try:
-                if int(p.read_text().strip()) == pid:
-                    p.unlink()
-            except (OSError, ValueError):
-                pass
+        # Clean up any pid files still pointing at this dead PID.
+        for name in members:
+            p = pid_path(name)
+            if p.is_file():
+                try:
+                    if int(p.read_text().strip()) == pid:
+                        p.unlink()
+                except (OSError, ValueError):
+                    pass
     return 0
 
 
@@ -1710,11 +1770,11 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("alias",    "[<alias> <member>]",   "Add member to alias (creates if new). Bare lists all aliases. Members may be agents or other aliases."),
     ("unalias",  "<alias> [<member>]",   "Remove a member from alias, or remove the whole alias."),
     ("aliases",  "",                     "List every alias and its members."),
-    ("start",    "<name>",               "Detached background process handling <name>. Aliases fork one process per member."),
-    ("run",      "<name>",               "Foreground attached loop handling <name>. Aliases not allowed (use start). Ctrl+C: graceful detach. 2nd Ctrl+C: kill subprocess group."),
-    ("step",     "<name>",               "Attach as handler, one route+drain pass, release. Aliases iterate sequentially. Heavyweight: detaches current handler."),
-    ("stop",     "<name>",               "SIGTERM the handler. Aliases signal each member's handler. Graceful detach."),
-    ("kill",     "<name>",               "SIGTERM (graceful), brief grace, then 2nd SIGTERM (kills subprocess group), SIGKILL fallback. Aliases iterate."),
+    ("start",    "<name>",               "Detached background process handling <name>. Aliases produce ONE process handling all members (each member's pid file points at it)."),
+    ("run",      "<name>",               "Foreground attached loop. Aliases produce one process handling all members (interleaved output). Ctrl+C: graceful detach. 2nd Ctrl+C: kill subprocess group."),
+    ("step",     "<name>",               "Attach as handler, one route+drain pass across all members, release. Heavyweight: detaches current handler."),
+    ("stop",     "<name>",               "SIGTERM each unique handler PID (one signal per multi-agent handler). Graceful detach — collateral on other members of the same handler."),
+    ("kill",     "<name>",               "Per unique handler PID: SIGTERM, brief grace, 2nd SIGTERM (kills subprocess group), SIGKILL fallback."),
     ("exit",     "",                     "SIGTERM every running handler. Each detaches gracefully on its own."),
     ("ls",       "",                     "List only running agents and their handler PIDs."),
     ("prompt",   "<name> <message>",     "Queue a senderless message. <name> may be an agent or alias (queues per member)."),
