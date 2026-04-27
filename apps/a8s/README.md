@@ -1,274 +1,251 @@
 # a8s — Agent Infinity System
 
-Filesystem-based message routing between independent Claude Code, Gemini, and Codex project directories. Plug in any existing project as a participant; a8s does the bookkeeping.
+A lightweight way to wire multiple agents — Claude Code sessions, Gemini CLI projects, codex sessions, plain scripts, eventually humans — into a team that can talk to each other.
 
-## Design principles
+> **Status: pre-v1.** Surface and storage layout will keep changing without migration paths until the design settles.
 
-1. **Generic participants.** Participants do not need to know they are part of a8s. Drop in any existing Claude Code / Gemini / Codex project directory unchanged. The only thing a participant must know is how to use the `/tell` skill — and that is installed at the tool's user scope, not into the project itself.
+## Why
 
-2. **Recipient transparency.** A `/tell` recipient may be another assistant *or* a human reading messages by hand. Senders cannot tell which. Skill descriptions, wake-up prompts, and any user-facing copy inside the system avoid the word "agent" — they say `<name>`, "recipient," or "participant" instead. (Internal a8s code/docs may still call them agents.)
+Modern agent tooling like Claude Code's subagents is great inside one process and one tool's permission model. But:
 
-3. **Zero project footprint.** Skills are installed at user scope:
-   - Claude Code: `~/.claude/commands/tell.md`
-   - Gemini: `~/.gemini/commands/tell.toml`
-   - Codex: equivalent user-scope location (TBD)
+- **Process and machine boundaries matter.** One agent might need codex's workspace-write sandbox; another might need Claude with a narrow allowlist; another might need to run on a different machine entirely. Cramming them into a single host process is the wrong abstraction.
+- **Members shouldn't have to know about a8s.** Drop in any existing project unchanged. The agent just sees a `tell` command and wakes to messages — same shape whether it's a Claude session, a Python program, or (someday) an SMS gateway routing to a human.
+- **Recipient opacity is the load-bearing invariant.** The sender doesn't know whether the recipient is a Claude session, a script, or a person on the other end of an email-to-message bridge. That's how this scales — anywhere the abstraction fits, you plug in.
+- **Eventually, one fabric across machines.** Tracked in #63: two a8s clusters on the same network see each other and route messages as peers. The local design today is shaped to accommodate that without breaking.
 
-   a8s never writes into the user's project directories — with one exception below.
+The win at scale: a team of agents that share knowledge through ordinary conversation grows faster than a collection of silos, and you interact with all of them through one verb (`tell`).
 
-4. **Mailboxes are split: outbox local, inbox/trash isolated.** `.inbox/` and `.trash/` live under `~/.a8s/mailboxes/<NAME>/` — the agent never sees them and only interacts with messaging through the `tell` / `says` skills. `.outbox/` lives **inside** the agent's project root because the agent has to write to it, and a strict workspace sandbox (e.g. codex `--full-auto`) can only write within its own workdir. Routing re-stamps the `from` field to the enclosing participant's name on every read, so an agent can't spoof a senderless prompt or impersonate another sender by writing a hand-crafted JSON.
+## Mental model
 
-5. **Each participant runs with CWD set to its own root** so its own settings (`.claude/settings*`, `.gemini/`, etc.) load correctly.
+```mermaid
+flowchart LR
+    subgraph A["Agent's own dir &nbsp;<i>(~/projects/foo/)</i>"]
+        direction TB
+        marker["CLAUDE.md / GEMINI.md / CODEX.md<br/><i>marker file</i>"]
+        outbox[".outbox/<br/><i>agent writes here</i>"]
+    end
 
-## What a8s does
+    subgraph H["~/.a8s/ &nbsp;<i>(a8s-managed state)</i>"]
+        direction TB
+        reg["a8s.json<br/><i>registry — agents + aliases</i>"]
+        slog["log.txt<br/><i>process-scoped supervisor log</i>"]
+        subgraph AG["agents/&lt;NAME&gt;/"]
+            direction TB
+            ib["inbox/"]
+            tr["trash/"]
+            alog["log.txt"]
+            pid["pid"]
+        end
+    end
 
-- Scans one or more directories for participant roots — directories containing `CLAUDE.md`, `GEMINI.md`, or `CODEX.md`. Default scan root is the current directory; override with `--dir <path>`.
-- Maps each participant's name (and aliases) to its directory.
-- Watches each participant's `<root>/.outbox/` for outgoing message JSON; routes them to the recipient's `~/.a8s/mailboxes/<NAME>/.inbox/`. On read, the `from` field is force-set to the actual enclosing participant's name (defense against an agent spoofing the sender by hand-writing JSON).
-- When a participant's inbox has messages, launches the participant with a prompt built from the **first** message and immediately moves that message to its `.trash/` (also under `~/.a8s/mailboxes/<NAME>/`).
-- Enforces single-instance-per-name (the same name cannot run concurrently with itself).
-- After a participant process exits, re-checks its inbox; if more messages remain, prompt again.
-- Captures stdout/stderr and prefixes each line with `NAME> `.
+    handler(("handler<br/>process"))
 
-### Name parsing
-
-The first `#` heading line of the marker file gives the name, stopping at the first special character.
-
-| First line                                          | Name      |
-| --------------------------------------------------- | --------- |
-| `# CLAUDE.md`                                       | `CLAUDE`  |
-| `# GEMINI.md: Digital Organism Workspace Mandates`  | `GEMINI`  |
-| `# code review notebook`                            | `code`    |
-
-If two participants resolve to the same name, they are numbered by directory creation date: `CLAUDE 1`, `CLAUDE 2`, …
-
-### Subprocess invocation
-
-a8s wakes participants by resuming their latest conversation:
-
-Each is invoked with CWD = the participant's directory. The exact flags depend on whether the participant is being resumed (default) or started fresh (after `clear`), and whether `a8s` was launched with `--unrestricted`.
-
-| Type   | Default                                                                                                                              | `--unrestricted`                                                                                                       |
-| ------ | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| Claude | `claude --permission-mode dontAsk --allowedTools "<list>" [--continue] -p "<prompt>"`                                                | `claude --dangerously-skip-permissions [--continue] -p "<prompt>"`                                                     |
-| Gemini | `gemini --yolo [--resume latest] --prompt "<prompt>"`                                                                                | (same — see below)                                                                                                     |
-| Codex  | `codex exec [resume --last] --full-auto --skip-git-repo-check "<prompt>"`                                                            | `codex exec [resume --last] --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "<prompt>"`               |
-
-The bracketed flags appear unless a fresh start was queued by `a8s clear` (or it's the first wake of a participant with no prior session — claude needs `clear` first; gemini and codex tolerate missing history).
-
-### Permission model per tool
-
-Headless tool use is the whole point of waking a participant — to deliver a message and let it act on it, including using `/tell` to reply. The default mode is the *minimum* permissive setting that lets each tool actually run tools without hanging:
-
-**Claude — granular allowlist.**
-
-Default flags: `--permission-mode dontAsk --allowedTools "<list>"`. `dontAsk` denies everything by default (silently — no prompts that would hang in `-p` mode), and `--allowedTools` pre-approves the tools we ship with. The current default list:
-
-```
-Bash(tell:*) Bash(says:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite
+    outbox ==>|"route_outboxes"| ib
+    ib ==>|"wake_once<br/>(after subprocess returns)"| tr
+    pid -.-|"holds attachment"| handler
+    handler -.-|"writes"| alog
 ```
 
-To extend per project, add to `<participant>/.claude/settings.json`:
+Three concepts:
 
-```json
-{ "permissions": { "allow": ["Bash(npm test:*)", "Bash(git diff:*)"] } }
+- **Registry** (`~/.a8s/a8s.json`) — the list of agents and aliases. Agents have a name, a directory, and a *definition* (a JSON file describing how to wake them).
+- **Handlers** — a process that holds the attachment for one or more agents. Pid file at `~/.a8s/agents/<NAME>/pid`. One agent is handled by exactly one process at a time, but one process can handle many agents (typically by attaching to an alias).
+- **Mailboxes** — agents write to `<agent-root>/.outbox/`; routing copies into `~/.a8s/agents/<RECIPIENT>/inbox/`; the handler drains the inbox by waking the agent's CLI. Routing is process-agnostic — only waking requires the handler attachment.
+
+The router doesn't trust the sender. The `from` field is force-overwritten to the actual enclosing agent at routing time. An agent can't impersonate another by hand-writing JSON.
+
+## Quickstart
+
+```bash
+# Find candidate agents.
+a8s discover ~/projects
+
+# Register them. Auto-detects the right definition from the marker file
+# (CLAUDE.md / GEMINI.md / CODEX.md).
+a8s add CLAUDE ~/projects/code-review
+a8s add GEMINI ~/projects/research
+
+# Optional: group them.
+a8s alias devs CLAUDE
+a8s alias devs GEMINI
+
+# Background daemon handling both members of the alias in one process.
+a8s start devs
+
+# See what's running.
+a8s ls
+#   CLAUDE  PID 12345  /Users/me/projects/code-review
+#   GEMINI  PID 12345  /Users/me/projects/research
+
+# Send messages. From anywhere, you can `a8s tell` directly.
+# From inside an agent's own root, the agent can use the `tell` skill.
+cd ~/projects/code-review
+tell GEMINI "look at lines 40-80 of foo.py"
+tell devs   "stand-up at 3pm"
+
+# Read what each agent is doing.
+a8s logs CLAUDE GEMINI --tail 20
+
+# Stop the daemon (graceful — finishes the current wake first).
+a8s stop devs
 ```
 
-These rules *layer on top* of a8s's default allowlist — settings.json applies in headless mode.
-
-**Gemini — `--yolo` only.**
-
-Gemini has a TOML Policy Engine for granular allowlisting (`~/.gemini/policies/*.toml` with `commandPrefix = "tell"` rules), but the engine **does not currently apply in headless `-p` mode** — see [`google-gemini/gemini-cli#20469`](https://github.com/google-gemini/gemini-cli/issues/20469). Until that's fixed upstream, `--yolo` is the only way to enable tools in non-interactive mode. Track and revisit.
-
-**Codex — workspace sandbox.**
-
-`--full-auto` runs codex in a workspace-write sandbox with auto-approval — it can edit files in the project tree but not outside, and won't prompt for any tool. `--unrestricted` drops the sandbox to full-bypass for cases where codex needs to touch files outside its workspace.
-
-### Trust boundary
-
-A participant woken by a8s can run arbitrary commands within whatever permission scope its tool grants. Treat each participant directory as a trust boundary; do not register projects you wouldn't trust to run unattended.
-
-### `--unrestricted`
-
-`a8s --unrestricted [step|loop|...]` drops every available gate:
-- Claude → `--dangerously-skip-permissions` (allowlist no longer enforced)
-- Codex → `--dangerously-bypass-approvals-and-sandbox` (sandbox dropped)
-- Gemini → no change (already maxed out due to upstream limitation)
+That's the full loop. Members don't know they're "in a8s" — they just see a `tell` command available in their shell and wake to messages the same way they wake to any prompt.
 
 ## Commands
 
-| Command                               | Behavior                                                                                                                                                |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `a8s` (no arguments)                  | **Step mode.** Run one pass of the routing loop, prompt for input, repeat — similar to `psql`. Good for interactive testing without multiple terminals. |
-| `a8s loop [names...]`                 | Run continuously until `Ctrl+C` or a sibling `a8s stop`.                                                                                                |
-| `a8s prompt <name> "<message>"`       | Queue a **senderless** message in `<name>`'s inbox. The next `step`/`loop` pass wakes `<name>` and delivers the raw prompt (no `from:` wrapper). Safe to run while `a8s loop` is active in another terminal. |
-| `a8s prompt all "<message>"`          | Same, but queue the message in **every** discovered participant's inbox. Useful for roll calls and global instructions.                                 |
-| `a8s clear`                           | Wipe every participant's mailbox dirs and flag each for a fresh conversation on its next wake.                                                          |
-| `a8s install`                         | Install every skill under `apps/a8s/skills/` into each supported tool's user scope. Idempotent.                                                         |
-| `a8s logs <name> [--tail N] [-f]`     | Print supervisor-log lines mentioning `<name>` (like `docker logs`). `--tail N` limits output, `-f` follows.                                            |
-| `a8s stop`                            | Signal any running `a8s loop` to exit.                                                                                                                  |
-| `a8s --dir <path>`                    | Set the scan root for participant discovery.                                                                                                            |
-| `a8s --interval <seconds>`            | Loop poll interval (default `1.0`).                                                                                                                     |
-| `a8s --unrestricted`                  | Wake participants in their full-permissions mode (claude `--dangerously-skip-permissions`, gemini `--yolo`, codex `--dangerously-bypass-...`).          |
+### Registration
+| | |
+|---|---|
+| `a8s add <name> <dir> [<def>]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given. |
+| `a8s define <name> [<path>]` | Show or set the agent's definition file. |
+| `a8s discover <path>` | Walk a path for marker files; print suggested `add`+`define` commands. Read-only. |
+| `a8s agents` | List every registered agent and its definition. |
 
-Without `loop`, a8s makes one pass and waits for any launched processes to exit before exiting itself.
+### Aliases
+| | |
+|---|---|
+| `a8s alias <alias> <member>` | Create or extend an alias. Members can be agents or other aliases (cycles rejected). |
+| `a8s unalias <alias> [<member>]` | Remove a single member, or the whole alias. |
+| `a8s aliases` | List every alias and its resolved members. |
 
-## Message format
+### Handlers
+| | |
+|---|---|
+| `a8s start <name>` | Spawn a detached background process to handle the agent (or every member of an alias, in one process). |
+| `a8s run <name>` | Foreground attached loop. Aliases produce one process with interleaved output. Ctrl+C: graceful detach. 2nd Ctrl+C: kill the wake subprocess group. |
+| `a8s step <name>` | Attach, do one route+drain pass, release. Heavyweight: detaches the current handler if any. |
+| `a8s stop <name>` | SIGTERM the handler. Aliases dedupe by PID — one signal per multi-agent handler. Graceful detach. |
+| `a8s kill <name>` | Etiquette-then-force: SIGTERM, brief grace, SIGTERM again (kills the wake subprocess group), SIGKILL fallback. |
+| `a8s exit` | SIGTERM every running handler. |
+| `a8s ls` | List only running agents and their handler PIDs. |
 
-Messages are JSON files dropped into the sender's outbox at `<sender-root>/.outbox/`:
+### Messaging
+| | |
+|---|---|
+| `a8s tell <name> <msg>` | Routed message. `<name>` may be an agent or alias (fans out at routing time). Sender = agent enclosing CWD. |
+| `a8s prompt <name> <msg>` | Senderless supervisor message — delivered raw, no template wrapping. |
+| `a8s clear <name>` | Queue a CLEAR sentinel. Inbox is wiped at write time and at read time; the next wake runs `invokeClear`. Aliases iterate. |
+| `a8s logs <name>... [--tail N] [-f]` | Read per-agent log files; merge-sort by ISO timestamp across multiple agents. `-f` follows. |
+
+### Skills
+| | |
+|---|---|
+| `a8s install` | Install canonical skills (`tell`) into Claude / Gemini / Codex user scope. |
+
+`a8s` with no command prints help. There is no auto-discovery of agents from CWD — registration is always explicit.
+
+### Take-over collateral
+
+`start`/`run`/`step` always win. If another handler holds the agent, the new caller SIGTERMs it, waits for it to detach, then atomically claims the pid file. If the prior handler was multi-agent (handling an alias), it detaches **all** its agents — the new caller takes only what it asked for. Other agents in the prior set become orphaned. Documented footgun; restart them explicitly.
+
+## Definitions
+
+Each agent has a definition file: a JSON document describing how to invoke its CLI for each verb, plus prompt templates. Built-in defaults ship in `apps/a8s/definitions/`:
+
+| File | Purpose |
+|---|---|
+| `claude.json` | Claude Code with `--permission-mode dontAsk` allowlist + `--continue` |
+| `gemini.json` | Gemini CLI with `--yolo` (Policy Engine doesn't apply in headless mode; tracked upstream) + `--resume latest` |
+| `codex.json` | Codex CLI with `--full-auto` workspace-write sandbox + `resume --last` |
+| `default.json` | Fallback — runs `dummy-cli` and prints "no real CLI configured" |
+
+### The four verbs
+
+The wake routine reads the message and selects one of:
+
+| Verb | Trigger | Body |
+|---|---|---|
+| `invokePrompt` | `from` is empty (queued by `a8s prompt`) | Raw `content`, delivered as-is |
+| `invokeMessage` | `from` is set, no alias context | `promptMessage` template formatted |
+| `invokeMessageAlias` | `from` is set, message arrived via alias | `promptMessageAlias` template (sees alias name + others-count, NOT the other recipients' names — opacity rule) |
+| `invokeClear` | `clear: true` sentinel | No prompt; runs the CLI fresh to start a new conversation |
+
+### Schema
 
 ```json
 {
-    "date": "2024-01-01T12:00:00Z",
-    "from": "NAME",
-    "to": "NAME",
-    "content": "MESSAGE_CONTENT",
-    "files": [
-        {"filename": "example.txt", "path": "/path/to/example.txt"}
-    ]
+  "description": "...",
+  "invokePrompt":       ["claude", "...", "--continue", "-p", "$PROMPT"],
+  "invokeMessage":      ["claude", "...", "--continue", "-p", "$PROMPT"],
+  "invokeMessageAlias": ["claude", "...", "--continue", "-p", "$PROMPT"],
+  "invokeClear":        ["claude", "-p", "Conversation cleared. New conversation starts now."],
+  "promptMessage":      "{sender} tells you ({recipient}): {message}",
+  "promptMessageAlias": "{sender} tells you ({recipient}) and {others_count} others on the {alias} alias: {message}"
 }
 ```
 
-When delivered, the participant is woken with a recipient-neutral prompt. The shape depends on `from` and `to`:
+Argv elements run through two substitutions:
+- `$PROMPT` → the wake's prompt body (formatted via the matching template, or raw for `invokePrompt`).
+- `$A8S_DIR` → `apps/a8s/` itself, so definitions can point at bundled scripts (`default.json` uses this for `dummy-cli`).
+
+Override per-agent with `a8s define <name> <path>` — point at any JSON. The file isn't moved or copied; the registry stores the path.
+
+### Recipient transparency
+
+Templates SHOULD NOT leak whether the recipient is a Claude session, a script, or a human via SMS. The four built-in defaults follow this — `{sender} tells you ({recipient})` works equally well for any backend. Customize at your own risk.
+
+## State on disk
 
 ```
-[{date}] {from} tells you ({to}): {content}    # direct       (from set, to set)
-[{date}] {from} says: {content}                # broadcast    (from set, to empty)
-{content}                                      # raw prompt   (from empty)
+~/.a8s/
+├── a8s.json                  registry: { agents: {...}, aliases: {...} }
+├── log.txt                   process-scoped supervisor log
+└── agents/
+    └── <NAME>/
+        ├── inbox/            pending JSON messages (drained by wake_once)
+        ├── trash/            processed messages
+        ├── log.txt           per-agent log (wakes, routing involving this agent, subprocess output)
+        └── pid               handler attachment
 
-FILE: {files[0].path}
+<agent-root>/
+└── .outbox/                  agent writes here; route_outboxes re-stamps `from` to enclose
 ```
 
-`FILE:` lines are omitted when there are no files. The direct template includes the recipient's own name in parens so the wake context is unambiguous about who is being addressed. Recipients of a broadcast are not told who else got it (the recipient list is implicit and ephemeral). A senderless message (queued by `a8s prompt`) is delivered as raw content — no wrapper. The template never identifies the sender as human or AI.
+The outbox lives in the agent's own dir because some sandboxes (codex `--full-auto`) only let the agent write inside its workspace. Inbox/trash live in `~/.a8s/` so the agent can't see them — keeps the abstraction clean.
 
-## The `tell` and `says` CLIs and the registry
+`from` is force-overwritten at routing time. An agent that hand-writes a JSON with `from: "VICTIM"` doesn't get to spoof — the file's outbox location is the unforgeable identity.
 
-a8s ships two sender-side shell commands, both siblings of `a8s` in `~/bin/`. Both write a message JSON into the **caller's** local `<root>/.outbox/` and exit — routing happens later when `a8s` next runs (step or loop) and re-stamps the message with the actual sender name.
-
-| Command | What it does                                                      | Outbox `to` field |
-| ------- | ----------------------------------------------------------------- | ----------------- |
-| `tell <name> <message>` | Direct message to a specific named recipient.       | the recipient name |
-| `says <message>`        | Broadcast to every other registered participant.    | empty (`""`)       |
-
-The room metaphor: `tell` is whispering to one person; `says` is speaking up so the room hears. The CLI is named `says` (third-person) rather than `say` to avoid clashing with macOS's `/usr/bin/say` (text-to-speech).
-
-To know who the *caller* is, `tell` walks up from `$PWD` looking for a directory whose absolute path matches an entry in the **registry** at `~/.a8s/a8s.json`. The registry is populated automatically every time `a8s` runs:
-
-```json
-{
-  "CLAUDE": {"kind": "claude", "root": "/abs/path", "aliases": []},
-  "WORK":   {"kind": "claude", "root": "/abs/path", "aliases": ["w"]}
-}
-```
-
-- New participants are added when `a8s` discovers them.
-- Name conflicts (same name → different root) are warned and skipped; resolution is by manual edit.
-- Aliases are not yet auto-populated; edit them in by hand.
-
-The recipient is resolved by name first, then by alias.
-
-If `$PWD` is not inside any registered participant, `tell` fails with a clear error — it does not silently default to a generic sender.
-
-### Skill installation
-
-`a8s install` walks `apps/a8s/skills/*/SKILL.md` and installs each skill into every supported tool. Idempotent.
-
-| Tool   | What `a8s install` does                                                                                                                                                                            |
-| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Claude | Symlinks `bin/docs/<name>.md` → `apps/a8s/skills/<name>/SKILL.md`. Your existing `bin/install.sh` then symlinks it into `~/.claude/skills/<name>/SKILL.md` on the next shell open.                |
-| Gemini | Calls `gemini skills link <skill-dir> --scope user --consent` so updates to the canonical skill propagate live. Skip if `gemini` isn't on PATH; skip if the skill is already linked.              |
-| Codex  | Symlinks the skill directory to `~/.codex/skills/<name>` (codex's user-scope skill location). Skip if `~/.codex/skills` doesn't exist.                                                            |
-
-## Example layout
+## Source layout
 
 ```
-projects/
-  my-claude-project/
-    CLAUDE.md
-    .outbox/                       ← agent writes here (sandbox-writable)
-  my-gemini-project/
-    GEMINI.md
-    .outbox/
-
-~/.a8s/                            ← supervisor-only state
-  a8s.json                         ← participant registry
-  log.txt                          ← supervisor log (ISO-timestamped lines)
-  mailboxes/
-    CLAUDE/.inbox/.trash/          ← keyed by registered name (sanitized);
-    GEMINI/.inbox/.trash/            agents never see these
+apps/a8s/
+├── a8s.py            entry shim (~30 lines)
+├── core.py           paths, logging, Participant, helpers, MARKER_FILES
+├── registry.py       ~/.a8s/a8s.json I/O + alias resolution + sender_from_cwd
+├── mailbox.py        ensure_mailboxes, route_outboxes, queue helpers
+├── definitions.py    invoke* verbs, prompt formatting, definition loading
+├── daemon.py         wake subprocess, pid attachment, signal handling
+├── commands.py       every cmd_*
+├── cli.py            COMMANDS table, dispatch, main
+├── definitions/      built-in JSONs (claude/gemini/codex/default)
+├── dummy-cli         fallback bash script
+├── skills/           tell skill (installable into Claude / Gemini / Codex)
+└── tests/
+    ├── agents/       per-tool fixture dirs (CLAUDE/GEMINI/CODEX/Llama)
+    ├── fixtures/     mock-cli + mock.json for end-to-end tests
+    ├── conftest.py   pytest scaffolding (sys.path + fake_home fixture)
+    └── test_*.py     98 tests, runs in <100ms
 ```
 
-```
-$ cd projects
-$ a8s loop
-$ a8s prompt my-claude-project "Ask my-gemini-project to summarize ./notes.md"
-$ a8s stop
-```
-
-### Supervisor log
-
-Every line a8s prints (system messages, routing decisions, prefixed agent output) is also appended to `~/.a8s/log.txt` with an ISO-8601 UTC timestamp. The same `PRINT_LOCK` that keeps stdout interleaving clean across concurrent loop workers also guards the log file, so log lines stay atomic.
-
-Use `a8s logs <name>` to filter the log for a specific participant — same shape as `docker logs`:
+## Testing
 
 ```bash
-a8s logs CLAUDE              # all log lines mentioning CLAUDE
-a8s logs CLAUDE --tail 100   # last 100
-a8s logs CLAUDE -f           # tail-follow new lines as they're written
+python3 -m pytest apps/a8s/tests/
 ```
 
-Matching is case-insensitive on word boundaries, so a lookup for `CLAUDE` catches `CLAUDE> ...`, `[CLAUDE] waking ...`, and `routed: GEMINI -> CLAUDE` lines alike.
+Tests are isolated via a `fake_home` fixture that monkey-patches `HOME` to a tmp dir, so they never touch the real `~/.a8s/`. The daemon tests run real subprocesses against `tests/fixtures/mock-cli` (a deterministic bash script that echoes its argv) so wake_once's argv expansion and routing fan-out can be asserted on the per-agent log.
 
-The log grows without rotation in v1 — truncate or rotate manually if needed.
+## Roadmap
 
-### Reset / fresh start
+Pre-v1 — the surface still moves. Tracked threads:
 
-`a8s clear` removes every queued, in-flight, and processed message from all participants' mailboxes, and records a one-shot "fresh" flag (in `~/.cache/a8s/fresh.json`) so that each participant's *next* wake omits the resume flag — i.e. starts a brand-new conversation rather than resuming the previous one. The flag is consumed on first wake; subsequent wakes resume normally.
+- **#62** — File transfer. `FILE: <path>` entries currently carry the sender's path verbatim. Routing should stage payloads into `<recipient>/.files/<filename>` so messages with attachments work across sandboxes (and, eventually, machines).
+- **#63** — Transparent multi-cluster routing. Two a8s clusters on the same network see each other and route messages as peers. Recipient opacity carries through. Proposed initial transports: MQTT for the control plane, an ephemeral payload host (TempFile.org-style) for files. Spec is implementation-agnostic.
+- **#39** — GitHub Copilot CLI as a fourth tool kind. Now trivial after the verb-scheme refactor: a `copilot.json` definition + an entry in `core.MARKER_FILES`.
 
-This is the recommended way to reset state when a participant gets wedged in a stuck conversation.
+Beyond what's filed: human participants via SMS/email gateways; synchronous `tell --wait <id>` via message-id completion polling on `trash/`; web/local UI; shared knowledge stores between teams.
 
-### Skill authoring note
+## Pre-v1 / scorch-the-earth note
 
-YAML frontmatter scalars in `SKILL.md` files **must be quoted** if their values contain `:` or other YAML-significant characters. Codex's parser is strict and will silently fail to load a skill with unquoted scalars; Gemini's parser is more tolerant. Use double-quoted strings as a safe default:
-
-```yaml
----
-name: "tell"
-description: "Send a message ... mentioning FILE: paths and other tricky chars."
----
-```
-
-## Local-model participants (Claude Code → Ollama)
-
-Local-model agents live in `tests/experimental-agents/` rather than the default `tests/agents/` mesh, because the skill abstraction doesn't reach the model through ollama and tool-use is unreliable enough that they're a noise source in protocol tests. Run `a8s --dir tests/experimental-agents` to engage with them.
-
-Claude Code can be pointed at a local Ollama endpoint by setting `ANTHROPIC_BASE_URL=http://localhost:11434` (Ollama's native `/v1/messages` endpoint speaks Anthropic protocol, including `tool_use` blocks). See `tests/experimental-agents/llama-agent/.claude/settings.json` for the working config.
-
-**What works.** Direct shell-command tool use (`Run: tell GEMINI hi`) works fine through Claude Code → Ollama, including with relatively small models (qwen3.5:latest reliably produces correctly-shaped Bash tool calls).
-
-**What doesn't.** Claude Code's *skill abstraction* (loading `~/.claude/skills/<name>/SKILL.md` and asking the model to "use the tell skill") is unreliable with local models — even capable ones often produce a final answer like "DONE" without ever emitting the tool call. The skill abstraction relies on a system-prompt translation step that local models flub.
-
-**Workaround.** Bypass the skill abstraction in the agent's own `CLAUDE.md` by instructing it about the `tell` and `says` shell commands directly:
-
-```markdown
-If you're asked to message someone privately by name, run: `tell <NAME> "<MESSAGE>"`
-If you're asked to address everyone, run: `says "<MESSAGE>"`
-```
-
-`tests/experimental-agents/llama-agent/CLAUDE.md` does this. Routing then works end-to-end.
-
-**Model recommendation.** `llama3.2:3b` is too small for reliable tool use even with direct instructions. Use `qwen3.5:latest` or comparable as the default for local-model participants. Adjust `model` in the participant's `.claude/settings.json`.
-
-**Auth-conflict warning.** Claude Code will print `Auth conflict: Both a token (ANTHROPIC_AUTH_TOKEN) and an API key (/login managed key) are set` if you've ever run `claude /login` previously. Functionality is unaffected, but to silence the warning, run `claude /logout` once at the user level.
-
-## Recovery model (v1)
-
-Messages are transient. The inbox file is moved to `.trash/` *before* the participant has produced a response. If the participant crashes or gets wedged mid-prompt, the message is gone — re-prompting is just as risky as loss (it can pile state on top of a broken conversation). v1 documents the gap and leaves recovery to the human operator. A future version will need a real recovery story (see below).
-
-## Future
-
-- **Recovery.** Some Claude conversations get stuck in a state where the only fix is starting fresh. Need a prompting structure that lets a participant either resume from prior context or knowingly start over.
-- **Per-participant run flags** declared in the participant's directory, e.g. `--dangerously-skip-permissions` / `--yolo`.
-- **Docker isolation** so a participant can be sandboxed with a curated set of mounts and binaries.
-- **Human participants** as first-class peers (the recipient-transparency rule already anticipates this).
-- **Aliases** for participants (the README mentions them but the format is undecided).
-- **Terminology.** "Agent" may not be the right word once humans are routinely on the other end. Candidates: participant, peer, correspondent, node.
+a8s has not reached v1. Surface, storage layout, and definition schemas change between phases without migration paths. Existing `~/.a8s/` state may need to be wiped and re-derived through `a8s discover` + `a8s add` after a breaking change. Once the design settles into v1, that contract changes.
