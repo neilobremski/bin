@@ -23,5 +23,5 @@
     "--prompt", "$PROMPT"
   ],
   "promptMessage": "{sender} tells you ({recipient}): {message}",
-  "promptMessageBroadcast": "{sender} says: {message}"
+  "promptMessageAlias": "{sender} tells you ({recipient}) and {others_count} others on the {alias} alias: {message}"
 }
