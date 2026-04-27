@@ -107,6 +107,11 @@ def resolve_name(query: str) -> tuple[str, list[str]]:
     Returns (kind, agent_names) where kind ∈ {"agent", "alias"}. For an alias,
     members are walked recursively; cycles raise ValueError. Unknown names
     raise KeyError.
+
+    A diamond (the same alias reached via two distinct parents) is NOT a cycle:
+    `path` tracks aliases currently on the recursion stack; `seen_aliases`
+    short-circuits second-and-later visits via different paths. Agents dedup
+    via `out_names` membership.
     """
     raw = _load_raw_registry()
     agents = raw["agents"]
@@ -117,22 +122,29 @@ def resolve_name(query: str) -> tuple[str, list[str]]:
     if q in agent_lookup:
         return "agent", [agent_lookup[q]]
     if q in alias_lookup:
-        seen: set[str] = set()
         out_names: list[str] = []
+        path: set[str] = set()           # aliases currently being recursed
+        seen_aliases: set[str] = set()   # aliases already fully expanded
 
         def walk(name: str) -> None:
             key = name.lower()
-            if key in seen:
-                raise ValueError(f"alias cycle detected at {name!r}")
-            seen.add(key)
             if key in agent_lookup:
                 resolved = agent_lookup[key]
                 if resolved not in out_names:
                     out_names.append(resolved)
                 return
             if key in alias_lookup:
-                for member in aliases[alias_lookup[key]]:
-                    walk(str(member))
+                if key in path:
+                    raise ValueError(f"alias cycle detected at {name!r}")
+                if key in seen_aliases:
+                    return  # diamond — already expanded via another parent
+                path.add(key)
+                try:
+                    for member in aliases[alias_lookup[key]]:
+                        walk(str(member))
+                finally:
+                    path.discard(key)
+                seen_aliases.add(key)
                 return
             raise KeyError(f"alias {alias_lookup[q]!r} references unknown name {name!r}")
 
