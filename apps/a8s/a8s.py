@@ -17,7 +17,7 @@ Surface (CLI):
   clear <name>                — wipe <name>'s mailboxes; flag fresh on next wake
   install                     — install canonical skills into Claude / Gemini /
                                 Codex user scope
-  logs <name> [--tail N] [-f] — docker-logs-style filter on the supervisor log
+  logs <name>... [--tail N] [-f] — read per-agent logs; merge-sort multiples
 
 `a8s` with no command prints help. There is no auto-discovery — agents must be
 explicitly registered with `a8s add` (use `a8s discover` to find candidates).
@@ -25,10 +25,13 @@ explicitly registered with `a8s add` (use `a8s discover` to find candidates).
 State:
   ~/.a8s/a8s.json             — registry (name -> {root, aliases, definition?}).
                                 Agents without `definition` cannot wake.
-  ~/.a8s/mailboxes/<NAME>/    — .inbox / .trash, isolated from the agent itself
-  ~/.a8s/log.txt              — supervisor log: ISO-timestamped, captures every line
-                                that goes through `out()` (including subprocess
-                                output captured by `run_with_prefix`)
+  ~/.a8s/agents/<NAME>/       — per-agent internal dir:
+    inbox/                    — pending messages routed in (drained by wake_once)
+    trash/                    — processed messages
+    log.txt                   — agent-scoped log (wake events, subprocess output,
+                                routing involving this agent)
+  ~/.a8s/log.txt              — supervisor log: process-scoped events only
+                                (loop lifecycle, registration, etc.)
   <agent-root>/.outbox/       — agent writes here; route_outboxes re-stamps `from`
                                 to the enclosing participant on every read so an
                                 agent can't spoof the sender by hand-writing JSON
@@ -75,6 +78,8 @@ def _a8s_dir() -> Path:
 
 
 def _log_path() -> Path:
+    """Process-scoped log: loop start/stop, registration, things without a
+    specific agent context. Per-agent activity goes in `agent_log_path(name)`."""
     return _a8s_dir() / "log.txt"
 
 
@@ -88,22 +93,28 @@ def _preview(content: str, n: int = 80) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def mailbox_dir(name: str) -> Path:
-    return _a8s_dir() / "mailboxes" / _safe_name(name)
+def agent_dir(name: str) -> Path:
+    """Per-agent internal directory under ~/.a8s/. Holds inbox/, trash/,
+    log.txt, and (phase 3b) the pid file."""
+    return _a8s_dir() / "agents" / _safe_name(name)
 
 
 def inbox_dir(name: str) -> Path:
-    return mailbox_dir(name) / ".inbox"
+    return agent_dir(name) / "inbox"
 
 
 def trash_dir(name: str) -> Path:
-    return mailbox_dir(name) / ".trash"
+    return agent_dir(name) / "trash"
+
+
+def agent_log_path(name: str) -> Path:
+    return agent_dir(name) / "log.txt"
 
 
 def outbox_dir(root: Path) -> Path:
     """Outbox lives **inside the agent's own dir** so the agent can write to it
     even under a strict workspace sandbox (codex --full-auto). Inbox and trash
-    stay isolated under ~/.a8s/ where the agent never sees them.
+    stay isolated under ~/.a8s/agents/<NAME>/ where the agent never sees them.
 
     `route_outboxes()` re-stamps the `from` field to the enclosing participant's
     name on every read, so an agent can't spoof a senderless prompt by writing
@@ -112,27 +123,62 @@ def outbox_dir(root: Path) -> Path:
     return root / ".outbox"
 
 
-def _emit(line: str) -> None:
-    """Write `line` (already terminated) to stdout and append a timestamped
-    copy to the supervisor log at ~/.a8s/log.txt."""
-    ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    log_line = f"{ts} {line}" if not line.endswith("\n") else f"{ts} {line}"
-    sys.stdout.write(line)
-    sys.stdout.flush()
+def _ts() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _append(path: Path, ts_line: str) -> None:
+    """Append `ts_line` (already timestamp-prefixed and newline-terminated) to
+    `path`. Best-effort: a missing directory is created lazily; OSError swallows."""
     try:
-        with _log_path().open("a", encoding="utf-8") as f:
-            f.write(log_line if log_line.endswith("\n") else log_line + "\n")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(ts_line)
     except OSError:
         pass
 
 
+def _emit_supervisor(line: str) -> None:
+    """Stdout + supervisor log (process-scoped events only)."""
+    sys.stdout.write(line)
+    sys.stdout.flush()
+    ts_line = f"{_ts()} {line}"
+    if not ts_line.endswith("\n"):
+        ts_line += "\n"
+    _append(_log_path(), ts_line)
+
+
+def _emit_agent(name: str, line: str) -> None:
+    """Stdout + per-agent log only. Does NOT write to the supervisor log —
+    agent-scoped events live in `~/.a8s/agents/<NAME>/log.txt` and `a8s logs`
+    reads them directly."""
+    sys.stdout.write(line)
+    sys.stdout.flush()
+    ts_line = f"{_ts()} {line}"
+    if not ts_line.endswith("\n"):
+        ts_line += "\n"
+    _append(agent_log_path(name), ts_line)
+
+
 def out(text: str = "", end: str = "\n") -> None:
+    """Process-scoped output (loop lifecycle, registration, etc.). For
+    agent-scoped lines use `out_agent(name, ...)`."""
     line = text + end
     if PRINT_LOCK is not None:
         with PRINT_LOCK:
-            _emit(line)
+            _emit_supervisor(line)
     else:
-        _emit(line)
+        _emit_supervisor(line)
+
+
+def out_agent(name: str, text: str = "", end: str = "\n") -> None:
+    """Agent-scoped output. Lands in `~/.a8s/agents/<NAME>/log.txt`."""
+    line = text + end
+    if PRINT_LOCK is not None:
+        with PRINT_LOCK:
+            _emit_agent(name, line)
+    else:
+        _emit_agent(name, line)
 
 
 @dataclass(frozen=True)
@@ -244,7 +290,7 @@ def route_outboxes(participants: list[Participant]) -> int:
                 with f.open("r", encoding="utf-8") as fp:
                     msg = json.load(fp)
             except (OSError, json.JSONDecodeError) as e:
-                out(f"[{sender.name}] outbox parse error on {f.name}: {e}")
+                out_agent(sender.name, f"[{sender.name}] outbox parse error on {f.name}: {e}")
                 continue
             # Defense: the outbox is writable by the agent, so it could try to
             # spoof a senderless prompt with `from: ""` or impersonate someone
@@ -252,6 +298,7 @@ def route_outboxes(participants: list[Participant]) -> int:
             # location is the unforgeable identity.
             msg["from"] = sender.name
             recipient_name = (msg.get("to") or "").strip()
+            preview = _preview(msg.get("content", ""))
             if not recipient_name:
                 # broadcast: fan out to every other participant.
                 others = [p for p in participants if p.name != sender.name]
@@ -260,20 +307,24 @@ def route_outboxes(participants: list[Participant]) -> int:
                     dest = unique_path(inbox_dir(recipient.name) / f.name)
                     with dest.open("w", encoding="utf-8") as out_f:
                         json.dump(msg, out_f, indent=2)
+                    # Mirror the routing event to the recipient's log too so
+                    # their `a8s logs <recipient>` shows what arrived.
+                    out_agent(recipient.name, f"received from {sender.name} (broadcast): {preview}")
                 f.unlink()
-                out(f"broadcast: {sender.name} -> {len(others)}: {_preview(msg.get('content', ''))}")
+                out_agent(sender.name, f"broadcast: {sender.name} -> {len(others)}: {preview}")
                 routed += len(others)
                 continue
             recipient = by_name.get(recipient_name.lower())
             if recipient is None:
-                out(f"[{sender.name}] unknown recipient {recipient_name!r} in {f.name}")
+                out_agent(sender.name, f"[{sender.name}] unknown recipient {recipient_name!r} in {f.name}")
                 continue
             ensure_mailboxes(recipient)
             dest = unique_path(inbox_dir(recipient.name) / f.name)
             with dest.open("w", encoding="utf-8") as out_f:
                 json.dump(msg, out_f, indent=2)
             f.unlink()
-            out(f"routed: {sender.name} -> {recipient.name}: {_preview(msg.get('content', ''))}")
+            out_agent(sender.name, f"routed: {sender.name} -> {recipient.name}: {preview}")
+            out_agent(recipient.name, f"received from {sender.name}: {preview}")
             routed += 1
     return routed
 
@@ -486,14 +537,14 @@ def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
             bufsize=1,
         )
     except FileNotFoundError:
-        out(f"{prefix}command not found: {cmd[0]}")
+        out_agent(name, f"{prefix}command not found: {cmd[0]}")
         return 127
     assert proc.stdout is not None
     for line in proc.stdout:
-        out(prefix + line.rstrip("\n"))
+        out_agent(name, prefix + line.rstrip("\n"))
     proc.wait()
     if proc.returncode != 0:
-        out(f"{prefix}(exit {proc.returncode})")
+        out_agent(name, f"{prefix}(exit {proc.returncode})")
     return proc.returncode
 
 
@@ -502,7 +553,7 @@ def wake_once(p: Participant, msg_path: Path) -> None:
         with msg_path.open("r", encoding="utf-8") as f:
             msg = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
-        out(f"[{p.name}] inbox parse error on {msg_path.name}: {e}")
+        out_agent(p.name, f"[{p.name}] inbox parse error on {msg_path.name}: {e}")
         bad = unique_path(trash_dir(p.name) / msg_path.name)
         msg_path.rename(bad)
         return
@@ -510,7 +561,7 @@ def wake_once(p: Participant, msg_path: Path) -> None:
     try:
         definition = load_definition(p.name)
     except (FileNotFoundError, RuntimeError) as e:
-        out(f"[{p.name}] {e}")
+        out_agent(p.name, f"[{p.name}] {e}")
         bad = unique_path(trash_dir(p.name) / msg_path.name)
         msg_path.rename(bad)
         return
@@ -519,7 +570,7 @@ def wake_once(p: Participant, msg_path: Path) -> None:
     msg_path.rename(trashed)
     fresh = consume_fresh(p.root)
     flag = " (fresh)" if fresh else ""
-    out(f"[{p.name}] waking from {trashed.name}{flag}: {_preview(msg.get('content', ''))}")
+    out_agent(p.name, f"[{p.name}] waking from {trashed.name}{flag}: {_preview(msg.get('content', ''))}")
     cmd = build_command(definition, prompt, fresh=fresh)
     run_with_prefix(p.name, cmd, p.root)
 
@@ -905,7 +956,7 @@ def cmd_tell(args: list[str]) -> int:
     target_name, _target_info = target
 
     _write_outbox(sender_name, Path(sender_info["root"]), target_name, content, files)
-    out(f"tell -> {target_name}: {_preview(content)}")
+    out_agent(sender_name, f"tell -> {target_name}: {_preview(content)}")
     return 0
 
 
@@ -923,7 +974,7 @@ def cmd_says(args: list[str]) -> int:
     sender_name, sender_info = sender
 
     _write_outbox(sender_name, Path(sender_info["root"]), "", content, files)
-    out(f"says ({sender_name}): {_preview(content)}")
+    out_agent(sender_name, f"says ({sender_name}): {_preview(content)}")
     return 0
 
 
@@ -954,13 +1005,17 @@ def cmd_clear(args: list[str]) -> int:
 
 
 def cmd_logs(args: list[str]) -> int:
+    """Read each named agent's log.txt and emit lines merge-sorted by ISO
+    timestamp prefix. -f follows each file; new lines from any source are
+    interleaved using a small ordering buffer so multi-file output stays
+    roughly chronological."""
     if not args:
-        print("usage: a8s logs <name> [--tail N] [-f|--follow]", file=sys.stderr)
+        print("usage: a8s logs <name> [<name>...] [--tail N] [-f|--follow]", file=sys.stderr)
         return 2
-    name = args[0]
+    names: list[str] = []
     tail_n: int | None = None
     follow = False
-    i = 1
+    i = 0
     while i < len(args):
         a = args[i]
         if a in ("-f", "--follow"):
@@ -980,43 +1035,86 @@ def cmd_logs(args: list[str]) -> int:
                 print(f"--tail: not an integer: {a!r}", file=sys.stderr)
                 return 2
             i += 1
-        else:
+        elif a.startswith("-"):
             print(f"unknown logs arg: {a!r}", file=sys.stderr)
             return 2
+        else:
+            names.append(a)
+            i += 1
 
-    log = _log_path()
-    if not log.is_file():
-        print(f"no log yet at {log}", file=sys.stderr)
+    if not names:
+        print("usage: a8s logs <name> [<name>...] [--tail N] [-f|--follow]", file=sys.stderr)
+        return 2
+
+    paths = [agent_log_path(n) for n in names]
+    missing = [p for p in paths if not p.is_file()]
+    if len(missing) == len(paths):
+        for p in missing:
+            print(f"no log yet at {p}", file=sys.stderr)
         return 1
 
-    pattern = re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
-
-    with log.open("r", encoding="utf-8", errors="replace") as f:
-        existing = [ln for ln in f if pattern.search(ln)]
+    # Initial dump: read all existing lines, merge-sort by leading timestamp.
+    lines: list[str] = []
+    for p in paths:
+        if p.is_file():
+            with p.open("r", encoding="utf-8", errors="replace") as f:
+                lines.extend(f)
+    lines.sort(key=lambda ln: ln.split(" ", 1)[0] if ln else "")
     if tail_n is not None:
-        existing = existing[-tail_n:]
-    for ln in existing:
+        lines = lines[-tail_n:]
+    for ln in lines:
         sys.stdout.write(ln)
     sys.stdout.flush()
 
     if not follow:
         return 0
 
-    # Follow: re-open and seek to end, then poll for new lines.
+    # Follow: poll each file's tail, emit new lines in chronological order
+    # using a ~1s ordering window. Cheap and correct enough for v1.
+    import time
+    handles: list[tuple[Path, "os.IOBase"]] = []
     try:
-        with log.open("r", encoding="utf-8", errors="replace") as f:
-            f.seek(0, 2)  # SEEK_END
+        for p in paths:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.touch(exist_ok=True)
+            f = p.open("r", encoding="utf-8", errors="replace")
+            f.seek(0, 2)
+            handles.append((p, f))
+        buf: list[str] = []
+        last_emit = time.time()
+        try:
             while True:
-                line = f.readline()
-                if not line:
-                    import time
-                    time.sleep(0.25)
-                    continue
-                if pattern.search(line):
-                    sys.stdout.write(line)
+                progress = False
+                for _path, f in handles:
+                    while True:
+                        ln = f.readline()
+                        if not ln:
+                            break
+                        buf.append(ln)
+                        progress = True
+                now = time.time()
+                if buf and (not progress or now - last_emit >= 1.0):
+                    buf.sort(key=lambda ln: ln.split(" ", 1)[0] if ln else "")
+                    for ln in buf:
+                        sys.stdout.write(ln)
                     sys.stdout.flush()
-    except KeyboardInterrupt:
-        return 0
+                    buf.clear()
+                    last_emit = now
+                if not progress:
+                    time.sleep(0.25)
+        except KeyboardInterrupt:
+            if buf:
+                buf.sort(key=lambda ln: ln.split(" ", 1)[0] if ln else "")
+                for ln in buf:
+                    sys.stdout.write(ln)
+                sys.stdout.flush()
+            return 0
+    finally:
+        for _p, f in handles:
+            try:
+                f.close()
+            except Exception:
+                pass
 
 
 def cmd_stop() -> int:
@@ -1057,7 +1155,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("says",     "<message>",            "Broadcast routed message to every other agent. Sender = agent enclosing CWD."),
     ("clear",    "<name>",               "Wipe <name>'s mailboxes and flag fresh on next wake."),
     ("install",  "",                     "Install canonical skills into each supported tool's user scope."),
-    ("logs",     "<name> [--tail N] [-f]", "Filter the supervisor log for lines mentioning <name>."),
+    ("logs",     "<name>... [--tail N] [-f]", "Read per-agent log files; merge-sort multiple by timestamp. -f follows."),
 ]
 
 KNOWN_COMMANDS = {name for name, _, _ in COMMANDS}
@@ -1145,7 +1243,8 @@ def cmd_prompt(args: list[str]) -> int:
             return 1
         for p in parts:
             _queue_prompt(p, prompt)
-        out(f"queued prompt to {len(parts)} agent(s): {_preview(prompt)}")
+            out_agent(p.name, f"queued prompt: {_preview(prompt)}")
+        out(f"queued prompt to {len(parts)} agent(s)")
         return 0
 
     target = find_participant(parts, name)
@@ -1153,7 +1252,7 @@ def cmd_prompt(args: list[str]) -> int:
         print(f"no agent named {name!r}", file=sys.stderr)
         return 1
     _queue_prompt(target, prompt)
-    out(f"queued prompt to {target.name}: {_preview(prompt)}")
+    out_agent(target.name, f"queued prompt to {target.name}: {_preview(prompt)}")
     return 0
 
 
