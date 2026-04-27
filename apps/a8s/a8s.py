@@ -51,10 +51,14 @@ State:
                                 agent can't spoof the sender by hand-writing JSON
 
 Definitions:
-  apps/a8s/definitions/{claude,gemini,codex}.json — built-in defaults selected by
-                                kind; encode argv (with `$PROMPT` placeholder) for
-                                each (fresh × unrestricted) variant plus prompt
-                                templates. Override per-agent via `a8s define`.
+  apps/a8s/definitions/{claude,gemini,codex}.json — built-in defaults. Each
+                                encodes argv (with `$PROMPT`) for four verbs:
+                                  invokePrompt        senderless supervisor-direct
+                                  invokeMessage       direct tell (one-to-one)
+                                  invokeMessageAlias  alias-routed tell (opaque)
+                                  invokeClear         start a fresh conversation
+                                Plus templates: promptMessage / promptMessageAlias.
+                                Override per-agent via `a8s define`.
 """
 
 from __future__ import annotations
@@ -82,7 +86,6 @@ MARKER_FILES = {
 NAME_RE = re.compile(r"[A-Za-z0-9]+")
 
 PRINT_LOCK: threading.Lock | None = None
-UNRESTRICTED: bool = False
 
 
 def _a8s_dir() -> Path:
@@ -388,20 +391,17 @@ def default_definition_path(kind: str) -> Path:
 
 
 def load_definition(name: str) -> dict:
-    """Load the JSON definition for `name` from the path stored in the registry.
-    Errors loudly if no definition is set — agents are not runnable until
-    `a8s define <name> <path>` has been called.
+    """Load the JSON definition for `name`. Every agent always has one — if
+    the registry lacks an explicit `definition` field, falls back to the
+    bundled `apps/a8s/definitions/default.json` (a dummy CLI that prints
+    'not configured' and the received prompt).
 
-    Definitions encode argv (with `$PROMPT` placeholder), message templates,
-    and per-tool quirks. See apps/a8s/definitions/*.json for built-in shapes.
+    Definitions encode argv (with `$PROMPT` and `$A8S_DIR` placeholders),
+    message templates, and per-tool quirks. See apps/a8s/definitions/*.json.
     """
     reg = load_registry()
     info = reg.get(name) or {}
-    custom = info.get("definition")
-    if not custom:
-        raise FileNotFoundError(
-            f"{name!r} has no definition; run `a8s define {name} <path>`"
-        )
+    custom = info.get("definition") or str(default_definition_path("default"))
     path = Path(custom).expanduser()
     if not path.is_file():
         raise FileNotFoundError(f"definition file missing: {path}")
@@ -412,121 +412,106 @@ def load_definition(name: str) -> dict:
         raise RuntimeError(f"definition load failed for {path}: {e}") from e
 
 
-def build_prompt(msg: dict, definition: dict) -> str:
-    """Format a queued message into the prompt string handed to the agent CLI.
+VERB_KEY = {
+    "prompt": "invokePrompt",
+    "message": "invokeMessage",
+    "messageAlias": "invokeMessageAlias",
+    "clear": "invokeClear",
+}
 
-    `definition` provides:
-      - `promptMessage`       — direct tell (one-to-one)
-      - `promptMessageAlias`  — message delivered via an alias; sees alias name
-                                and others-count but not the other recipients
-    Senderless messages (queued by `a8s prompt`) deliver `content` raw.
+
+def _file_lines(msg: dict) -> list[str]:
+    files = msg.get("files") or []
+    if not files:
+        return []
+    out = [""]
+    for entry in files:
+        path = entry.get("path") or entry.get("filename")
+        if path:
+            out.append(f"FILE: {path}")
+    return out
+
+
+def build_prompt(msg: dict, definition: dict, verb: str) -> str:
+    """Format a queued message into the prompt string for the agent CLI.
+
+    `verb` selects how the body is built:
+      - `prompt`        — raw `content` delivery (no template wrapping)
+      - `message`       — `promptMessage` template
+      - `messageAlias`  — `promptMessageAlias` template (alias + others_count)
+      - `clear`         — invokeClear takes no prompt; returns empty string
     """
-    sender = (msg.get("from") or "").strip()
+    if verb == "clear":
+        return ""
     content = msg.get("content", "")
+    if verb == "prompt":
+        return "\n".join([content, *_file_lines(msg)])
+
+    sender = (msg.get("from") or "").strip()
     date = msg.get("date", "")
     recipient = (msg.get("to") or "").strip()
     alias = (msg.get("alias") or "").strip()
     others_count = msg.get("others_count", 0)
-    if not sender:
-        # `a8s prompt` queued this; supervisor-direct, no template wrapping.
-        header = content
-    else:
-        if alias:
-            tmpl = definition.get("promptMessageAlias") or (
-                "{sender} tells you ({recipient}) and {others_count} others on the {alias} alias: {message}"
-            )
-        else:
-            tmpl = definition.get("promptMessage") or "{sender} tells you ({recipient}): {message}"
-        header = tmpl.format(
-            sender=sender,
-            recipient=recipient,
-            message=content,
-            date=date,
-            alias=alias,
-            others_count=others_count,
+    if verb == "messageAlias":
+        tmpl = definition.get("promptMessageAlias") or (
+            "{sender} tells you ({recipient}) and {others_count} others on the {alias} alias: {message}"
         )
-        if date and "{date}" not in tmpl:
-            header = f"[{date}] {header}"
-    parts = [header]
-    files = msg.get("files") or []
-    if files:
-        parts.append("")
-        for entry in files:
-            path = entry.get("path") or entry.get("filename")
-            if path:
-                parts.append(f"FILE: {path}")
-    return "\n".join(parts)
+    else:  # "message"
+        tmpl = definition.get("promptMessage") or "{sender} tells you ({recipient}): {message}"
+    header = tmpl.format(
+        sender=sender,
+        recipient=recipient,
+        message=content,
+        date=date,
+        alias=alias,
+        others_count=others_count,
+    )
+    if date and "{date}" not in tmpl:
+        header = f"[{date}] {header}"
+    return "\n".join([header, *_file_lines(msg)])
 
 
 def _expand_argv(argv: list[str], prompt: str) -> list[str]:
-    """Expand `$PROMPT` placeholder in argv. Other env-var-style placeholders
-    are reserved for future verbs."""
-    return [a.replace("$PROMPT", prompt) for a in argv]
+    """Expand placeholders in argv:
+      - `$PROMPT`   the wake prompt (raw or template-formatted)
+      - `$A8S_DIR`  the apps/a8s/ directory (so default.json can reference
+                    bundled scripts like dummy-cli without hardcoding paths)
+    invokeClear ignores prompt entirely; its argv should not contain $PROMPT."""
+    a8s_dir = str(Path(__file__).resolve().parent)
+    return [a.replace("$PROMPT", prompt).replace("$A8S_DIR", a8s_dir) for a in argv]
 
 
-def build_command(definition: dict, prompt: str, fresh: bool = False) -> list[str]:
-    """Pick the right `invoke*` argv from `definition` based on (fresh, UNRESTRICTED)
-    and expand `$PROMPT`.
+def build_command(definition: dict, prompt: str, verb: str) -> list[str]:
+    """Pick the `invoke*` argv from `definition` for this verb and expand $PROMPT.
 
-    Phase 1 schema:
-      invoke                    — default mode, continues prior session
-      invokeFresh               — default mode, starts fresh
-      invokeUnrestricted        — `--unrestricted`, continues
-      invokeUnrestrictedFresh   — `--unrestricted`, fresh
+    Verbs:
+      prompt        invokePrompt        senderless supervisor-direct (raw)
+      message       invokeMessage       direct tell from one agent to another
+      messageAlias  invokeMessageAlias  alias-routed tell (with opacity vars)
+      clear         invokeClear         start a fresh conversation (no prompt)
     """
-    if UNRESTRICTED:
-        key = "invokeUnrestrictedFresh" if fresh else "invokeUnrestricted"
-    else:
-        key = "invokeFresh" if fresh else "invoke"
+    key = VERB_KEY.get(verb)
+    if key is None:
+        raise ValueError(f"unknown verb: {verb!r}")
     argv = definition.get(key)
     if not argv:
-        # Fallback: try the non-fresh variant of the same mode.
-        argv = definition.get("invokeUnrestricted" if UNRESTRICTED else "invoke")
-    if not argv:
-        raise ValueError(f"definition missing {key!r} (and fallback)")
+        raise ValueError(f"definition missing {key!r}")
     return _expand_argv(list(argv), prompt)
 
 
-def _cache_dir() -> Path:
-    base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "a8s"
-    base.mkdir(parents=True, exist_ok=True)
-    return base
+def select_verb(msg: dict) -> str:
+    """Determine the wake verb from a queued message JSON.
 
-
-def _fresh_file() -> Path:
-    return _cache_dir() / "fresh.json"
-
-
-def _load_fresh() -> set[str]:
-    f = _fresh_file()
-    if not f.is_file():
-        return set()
-    try:
-        data = json.loads(f.read_text())
-        return set(data) if isinstance(data, list) else set()
-    except (OSError, json.JSONDecodeError):
-        return set()
-
-
-def _save_fresh(s: set[str]) -> None:
-    _fresh_file().write_text(json.dumps(sorted(s), indent=2))
-
-
-def mark_fresh(roots: list[Path]) -> None:
-    s = _load_fresh()
-    for r in roots:
-        s.add(str(r))
-    _save_fresh(s)
-
-
-def consume_fresh(root: Path) -> bool:
-    s = _load_fresh()
-    key = str(root)
-    if key not in s:
-        return False
-    s.discard(key)
-    _save_fresh(s)
-    return True
+    Order matters: clear first (so the sentinel takes precedence), then
+    senderless prompt, then alias, then plain message."""
+    if msg.get("clear") is True:
+        return "clear"
+    sender = (msg.get("from") or "").strip()
+    if not sender:
+        return "prompt"
+    if (msg.get("alias") or "").strip():
+        return "messageAlias"
+    return "message"
 
 
 # ---------- registry ----------
@@ -709,13 +694,26 @@ def wake_once(p: Participant, msg_path: Path) -> None:
         bad = unique_path(trash_dir(p.name) / msg_path.name)
         msg_path.rename(bad)
         return
-    prompt = build_prompt(msg, definition)
+
+    verb = select_verb(msg)
+    if verb == "clear":
+        # Read-time wipe (locked design Q1, belt-and-suspenders): trash any
+        # other messages currently in the inbox so the clear is the only thing
+        # this wake processes. Anything that arrives during the wake will land
+        # for the next iteration.
+        for f in inbox_dir(p.name).iterdir():
+            if f.is_file() and f != msg_path:
+                trashed = unique_path(trash_dir(p.name) / f.name)
+                f.rename(trashed)
+
+    prompt = build_prompt(msg, definition, verb)
     trashed = unique_path(trash_dir(p.name) / msg_path.name)
     msg_path.rename(trashed)
-    fresh = consume_fresh(p.root)
-    flag = " (fresh)" if fresh else ""
-    out_agent(p.name, f"[{p.name}] waking from {trashed.name}{flag}: {_preview(msg.get('content', ''))}")
-    cmd = build_command(definition, prompt, fresh=fresh)
+    if verb == "clear":
+        out_agent(p.name, f"[{p.name}] waking ({verb}) from {trashed.name}")
+    else:
+        out_agent(p.name, f"[{p.name}] waking ({verb}) from {trashed.name}: {_preview(msg.get('content', ''))}")
+    cmd = build_command(definition, prompt, verb)
     run_with_prefix(p.name, cmd, p.root)
 
 
@@ -1046,14 +1044,45 @@ def _install_skill_codex(skill_dir: Path) -> str:
     return f"  codex: linked '{skill_name}' at {target}"
 
 
+def _autodiscover_definition(root: Path) -> tuple[str, str]:
+    """Look for marker files (CLAUDE.md/GEMINI.md/CODEX.md) directly in `root`
+    and pick the matching built-in definition. Always returns a usable path:
+    falls back to `default.json` (the dummy fallback) if no single marker
+    matches. Returns (definition_path, note)."""
+    found: list[tuple[str, str]] = []
+    for marker_name, kind in MARKER_FILES.items():
+        if (root / marker_name).is_file():
+            found.append((marker_name, kind))
+    marker_names = [m for m, _ in found]
+    default_fallback = str(default_definition_path("default"))
+    if len(found) == 1:
+        kind = found[0][1]
+        path = default_definition_path(kind)
+        if path.is_file():
+            return str(path), f"auto-detected via {marker_names[0]}"
+        return default_fallback, f"marker {marker_names[0]} found but {path} missing — using default fallback"
+    if len(found) > 1:
+        return default_fallback, f"multiple markers ({', '.join(marker_names)}) — using default fallback; re-add with explicit definition to pick one"
+    return default_fallback, "no marker file — using default fallback (run `a8s define` to wire a real CLI)"
+
+
 def cmd_add(args: list[str]) -> int:
-    """`a8s add <name> <dir>` — explicitly register a new agent. Errors on
-    duplicate name or non-directory path. New entries have no definition;
-    `a8s define <name> <path>` is required before the agent can wake."""
-    if len(args) != 2:
-        print("usage: a8s add <name> <dir>", file=sys.stderr)
+    """`a8s add <name> <dir> [<definition>]` — register a new agent.
+
+    Without `<definition>`, `<dir>` is scanned for a marker file
+    (CLAUDE.md/GEMINI.md/CODEX.md) and the matching built-in definition is
+    auto-linked. Multiple or zero markers leaves the agent undefined with a
+    hint to run `a8s define`.
+
+    With `<definition>`, the JSON file is validated and set as the agent's
+    definition.
+
+    Errors on duplicate name (vs. agents or aliases) or non-directory path."""
+    if len(args) < 2 or len(args) > 3:
+        print("usage: a8s add <name> <dir> [<definition>]", file=sys.stderr)
         return 2
-    name, dir_str = args
+    name, dir_str = args[0], args[1]
+    definition_arg = args[2] if len(args) == 3 else None
     if not NAME_RE.fullmatch(name):
         print(f"name must be alphanumeric: {name!r}", file=sys.stderr)
         return 2
@@ -1072,10 +1101,27 @@ def cmd_add(args: list[str]) -> int:
         if k.lower() == name.lower():
             print(f"alias already exists with name: {k} — pick a different agent name", file=sys.stderr)
             return 1
-    reg[name] = {"root": str(root)}
+
+    if definition_arg:
+        path = Path(definition_arg).expanduser().resolve()
+        if not path.is_file():
+            print(f"not a file: {path}", file=sys.stderr)
+            return 1
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                json.loads(f.read())
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"definition is not valid JSON: {e}", file=sys.stderr)
+            return 1
+        definition_path = str(path)
+        note = "explicit"
+    else:
+        definition_path, note = _autodiscover_definition(root)
+
+    reg[name] = {"root": str(root), "definition": definition_path}
     save_registry(reg)
     print(f"added {name} -> {root}")
-    print(f"next: a8s define {name} <path-to-definition.json>")
+    print(f"definition: {definition_path}  ({note})")
     return 0
 
 
@@ -1198,20 +1244,20 @@ def cmd_aliases() -> int:
 
 
 def cmd_agents() -> int:
-    """`a8s agents` — list every registered agent with status (defined/undefined)."""
+    """`a8s agents` — list every registered agent and its definition path.
+    Every agent always has a definition (default fallback applies if the
+    registry's `definition` field is missing)."""
     reg = load_registry()
     if not reg:
         print("(no agents registered — use `a8s add <name> <dir>`)")
         return 0
+    default_fallback = str(default_definition_path("default"))
     width = max(len(name) for name in reg)
     for name in sorted(reg, key=str.lower):
         info = reg[name]
         root = info.get("root", "?")
-        if info.get("definition"):
-            status = f"defined ({info['definition']})"
-        else:
-            status = "UNDEFINED — run `a8s define`"
-        print(f"  {name.ljust(width)}  {root}  [{status}]")
+        defn = info.get("definition") or f"{default_fallback} (fallback)"
+        print(f"  {name.ljust(width)}  {root}  [{defn}]")
     return 0
 
 
@@ -1392,9 +1438,42 @@ def cmd_tell(args: list[str]) -> int:
     return 0
 
 
+def _queue_clear_sentinel(p: Participant) -> Path:
+    """Drop a CLEAR sentinel into <p>/inbox/. Per the locked design (Q1,
+    belt-and-suspenders): wipe everything currently in the inbox to trash
+    so the sentinel is the only message at write time. Read-time wipe in
+    `wake_once` handles anything that arrives in the gap.
+
+    The sentinel has `from: ""` and `clear: true`. `select_verb` routes
+    it to `invokeClear`, which runs without a prompt to start a fresh
+    conversation."""
+    ensure_mailboxes(p)
+    # Write-time wipe: trash everything in the inbox.
+    for f in inbox_dir(p.name).iterdir():
+        if f.is_file():
+            trashed = unique_path(trash_dir(p.name) / f.name)
+            f.rename(trashed)
+    now = datetime.now(timezone.utc)
+    msg = {
+        "date": now.isoformat().replace("+00:00", "Z"),
+        "from": "",
+        "to": p.name,
+        "content": "",
+        "files": [],
+        "clear": True,
+    }
+    fname = f"{now.strftime('%Y%m%dT%H%M%S%f')}_CLEAR.json"
+    dest = unique_path(inbox_dir(p.name) / fname)
+    with dest.open("w", encoding="utf-8") as f:
+        json.dump(msg, f, indent=2)
+    return dest
+
+
 def cmd_clear(args: list[str]) -> int:
-    """`a8s clear <name>` wipes the agent's (or alias members') mailboxes and
-    flags fresh on next wake. Aliases fan out — every member is cleared."""
+    """`a8s clear <name>` queues a CLEAR sentinel into the agent's (or alias
+    members') inbox. The sentinel is the only message at write time (current
+    inbox is moved to trash). When the wake-loop processes it, invokeClear
+    runs (no prompt) — starts a fresh conversation."""
     if not args:
         print("usage: a8s clear <name>", file=sys.stderr)
         print("       <name> can be an agent or alias; alias members are all cleared.", file=sys.stderr)
@@ -1409,22 +1488,15 @@ def cmd_clear(args: list[str]) -> int:
         print(f"clear: {e}", file=sys.stderr)
         return 1
     parts = participants_from_registry()
-    cleared_agents = 0
-    cleared_msgs = 0
+    queued = 0
     for member in members:
         target = find_participant(parts, member)
         if target is None:
             continue
-        ensure_mailboxes(target)
-        for d in (inbox_dir(target.name), trash_dir(target.name), outbox_dir(target.root)):
-            for f in d.iterdir():
-                if f.is_file():
-                    f.unlink()
-                    cleared_msgs += 1
-        mark_fresh([target.root])
-        cleared_agents += 1
-    print(f"cleared {cleared_msgs} message(s) across {cleared_agents} agent(s)")
-    print("next wake for each will start a new conversation")
+        _queue_clear_sentinel(target)
+        out_agent(target.name, f"[{target.name}] clear queued")
+        queued += 1
+    print(f"queued clear for {queued} agent(s)")
     return 0
 
 
@@ -1763,7 +1835,7 @@ def cmd_ls() -> int:
 # ---------- presentation ----------
 
 COMMANDS: list[tuple[str, str, str]] = [
-    ("add",      "<name> <dir>",         "Register a new agent. Errors on duplicate name. Run `a8s define` next."),
+    ("add",      "<name> <dir> [<def>]", "Register a new agent. Without <def>, scans <dir> for marker files (CLAUDE.md/GEMINI.md/CODEX.md) and auto-links the matching built-in definition."),
     ("agents",   "",                     "List every registered agent and definition status."),
     ("discover", "<path>",               "Walk <path> for marker files; print suggested `a8s add`/`a8s define` commands. Read-only."),
     ("define",   "<name> [<path>]",      "Show or set <name>'s definition JSON. Without <path>, prints the effective definition."),
@@ -1779,7 +1851,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("ls",       "",                     "List only running agents and their handler PIDs."),
     ("prompt",   "<name> <message>",     "Queue a senderless message. <name> may be an agent or alias (queues per member)."),
     ("tell",     "<name> <message>",     "Routed message to <name>. <name> may be an agent or alias (fans out at routing time). Sender = agent enclosing CWD."),
-    ("clear",    "<name>",               "Wipe mailboxes and flag fresh. <name> may be an agent or alias (clears each member)."),
+    ("clear",    "<name>",               "Queue a CLEAR sentinel (wipes inbox first; next wake runs invokeClear). Aliases iterate."),
     ("install",  "",                     "Install canonical skills into each supported tool's user scope."),
     ("logs",     "<name>... [--tail N] [-f]", "Read per-agent log files; merge-sort multiple by timestamp. Names may include aliases."),
 ]
@@ -1909,11 +1981,6 @@ def main(argv: list[str]) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--interval", type=float, default=1.0, help="loop poll interval seconds (default: 1.0)")
-    parser.add_argument("--unrestricted", action="store_true",
-                        help="drop per-tool gating where possible: claude switches to "
-                             "--dangerously-skip-permissions, codex to "
-                             "--dangerously-bypass-approvals-and-sandbox. Gemini is already "
-                             "fully permissive in headless mode (Policy Engine doesn't apply).")
     parser.add_argument("command", nargs="?", help=argparse.SUPPRESS)
     parser.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -1921,11 +1988,6 @@ def main(argv: list[str]) -> int:
     if args.command is None:
         parser.print_help()
         return 0
-
-    global UNRESTRICTED
-    UNRESTRICTED = bool(args.unrestricted)
-    if UNRESTRICTED:
-        print("[a8s] UNRESTRICTED: claude --dangerously-skip-permissions, codex --dangerously-bypass-approvals-and-sandbox", file=sys.stderr)
 
     if args.command in KNOWN_COMMANDS:
         return dispatch(args.command, args.rest, args.interval)

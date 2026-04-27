@@ -1,28 +1,30 @@
 {
   "description": "Claude Code default — granular permissions, continues prior session.",
-  "invoke": [
+  "invokePrompt": [
     "claude",
     "--permission-mode", "dontAsk",
-    "--allowedTools", "Bash(tell:*) Bash(says:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
+    "--allowedTools", "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
     "--continue",
     "-p", "$PROMPT"
   ],
-  "invokeFresh": [
+  "invokeMessage": [
     "claude",
     "--permission-mode", "dontAsk",
-    "--allowedTools", "Bash(tell:*) Bash(says:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
-    "-p", "$PROMPT"
-  ],
-  "invokeUnrestricted": [
-    "claude",
-    "--dangerously-skip-permissions",
+    "--allowedTools", "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
     "--continue",
     "-p", "$PROMPT"
   ],
-  "invokeUnrestrictedFresh": [
+  "invokeMessageAlias": [
     "claude",
-    "--dangerously-skip-permissions",
+    "--permission-mode", "dontAsk",
+    "--allowedTools", "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
+    "--continue",
     "-p", "$PROMPT"
+  ],
+  "invokeClear": [
+    "claude",
+    "--permission-mode", "dontAsk",
+    "-p", "Conversation cleared. New conversation starts now."
   ],
   "promptMessage": "{sender} tells you ({recipient}): {message}",
   "promptMessageAlias": "{sender} tells you ({recipient}) and {others_count} others on the {alias} alias: {message}"
