@@ -1,0 +1,858 @@
+"""a8s commands — every cmd_* function dispatched by cli.py.
+
+Grouped by section:
+  registry mgmt    — add, define, agents, discover, install
+  aliases          — alias, unalias, aliases
+  process control  — start, run, step, stop, kill, exit, ls
+  messaging        — tell, prompt, clear
+  logs             — logs
+
+`cmd_start` re-execs the entry script via `core.ENTRYPOINT` (NOT __file__,
+which would resolve to commands.py after the modular split).
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from core import (
+    ENTRYPOINT,
+    NAME_RE,
+    SKILLS_DIR,
+    BIN_ROOT,
+    _pid_alive,
+    _preview,
+    agent_log_path,
+    out,
+    out_agent,
+    pid_path,
+)
+from definitions import _autodiscover_definition, default_definition_path
+from daemon import _read_handler_pid, attached_loop
+from mailbox import (
+    _queue_clear_sentinel,
+    _queue_prompt,
+    _split_content_and_files,
+    _write_outbox,
+)
+from registry import (
+    _scan_for_markers,
+    find_participant,
+    load_aliases,
+    load_registry,
+    participants_from_registry,
+    resolve_name,
+    save_aliases,
+    save_registry,
+    sender_from_cwd,
+)
+
+
+# ---------- skill installation helpers ----------
+
+def _install_skill_claude(skill_dir: Path) -> str:
+    docs_dir = BIN_ROOT / "docs"
+    if not docs_dir.is_dir():
+        return f"  claude: {docs_dir} not found; skipping"
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.is_file():
+        return f"  claude: {skill_md} missing; skipping"
+    target_link = docs_dir / f"{skill_dir.name}.md"
+    rel = Path("..") / skill_md.relative_to(BIN_ROOT)
+    if target_link.is_symlink():
+        if os.readlink(target_link) == str(rel):
+            return f"  claude: docs/{target_link.name} already linked"
+        target_link.unlink()
+    elif target_link.exists():
+        return f"  claude: {target_link} exists and is not a symlink; refusing to overwrite"
+    target_link.symlink_to(rel)
+    return f"  claude: linked docs/{target_link.name} -> {rel} (install.sh will sync to ~/.claude/skills/)"
+
+
+def _install_skill_gemini(skill_dir: Path) -> str:
+    if shutil.which("gemini") is None:
+        return "  gemini: not on PATH; skipping"
+    skill_name = skill_dir.name
+    try:
+        listed = subprocess.run(
+            ["gemini", "skills", "list", "--all"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        return f"  gemini: could not list skills ({e}); skipping"
+    if re.search(rf"\b{re.escape(skill_name)}\b", listed.stdout):
+        return f"  gemini: '{skill_name}' already linked"
+    res = subprocess.run(
+        ["gemini", "skills", "link", str(skill_dir), "--scope", "user", "--consent"],
+        capture_output=True, text=True, timeout=60,
+    )
+    if res.returncode != 0:
+        msg = (res.stderr.strip() or res.stdout.strip()).splitlines()[-1] if (res.stderr or res.stdout) else "unknown error"
+        return f"  gemini: link failed ({msg})"
+    return f"  gemini: linked '{skill_name}' at user scope"
+
+
+def _install_skill_codex(skill_dir: Path) -> str:
+    codex_skills = Path.home() / ".codex" / "skills"
+    if not codex_skills.is_dir():
+        return f"  codex: {codex_skills} not found; skipping (codex may not be installed)"
+    skill_name = skill_dir.name
+    target = codex_skills / skill_name
+    src = str(skill_dir)
+    if target.is_symlink():
+        if os.readlink(target) == src:
+            return f"  codex: '{skill_name}' already linked"
+        target.unlink()
+    elif target.exists():
+        return f"  codex: {target} exists and is not a symlink; refusing to overwrite"
+    target.symlink_to(src)
+    return f"  codex: linked '{skill_name}' at {target}"
+
+
+# ---------- registry management commands ----------
+
+def cmd_add(args: list[str]) -> int:
+    """`a8s add <name> <dir> [<definition>]` — register a new agent.
+
+    Without `<definition>`, `<dir>` is scanned for a marker file
+    (CLAUDE.md/GEMINI.md/CODEX.md) and the matching built-in definition is
+    auto-linked. Multiple or zero markers fall back to the bundled default.
+
+    With `<definition>`, the JSON file is validated and set as the agent's
+    definition.
+
+    Errors on duplicate name (vs. agents or aliases) or non-directory path."""
+    if len(args) < 2 or len(args) > 3:
+        print("usage: a8s add <name> <dir> [<definition>]", file=sys.stderr)
+        return 2
+    name, dir_str = args[0], args[1]
+    definition_arg = args[2] if len(args) == 3 else None
+    if not NAME_RE.fullmatch(name):
+        print(f"name must be alphanumeric: {name!r}", file=sys.stderr)
+        return 2
+    root = Path(dir_str).expanduser()
+    if not root.is_dir():
+        print(f"not a directory: {root}", file=sys.stderr)
+        return 1
+    root = root.resolve()
+    reg = load_registry()
+    for k in reg:
+        if k.lower() == name.lower():
+            print(f"agent already exists with name: {k}", file=sys.stderr)
+            return 1
+    aliases = load_aliases()
+    for k in aliases:
+        if k.lower() == name.lower():
+            print(f"alias already exists with name: {k} — pick a different agent name", file=sys.stderr)
+            return 1
+
+    if definition_arg:
+        path = Path(definition_arg).expanduser().resolve()
+        if not path.is_file():
+            print(f"not a file: {path}", file=sys.stderr)
+            return 1
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                json.loads(f.read())
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"definition is not valid JSON: {e}", file=sys.stderr)
+            return 1
+        definition_path = str(path)
+        note = "explicit"
+    else:
+        definition_path, note = _autodiscover_definition(root)
+
+    reg[name] = {"root": str(root), "definition": definition_path}
+    save_registry(reg)
+    print(f"added {name} -> {root}")
+    print(f"definition: {definition_path}  ({note})")
+    return 0
+
+
+def cmd_define(args: list[str]) -> int:
+    """`a8s define <name>`           — show <name>'s effective definition + source.
+    `a8s define <name> <path>`       — set <name>'s definition file path in the registry."""
+    if not args:
+        print("usage: a8s define <name> [<path-to-definition.json>]", file=sys.stderr)
+        return 2
+    name = args[0]
+    reg = load_registry()
+    target_key: str | None = None
+    for k in reg:
+        if k.lower() == name.lower():
+            target_key = k
+            break
+    if target_key is None:
+        print(f"no agent named {name!r}", file=sys.stderr)
+        return 1
+    info = reg[target_key]
+
+    if len(args) == 1:
+        custom = info.get("definition")
+        if not custom:
+            print(f"{target_key}: no definition set", file=sys.stderr)
+            print(f"hint: a8s define {target_key} apps/a8s/definitions/<kind>.json", file=sys.stderr)
+            return 1
+        source = Path(custom).expanduser()
+        print(f"{target_key}: {source}")
+        try:
+            with source.open("r", encoding="utf-8") as f:
+                sys.stdout.write(f.read())
+        except OSError as e:
+            print(f"(could not read: {e})", file=sys.stderr)
+            return 1
+        return 0
+
+    if len(args) > 2:
+        print("usage: a8s define <name> [<path-to-definition.json>]", file=sys.stderr)
+        return 2
+    path = Path(args[1]).expanduser().resolve()
+    if not path.is_file():
+        print(f"not a file: {path}", file=sys.stderr)
+        return 1
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            json.loads(f.read())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"definition is not valid JSON: {e}", file=sys.stderr)
+        return 1
+    info["definition"] = str(path)
+    save_registry(reg)
+    print(f"{target_key}: definition set to {path}")
+    return 0
+
+
+def cmd_agents() -> int:
+    """`a8s agents` — list every registered agent and its definition path.
+    Every agent always has a definition (default fallback applies if the
+    registry's `definition` field is missing)."""
+    reg = load_registry()
+    if not reg:
+        print("(no agents registered — use `a8s add <name> <dir>`)")
+        return 0
+    default_fallback = str(default_definition_path("default"))
+    width = max(len(name) for name in reg)
+    for name in sorted(reg, key=str.lower):
+        info = reg[name]
+        root = info.get("root", "?")
+        defn = info.get("definition") or f"{default_fallback} (fallback)"
+        print(f"  {name.ljust(width)}  {root}  [{defn}]")
+    return 0
+
+
+def cmd_discover(args: list[str]) -> int:
+    """`a8s discover <path>` — read-only walk for marker files. Prints suggested
+    `a8s add` / `a8s define` commands; never mutates the registry."""
+    if len(args) != 1:
+        print("usage: a8s discover <path>", file=sys.stderr)
+        return 2
+    root = Path(args[0]).expanduser()
+    if not root.is_dir():
+        print(f"not a directory: {root}", file=sys.stderr)
+        return 1
+    found = _scan_for_markers(root.resolve())
+    if not found:
+        print(f"no marker files (CLAUDE.md/GEMINI.md/CODEX.md with `# Name` line) found under {root}")
+        return 0
+    reg = load_registry()
+    registered_names = {n.lower() for n in reg}
+    registered_roots = {Path(v.get("root", "")).resolve() for v in reg.values() if v.get("root")}
+    print(f"found {len(found)} candidate(s) under {root}:\n")
+    for name, kind, dir_path in found:
+        already = name.lower() in registered_names or dir_path in registered_roots
+        marker = "  [already registered]" if already else ""
+        print(f"# {name} ({kind}) at {dir_path}{marker}")
+        if not already:
+            print(f"a8s add {name} {dir_path}")
+            print(f"a8s define {name} {default_definition_path(kind)}")
+        print()
+    return 0
+
+
+def cmd_install() -> int:
+    if not SKILLS_DIR.is_dir():
+        print(f"no skills directory at {SKILLS_DIR}", file=sys.stderr)
+        return 1
+    skill_dirs = [
+        d for d in sorted(SKILLS_DIR.iterdir())
+        if d.is_dir() and (d / "SKILL.md").is_file()
+    ]
+    if not skill_dirs:
+        print(f"no skills found in {SKILLS_DIR}")
+        return 0
+    print(f"installing {len(skill_dirs)} skill(s) from {SKILLS_DIR}:")
+    for skill_dir in skill_dirs:
+        print(f"\n[{skill_dir.name}]")
+        print(_install_skill_claude(skill_dir))
+        print(_install_skill_gemini(skill_dir))
+        print(_install_skill_codex(skill_dir))
+    return 0
+
+
+# ---------- alias commands ----------
+
+def cmd_alias(args: list[str]) -> int:
+    """`a8s alias <alias> <member>` — add member to alias, creating the alias
+    if new. Members may be agent names OR existing alias names (nesting OK,
+    cycles rejected at resolve time). The alias name must not collide with
+    an existing agent name."""
+    if len(args) == 0:
+        return cmd_aliases()
+    if len(args) != 2:
+        print("usage: a8s alias <alias> <member>     # add or create", file=sys.stderr)
+        print("       a8s alias                      # list", file=sys.stderr)
+        return 2
+    alias_name, member = args
+    if not NAME_RE.fullmatch(alias_name):
+        print(f"alias name must be alphanumeric: {alias_name!r}", file=sys.stderr)
+        return 2
+    agents = load_registry()
+    aliases = load_aliases()
+    for k in agents:
+        if k.lower() == alias_name.lower():
+            print(f"agent already exists with name: {k} — pick a different alias", file=sys.stderr)
+            return 1
+    member_resolved: str | None = None
+    for k in agents:
+        if k.lower() == member.lower():
+            member_resolved = k
+            break
+    if member_resolved is None:
+        for k in aliases:
+            if k.lower() == member.lower():
+                member_resolved = k
+                break
+    if member_resolved is None:
+        print(f"unknown member {member!r} (not an agent or alias)", file=sys.stderr)
+        return 1
+    if member_resolved.lower() == alias_name.lower():
+        print(f"cannot add alias {alias_name!r} to itself", file=sys.stderr)
+        return 1
+    canonical_alias = alias_name
+    for k in aliases:
+        if k.lower() == alias_name.lower():
+            canonical_alias = k
+            break
+    members = aliases.get(canonical_alias) or []
+    if any(m.lower() == member_resolved.lower() for m in members):
+        print(f"{canonical_alias} already includes {member_resolved}")
+        return 0
+    members.append(member_resolved)
+    aliases[canonical_alias] = members
+    save_aliases(aliases)
+    # Cycle check via resolve_name; revert on failure.
+    try:
+        resolve_name(canonical_alias)
+    except ValueError as e:
+        members.remove(member_resolved)
+        if not members:
+            aliases.pop(canonical_alias, None)
+        else:
+            aliases[canonical_alias] = members
+        save_aliases(aliases)
+        print(f"refusing add: {e}", file=sys.stderr)
+        return 1
+    print(f"{canonical_alias} += {member_resolved}")
+    return 0
+
+
+def cmd_unalias(args: list[str]) -> int:
+    """`a8s unalias <alias> [<member>]` — remove a single member, or the whole
+    alias if no member given."""
+    if not args or len(args) > 2:
+        print("usage: a8s unalias <alias> [<member>]", file=sys.stderr)
+        return 2
+    aliases = load_aliases()
+    canonical: str | None = None
+    for k in aliases:
+        if k.lower() == args[0].lower():
+            canonical = k
+            break
+    if canonical is None:
+        print(f"unknown alias: {args[0]!r}", file=sys.stderr)
+        return 1
+    if len(args) == 1:
+        del aliases[canonical]
+        save_aliases(aliases)
+        print(f"removed alias {canonical}")
+        return 0
+    member = args[1]
+    members = aliases[canonical]
+    new_members = [m for m in members if m.lower() != member.lower()]
+    if len(new_members) == len(members):
+        print(f"{canonical}: not a member: {member!r}", file=sys.stderr)
+        return 1
+    if not new_members:
+        del aliases[canonical]
+    else:
+        aliases[canonical] = new_members
+    save_aliases(aliases)
+    print(f"{canonical} -= {member}")
+    return 0
+
+
+def cmd_aliases() -> int:
+    """`a8s aliases` — list every alias and its members."""
+    aliases = load_aliases()
+    if not aliases:
+        print("(no aliases — use `a8s alias <alias> <member>` to create one)")
+        return 0
+    width = max(len(name) for name in aliases)
+    for name in sorted(aliases, key=str.lower):
+        members = aliases[name]
+        try:
+            _, resolved = resolve_name(name)
+            tail = "" if len(members) == len(resolved) else f"  → {len(resolved)} agents"
+        except (KeyError, ValueError) as e:
+            tail = f"  [{e}]"
+        print(f"  {name.ljust(width)}  [{', '.join(members)}]{tail}")
+    return 0
+
+
+# ---------- process control commands ----------
+
+def _expand_to_agents(name: str) -> list[str] | None:
+    """Resolve `name` to a flat list of agent names. Returns None on error
+    (already-printed usage)."""
+    try:
+        _, members = resolve_name(name)
+    except KeyError:
+        print(f"no agent or alias named {name!r}", file=sys.stderr)
+        return None
+    except ValueError as e:
+        print(f"{e}", file=sys.stderr)
+        return None
+    if not members:
+        print(f"{name!r} resolves to no agents", file=sys.stderr)
+        return None
+    return members
+
+
+def cmd_run(args: list[str], interval: float) -> int:
+    """`a8s run <name>` — foreground attached loop. <name> may be an agent or
+    an alias; aliases produce ONE process that handles every member (each
+    member's pid file points at this PID). Ctrl+C: graceful detach. 2nd
+    Ctrl+C: kills the wake subprocess group."""
+    if len(args) != 1:
+        print("usage: a8s run <name>", file=sys.stderr)
+        return 2
+    members = _expand_to_agents(args[0])
+    if members is None:
+        return 1
+    return attached_loop(members, interval)
+
+
+def cmd_start(args: list[str]) -> int:
+    """`a8s start <name>` — spawn ONE detached background process. The child
+    runs `a8s run <name>` and (if <name> is an alias) handles every member in
+    a single process. Returns the child's PID."""
+    if len(args) != 1:
+        print("usage: a8s start <name>", file=sys.stderr)
+        return 2
+    name = args[0]
+    # Validate (resolve_name raises if unknown / cycle).
+    try:
+        _, members = resolve_name(name)
+    except KeyError:
+        print(f"start: no agent or alias named {name!r}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"start: {e}", file=sys.stderr)
+        return 1
+    if not members:
+        print(f"start: {name!r} resolves to no agents", file=sys.stderr)
+        return 1
+    # NOTE: the child must launch the entrypoint script (a8s.py), NOT this
+    # commands.py module. That's why core.ENTRYPOINT exists.
+    cmd = [sys.executable, str(ENTRYPOINT), "run", name]
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    if len(members) == 1:
+        print(f"started {members[0]} as PID {proc.pid}")
+    else:
+        print(f"started {name} (alias of {len(members)}) as PID {proc.pid}")
+    return 0
+
+
+def cmd_step(args: list[str], interval: float) -> int:
+    """`a8s step <name>` — attach as handler, one route+drain pass, release.
+    Aliases handled in a single process: one acquire across all members, one
+    pass, one release."""
+    if len(args) != 1:
+        print("usage: a8s step <name>", file=sys.stderr)
+        return 2
+    members = _expand_to_agents(args[0])
+    if members is None:
+        return 1
+    return attached_loop(members, interval, single_pass=True)
+
+
+def cmd_stop(args: list[str]) -> int:
+    """`a8s stop <name>` — SIGTERM the handler(s). One handler may serve
+    multiple members of an alias; we dedupe by PID so we signal each unique
+    handler exactly once. Detaches the WHOLE handler (collateral on any other
+    members it was handling)."""
+    if len(args) != 1:
+        print("usage: a8s stop <name>", file=sys.stderr)
+        return 2
+    members = _expand_to_agents(args[0])
+    if members is None:
+        return 1
+    seen_pids: dict[int, str] = {}
+    not_running: list[str] = []
+    for name in members:
+        pid = _read_handler_pid(name)
+        if pid is None:
+            not_running.append(name)
+            continue
+        if pid not in seen_pids:
+            seen_pids[pid] = name
+    if not seen_pids:
+        for n in not_running:
+            print(f"{n}: not running", file=sys.stderr)
+        return 1
+    for pid, label in seen_pids.items():
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"{label}: sent SIGTERM to PID {pid}")
+        except OSError as e:
+            print(f"{label}: could not signal PID {pid}: {e}", file=sys.stderr)
+    for n in not_running:
+        print(f"{n}: not running")
+    return 0
+
+
+def cmd_kill(args: list[str]) -> int:
+    """`a8s kill <name>` — etiquette-then-force per unique handler PID."""
+    if len(args) != 1:
+        print("usage: a8s kill <name>", file=sys.stderr)
+        return 2
+    members = _expand_to_agents(args[0])
+    if members is None:
+        return 1
+    seen_pids: dict[int, str] = {}
+    for name in members:
+        pid = _read_handler_pid(name)
+        if pid is not None and pid not in seen_pids:
+            seen_pids[pid] = name
+    if not seen_pids:
+        for name in members:
+            print(f"{name}: not running", file=sys.stderr)
+        return 1
+    for pid, label in seen_pids.items():
+        print(f"{label}: SIGTERM PID {pid} (graceful)")
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        time.sleep(0.5)
+        if _pid_alive(pid):
+            print(f"{label}: still alive — second SIGTERM (forces subprocess group kill)")
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            time.sleep(0.5)
+        if _pid_alive(pid):
+            print(f"{label}: still alive — SIGKILL")
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        # Clean up any pid files still pointing at this dead PID.
+        for name in members:
+            p = pid_path(name)
+            if p.is_file():
+                try:
+                    if int(p.read_text().strip()) == pid:
+                        p.unlink()
+                except (OSError, ValueError):
+                    pass
+    return 0
+
+
+def cmd_exit() -> int:
+    """`a8s exit` — SIGTERM every running agent's handler. Each daemon
+    detaches gracefully on its own."""
+    parts = participants_from_registry()
+    sent = 0
+    for p in parts:
+        pid = _read_handler_pid(p.name)
+        if pid is None:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"{p.name}: SIGTERM PID {pid}")
+            sent += 1
+        except OSError as e:
+            print(f"{p.name}: could not signal PID {pid}: {e}", file=sys.stderr)
+    if sent == 0:
+        print("no agents running")
+    return 0
+
+
+def cmd_ls() -> int:
+    """`a8s ls` — list only running agents and their handler PIDs."""
+    parts = participants_from_registry()
+    running: list[tuple[str, int, Path]] = []
+    for p in parts:
+        pid = _read_handler_pid(p.name)
+        if pid is not None:
+            running.append((p.name, pid, p.root))
+    if not running:
+        print("(no agents running)")
+        return 0
+    width = max(len(n) for n, _, _ in running)
+    for name, pid, root in sorted(running, key=lambda x: x[0].lower()):
+        print(f"  {name.ljust(width)}  PID {pid}  {root}")
+    return 0
+
+
+# ---------- messaging commands ----------
+
+def cmd_tell(args: list[str]) -> int:
+    """`a8s tell <name> <msg>` — write a single outbox message; `name` may be
+    an agent or alias. Fan-out to alias members happens at routing time so the
+    `to` field stays the original alias name (recipients can see it via
+    `promptMessageAlias`)."""
+    if len(args) < 2:
+        print("usage: tell <name> <message>", file=sys.stderr)
+        return 2
+    target_query, *rest = args
+    content, files = _split_content_and_files(" ".join(rest))
+
+    sender = sender_from_cwd()
+    if sender is None:
+        print("tell: current directory is not inside any registered agent", file=sys.stderr)
+        print("hint: register the enclosing dir with `a8s add <name> <dir>`", file=sys.stderr)
+        return 1
+    sender_name, sender_info = sender
+
+    try:
+        kind, members = resolve_name(target_query)
+    except KeyError:
+        print(f"tell: no agent or alias named {target_query!r}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"tell: {e}", file=sys.stderr)
+        return 1
+    if not members:
+        print(f"tell: {target_query!r} resolves to no agents", file=sys.stderr)
+        return 1
+    # Resolve the canonical name (preserves user's chosen casing) for the `to`
+    # field, regardless of agent vs alias.
+    if kind == "agent":
+        canonical = members[0]
+    else:
+        aliases = load_aliases()
+        canonical = next((k for k in aliases if k.lower() == target_query.lower()), target_query)
+
+    _write_outbox(sender_name, Path(sender_info["root"]), canonical, content, files)
+    if kind == "alias":
+        out_agent(sender_name, f"tell -> {canonical} (alias of {len(members)}): {_preview(content)}")
+    else:
+        out_agent(sender_name, f"tell -> {canonical}: {_preview(content)}")
+    return 0
+
+
+def cmd_prompt(args: list[str]) -> int:
+    """`a8s prompt <name> <message>` — queue a senderless prompt. <name> may
+    be an agent or alias; aliases queue one copy per member. The literal
+    `all` target is gone — create an `all` alias if you want broadcast."""
+    if len(args) < 2:
+        print("usage: a8s prompt <name> <message>", file=sys.stderr)
+        return 2
+    name, *rest = args
+    prompt = " ".join(rest)
+    parts = participants_from_registry()
+
+    members = _expand_to_agents(name)
+    if members is None:
+        return 1
+    queued = 0
+    for member in members:
+        target = find_participant(parts, member)
+        if target is None:
+            print(f"prompt: registry inconsistency — {member!r} not found", file=sys.stderr)
+            continue
+        _queue_prompt(target, prompt)
+        out_agent(target.name, f"queued prompt to {target.name}: {_preview(prompt)}")
+        queued += 1
+    if queued > 1:
+        out(f"queued prompt to {queued} agent(s)")
+    return 0 if queued > 0 else 1
+
+
+def cmd_clear(args: list[str]) -> int:
+    """`a8s clear <name>` queues a CLEAR sentinel into the agent's (or alias
+    members') inbox. The sentinel is the only message at write time (current
+    inbox is moved to trash). When the wake-loop processes it, invokeClear
+    runs (no prompt) — starts a fresh conversation."""
+    if not args:
+        print("usage: a8s clear <name>", file=sys.stderr)
+        print("       <name> can be an agent or alias; alias members are all cleared.", file=sys.stderr)
+        return 2
+    name = args[0]
+    try:
+        _kind, members = resolve_name(name)
+    except KeyError:
+        print(f"clear: no agent or alias named {name!r}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"clear: {e}", file=sys.stderr)
+        return 1
+    parts = participants_from_registry()
+    queued = 0
+    for member in members:
+        target = find_participant(parts, member)
+        if target is None:
+            continue
+        _queue_clear_sentinel(target)
+        out_agent(target.name, f"[{target.name}] clear queued")
+        queued += 1
+    print(f"queued clear for {queued} agent(s)")
+    return 0
+
+
+# ---------- logs ----------
+
+def cmd_logs(args: list[str]) -> int:
+    """Read each named agent's log.txt and emit lines merge-sorted by ISO
+    timestamp prefix. -f follows each file; new lines from any source are
+    interleaved using a small ordering buffer so multi-file output stays
+    roughly chronological."""
+    if not args:
+        print("usage: a8s logs <name> [<name>...] [--tail N] [-f|--follow]", file=sys.stderr)
+        return 2
+    names: list[str] = []
+    tail_n: int | None = None
+    follow = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-f", "--follow"):
+            follow = True
+            i += 1
+        elif a == "--tail" and i + 1 < len(args):
+            try:
+                tail_n = int(args[i + 1])
+            except ValueError:
+                print(f"--tail: not an integer: {args[i + 1]!r}", file=sys.stderr)
+                return 2
+            i += 2
+        elif a.startswith("--tail="):
+            try:
+                tail_n = int(a.split("=", 1)[1])
+            except ValueError:
+                print(f"--tail: not an integer: {a!r}", file=sys.stderr)
+                return 2
+            i += 1
+        elif a.startswith("-"):
+            print(f"unknown logs arg: {a!r}", file=sys.stderr)
+            return 2
+        else:
+            names.append(a)
+            i += 1
+
+    if not names:
+        print("usage: a8s logs <name> [<name>...] [--tail N] [-f|--follow]", file=sys.stderr)
+        return 2
+
+    # Expand aliases. Names may include agents and aliases; dedupe agent names
+    # (an agent listed twice via overlapping aliases shouldn't double up).
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for n in names:
+        try:
+            _, members = resolve_name(n)
+        except KeyError:
+            print(f"logs: no agent or alias named {n!r}", file=sys.stderr)
+            return 1
+        except ValueError as e:
+            print(f"logs: {e}", file=sys.stderr)
+            return 1
+        for m in members:
+            if m.lower() not in seen:
+                seen.add(m.lower())
+                expanded.append(m)
+
+    paths = [agent_log_path(n) for n in expanded]
+    missing = [p for p in paths if not p.is_file()]
+    if len(missing) == len(paths):
+        for p in missing:
+            print(f"no log yet at {p}", file=sys.stderr)
+        return 1
+
+    # Initial dump: read all existing lines, merge-sort by leading timestamp.
+    lines: list[str] = []
+    for p in paths:
+        if p.is_file():
+            with p.open("r", encoding="utf-8", errors="replace") as f:
+                lines.extend(f)
+    lines.sort(key=lambda ln: ln.split(" ", 1)[0] if ln else "")
+    if tail_n is not None:
+        lines = lines[-tail_n:]
+    for ln in lines:
+        sys.stdout.write(ln)
+    sys.stdout.flush()
+
+    if not follow:
+        return 0
+
+    # Follow: poll each file's tail, emit new lines in chronological order
+    # using a ~1s ordering window. Cheap and correct enough for v1.
+    handles: list[tuple[Path, "os.IOBase"]] = []
+    try:
+        for p in paths:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.touch(exist_ok=True)
+            f = p.open("r", encoding="utf-8", errors="replace")
+            f.seek(0, 2)
+            handles.append((p, f))
+        buf: list[str] = []
+        last_emit = time.time()
+        try:
+            while True:
+                progress = False
+                for _path, f in handles:
+                    while True:
+                        ln = f.readline()
+                        if not ln:
+                            break
+                        buf.append(ln)
+                        progress = True
+                now = time.time()
+                if buf and (not progress or now - last_emit >= 1.0):
+                    buf.sort(key=lambda ln: ln.split(" ", 1)[0] if ln else "")
+                    for ln in buf:
+                        sys.stdout.write(ln)
+                    sys.stdout.flush()
+                    buf.clear()
+                    last_emit = now
+                if not progress:
+                    time.sleep(0.25)
+        except KeyboardInterrupt:
+            if buf:
+                buf.sort(key=lambda ln: ln.split(" ", 1)[0] if ln else "")
+                for ln in buf:
+                    sys.stdout.write(ln)
+                sys.stdout.flush()
+            return 0
+    finally:
+        for _p, f in handles:
+            try:
+                f.close()
+            except Exception:
+                pass
