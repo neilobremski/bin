@@ -17,10 +17,12 @@ Surface (CLI):
   kill <name>                 — graceful SIGTERM, then forced subprocess-group kill
   exit                        — SIGTERM every running handler
   ls                          — list only running agents (with handler PIDs)
-  prompt <name|all> <msg>     — queue a senderless message to inbox(es)
-  tell <name> <msg>           — direct routed message (sibling CLI ~/bin/tell)
-  says <msg>                  — broadcast routed message (sibling CLI ~/bin/says)
-  clear <name>                — wipe <name>'s mailboxes; flag fresh on next wake
+  alias <alias> <member>      — add member to alias (creates if new); bare lists
+  unalias <alias> [<member>]  — remove member, or remove the whole alias
+  aliases                     — list every alias and its members
+  prompt <name> <msg>         — queue a senderless message; alias = per-member
+  tell <name> <msg>           — routed message; alias = fan-out at routing
+  clear <name>                — wipe mailboxes + flag fresh; alias iterates
   install                     — install canonical skills into Claude / Gemini /
                                 Codex user scope
   logs <name>... [--tail N] [-f] — read per-agent logs; merge-sort multiples
@@ -320,32 +322,53 @@ def route_outboxes(senders: list[Participant], all_agents: list[Participant] | N
             recipient_name = (msg.get("to") or "").strip()
             preview = _preview(msg.get("content", ""))
             if not recipient_name:
-                # broadcast: fan out to every other participant.
-                others = [p for p in all_agents if p.name != sender.name]
-                for recipient in others:
-                    ensure_mailboxes(recipient)
-                    dest = unique_path(inbox_dir(recipient.name) / f.name)
-                    with dest.open("w", encoding="utf-8") as out_f:
-                        json.dump(msg, out_f, indent=2)
-                    # Mirror the routing event to the recipient's log too so
-                    # their `a8s logs <recipient>` shows what arrived.
-                    out_agent(recipient.name, f"received from {sender.name} (broadcast): {preview}")
-                f.unlink()
-                out_agent(sender.name, f"broadcast: {sender.name} -> {len(others)}: {preview}")
-                routed += len(others)
+                out_agent(sender.name, f"[{sender.name}] empty 'to' in {f.name}; rejecting (use an alias for groups)")
+                bad = unique_path(trash_dir(sender.name) / f.name)
+                f.rename(bad)
                 continue
-            recipient = by_name.get(recipient_name.lower())
-            if recipient is None:
+            try:
+                kind, member_names = resolve_name(recipient_name)
+            except KeyError:
                 out_agent(sender.name, f"[{sender.name}] unknown recipient {recipient_name!r} in {f.name}")
                 continue
-            ensure_mailboxes(recipient)
-            dest = unique_path(inbox_dir(recipient.name) / f.name)
-            with dest.open("w", encoding="utf-8") as out_f:
-                json.dump(msg, out_f, indent=2)
-            f.unlink()
-            out_agent(sender.name, f"routed: {sender.name} -> {recipient.name}: {preview}")
-            out_agent(recipient.name, f"received from {sender.name}: {preview}")
-            routed += 1
+            except ValueError as e:
+                out_agent(sender.name, f"[{sender.name}] {e} in {f.name}")
+                continue
+            recipients: list[Participant] = []
+            for member in member_names:
+                rp = by_name.get(member.lower())
+                if rp is not None and rp.name != sender.name:
+                    # Skip self-copy: an alias that includes the sender doesn't
+                    # echo the message back to them.
+                    recipients.append(rp)
+            if kind == "alias":
+                msg["alias"] = recipient_name
+                msg["others_count"] = max(0, len(recipients) - 1)
+                out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (alias of {len(recipients)}): {preview}")
+                for recipient in recipients:
+                    ensure_mailboxes(recipient)
+                    copy = dict(msg)
+                    copy["to"] = recipient.name
+                    dest = unique_path(inbox_dir(recipient.name) / f.name)
+                    with dest.open("w", encoding="utf-8") as out_f:
+                        json.dump(copy, out_f, indent=2)
+                    out_agent(recipient.name, f"received from {sender.name} (via {recipient_name} alias): {preview}")
+                f.unlink()
+                routed += len(recipients)
+            else:
+                # Single agent recipient.
+                if not recipients:
+                    out_agent(sender.name, f"[{sender.name}] {recipient_name!r} resolved to no agents in {f.name}")
+                    continue
+                recipient = recipients[0]
+                ensure_mailboxes(recipient)
+                dest = unique_path(inbox_dir(recipient.name) / f.name)
+                with dest.open("w", encoding="utf-8") as out_f:
+                    json.dump(msg, out_f, indent=2)
+                f.unlink()
+                out_agent(sender.name, f"routed: {sender.name} -> {recipient.name}: {preview}")
+                out_agent(recipient.name, f"received from {sender.name}: {preview}")
+                routed += 1
     return routed
 
 
@@ -393,23 +416,35 @@ def build_prompt(msg: dict, definition: dict) -> str:
     """Format a queued message into the prompt string handed to the agent CLI.
 
     `definition` provides:
-      - `promptMessage`           — used when sender + recipient are both set (direct tell)
-      - `promptMessageBroadcast`  — used when sender is set but recipient is empty (broadcast)
+      - `promptMessage`       — direct tell (one-to-one)
+      - `promptMessageAlias`  — message delivered via an alias; sees alias name
+                                and others-count but not the other recipients
     Senderless messages (queued by `a8s prompt`) deliver `content` raw.
     """
     sender = (msg.get("from") or "").strip()
     content = msg.get("content", "")
     date = msg.get("date", "")
     recipient = (msg.get("to") or "").strip()
+    alias = (msg.get("alias") or "").strip()
+    others_count = msg.get("others_count", 0)
     if not sender:
         # `a8s prompt` queued this; supervisor-direct, no template wrapping.
         header = content
     else:
-        if recipient:
-            tmpl = definition.get("promptMessage") or "{sender} tells you ({recipient}): {message}"
+        if alias:
+            tmpl = definition.get("promptMessageAlias") or (
+                "{sender} tells you ({recipient}) and {others_count} others on the {alias} alias: {message}"
+            )
         else:
-            tmpl = definition.get("promptMessageBroadcast") or "{sender} says: {message}"
-        header = tmpl.format(sender=sender, recipient=recipient, message=content, date=date)
+            tmpl = definition.get("promptMessage") or "{sender} tells you ({recipient}): {message}"
+        header = tmpl.format(
+            sender=sender,
+            recipient=recipient,
+            message=content,
+            date=date,
+            alias=alias,
+            others_count=others_count,
+        )
         if date and "{date}" not in tmpl:
             header = f"[{date}] {header}"
     parts = [header]
@@ -496,37 +531,77 @@ def consume_fresh(root: Path) -> bool:
 
 # ---------- registry ----------
 
+# Schema (~/.a8s/a8s.json):
+#   {
+#     "agents":  {"<NAME>": {"root": "...", "definition": "...?"}},
+#     "aliases": {"<ALIAS>": ["<NAME-or-ALIAS>", ...]}
+#   }
+# Agent and alias namespaces are disjoint (cmd_alias rejects collisions).
+
 def registry_path() -> Path:
     base = Path.home() / ".a8s"
     base.mkdir(parents=True, exist_ok=True)
     return base / "a8s.json"
 
 
-def load_registry() -> dict:
+def _load_raw_registry() -> dict:
     p = registry_path()
     if not p.is_file():
-        return {}
+        return {"agents": {}, "aliases": {}}
     try:
         data = json.loads(p.read_text())
-        return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
-        return {}
+        return {"agents": {}, "aliases": {}}
+    if not isinstance(data, dict):
+        return {"agents": {}, "aliases": {}}
+    agents = data.get("agents")
+    aliases = data.get("aliases")
+    if not isinstance(agents, dict):
+        agents = {}
+    if not isinstance(aliases, dict):
+        aliases = {}
+    return {"agents": agents, "aliases": aliases}
 
 
-def save_registry(reg: dict) -> None:
-    registry_path().write_text(json.dumps(reg, indent=2, sort_keys=True))
+def _save_raw_registry(data: dict) -> None:
+    payload = {
+        "agents": data.get("agents") or {},
+        "aliases": data.get("aliases") or {},
+    }
+    registry_path().write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def load_registry() -> dict:
+    """Return just the agents section (compatibility shape for callers that
+    iterate `name -> info`). Use `load_aliases()` for the alias map."""
+    return _load_raw_registry()["agents"]
+
+
+def save_registry(agents: dict) -> None:
+    """Write the agents section, preserving the existing aliases section."""
+    raw = _load_raw_registry()
+    raw["agents"] = agents
+    _save_raw_registry(raw)
+
+
+def load_aliases() -> dict:
+    return _load_raw_registry()["aliases"]
+
+
+def save_aliases(aliases: dict) -> None:
+    raw = _load_raw_registry()
+    raw["aliases"] = aliases
+    _save_raw_registry(raw)
 
 
 def resolve_recipient(query: str) -> tuple[str, dict] | None:
+    """Look up an agent by exact (case-insensitive) name. Aliases are NOT
+    resolved here — that's `resolve_name()`'s job for fan-out."""
     reg = load_registry()
     q = query.strip().lower()
     for name, info in reg.items():
         if name.lower() == q:
             return name, info
-    for name, info in reg.items():
-        for alias in info.get("aliases") or []:
-            if str(alias).lower() == q:
-                return name, info
     return None
 
 
@@ -542,6 +617,46 @@ def sender_from_cwd() -> tuple[str, dict] | None:
             if root == parent:
                 return name, info
     return None
+
+
+def resolve_name(query: str) -> tuple[str, list[str]]:
+    """Expand `query` into a flat list of agent names.
+
+    Returns (kind, agent_names) where kind ∈ {"agent", "alias"}. For an alias,
+    members are walked recursively; cycles raise ValueError. Unknown names
+    raise KeyError.
+    """
+    raw = _load_raw_registry()
+    agents = raw["agents"]
+    aliases = raw["aliases"]
+    agent_lookup = {n.lower(): n for n in agents}
+    alias_lookup = {n.lower(): n for n in aliases}
+    q = query.strip().lower()
+    if q in agent_lookup:
+        return "agent", [agent_lookup[q]]
+    if q in alias_lookup:
+        seen: set[str] = set()
+        out_names: list[str] = []
+
+        def walk(name: str) -> None:
+            key = name.lower()
+            if key in seen:
+                raise ValueError(f"alias cycle detected at {name!r}")
+            seen.add(key)
+            if key in agent_lookup:
+                resolved = agent_lookup[key]
+                if resolved not in out_names:
+                    out_names.append(resolved)
+                return
+            if key in alias_lookup:
+                for member in aliases[alias_lookup[key]]:
+                    walk(str(member))
+                return
+            raise KeyError(f"alias {alias_lookup[q]!r} references unknown name {name!r}")
+
+        walk(alias_lookup[q])
+        return "alias", out_names
+    raise KeyError(query)
 
 
 def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
@@ -720,7 +835,7 @@ def release(name: str) -> None:
         pass
 
 
-# ---------- attached loop (the daemon body for one agent) ----------
+# ---------- attached loop (the daemon body for one or more agents) ----------
 
 # Shared state for the signal handler. Set when an attached loop is running.
 _STOP_EVENT: threading.Event | None = None
@@ -751,76 +866,119 @@ def _kill_wake_subprocess_group() -> None:
             pass
 
 
-def _make_signal_handler(name: str):
+def _make_signal_handler(label: str):
     def handle(signum, _frame):
         global _SIGNAL_COUNT
         _SIGNAL_COUNT += 1
         if _SIGNAL_COUNT == 1:
             sys.stderr.write(
-                f"[a8s] {name}: received signal {signum}; detaching after current wake\n"
+                f"[a8s] {label}: received signal {signum}; detaching after current wake\n"
             )
             sys.stderr.flush()
             if _STOP_EVENT is not None:
                 _STOP_EVENT.set()
         else:
             sys.stderr.write(
-                f"[a8s] {name}: second signal — killing wake subprocess group\n"
+                f"[a8s] {label}: second signal — killing wake subprocess group\n"
             )
             sys.stderr.flush()
             _kill_wake_subprocess_group()
     return handle
 
 
-def attached_loop(name: str, interval: float, *, single_pass: bool = False) -> int:
-    """Body of `a8s run` / `a8s start` (and `a8s step` when single_pass=True).
-    Attaches as handler of <name>, then in-loop:
+def attached_loop(names: list[str], interval: float, *, single_pass: bool = False) -> int:
+    """Body of `a8s run` / `a8s start` / `a8s step`. ONE process handles every
+    name in `names` (multiple agents share the same handler PID, recorded in
+    each agent's `~/.a8s/agents/<NAME>/pid`).
+
+    Per iteration:
       - reload registry (so newly-added agents become routable recipients)
-      - route this agent's outbox
-      - drain this agent's inbox (one wake at a time)
-      - sleep `interval` (skipped if single_pass)
-    On signal, finishes the current wake, releases, exits."""
+      - check each handled agent's pid file is still ours (drop if taken over)
+      - route each handled agent's outbox to recipients
+      - drain each handled agent's inbox
+
+    On 1st signal: detach all currently-handled agents (graceful — finish the
+    in-flight wake first). On 2nd signal: SIGTERM-then-SIGKILL the wake
+    subprocess group.
+
+    Take-over collateral: SIGTERM is process-level, so when one of our handled
+    agents is targeted by another `a8s start`, this whole handler detaches
+    everything. Other agents in our set become orphaned. The user's footgun;
+    document and move on (documented in #52)."""
     global _STOP_EVENT, _SIGNAL_COUNT, PRINT_LOCK
     PRINT_LOCK = threading.Lock()
     _STOP_EVENT = threading.Event()
     _SIGNAL_COUNT = 0
 
+    if not names:
+        print("attached_loop: empty names list", file=sys.stderr)
+        return 2
+
+    # Acquire each pid file. If any fails (timeout), release whatever we got.
+    acquired: list[str] = []
     try:
-        acquire(name)
+        for name in names:
+            acquire(name)
+            acquired.append(name)
     except TimeoutError as e:
         print(str(e), file=sys.stderr)
+        for n in acquired:
+            release(n)
         return 1
 
-    handler = _make_signal_handler(name)
+    label = names[0] if len(names) == 1 else f"[{', '.join(names)}]"
+    handler = _make_signal_handler(label)
     prev_sigterm = signal.signal(signal.SIGTERM, handler)
     prev_sigint = signal.signal(signal.SIGINT, handler)
 
-    out_agent(name, f"[a8s] {name}: attached (PID {os.getpid()})")
+    pid = os.getpid()
+    for n in names:
+        out_agent(n, f"[a8s] {n}: attached (PID {pid}{', shared' if len(names) > 1 else ''})")
     try:
         while not _STOP_EVENT.is_set():
             try:
                 all_agents = participants_from_registry()
-                me = next((p for p in all_agents if p.name == name), None)
-                if me is None:
-                    out_agent(name, f"[a8s] {name}: agent removed from registry; exiting")
+                # Filter to agents we still hold and that still exist.
+                handled: list[Participant] = []
+                for name in list(names):
+                    p = next((q for q in all_agents if q.name == name), None)
+                    if p is None:
+                        out_agent(name, f"[a8s] {name}: removed from registry; dropping")
+                        names.remove(name)
+                        continue
+                    holder = _read_handler_pid(name)
+                    if holder is not None and holder != pid:
+                        out_agent(name, f"[a8s] {name}: detaching (taken over by PID {holder})")
+                        names.remove(name)
+                        continue
+                    handled.append(p)
+                if not handled:
+                    out_agent(label, f"[a8s] {label}: nothing left to handle; exiting")
                     break
-                ensure_mailboxes(me)
-                route_outboxes([me], all_agents=all_agents)
-                while not _STOP_EVENT.is_set():
-                    msg = next_inbox_message(me)
-                    if msg is None:
-                        break
-                    wake_once(me, msg)
+                for p in handled:
+                    ensure_mailboxes(p)
+                route_outboxes(handled, all_agents=all_agents)
+                for p in handled:
+                    while not _STOP_EVENT.is_set():
+                        msg = next_inbox_message(p)
+                        if msg is None:
+                            break
+                        wake_once(p, msg)
             except Exception as e:
-                out_agent(name, f"[a8s] {name}: iteration error: {e}")
+                out_agent(label, f"[a8s] {label}: iteration error: {e}")
             if single_pass:
                 break
             _STOP_EVENT.wait(interval)
     finally:
-        release(name)
+        # Release every pid file we still hold.
+        for n in acquired:
+            holder = _read_handler_pid(n)
+            if holder is None or holder == pid:
+                release(n)
+                out_agent(n, f"[a8s] {n}: detached")
         signal.signal(signal.SIGTERM, prev_sigterm)
         signal.signal(signal.SIGINT, prev_sigint)
         _STOP_EVENT = None
-        out_agent(name, f"[a8s] {name}: detached")
     return 0
 
 
@@ -909,10 +1067,133 @@ def cmd_add(args: list[str]) -> int:
         if k.lower() == name.lower():
             print(f"agent already exists with name: {k}", file=sys.stderr)
             return 1
-    reg[name] = {"root": str(root), "aliases": []}
+    aliases = load_aliases()
+    for k in aliases:
+        if k.lower() == name.lower():
+            print(f"alias already exists with name: {k} — pick a different agent name", file=sys.stderr)
+            return 1
+    reg[name] = {"root": str(root)}
     save_registry(reg)
     print(f"added {name} -> {root}")
     print(f"next: a8s define {name} <path-to-definition.json>")
+    return 0
+
+
+def cmd_alias(args: list[str]) -> int:
+    """`a8s alias <alias> <member>` — add member to alias, creating the alias
+    if new. Members may be agent names OR existing alias names (nesting OK,
+    cycles rejected at resolve time). The alias name must not collide with
+    an existing agent name."""
+    if len(args) == 0:
+        return cmd_aliases()
+    if len(args) != 2:
+        print("usage: a8s alias <alias> <member>     # add or create", file=sys.stderr)
+        print("       a8s alias                      # list", file=sys.stderr)
+        return 2
+    alias_name, member = args
+    if not NAME_RE.fullmatch(alias_name):
+        print(f"alias name must be alphanumeric: {alias_name!r}", file=sys.stderr)
+        return 2
+    agents = load_registry()
+    aliases = load_aliases()
+    for k in agents:
+        if k.lower() == alias_name.lower():
+            print(f"agent already exists with name: {k} — pick a different alias", file=sys.stderr)
+            return 1
+    member_resolved: str | None = None
+    for k in agents:
+        if k.lower() == member.lower():
+            member_resolved = k
+            break
+    if member_resolved is None:
+        for k in aliases:
+            if k.lower() == member.lower():
+                member_resolved = k
+                break
+    if member_resolved is None:
+        print(f"unknown member {member!r} (not an agent or alias)", file=sys.stderr)
+        return 1
+    if member_resolved.lower() == alias_name.lower():
+        print(f"cannot add alias {alias_name!r} to itself", file=sys.stderr)
+        return 1
+    canonical_alias = alias_name
+    for k in aliases:
+        if k.lower() == alias_name.lower():
+            canonical_alias = k
+            break
+    members = aliases.get(canonical_alias) or []
+    if any(m.lower() == member_resolved.lower() for m in members):
+        print(f"{canonical_alias} already includes {member_resolved}")
+        return 0
+    members.append(member_resolved)
+    aliases[canonical_alias] = members
+    save_aliases(aliases)
+    # Cycle check via resolve_name; revert on failure.
+    try:
+        resolve_name(canonical_alias)
+    except ValueError as e:
+        members.remove(member_resolved)
+        if not members:
+            aliases.pop(canonical_alias, None)
+        else:
+            aliases[canonical_alias] = members
+        save_aliases(aliases)
+        print(f"refusing add: {e}", file=sys.stderr)
+        return 1
+    print(f"{canonical_alias} += {member_resolved}")
+    return 0
+
+
+def cmd_unalias(args: list[str]) -> int:
+    """`a8s unalias <alias> [<member>]` — remove a single member, or the whole
+    alias if no member given."""
+    if not args or len(args) > 2:
+        print("usage: a8s unalias <alias> [<member>]", file=sys.stderr)
+        return 2
+    aliases = load_aliases()
+    canonical: str | None = None
+    for k in aliases:
+        if k.lower() == args[0].lower():
+            canonical = k
+            break
+    if canonical is None:
+        print(f"unknown alias: {args[0]!r}", file=sys.stderr)
+        return 1
+    if len(args) == 1:
+        del aliases[canonical]
+        save_aliases(aliases)
+        print(f"removed alias {canonical}")
+        return 0
+    member = args[1]
+    members = aliases[canonical]
+    new_members = [m for m in members if m.lower() != member.lower()]
+    if len(new_members) == len(members):
+        print(f"{canonical}: not a member: {member!r}", file=sys.stderr)
+        return 1
+    if not new_members:
+        del aliases[canonical]
+    else:
+        aliases[canonical] = new_members
+    save_aliases(aliases)
+    print(f"{canonical} -= {member}")
+    return 0
+
+
+def cmd_aliases() -> int:
+    """`a8s aliases` — list every alias and its members."""
+    aliases = load_aliases()
+    if not aliases:
+        print("(no aliases — use `a8s alias <alias> <member>` to create one)")
+        return 0
+    width = max(len(name) for name in aliases)
+    for name in sorted(aliases, key=str.lower):
+        members = aliases[name]
+        try:
+            _, resolved = resolve_name(name)
+            tail = "" if len(members) == len(resolved) else f"  → {len(resolved)} agents"
+        except (KeyError, ValueError) as e:
+            tail = f"  [{e}]"
+        print(f"  {name.ljust(width)}  [{', '.join(members)}]{tail}")
     return 0
 
 
@@ -1067,6 +1348,10 @@ def _write_outbox(sender_name: str, sender_root: Path, to: str, content: str, fi
 
 
 def cmd_tell(args: list[str]) -> int:
+    """`a8s tell <name> <msg>` — write a single outbox message; `name` may be
+    an agent or alias. Fan-out to alias members happens at routing time so the
+    `to` field stays the original alias name (recipients can see it via
+    `promptMessageAlias`)."""
     if len(args) < 2:
         print("usage: tell <name> <message>", file=sys.stderr)
         return 2
@@ -1080,58 +1365,66 @@ def cmd_tell(args: list[str]) -> int:
         return 1
     sender_name, sender_info = sender
 
-    target = resolve_recipient(target_query)
-    if target is None:
-        print(f"tell: no participant named or aliased {target_query!r}", file=sys.stderr)
+    try:
+        kind, members = resolve_name(target_query)
+    except KeyError:
+        print(f"tell: no agent or alias named {target_query!r}", file=sys.stderr)
         return 1
-    target_name, _target_info = target
-
-    _write_outbox(sender_name, Path(sender_info["root"]), target_name, content, files)
-    out_agent(sender_name, f"tell -> {target_name}: {_preview(content)}")
-    return 0
-
-
-def cmd_says(args: list[str]) -> int:
-    if not args:
-        print("usage: says <message>", file=sys.stderr)
-        return 2
-    content, files = _split_content_and_files(" ".join(args))
-
-    sender = sender_from_cwd()
-    if sender is None:
-        print("says: current directory is not inside any registered agent", file=sys.stderr)
-        print("hint: register the enclosing dir with `a8s add <name> <dir>`", file=sys.stderr)
+    except ValueError as e:
+        print(f"tell: {e}", file=sys.stderr)
         return 1
-    sender_name, sender_info = sender
+    if not members:
+        print(f"tell: {target_query!r} resolves to no agents", file=sys.stderr)
+        return 1
+    # Resolve the canonical name (preserves user's chosen casing) for the `to`
+    # field, regardless of agent vs alias.
+    if kind == "agent":
+        canonical = members[0]
+    else:
+        aliases = load_aliases()
+        canonical = next((k for k in aliases if k.lower() == target_query.lower()), target_query)
 
-    _write_outbox(sender_name, Path(sender_info["root"]), "", content, files)
-    out_agent(sender_name, f"says ({sender_name}): {_preview(content)}")
+    _write_outbox(sender_name, Path(sender_info["root"]), canonical, content, files)
+    if kind == "alias":
+        out_agent(sender_name, f"tell -> {canonical} (alias of {len(members)}): {_preview(content)}")
+    else:
+        out_agent(sender_name, f"tell -> {canonical}: {_preview(content)}")
     return 0
 
 
 def cmd_clear(args: list[str]) -> int:
-    """`a8s clear <name>` wipes that agent's mailboxes and flags fresh on next wake.
-    Bare `a8s clear` errors with usage. (Phase 2: per-name only — was: wipe everyone.)"""
+    """`a8s clear <name>` wipes the agent's (or alias members') mailboxes and
+    flags fresh on next wake. Aliases fan out — every member is cleared."""
     if not args:
         print("usage: a8s clear <name>", file=sys.stderr)
-        print("       wipes <name>'s inbox, trash, and outbox; next wake starts fresh.", file=sys.stderr)
+        print("       <name> can be an agent or alias; alias members are all cleared.", file=sys.stderr)
         return 2
     name = args[0]
-    parts = participants_from_registry()
-    target = find_participant(parts, name)
-    if target is None:
-        print(f"clear: no agent named {name!r}", file=sys.stderr)
+    try:
+        _kind, members = resolve_name(name)
+    except KeyError:
+        print(f"clear: no agent or alias named {name!r}", file=sys.stderr)
         return 1
-    ensure_mailboxes(target)
-    cleared = 0
-    for d in (inbox_dir(target.name), trash_dir(target.name), outbox_dir(target.root)):
-        for f in d.iterdir():
-            if f.is_file():
-                f.unlink()
-                cleared += 1
-    mark_fresh([target.root])
-    print(f"cleared {cleared} message(s) for {target.name}")
-    print("next wake will start a new conversation")
+    except ValueError as e:
+        print(f"clear: {e}", file=sys.stderr)
+        return 1
+    parts = participants_from_registry()
+    cleared_agents = 0
+    cleared_msgs = 0
+    for member in members:
+        target = find_participant(parts, member)
+        if target is None:
+            continue
+        ensure_mailboxes(target)
+        for d in (inbox_dir(target.name), trash_dir(target.name), outbox_dir(target.root)):
+            for f in d.iterdir():
+                if f.is_file():
+                    f.unlink()
+                    cleared_msgs += 1
+        mark_fresh([target.root])
+        cleared_agents += 1
+    print(f"cleared {cleared_msgs} message(s) across {cleared_agents} agent(s)")
+    print("next wake for each will start a new conversation")
     return 0
 
 
@@ -1177,7 +1470,25 @@ def cmd_logs(args: list[str]) -> int:
         print("usage: a8s logs <name> [<name>...] [--tail N] [-f|--follow]", file=sys.stderr)
         return 2
 
-    paths = [agent_log_path(n) for n in names]
+    # Expand aliases. Names may include agents and aliases; dedupe agent names
+    # (an agent listed twice via overlapping aliases shouldn't double up).
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for n in names:
+        try:
+            _, members = resolve_name(n)
+        except KeyError:
+            print(f"logs: no agent or alias named {n!r}", file=sys.stderr)
+            return 1
+        except ValueError as e:
+            print(f"logs: {e}", file=sys.stderr)
+            return 1
+        for m in members:
+            if m.lower() not in seen:
+                seen.add(m.lower())
+                expanded.append(m)
+
+    paths = [agent_log_path(n) for n in expanded]
     missing = [p for p in paths if not p.is_file()]
     if len(missing) == len(paths):
         for p in missing:
@@ -1248,34 +1559,56 @@ def cmd_logs(args: list[str]) -> int:
                 pass
 
 
-def _resolve_agent(name: str) -> Participant | None:
-    parts = participants_from_registry()
-    return find_participant(parts, name)
+def _expand_to_agents(name: str) -> list[str] | None:
+    """Resolve `name` to a flat list of agent names. Returns None on error
+    (already-printed usage)."""
+    try:
+        _, members = resolve_name(name)
+    except KeyError:
+        print(f"no agent or alias named {name!r}", file=sys.stderr)
+        return None
+    except ValueError as e:
+        print(f"{e}", file=sys.stderr)
+        return None
+    if not members:
+        print(f"{name!r} resolves to no agents", file=sys.stderr)
+        return None
+    return members
 
 
 def cmd_run(args: list[str], interval: float) -> int:
-    """`a8s run <name>` — foreground attached loop. Attaches as the handler
-    (asks any existing handler to detach). Ctrl+C: graceful detach. Second
+    """`a8s run <name>` — foreground attached loop. <name> may be an agent or
+    an alias; aliases produce ONE process that handles every member (each
+    member's pid file points at this PID). Ctrl+C: graceful detach. 2nd
     Ctrl+C: kills the wake subprocess group."""
     if len(args) != 1:
         print("usage: a8s run <name>", file=sys.stderr)
         return 2
-    name = args[0]
-    if _resolve_agent(name) is None:
-        print(f"run: no agent named {name!r}", file=sys.stderr)
+    members = _expand_to_agents(args[0])
+    if members is None:
         return 1
-    return attached_loop(name, interval)
+    return attached_loop(members, interval)
 
 
 def cmd_start(args: list[str]) -> int:
-    """`a8s start <name>` — spawn a detached background process running
-    `a8s run <name>`. Returns immediately with the child PID."""
+    """`a8s start <name>` — spawn ONE detached background process. The child
+    runs `a8s run <name>` and (if <name> is an alias) handles every member in
+    a single process. Returns the child's PID."""
     if len(args) != 1:
         print("usage: a8s start <name>", file=sys.stderr)
         return 2
     name = args[0]
-    if _resolve_agent(name) is None:
-        print(f"start: no agent named {name!r}", file=sys.stderr)
+    # Validate (resolve_name raises if unknown / cycle).
+    try:
+        _, members = resolve_name(name)
+    except KeyError:
+        print(f"start: no agent or alias named {name!r}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"start: {e}", file=sys.stderr)
+        return 1
+    if not members:
+        print(f"start: {name!r} resolves to no agents", file=sys.stderr)
         return 1
     cmd = [sys.executable, str(Path(__file__).resolve()), "run", name]
     proc = subprocess.Popen(
@@ -1285,85 +1618,108 @@ def cmd_start(args: list[str]) -> int:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    print(f"started {name} as PID {proc.pid}")
+    if len(members) == 1:
+        print(f"started {members[0]} as PID {proc.pid}")
+    else:
+        print(f"started {name} (alias of {len(members)}) as PID {proc.pid}")
     return 0
 
 
 def cmd_step(args: list[str], interval: float) -> int:
-    """`a8s step <name>` — attach as handler, do one full pass (route +
-    drain), release. Heavyweight: if a daemon is already handling the agent,
-    this detaches it."""
+    """`a8s step <name>` — attach as handler, one route+drain pass, release.
+    Aliases handled in a single process: one acquire across all members, one
+    pass, one release."""
     if len(args) != 1:
         print("usage: a8s step <name>", file=sys.stderr)
         return 2
-    name = args[0]
-    if _resolve_agent(name) is None:
-        print(f"step: no agent named {name!r}", file=sys.stderr)
+    members = _expand_to_agents(args[0])
+    if members is None:
         return 1
-    return attached_loop(name, interval, single_pass=True)
+    return attached_loop(members, interval, single_pass=True)
 
 
 def cmd_stop(args: list[str]) -> int:
-    """`a8s stop <name>` — SIGTERM the process handling <name>. Graceful
-    detach: the daemon finishes its current wake before exiting."""
+    """`a8s stop <name>` — SIGTERM the handler(s). One handler may serve
+    multiple members of an alias; we dedupe by PID so we signal each unique
+    handler exactly once. Detaches the WHOLE handler (collateral on any other
+    members it was handling)."""
     if len(args) != 1:
         print("usage: a8s stop <name>", file=sys.stderr)
         return 2
-    name = args[0]
-    pid = _read_handler_pid(name)
-    if pid is None:
-        print(f"{name}: not running", file=sys.stderr)
+    members = _expand_to_agents(args[0])
+    if members is None:
         return 1
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError as e:
-        print(f"{name}: could not signal PID {pid}: {e}", file=sys.stderr)
+    seen_pids: dict[int, str] = {}
+    not_running: list[str] = []
+    for name in members:
+        pid = _read_handler_pid(name)
+        if pid is None:
+            not_running.append(name)
+            continue
+        if pid not in seen_pids:
+            seen_pids[pid] = name
+    if not seen_pids:
+        for n in not_running:
+            print(f"{n}: not running", file=sys.stderr)
         return 1
-    print(f"{name}: sent SIGTERM to PID {pid}")
+    for pid, label in seen_pids.items():
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"{label}: sent SIGTERM to PID {pid}")
+        except OSError as e:
+            print(f"{label}: could not signal PID {pid}: {e}", file=sys.stderr)
+    for n in not_running:
+        print(f"{n}: not running")
     return 0
 
 
 def cmd_kill(args: list[str]) -> int:
-    """`a8s kill <name>` — etiquette-then-force: SIGTERM (graceful), brief
-    grace, second SIGTERM (handler kills the wake subprocess group), final
-    SIGKILL fallback if still alive."""
+    """`a8s kill <name>` — etiquette-then-force per unique handler PID."""
     if len(args) != 1:
         print("usage: a8s kill <name>", file=sys.stderr)
         return 2
-    name = args[0]
-    pid = _read_handler_pid(name)
-    if pid is None:
-        print(f"{name}: not running", file=sys.stderr)
+    members = _expand_to_agents(args[0])
+    if members is None:
+        return 1
+    seen_pids: dict[int, str] = {}
+    for name in members:
+        pid = _read_handler_pid(name)
+        if pid is not None and pid not in seen_pids:
+            seen_pids[pid] = name
+    if not seen_pids:
+        for name in members:
+            print(f"{name}: not running", file=sys.stderr)
         return 1
     import time as _time
-    print(f"{name}: SIGTERM PID {pid} (graceful)")
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return 0
-    _time.sleep(0.5)
-    if _pid_alive(pid):
-        print(f"{name}: still alive — second SIGTERM (forces subprocess group kill)")
+    for pid, label in seen_pids.items():
+        print(f"{label}: SIGTERM PID {pid} (graceful)")
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
-            return 0
+            continue
         _time.sleep(0.5)
-    if _pid_alive(pid):
-        print(f"{name}: still alive — SIGKILL")
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    # Pid file may stick around if the handler was force-killed before its
-    # finally-block ran. Clean up if still there.
-    p = pid_path(name)
-    if p.is_file():
-        try:
-            if int(p.read_text().strip()) == pid:
-                p.unlink()
-        except (OSError, ValueError):
-            pass
+        if _pid_alive(pid):
+            print(f"{label}: still alive — second SIGTERM (forces subprocess group kill)")
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            _time.sleep(0.5)
+        if _pid_alive(pid):
+            print(f"{label}: still alive — SIGKILL")
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        # Clean up any pid files still pointing at this dead PID.
+        for name in members:
+            p = pid_path(name)
+            if p.is_file():
+                try:
+                    if int(p.read_text().strip()) == pid:
+                        p.unlink()
+                except (OSError, ValueError):
+                    pass
     return 0
 
 
@@ -1411,19 +1767,21 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("agents",   "",                     "List every registered agent and definition status."),
     ("discover", "<path>",               "Walk <path> for marker files; print suggested `a8s add`/`a8s define` commands. Read-only."),
     ("define",   "<name> [<path>]",      "Show or set <name>'s definition JSON. Without <path>, prints the effective definition."),
-    ("start",    "<name>",               "Run a detached background process handling <name>. Detaches any prior handler."),
-    ("run",      "<name>",               "Run a foreground attached loop handling <name>. Ctrl+C: graceful detach. 2nd Ctrl+C: kill subprocess group."),
-    ("step",     "<name>",               "Attach as handler, do one route+drain pass for <name>, release. Heavyweight: detaches any current handler."),
-    ("stop",     "<name>",               "SIGTERM the process handling <name>. Graceful detach (waits for current wake)."),
-    ("kill",     "<name>",               "SIGTERM (graceful), brief grace, then 2nd SIGTERM (kills subprocess group), final SIGKILL fallback."),
+    ("alias",    "[<alias> <member>]",   "Add member to alias (creates if new). Bare lists all aliases. Members may be agents or other aliases."),
+    ("unalias",  "<alias> [<member>]",   "Remove a member from alias, or remove the whole alias."),
+    ("aliases",  "",                     "List every alias and its members."),
+    ("start",    "<name>",               "Detached background process handling <name>. Aliases produce ONE process handling all members (each member's pid file points at it)."),
+    ("run",      "<name>",               "Foreground attached loop. Aliases produce one process handling all members (interleaved output). Ctrl+C: graceful detach. 2nd Ctrl+C: kill subprocess group."),
+    ("step",     "<name>",               "Attach as handler, one route+drain pass across all members, release. Heavyweight: detaches current handler."),
+    ("stop",     "<name>",               "SIGTERM each unique handler PID (one signal per multi-agent handler). Graceful detach — collateral on other members of the same handler."),
+    ("kill",     "<name>",               "Per unique handler PID: SIGTERM, brief grace, 2nd SIGTERM (kills subprocess group), SIGKILL fallback."),
     ("exit",     "",                     "SIGTERM every running handler. Each detaches gracefully on its own."),
     ("ls",       "",                     "List only running agents and their handler PIDs."),
-    ("prompt",   "<name|all> <message>", "Queue a senderless message in <name>'s inbox (or all)."),
-    ("tell",     "<name> <message>",     "Direct routed message to <name>. Sender = agent enclosing CWD."),
-    ("says",     "<message>",            "Broadcast routed message to every other agent. Sender = agent enclosing CWD."),
-    ("clear",    "<name>",               "Wipe <name>'s mailboxes and flag fresh on next wake."),
+    ("prompt",   "<name> <message>",     "Queue a senderless message. <name> may be an agent or alias (queues per member)."),
+    ("tell",     "<name> <message>",     "Routed message to <name>. <name> may be an agent or alias (fans out at routing time). Sender = agent enclosing CWD."),
+    ("clear",    "<name>",               "Wipe mailboxes and flag fresh. <name> may be an agent or alias (clears each member)."),
     ("install",  "",                     "Install canonical skills into each supported tool's user scope."),
-    ("logs",     "<name>... [--tail N] [-f]", "Read per-agent log files; merge-sort multiple by timestamp. -f follows."),
+    ("logs",     "<name>... [--tail N] [-f]", "Read per-agent log files; merge-sort multiple by timestamp. Names may include aliases."),
 ]
 
 KNOWN_COMMANDS = {name for name, _, _ in COMMANDS}
@@ -1450,6 +1808,12 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_discover(args)
     if cmd == "define":
         return cmd_define(args)
+    if cmd == "alias":
+        return cmd_alias(args)
+    if cmd == "unalias":
+        return cmd_unalias(args)
+    if cmd == "aliases":
+        return cmd_aliases()
     if cmd == "start":
         return cmd_start(args)
     if cmd == "run":
@@ -1468,8 +1832,6 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_prompt(args)
     if cmd == "tell":
         return cmd_tell(args)
-    if cmd == "says":
-        return cmd_says(args)
     if cmd == "clear":
         return cmd_clear(args)
     if cmd == "install":
@@ -1482,12 +1844,11 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
 # ---------- CLI ----------
 
 def _queue_prompt(p: Participant, content: str) -> Path:
-    """Drop a senderless message JSON directly into <p>/.inbox/.
+    """Drop a senderless message JSON directly into <p>/inbox/.
 
-    The empty `from` is the signal to `build_prompt` to deliver the
-    raw content without a `tells you` / `says` wrapper. The next
-    inbox-drain (via `step` or `loop`) wakes the participant.
-    """
+    The empty `from` is the signal to `build_prompt` to deliver the raw
+    content (no `tells you` template wrapping). The next inbox-drain wakes
+    the agent."""
     ensure_mailboxes(p)
     now = datetime.now(timezone.utc)
     msg = {
@@ -1505,22 +1866,31 @@ def _queue_prompt(p: Participant, content: str) -> Path:
 
 
 def cmd_prompt(args: list[str]) -> int:
+    """`a8s prompt <name> <message>` — queue a senderless prompt. <name> may
+    be an agent or alias; aliases queue one copy per member. The literal
+    `all` target is gone — create an `all` alias if you want broadcast."""
     if len(args) < 2:
-        print("usage: a8s prompt <name|all> <message>", file=sys.stderr)
+        print("usage: a8s prompt <name> <message>", file=sys.stderr)
         return 2
     name, *rest = args
     prompt = " ".join(rest)
     parts = participants_from_registry()
 
-    if name.strip().lower() == "all":
-        if not parts:
-            print("no agents registered (use `a8s add`)", file=sys.stderr)
-            return 1
-        for p in parts:
-            _queue_prompt(p, prompt)
-            out_agent(p.name, f"queued prompt: {_preview(prompt)}")
-        out(f"queued prompt to {len(parts)} agent(s)")
-        return 0
+    members = _expand_to_agents(name)
+    if members is None:
+        return 1
+    queued = 0
+    for member in members:
+        target = find_participant(parts, member)
+        if target is None:
+            print(f"prompt: registry inconsistency — {member!r} not found", file=sys.stderr)
+            continue
+        _queue_prompt(target, prompt)
+        out_agent(target.name, f"queued prompt to {target.name}: {_preview(prompt)}")
+        queued += 1
+    if queued > 1:
+        out(f"queued prompt to {queued} agent(s)")
+    return 0 if queued > 0 else 1
 
     target = find_participant(parts, name)
     if target is None:
