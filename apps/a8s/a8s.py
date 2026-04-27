@@ -10,7 +10,13 @@ Surface (CLI):
                                 add/define commands (read-only, no mutation)
   define <name> [<path>]      — show or set the JSON definition that drives an
                                 agent's wake invocation + prompt formatting
-  step / loop / stop          — one routing pass / continuous mode / signal stop
+  start <name>                — spawn a detached daemon owning <name>
+  run <name>                  — foreground attached loop owning <name>
+  step <name>                 — take ownership, one route+drain pass, release
+  stop <name>                 — SIGTERM the owner of <name> (graceful detach)
+  kill <name>                 — graceful SIGTERM, then forced subprocess-group kill
+  exit                        — SIGTERM every running owner
+  ls                          — list only running agents (with PIDs)
   prompt <name|all> <msg>     — queue a senderless message to inbox(es)
   tell <name> <msg>           — direct routed message (sibling CLI ~/bin/tell)
   says <msg>                  — broadcast routed message (sibling CLI ~/bin/says)
@@ -30,6 +36,9 @@ State:
     trash/                    — processed messages
     log.txt                   — agent-scoped log (wake events, subprocess output,
                                 routing involving this agent)
+    pid                       — current owner process; written via O_CREAT|O_EXCL
+                                atomic claim. `start`/`run`/`step` always win,
+                                asking any prior owner to detach first.
   ~/.a8s/log.txt              — supervisor log: process-scoped events only
                                 (loop lifecycle, registration, etc.)
   <agent-root>/.outbox/       — agent writes here; route_outboxes re-stamps `from`
@@ -277,10 +286,18 @@ def unique_path(p: Path) -> Path:
 
 # ---------- routing ----------
 
-def route_outboxes(participants: list[Participant]) -> int:
-    by_name = {p.name.lower(): p for p in participants}
+def route_outboxes(senders: list[Participant], all_agents: list[Participant] | None = None) -> int:
+    """Route each sender's outbox to recipients found in `all_agents`.
+
+    Mailbox routing is process-agnostic: a per-agent daemon may write into any
+    other agent's inbox even though it doesn't own them. Only `wake_once` requires
+    ownership. `all_agents` is the recipient lookup pool (defaults to senders for
+    self-contained calls)."""
+    if all_agents is None:
+        all_agents = senders
+    by_name = {p.name.lower(): p for p in all_agents}
     routed = 0
-    for sender in participants:
+    for sender in senders:
         ensure_mailboxes(sender)
         outbox = outbox_dir(sender.root)
         for f in sorted(outbox.iterdir()):
@@ -301,7 +318,7 @@ def route_outboxes(participants: list[Participant]) -> int:
             preview = _preview(msg.get("content", ""))
             if not recipient_name:
                 # broadcast: fan out to every other participant.
-                others = [p for p in participants if p.name != sender.name]
+                others = [p for p in all_agents if p.name != sender.name]
                 for recipient in others:
                     ensure_mailboxes(recipient)
                     dest = unique_path(inbox_dir(recipient.name) / f.name)
@@ -525,6 +542,10 @@ def sender_from_cwd() -> tuple[str, dict] | None:
 
 
 def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
+    """Run the wake subprocess in its own session so SIGKILL can target the
+    whole process group (LLM CLI + any helpers it spawns). Tracks the live
+    process in `_CURRENT_WAKE_PROC` so the second-signal handler can find it."""
+    global _CURRENT_WAKE_PROC
     prefix = f"{name}> "
     try:
         proc = subprocess.Popen(
@@ -535,17 +556,22 @@ def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
     except FileNotFoundError:
         out_agent(name, f"{prefix}command not found: {cmd[0]}")
         return 127
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        out_agent(name, prefix + line.rstrip("\n"))
-    proc.wait()
-    if proc.returncode != 0:
-        out_agent(name, f"{prefix}(exit {proc.returncode})")
-    return proc.returncode
+    _CURRENT_WAKE_PROC = proc
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            out_agent(name, prefix + line.rstrip("\n"))
+        proc.wait()
+        if proc.returncode != 0:
+            out_agent(name, f"{prefix}(exit {proc.returncode})")
+        return proc.returncode
+    finally:
+        _CURRENT_WAKE_PROC = None
 
 
 def wake_once(p: Participant, msg_path: Path) -> None:
@@ -575,27 +601,10 @@ def wake_once(p: Participant, msg_path: Path) -> None:
     run_with_prefix(p.name, cmd, p.root)
 
 
-def step() -> None:
-    """One routing pass over every registered agent. No filesystem walk —
-    agents are explicit (`a8s add`) and the registry is the source of truth."""
-    parts = participants_from_registry()
-    for p in parts:
-        ensure_mailboxes(p)
-    route_outboxes(parts)
-    for p in parts:
-        while True:
-            msg = next_inbox_message(p)
-            if msg is None:
-                break
-            wake_once(p, msg)
+# ---------- per-agent attachment ----------
 
-
-# ---------- loop / stop ----------
-
-def pid_file_path() -> Path:
-    base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "a8s"
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "loop.pid"
+def pid_path(name: str) -> Path:
+    return agent_dir(name) / "pid"
 
 
 def _pid_alive(pid: int) -> bool:
@@ -608,88 +617,206 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
-def _read_pid_file(path: Path) -> dict | None:
-    if not path.is_file():
+def _read_owner_pid(name: str) -> int | None:
+    """Return the live PID owning <name>, or None. Cleans up stale pid files."""
+    p = pid_path(name)
+    if not p.is_file():
         return None
     try:
-        return json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+        pid = int(p.read_text().strip())
+    except (OSError, ValueError):
+        try:
+            p.unlink()
+        except OSError:
+            pass
         return None
+    if _pid_alive(pid):
+        return pid
+    try:
+        p.unlink()
+    except OSError:
+        pass
+    return None
 
 
-def loop_mode(interval: float) -> int:
-    global PRINT_LOCK
+def _try_atomic_claim(name: str, pid: int) -> bool:
+    """Attempt to write `pid` into `pid_path(name)` using O_CREAT|O_EXCL.
+    Returns True iff this process now owns the file."""
+    p = pid_path(name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False
+    try:
+        os.write(fd, str(pid).encode())
+    finally:
+        os.close(fd)
+    return True
+
+
+# Wait up to this long for an existing owner to release after SIGTERM.
+ACQUIRE_TIMEOUT_S = 30.0
+ACQUIRE_POLL_S = 0.1
+
+
+def acquire(name: str) -> None:
+    """Take exclusive ownership of <name>. If another live process owns the
+    pid file, send it SIGTERM (graceful detach) and wait for release. Always
+    wins (per locked design). Raises TimeoutError if the owner doesn't release
+    within ACQUIRE_TIMEOUT_S."""
+    import time as _time
+    me = os.getpid()
+    while True:
+        if _try_atomic_claim(name, me):
+            return
+        existing = _read_owner_pid(name)
+        if existing is None:
+            continue  # stale or freed; retry
+        if existing == me:
+            return
+        sys.stderr.write(f"[a8s] detach in progress: {name} from PID {existing}\n")
+        sys.stderr.flush()
+        try:
+            os.kill(existing, signal.SIGTERM)
+        except ProcessLookupError:
+            try:
+                pid_path(name).unlink()
+            except OSError:
+                pass
+            continue
+        deadline = _time.time() + ACQUIRE_TIMEOUT_S
+        while _time.time() < deadline:
+            if not pid_path(name).is_file():
+                break
+            if not _pid_alive(existing):
+                try:
+                    pid_path(name).unlink()
+                except OSError:
+                    pass
+                break
+            _time.sleep(ACQUIRE_POLL_S)
+        else:
+            raise TimeoutError(
+                f"PID {existing} did not release {name} within {ACQUIRE_TIMEOUT_S}s — "
+                f"try `a8s kill {name}`"
+            )
+
+
+def release(name: str) -> None:
+    """Unlink the pid file iff it points at our pid. Safe to call repeatedly."""
+    p = pid_path(name)
+    try:
+        if not p.is_file():
+            return
+        pid = int(p.read_text().strip())
+        if pid == os.getpid():
+            p.unlink()
+    except (OSError, ValueError):
+        pass
+
+
+# ---------- attached loop (the daemon body for one agent) ----------
+
+# Shared state for the signal handler. Set when an attached loop is running.
+_STOP_EVENT: threading.Event | None = None
+_SIGNAL_COUNT = 0
+_CURRENT_WAKE_PROC: subprocess.Popen | None = None
+
+
+def _kill_wake_subprocess_group() -> None:
+    """SIGTERM-then-SIGKILL the current wake's subprocess group. Targets the
+    whole process tree so the LLM CLI dies along with our wake wrapper."""
+    proc = _CURRENT_WAKE_PROC
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError:
+        pass
+    import time as _time
+    _time.sleep(0.5)
+    if proc.poll() is None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def _make_signal_handler(name: str):
+    def handle(signum, _frame):
+        global _SIGNAL_COUNT
+        _SIGNAL_COUNT += 1
+        if _SIGNAL_COUNT == 1:
+            sys.stderr.write(
+                f"[a8s] {name}: received signal {signum}; detaching after current wake\n"
+            )
+            sys.stderr.flush()
+            if _STOP_EVENT is not None:
+                _STOP_EVENT.set()
+        else:
+            sys.stderr.write(
+                f"[a8s] {name}: second signal — killing wake subprocess group\n"
+            )
+            sys.stderr.flush()
+            _kill_wake_subprocess_group()
+    return handle
+
+
+def attached_loop(name: str, interval: float, *, single_pass: bool = False) -> int:
+    """Body of `a8s run` / `a8s start` (and `a8s step` when single_pass=True).
+    Acquires exclusive ownership of <name>, then in-loop:
+      - reload registry (so newly-added agents become routable recipients)
+      - route this agent's outbox
+      - drain this agent's inbox (one wake at a time)
+      - sleep `interval` (skipped if single_pass)
+    On signal, finishes the current wake, releases, exits."""
+    global _STOP_EVENT, _SIGNAL_COUNT, PRINT_LOCK
     PRINT_LOCK = threading.Lock()
+    _STOP_EVENT = threading.Event()
+    _SIGNAL_COUNT = 0
 
-    pid_file = pid_file_path()
-    existing = _read_pid_file(pid_file)
-    if existing and isinstance(existing.get("pid"), int) and _pid_alive(existing["pid"]):
-        print(f"a8s loop already running (pid {existing['pid']})", file=sys.stderr)
+    try:
+        acquire(name)
+    except TimeoutError as e:
+        print(str(e), file=sys.stderr)
         return 1
 
-    pid_file.write_text(json.dumps({
-        "pid": os.getpid(),
-        "started": datetime.now(timezone.utc).isoformat(),
-    }))
+    handler = _make_signal_handler(name)
+    prev_sigterm = signal.signal(signal.SIGTERM, handler)
+    prev_sigint = signal.signal(signal.SIGINT, handler)
 
-    stop_event = threading.Event()
-    busy: set[str] = set()
-    busy_lock = threading.Lock()
-    workers: list[threading.Thread] = []
-
-    def handle_signal(signum, _frame):
-        out(f"[a8s] received signal {signum}; finishing in-flight work")
-        stop_event.set()
-
-    prev_sigterm = signal.signal(signal.SIGTERM, handle_signal)
-    prev_sigint = signal.signal(signal.SIGINT, handle_signal)
-
-    def drain_worker(p: Participant) -> None:
-        try:
-            while not stop_event.is_set():
-                msg = next_inbox_message(p)
-                if msg is None:
-                    return
-                wake_once(p, msg)
-        finally:
-            with busy_lock:
-                busy.discard(p.name)
-
-    out(f"[a8s] loop started (pid {os.getpid()}, interval {interval}s)")
+    out_agent(name, f"[a8s] {name}: attached (PID {os.getpid()})")
     try:
-        while not stop_event.is_set():
+        while not _STOP_EVENT.is_set():
             try:
-                participants = participants_from_registry()
-                for p in participants:
-                    ensure_mailboxes(p)
-                route_outboxes(participants)
-                for p in participants:
-                    if stop_event.is_set():
+                all_agents = participants_from_registry()
+                me = next((p for p in all_agents if p.name == name), None)
+                if me is None:
+                    out_agent(name, f"[a8s] {name}: agent removed from registry; exiting")
+                    break
+                ensure_mailboxes(me)
+                route_outboxes([me], all_agents=all_agents)
+                while not _STOP_EVENT.is_set():
+                    msg = next_inbox_message(me)
+                    if msg is None:
                         break
-                    with busy_lock:
-                        if p.name in busy:
-                            continue
-                        if next_inbox_message(p) is None:
-                            continue
-                        busy.add(p.name)
-                    t = threading.Thread(target=drain_worker, args=(p,), daemon=False)
-                    t.start()
-                    workers.append(t)
-                workers[:] = [t for t in workers if t.is_alive()]
+                    wake_once(me, msg)
             except Exception as e:
-                out(f"[a8s] iteration error: {e}")
-            stop_event.wait(interval)
+                out_agent(name, f"[a8s] {name}: iteration error: {e}")
+            if single_pass:
+                break
+            _STOP_EVENT.wait(interval)
     finally:
-        out("[a8s] waiting for in-flight workers")
-        for t in workers:
-            t.join()
-        try:
-            pid_file.unlink()
-        except FileNotFoundError:
-            pass
+        release(name)
         signal.signal(signal.SIGTERM, prev_sigterm)
         signal.signal(signal.SIGINT, prev_sigint)
-        out("[a8s] loop exited")
+        _STOP_EVENT = None
+        out_agent(name, f"[a8s] {name}: detached")
     return 0
 
 
@@ -1117,26 +1244,158 @@ def cmd_logs(args: list[str]) -> int:
                 pass
 
 
-def cmd_stop() -> int:
-    pid_file = pid_file_path()
-    info = _read_pid_file(pid_file)
-    if not info:
-        print("no a8s loop is running", file=sys.stderr)
+def _resolve_agent(name: str) -> Participant | None:
+    parts = participants_from_registry()
+    return find_participant(parts, name)
+
+
+def cmd_run(args: list[str], interval: float) -> int:
+    """`a8s run <name>` — foreground attached loop. Takes ownership (asks any
+    existing owner to detach). Ctrl+C: graceful detach. Second Ctrl+C: kills
+    the wake subprocess group."""
+    if len(args) != 1:
+        print("usage: a8s run <name>", file=sys.stderr)
+        return 2
+    name = args[0]
+    if _resolve_agent(name) is None:
+        print(f"run: no agent named {name!r}", file=sys.stderr)
         return 1
-    pid = info.get("pid")
-    if not isinstance(pid, int):
-        print("pid file missing or malformed pid", file=sys.stderr)
+    return attached_loop(name, interval)
+
+
+def cmd_start(args: list[str]) -> int:
+    """`a8s start <name>` — spawn a detached background process running
+    `a8s run <name>`. Returns immediately with the child PID."""
+    if len(args) != 1:
+        print("usage: a8s start <name>", file=sys.stderr)
+        return 2
+    name = args[0]
+    if _resolve_agent(name) is None:
+        print(f"start: no agent named {name!r}", file=sys.stderr)
         return 1
-    if not _pid_alive(pid):
-        print(f"pid {pid} not running; removing stale pid file")
-        pid_file.unlink(missing_ok=True)
+    cmd = [sys.executable, str(Path(__file__).resolve()), "run", name]
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    print(f"started {name} as PID {proc.pid}")
+    return 0
+
+
+def cmd_step(args: list[str], interval: float) -> int:
+    """`a8s step <name>` — take ownership, do one full pass (route + drain),
+    release. Heavyweight: if a daemon owns the agent, this detaches it."""
+    if len(args) != 1:
+        print("usage: a8s step <name>", file=sys.stderr)
+        return 2
+    name = args[0]
+    if _resolve_agent(name) is None:
+        print(f"step: no agent named {name!r}", file=sys.stderr)
+        return 1
+    return attached_loop(name, interval, single_pass=True)
+
+
+def cmd_stop(args: list[str]) -> int:
+    """`a8s stop <name>` — SIGTERM the owning process. Graceful detach: the
+    daemon finishes its current wake before exiting."""
+    if len(args) != 1:
+        print("usage: a8s stop <name>", file=sys.stderr)
+        return 2
+    name = args[0]
+    pid = _read_owner_pid(name)
+    if pid is None:
+        print(f"{name}: not running", file=sys.stderr)
         return 1
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError as e:
-        print(f"could not signal pid {pid}: {e}", file=sys.stderr)
+        print(f"{name}: could not signal PID {pid}: {e}", file=sys.stderr)
         return 1
-    print(f"sent SIGTERM to pid {pid}")
+    print(f"{name}: sent SIGTERM to PID {pid}")
+    return 0
+
+
+def cmd_kill(args: list[str]) -> int:
+    """`a8s kill <name>` — etiquette-then-force: SIGTERM (graceful), brief
+    grace, second SIGTERM (handler kills the wake subprocess group), final
+    SIGKILL fallback if still alive."""
+    if len(args) != 1:
+        print("usage: a8s kill <name>", file=sys.stderr)
+        return 2
+    name = args[0]
+    pid = _read_owner_pid(name)
+    if pid is None:
+        print(f"{name}: not running", file=sys.stderr)
+        return 1
+    import time as _time
+    print(f"{name}: SIGTERM PID {pid} (graceful)")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return 0
+    _time.sleep(0.5)
+    if _pid_alive(pid):
+        print(f"{name}: still alive — second SIGTERM (forces subprocess group kill)")
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return 0
+        _time.sleep(0.5)
+    if _pid_alive(pid):
+        print(f"{name}: still alive — SIGKILL")
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    # Pid file may stick around if the owner was force-killed before its
+    # finally-block ran. Clean up if still there.
+    p = pid_path(name)
+    if p.is_file():
+        try:
+            if int(p.read_text().strip()) == pid:
+                p.unlink()
+        except (OSError, ValueError):
+            pass
+    return 0
+
+
+def cmd_exit() -> int:
+    """`a8s exit` — SIGTERM every running agent's owner. Each daemon detaches
+    gracefully on its own."""
+    parts = participants_from_registry()
+    sent = 0
+    for p in parts:
+        pid = _read_owner_pid(p.name)
+        if pid is None:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"{p.name}: SIGTERM PID {pid}")
+            sent += 1
+        except OSError as e:
+            print(f"{p.name}: could not signal PID {pid}: {e}", file=sys.stderr)
+    if sent == 0:
+        print("no agents running")
+    return 0
+
+
+def cmd_ls() -> int:
+    """`a8s ls` — list only running agents and their owning PIDs."""
+    parts = participants_from_registry()
+    running: list[tuple[str, int, Path]] = []
+    for p in parts:
+        pid = _read_owner_pid(p.name)
+        if pid is not None:
+            running.append((p.name, pid, p.root))
+    if not running:
+        print("(no agents running)")
+        return 0
+    width = max(len(n) for n, _, _ in running)
+    for name, pid, root in sorted(running, key=lambda x: x[0].lower()):
+        print(f"  {name.ljust(width)}  PID {pid}  {root}")
     return 0
 
 
@@ -1147,9 +1406,13 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("agents",   "",                     "List every registered agent and definition status."),
     ("discover", "<path>",               "Walk <path> for marker files; print suggested `a8s add`/`a8s define` commands. Read-only."),
     ("define",   "<name> [<path>]",      "Show or set <name>'s definition JSON. Without <path>, prints the effective definition."),
-    ("step",     "",                     "Run one routing pass over every registered agent."),
-    ("loop",     "",                     "Run continuously until Ctrl+C or `a8s stop`."),
-    ("stop",     "",                     "Signal a running `a8s loop` to exit."),
+    ("start",    "<name>",               "Run a detached background process owning <name>. Takes ownership from any prior owner."),
+    ("run",      "<name>",               "Run a foreground attached loop owning <name>. Ctrl+C: graceful detach. 2nd Ctrl+C: kill subprocess group."),
+    ("step",     "<name>",               "Take ownership, do one route+drain pass for <name>, release. Heavyweight: detaches any current owner."),
+    ("stop",     "<name>",               "SIGTERM the process owning <name>. Graceful detach (waits for current wake)."),
+    ("kill",     "<name>",               "SIGTERM (graceful), brief grace, then 2nd SIGTERM (kills subprocess group), final SIGKILL fallback."),
+    ("exit",     "",                     "SIGTERM every running agent's owner. Each detaches gracefully on its own."),
+    ("ls",       "",                     "List only running agents and their owning PIDs."),
     ("prompt",   "<name|all> <message>", "Queue a senderless message in <name>'s inbox (or all)."),
     ("tell",     "<name> <message>",     "Direct routed message to <name>. Sender = agent enclosing CWD."),
     ("says",     "<message>",            "Broadcast routed message to every other agent. Sender = agent enclosing CWD."),
@@ -1182,13 +1445,20 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_discover(args)
     if cmd == "define":
         return cmd_define(args)
+    if cmd == "start":
+        return cmd_start(args)
+    if cmd == "run":
+        return cmd_run(args, interval)
     if cmd == "step":
-        step()
-        return 0
-    if cmd == "loop":
-        return loop_mode(interval)
+        return cmd_step(args, interval)
     if cmd == "stop":
-        return cmd_stop()
+        return cmd_stop(args)
+    if cmd == "kill":
+        return cmd_kill(args)
+    if cmd == "exit":
+        return cmd_exit()
+    if cmd == "ls":
+        return cmd_ls()
     if cmd == "prompt":
         return cmd_prompt(args)
     if cmd == "tell":
