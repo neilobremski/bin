@@ -23,9 +23,8 @@ Surface (CLI):
 explicitly registered with `a8s add` (use `a8s discover` to find candidates).
 
 State:
-  ~/.a8s/a8s.json             — registry (name -> {root, aliases, definition?,
-                                kind?}). `kind` is legacy fallback used only by
-                                pre-`a8s define` entries.
+  ~/.a8s/a8s.json             — registry (name -> {root, aliases, definition?}).
+                                Agents without `definition` cannot wake.
   ~/.a8s/mailboxes/<NAME>/    — .inbox / .trash, isolated from the agent itself
   ~/.a8s/log.txt              — supervisor log: ISO-timestamped, captures every line
                                 that goes through `out()` (including subprocess
@@ -139,10 +138,7 @@ def out(text: str = "", end: str = "\n") -> None:
 @dataclass(frozen=True)
 class Participant:
     name: str
-    kind: str
     root: Path
-    marker: Path
-    birthtime: float
 
 
 # ---------- discovery ----------
@@ -172,13 +168,7 @@ def find_participant(parts: list[Participant], query: str) -> Participant | None
 
 def participants_from_registry() -> list[Participant]:
     """Build Participants from the registry — the single source of truth for
-    which agents exist. No filesystem walk; explicit `a8s add` is required for
-    new agents.
-
-    `kind` is carried through from legacy entries so phase-1 default-definition
-    fallback still works; entries created by `a8s add` have kind="" and require
-    `a8s define` before they can wake.
-    """
+    which agents exist. No filesystem walk; explicit `a8s add` is required."""
     reg = load_registry()
     parts: list[Participant] = []
     for name, info in reg.items():
@@ -189,9 +179,7 @@ def participants_from_registry() -> list[Participant]:
             root = Path(root_str).expanduser().resolve()
         except (OSError, RuntimeError):
             continue
-        kind = info.get("kind", "")
-        parts.append(Participant(name=name, kind=kind, root=root,
-                                 marker=Path(""), birthtime=0.0))
+        parts.append(Participant(name=name, root=root))
     return parts
 
 
@@ -305,31 +293,29 @@ def default_definition_path(kind: str) -> Path:
     return DEFINITIONS_DIR / f"{kind}.json"
 
 
-def load_definition(name: str, kind: str) -> dict:
-    """Load the JSON definition for `name`. The registry may carry an explicit
-    `definition` path; otherwise fall back to the built-in default for `kind`.
+def load_definition(name: str) -> dict:
+    """Load the JSON definition for `name` from the path stored in the registry.
+    Errors loudly if no definition is set — agents are not runnable until
+    `a8s define <name> <path>` has been called.
 
     Definitions encode argv (with `$PROMPT` placeholder), message templates,
-    and per-tool quirks. See apps/a8s/definitions/*.json.
+    and per-tool quirks. See apps/a8s/definitions/*.json for built-in shapes.
     """
     reg = load_registry()
     info = reg.get(name) or {}
     custom = info.get("definition")
-    candidates: list[Path] = []
-    if custom:
-        candidates.append(Path(custom).expanduser())
-    candidates.append(default_definition_path(kind))
-    for path in candidates:
-        if path.is_file():
-            try:
-                with path.open("r", encoding="utf-8") as f:
-                    return json.loads(f.read())
-            except (OSError, json.JSONDecodeError) as e:
-                raise RuntimeError(f"definition load failed for {path}: {e}") from e
-    raise FileNotFoundError(
-        f"no definition for {name!r} (kind={kind}); "
-        f"looked in: {', '.join(str(c) for c in candidates)}"
-    )
+    if not custom:
+        raise FileNotFoundError(
+            f"{name!r} has no definition; run `a8s define {name} <path>`"
+        )
+    path = Path(custom).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"definition file missing: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.loads(f.read())
+    except (OSError, json.JSONDecodeError) as e:
+        raise RuntimeError(f"definition load failed for {path}: {e}") from e
 
 
 def build_prompt(msg: dict, definition: dict) -> str:
@@ -522,7 +508,7 @@ def wake_once(p: Participant, msg_path: Path) -> None:
         return
 
     try:
-        definition = load_definition(p.name, p.kind)
+        definition = load_definition(p.name)
     except (FileNotFoundError, RuntimeError) as e:
         out(f"[{p.name}] {e}")
         bad = unique_path(trash_dir(p.name) / msg_path.name)
@@ -760,8 +746,6 @@ def cmd_agents() -> int:
         root = info.get("root", "?")
         if info.get("definition"):
             status = f"defined ({info['definition']})"
-        elif info.get("kind"):
-            status = f"defined (default: kind={info['kind']})"
         else:
             status = "UNDEFINED — run `a8s define`"
         print(f"  {name.ljust(width)}  {root}  [{status}]")
@@ -815,14 +799,14 @@ def cmd_define(args: list[str]) -> int:
         print(f"no agent named {name!r}", file=sys.stderr)
         return 1
     info = reg[target_key]
-    kind = info.get("kind", "")
 
     if len(args) == 1:
         custom = info.get("definition")
-        if custom:
-            source = Path(custom).expanduser()
-        else:
-            source = default_definition_path(kind)
+        if not custom:
+            print(f"{target_key}: no definition set", file=sys.stderr)
+            print(f"hint: a8s define {target_key} apps/a8s/definitions/<kind>.json", file=sys.stderr)
+            return 1
+        source = Path(custom).expanduser()
         print(f"{target_key}: {source}")
         try:
             with source.open("r", encoding="utf-8") as f:
