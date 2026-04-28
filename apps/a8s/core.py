@@ -108,6 +108,16 @@ def pid_path(name: str) -> Path:
     return agent_dir(name) / "pid"
 
 
+def detach_request_path(name: str) -> Path:
+    """Per-agent detach-request file. A process that wants to take over <name>
+    writes its own pid here, then polls for the holder to release. The holder's
+    `attached_loop` checks this file at the top of each iteration and, when the
+    request is from a different pid, releases ONLY <name> (not its other handled
+    agents) and clears the request. This is how take-over moves a single agent
+    between processes without orphaning the holder's siblings."""
+    return agent_dir(name) / "detach-request"
+
+
 def outbox_dir(root: Path) -> Path:
     """Outbox lives **inside the agent's own dir** so the agent can write to it
     even under a strict workspace sandbox (codex --full-auto). Inbox and trash

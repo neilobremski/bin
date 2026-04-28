@@ -19,13 +19,17 @@ import pytest
 from core import (
     Participant,
     agent_log_path,
+    detach_request_path,
     inbox_dir,
     pid_path,
     trash_dir,
 )
 from daemon import (
+    _clear_detach_request,
+    _read_detach_request,
     _read_handler_pid,
     _try_atomic_claim,
+    _write_detach_request,
     acquire,
     attached_loop,
     release,
@@ -118,6 +122,63 @@ class TestAcquireRelease:
         assert pid_path("X").read_text() == str(os.getpid())
         release("X")
         assert not pid_path("X").is_file()
+
+    def test_acquire_reaps_stale_pid_and_succeeds(self, fake_home):
+        # Pid file points at a dead pid → _read_handler_pid unlinks it →
+        # acquire's loop retries the claim and succeeds.
+        dead_pid = 2**31 - 1
+        pid_path("X").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("X").write_text(str(dead_pid))
+        acquire("X")
+        assert pid_path("X").read_text() == str(os.getpid())
+        release("X")
+
+    def test_acquire_against_live_holder_times_out(self, fake_home, monkeypatch):
+        # Issue #68: acquire writes a detach-request and polls; if the holder
+        # never honors it, raise TimeoutError. Use a tiny timeout so the test
+        # finishes quickly.
+        monkeypatch.setattr("daemon.DETACH_TIMEOUT_S", 0.5)
+        monkeypatch.setattr("daemon.DETACH_POLL_S", 0.05)
+        # Hold the pid file with the parent shell's pid (live, foreign).
+        pid_path("X").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("X").write_text(str(os.getppid()))
+        with pytest.raises(TimeoutError, match="did not release X"):
+            acquire("X")
+        # Holder pid file untouched.
+        assert pid_path("X").read_text() == str(os.getppid())
+        # Detach-request cleared on timeout.
+        assert not detach_request_path("X").is_file()
+
+    def test_acquire_writes_detach_request_for_live_holder(self, fake_home, monkeypatch):
+        # Verify the request file is written before the timeout fires.
+        monkeypatch.setattr("daemon.DETACH_TIMEOUT_S", 0.3)
+        monkeypatch.setattr("daemon.DETACH_POLL_S", 0.05)
+        pid_path("X").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("X").write_text(str(os.getppid()))
+        # During acquire's poll loop, the request file should be present.
+        # Easiest assertion: after timeout, the file is gone (cleared on
+        # timeout) — but during the polling window it WAS written. Use a
+        # spy on _write_detach_request.
+        called = {}
+        orig = _write_detach_request
+        def spy(name, pid):
+            called["name"] = name
+            called["pid"] = pid
+            orig(name, pid)
+        monkeypatch.setattr("daemon._write_detach_request", spy)
+        with pytest.raises(TimeoutError):
+            acquire("X")
+        assert called == {"name": "X", "pid": os.getpid()}
+
+    def test_release_clears_detach_request(self, fake_home):
+        # release(name) also clears any pending detach-request — once we
+        # release, there's nothing to ask for.
+        acquire("X")
+        _write_detach_request("X", os.getppid())
+        assert detach_request_path("X").is_file()
+        release("X")
+        assert not pid_path("X").is_file()
+        assert not detach_request_path("X").is_file()
 
     def test_release_other_pid_is_noop(self, fake_home):
         # Another (dead) pid in the file — release shouldn't unlink it because
@@ -247,6 +308,64 @@ class TestAttachedLoopLifecycle:
         assert "[a8s] MOCK: detached" in log
         # Pid file released.
         assert not pid_path("MOCK").is_file()
+
+
+class TestAttachedLoopDetachRequest:
+    """Issue #68 — per-agent take-over. A detach-request file under one of
+    our handled agents causes that agent (and only that agent) to be
+    released; siblings keep running."""
+
+    def test_releases_only_requested_agent(self, fake_home, tmp_path, fixtures_dir):
+        # Two agents A, B. We acquire both, then drop a detach-request for
+        # A (from a foreign pid), run one iteration, and verify A is gone
+        # while B is still ours.
+        for n in ("A", "B"):
+            (tmp_path / n).mkdir()
+        save_registry({
+            "A": {"root": str(tmp_path / "a"), "definition": str(fixtures_dir / "mock.json")},
+            "B": {"root": str(tmp_path / "b"), "definition": str(fixtures_dir / "mock.json")},
+        })
+        for n in ("A", "B"):
+            ensure_mailboxes(Participant(n, tmp_path / n))
+
+        # Place the detach-request BEFORE running attached_loop. The first
+        # iteration will pick it up, release A, and continue with B.
+        detach_request_path("A").parent.mkdir(parents=True, exist_ok=True)
+        detach_request_path("A").write_text(str(os.getppid()))
+
+        rc = attached_loop(["A", "B"], 0.1, single_pass=True)
+        assert rc == 0
+        # A's log captured the release notice.
+        assert f"releasing to PID {os.getppid()}" in _read_log("A")
+        # B's log shows attached + detached normally.
+        assert f"[a8s] B: attached (PID {os.getpid()}" in _read_log("B")
+        assert "[a8s] B: detached" in _read_log("B")
+        # Both pid files cleaned up at end (B by the finally block, A by the
+        # detach-request handling mid-iteration).
+        assert not pid_path("A").is_file()
+        assert not pid_path("B").is_file()
+        # Detach-request file removed too.
+        assert not detach_request_path("A").is_file()
+
+    def test_self_request_is_ignored(self, fake_home, tmp_path, fixtures_dir):
+        # If our OWN pid is in the detach-request (shouldn't happen, but
+        # defense), we don't release ourselves.
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({
+            "X": {"root": str(d), "definition": str(fixtures_dir / "mock.json")},
+        })
+        ensure_mailboxes(Participant("X", d))
+
+        detach_request_path("X").parent.mkdir(parents=True, exist_ok=True)
+        detach_request_path("X").write_text(str(os.getpid()))
+
+        rc = attached_loop(["X"], 0.1, single_pass=True)
+        assert rc == 0
+        # Did NOT log a release.
+        assert "releasing to PID" not in _read_log("X")
+        # Normal attached + detached.
+        assert "attached (PID" in _read_log("X")
+        assert "detached" in _read_log("X")
 
     def test_multi_agent_share_one_pid(self, fake_home, tmp_path, fixtures_dir):
         # Two agents, one process — both pid files point at this pytest process.

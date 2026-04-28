@@ -135,9 +135,13 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 
 `a8s` with no command prints help. There is no auto-discovery of agents from CWD — registration is always explicit.
 
-### Take-over collateral
+### Per-agent take-over
 
-`start`/`run`/`step` always win. If another handler holds the agent, the new caller SIGTERMs it, waits for it to detach, then atomically claims the pid file. If the prior handler was multi-agent (handling an alias), it detaches **all** its agents — the new caller takes only what it asked for. Other agents in the prior set become orphaned. Documented footgun; restart them explicitly.
+`start`/`run`/`step` against an agent that's already attached to another live process performs a **per-agent** hand-off. The new caller drops a `detach-request` file under `~/.a8s/agents/<NAME>/`; the existing handler reads it at the top of its next iteration and releases just that one agent — its other handled agents keep running. Then the new caller atomically claims the pid file. There is never an orphan: at every moment, an agent is either attached to exactly one live process or it isn't running at all.
+
+Concretely: P1 is `a8s start devs` (handling `[CLAUDE, GEMINI, FOO]`). You run `a8s run CLAUDE` in another window. CLAUDE moves to your foreground process; P1 keeps handling `[GEMINI, FOO]`. If you then `a8s run GEMINI` in a third window, GEMINI moves there; P1 keeps `[FOO]`. If P1's last agent gets pulled out, P1 exits cleanly with nothing left to handle.
+
+Take-over has a 60-second timeout. If the holder is wedged on a long LLM wake and doesn't honor the request in time, `acquire` errors out — `a8s kill <name>` breaks the deadlock.
 
 ## Definitions
 
