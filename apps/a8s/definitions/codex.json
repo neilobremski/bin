@@ -5,28 +5,19 @@
     "resume", "--last",
     "--full-auto",
     "--skip-git-repo-check",
-    "$PROMPT"
+    "$MESSAGE"
   ],
   "invokeMessage": [
     "codex", "exec",
     "resume", "--last",
     "--full-auto",
     "--skip-git-repo-check",
-    "$PROMPT"
-  ],
-  "invokeMessageAlias": [
-    "codex", "exec",
-    "resume", "--last",
-    "--full-auto",
-    "--skip-git-repo-check",
-    "$PROMPT"
+    "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ],
   "invokeClear": [
     "codex", "exec",
     "--full-auto",
     "--skip-git-repo-check",
     "Conversation cleared. New conversation starts now."
-  ],
-  "promptMessage": "{sender} tells you ({recipient}): {message}",
-  "promptMessageAlias": "{sender} tells you ({recipient}) and {others_count} others on the {alias} alias: {message}"
+  ]
 }

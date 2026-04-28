@@ -4,25 +4,17 @@
     "gemini",
     "--yolo",
     "--resume", "latest",
-    "--prompt", "$PROMPT"
+    "--prompt", "$MESSAGE"
   ],
   "invokeMessage": [
     "gemini",
     "--yolo",
     "--resume", "latest",
-    "--prompt", "$PROMPT"
-  ],
-  "invokeMessageAlias": [
-    "gemini",
-    "--yolo",
-    "--resume", "latest",
-    "--prompt", "$PROMPT"
+    "--prompt", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ],
   "invokeClear": [
     "gemini",
     "--yolo",
     "--prompt", "Conversation cleared. New conversation starts now."
-  ],
-  "promptMessage": "{sender} tells you ({recipient}): {message}",
-  "promptMessageAlias": "{sender} tells you ({recipient}) and {others_count} others on the {alias} alias: {message}"
+  ]
 }

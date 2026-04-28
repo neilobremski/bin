@@ -106,9 +106,12 @@ read it first.
 
 Key invariants:
 
-- **Recipient opacity** — sender doesn't know whether the recipient is a
-  Claude session, a script, or a human. Never leak this through skill
-  descriptions, prompt templates, or routing metadata.
+- **Recipient opacity (strict, mailing-list style)** — sender doesn't know
+  whether the recipient is a Claude session, a script, or a human; recipient
+  doesn't know who else got the message. A direct tell and an alias-fanned
+  tell produce identical message shapes — only `to` differs (alias vs agent
+  name). Never re-introduce `alias` / `others_count` fields or a separate
+  alias verb. (Settled in issues #69 / #70.)
 - **Members don't know about a8s** — drop in any project unchanged.
   An agent just sees a `tell` shell command and wakes to messages.
 - **The filesystem is the IPC, the outbox location is the unforgeable identity.**
@@ -126,7 +129,7 @@ Key invariants:
 | `apps/a8s/core.py` | paths, logging, helpers, `Participant`, mutable `PRINT_LOCK`, path constants (`SCRIPT_DIR`, `DEFINITIONS_DIR`, `ENTRYPOINT`) | leaf module — no a8s imports |
 | `apps/a8s/registry.py` | `~/.a8s/a8s.json` I/O, `resolve_name` (alias resolution with diamond/cycle detection), `sender_from_cwd`, `_scan_for_markers` | depends on `core` |
 | `apps/a8s/mailbox.py` | `route_outboxes`, `ensure_mailboxes`, `_queue_prompt`, `_queue_clear_sentinel`, `_split_content_and_files`, `_write_outbox` | depends on `core`, `registry` |
-| `apps/a8s/definitions.py` | `select_verb`, `build_prompt`, `build_command`, `_expand_argv` ($PROMPT/$A8S_DIR), `load_definition`, `_autodiscover_definition` | depends on `core`, `registry` |
+| `apps/a8s/definitions.py` | `select_verb`, `build_command`, `_expand_argv` (`$SENDER`/`$RECIPIENT`/`$MESSAGE`/`$A8S_DIR`), `load_definition`, `_autodiscover_definition` | depends on `core`, `registry` |
 | `apps/a8s/daemon.py` | `acquire`/`release` (pid files), `attached_loop`, signal handling (`_make_signal_handler`, `_kill_wake_subprocess_group`), `run_with_prefix`, `wake_once`. Mutable globals `_STOP_EVENT`/`_SIGNAL_COUNT`/`_CURRENT_WAKE_PROC` live here. Sets `core.PRINT_LOCK`. | depends on everything above |
 | `apps/a8s/commands.py` | every `cmd_*`, `_install_skill_*` for Claude/Gemini/Codex, `_expand_to_agents` | depends on everything above |
 | `apps/a8s/cli.py` | `COMMANDS` table (the source of truth for help text), `dispatch`, `main` | depends on `commands` only |
@@ -136,10 +139,13 @@ Key invariants:
 - **`cmd_start` re-execs via `core.ENTRYPOINT`**, not `__file__`. After the
   modular split, `__file__` inside `commands.py` resolves to the wrong path.
   `core.ENTRYPOINT = SCRIPT_DIR / "a8s.py"` is the canonical re-exec target.
-- **`$A8S_DIR` placeholder** in definition argv expands via
-  `definitions._expand_argv`. Used by `default.json` to point at the bundled
-  `dummy-cli`. Don't introduce more placeholders without checking they make
-  sense across all four `invoke*` verbs.
+- **Argv interpolation** (`$SENDER`, `$RECIPIENT`, `$MESSAGE`, `$TIMESTAMP`,
+  `$AGE`, `$A8S_DIR`) expands via `definitions._expand_argv`. `$TIMESTAMP`
+  is the ISO date the message was queued; `$AGE` is the human-readable
+  delta from now (computed each wake, so backlogs get accurate per-message
+  ages). `invokeClear` always gets empty strings for the message-shaped
+  vars. Don't introduce more placeholders without checking they make
+  sense across all three `invoke*` verbs.
 - **`core.PRINT_LOCK` is the cross-module log lock.** It's `None` at module
   load and only set when `daemon.attached_loop` starts. Threading is intentional:
   multi-agent handlers may interleave wake events. If you write a new code path
@@ -209,19 +215,25 @@ install                      install canonical skills
 └── .outbox/                  agent writes here; route_outboxes re-stamps `from`
 ```
 
-### The four invoke verbs
+### The three invoke verbs
 
 `select_verb(msg)` picks one based on the message's shape:
 
-| Verb | Trigger | Body |
+| Verb | Trigger | Argv vars typically used |
 |---|---|---|
-| `invokePrompt` | `from` is empty (queued by `a8s prompt`) | raw `content`, no template |
-| `invokeMessage` | `from` set, no `alias` field | `promptMessage` template formatted |
-| `invokeMessageAlias` | `from` set, `alias` field set | `promptMessageAlias` template (with `{others_count}`, `{alias}`) |
-| `invokeClear` | `clear: true` field set | no prompt; runs the CLI fresh |
+| `invokePrompt` | `from` is empty (queued by `a8s prompt`) | `$MESSAGE` (and optionally `$AGE`/`$TIMESTAMP`) |
+| `invokeMessage` | `from` set | `$SENDER`, `$RECIPIENT`, `$AGE` or `$TIMESTAMP`, `$MESSAGE` |
+| `invokeClear` | `clear: true` field set | none — argv is literal |
 
-`build_command(definition, prompt, verb)` reads the matching `invoke*` argv
-from the definition JSON and substitutes `$PROMPT` and `$A8S_DIR`.
+There's no separate alias verb. Strict opacity (#69, #70) makes a direct
+tell and an alias-fanned tell indistinguishable in shape; `$RECIPIENT`
+preserves whatever the sender wrote (alias name for fanned, agent name for
+direct) — mailing-list semantics.
+
+`build_command(definition, msg, verb)` reads the matching `invoke*` argv
+and substitutes `$SENDER` / `$RECIPIENT` / `$MESSAGE` (content + any
+`FILE:` lines) / `$A8S_DIR`. There is no `$PROMPT` and no separate
+`promptMessage` template — argv interpolation does the whole job.
 
 ### Definition fallback
 
@@ -271,9 +283,9 @@ python3 -m pytest apps/a8s/tests/
   end-to-end daemon tests. Each argv element printed on its own line with
   `MOCK-CLI:` prefix; tests grep the per-agent log to assert what the wake
   subprocess actually received.
-- `apps/a8s/tests/fixtures/mock.json` — definition that routes all four
-  verbs through `mock-cli` with deterministic templates like
-  `FROM:{sender}|TO:{recipient}|MSG:{message}` so log assertions are stable.
+- `apps/a8s/tests/fixtures/mock.json` — definition that routes all three
+  verbs through `mock-cli` with a deterministic argv template
+  `FROM:$SENDER|TO:$RECIPIENT|MSG:$MESSAGE` so log assertions are stable.
 
 When you change behavior in `core` / `registry` / `mailbox` / `definitions` /
 `daemon`, add or modify the corresponding `test_*.py`. The pytest suite is
@@ -287,7 +299,7 @@ The locked-design refactor (#52) is closed. The following are open:
 |---|---|---|
 | #39 | open enhancement | Copilot CLI as 4th tool kind. Trivial after the refactor: write `copilot.json`, add `COPILOT.md` → `copilot` to `core.MARKER_FILES`. |
 | #63 | open enhancement | Transparent multi-cluster routing (peer mesh). MQTT + ephemeral payload host as initial transports. Spec is implementation-agnostic. Armstrong's 5-item retrofit list (UUIDs, expiry, priority, dedup, acks) lands locally first. |
-| #69–72 | open question | Design discussions surfaced by the review panel: verb-scheme collapse vs eliminate; opacity strictness; supervision model; mailbox file format. Resolve before #63 hardens. |
+| #72 | open question | Design discussion surfaced by the review panel: mailbox file format. Resolve before #63 hardens. (#69, #70 closed by strict opacity + verb collapse; #71 closed by v1 thin-wrapper stance + stale-rendezvous-file fix.) |
 
 ### What I tried that didn't work (concrete)
 

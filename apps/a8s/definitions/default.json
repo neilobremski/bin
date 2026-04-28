@@ -1,9 +1,6 @@
 {
   "description": "Fallback default — no real CLI is configured. Routes every verb to apps/a8s/dummy-cli, which prints a 'not configured' notice and the received prompt. Configure a real CLI with `a8s define <name> <path-to-definition.json>`.",
-  "invokePrompt":       ["$A8S_DIR/dummy-cli", "$PROMPT"],
-  "invokeMessage":      ["$A8S_DIR/dummy-cli", "$PROMPT"],
-  "invokeMessageAlias": ["$A8S_DIR/dummy-cli", "$PROMPT"],
-  "invokeClear":        ["$A8S_DIR/dummy-cli", "(conversation cleared)"],
-  "promptMessage": "{sender} tells you ({recipient}): {message}",
-  "promptMessageAlias": "{sender} tells you ({recipient}) and {others_count} others on the {alias} alias: {message}"
+  "invokePrompt":  ["$A8S_DIR/dummy-cli", "$MESSAGE"],
+  "invokeMessage": ["$A8S_DIR/dummy-cli", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"],
+  "invokeClear":   ["$A8S_DIR/dummy-cli", "(conversation cleared)"]
 }

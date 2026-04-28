@@ -147,7 +147,7 @@ Take-over has a 60-second timeout (kill is 10s). If the holder is wedged on a lo
 
 ## Definitions
 
-Each agent has a definition file: a JSON document describing how to invoke its CLI for each verb, plus prompt templates. Built-in defaults ship in `apps/a8s/definitions/`:
+Each agent has a definition file: a JSON document describing how to invoke its CLI for each verb. Built-in defaults ship in `apps/a8s/definitions/`:
 
 | File | Purpose |
 |---|---|
@@ -156,40 +156,44 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `codex.json` | Codex CLI with `--full-auto` workspace-write sandbox + `resume --last` |
 | `default.json` | Fallback — runs `dummy-cli` and prints "no real CLI configured" |
 
-### The four verbs
+### The three verbs
 
 The wake routine reads the message and selects one of:
 
 | Verb | Trigger | Body |
 |---|---|---|
-| `invokePrompt` | `from` is empty (queued by `a8s prompt`) | Raw `content`, delivered as-is |
-| `invokeMessage` | `from` is set, no alias context | `promptMessage` template formatted |
-| `invokeMessageAlias` | `from` is set, message arrived via alias | `promptMessageAlias` template (sees alias name + others-count, NOT the other recipients' names — opacity rule) |
+| `invokePrompt` | `from` is empty (queued by `a8s prompt`) | `$MESSAGE` only — raw content, no sender header |
+| `invokeMessage` | `from` is set | `$SENDER`/`$RECIPIENT`/`$MESSAGE` interpolated into argv directly |
 | `invokeClear` | `clear: true` sentinel | No prompt; runs the CLI fresh to start a new conversation |
+
+There is no separate alias verb. Strict opacity (issues #69, #70): a routed message looks identical whether it arrived directly or via alias fan-out — `$RECIPIENT` resolves to whatever the sender wrote in `to` (the alias name for fanned messages, the agent name for direct ones). The recipient knows it came via the list; not who else got it. Mailing-list semantics.
 
 ### Schema
 
 ```json
 {
   "description": "...",
-  "invokePrompt":       ["claude", "...", "--continue", "-p", "$PROMPT"],
-  "invokeMessage":      ["claude", "...", "--continue", "-p", "$PROMPT"],
-  "invokeMessageAlias": ["claude", "...", "--continue", "-p", "$PROMPT"],
-  "invokeClear":        ["claude", "-p", "Conversation cleared. New conversation starts now."],
-  "promptMessage":      "{sender} tells you ({recipient}): {message}",
-  "promptMessageAlias": "{sender} tells you ({recipient}) and {others_count} others on the {alias} alias: {message}"
+  "invokePrompt":  ["claude", "...", "--continue", "-p", "$MESSAGE"],
+  "invokeMessage": ["claude", "...", "--continue", "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"],
+  "invokeClear":   ["claude", "-p", "Conversation cleared. New conversation starts now."]
 }
 ```
 
-Argv elements run through two substitutions:
-- `$PROMPT` → the wake's prompt body (formatted via the matching template, or raw for `invokePrompt`).
+Argv elements run through six substitutions:
+- `$SENDER` → sender's canonical name (empty for senderless prompts).
+- `$RECIPIENT` → what the sender wrote in `to` (alias name for fanned messages, agent name for direct ones).
+- `$MESSAGE` → the message body (`content`, with any `FILE: <path>` lines appended).
+- `$TIMESTAMP` → ISO 8601 UTC timestamp the message was queued (e.g. `2026-04-28T14:30:00.123456Z`). Useful when you want a stable machine-readable time.
+- `$AGE` → human-readable age relative to now (e.g. `5 minutes ago`). Computed at wake time, so a long backlog gets accurate values per message. Pick this OR `$TIMESTAMP` per definition based on which the LLM will read more naturally.
 - `$A8S_DIR` → `apps/a8s/` itself, so definitions can point at bundled scripts (`default.json` uses this for `dummy-cli`).
+
+`$TIMESTAMP` and `$AGE` are empty for `invokeClear` and for any message without a `date` field.
 
 Override per-agent with `a8s define <name> <path>` — point at any JSON. The file isn't moved or copied; the registry stores the path.
 
 ### Recipient transparency
 
-Templates SHOULD NOT leak whether the recipient is a Claude session, a script, or a human via SMS. The four built-in defaults follow this — `{sender} tells you ({recipient})` works equally well for any backend. Customize at your own risk.
+The default definitions follow the opacity rule — `$SENDER tells $RECIPIENT: $MESSAGE` works equally well whether `$RECIPIENT` is an LLM session, a Python script, or (someday) an SMS gateway. Customize at your own risk.
 
 ## State on disk
 

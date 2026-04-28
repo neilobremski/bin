@@ -1,13 +1,21 @@
-"""a8s definitions — invoke* verbs, prompt formatting, definition loading.
+"""a8s definitions — invoke* verbs and argv interpolation.
 
 Each agent has a definition JSON (built-in or custom) that encodes argv for
-four verbs and message templates. `select_verb` picks the verb from the
-queued message, `build_prompt` formats the body, `build_command` expands
-$PROMPT/$A8S_DIR placeholders into the final argv.
+three verbs. `select_verb` picks the verb from the queued message;
+`build_command` substitutes `$SENDER` / `$RECIPIENT` / `$MESSAGE` /
+`$TIMESTAMP` / `$AGE` / `$A8S_DIR` into the chosen argv.
+
+Strict opacity (issues #69, #70): the recipient sees only sender + message
+content — no `alias` or `others_count` leak. A direct tell and an
+alias-fanned tell produce the same prompt shape, distinguished only by what
+`$RECIPIENT` resolves to (the original `to` field, which is the alias name
+for fanned messages and the agent name for direct ones — same as a public
+mailing list: you know it came via the list, you don't know who else got it).
 """
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core import (
@@ -21,7 +29,6 @@ from registry import load_registry
 VERB_KEY = {
     "prompt": "invokePrompt",
     "message": "invokeMessage",
-    "messageAlias": "invokeMessageAlias",
     "clear": "invokeClear",
 }
 
@@ -36,8 +43,8 @@ def load_definition(name: str) -> dict:
     bundled `apps/a8s/definitions/default.json` (a dummy CLI that prints
     'not configured' and the received prompt).
 
-    Definitions encode argv (with `$PROMPT` and `$A8S_DIR` placeholders),
-    message templates, and per-tool quirks. See apps/a8s/definitions/*.json.
+    Definitions encode argv with `$SENDER`, `$RECIPIENT`, `$MESSAGE`, and
+    `$A8S_DIR` placeholders. See apps/a8s/definitions/*.json.
     """
     reg = load_registry()
     info = reg.get(name) or {}
@@ -68,74 +75,106 @@ def select_verb(msg: dict) -> str:
     """Determine the wake verb from a queued message JSON.
 
     Order matters: clear first (so the sentinel takes precedence), then
-    senderless prompt, then alias, then plain message."""
+    senderless prompt, then plain message. Alias-routed messages take
+    `message` like direct ones — strict opacity collapses the dispatch."""
     if msg.get("clear") is True:
         return "clear"
     sender = (msg.get("from") or "").strip()
     if not sender:
         return "prompt"
-    if (msg.get("alias") or "").strip():
-        return "messageAlias"
     return "message"
 
 
-def build_prompt(msg: dict, definition: dict, verb: str) -> str:
-    """Format a queued message into the prompt string for the agent CLI.
-
-    `verb` selects how the body is built:
-      - `prompt`        — raw `content` delivery (no template wrapping)
-      - `message`       — `promptMessage` template
-      - `messageAlias`  — `promptMessageAlias` template (alias + others_count)
-      - `clear`         — invokeClear takes no prompt; returns empty string
-    """
-    if verb == "clear":
-        return ""
+def _message_body(msg: dict) -> str:
+    """Compose the `$MESSAGE` body: content plus any FILE: lines."""
     content = msg.get("content", "")
-    if verb == "prompt":
-        return "\n".join([content, *_file_lines(msg)])
-
-    sender = (msg.get("from") or "").strip()
-    date = msg.get("date", "")
-    recipient = (msg.get("to") or "").strip()
-    alias = (msg.get("alias") or "").strip()
-    others_count = msg.get("others_count", 0)
-    if verb == "messageAlias":
-        tmpl = definition.get("promptMessageAlias") or (
-            "{sender} tells you ({recipient}) and {others_count} others on the {alias} alias: {message}"
-        )
-    else:  # "message"
-        tmpl = definition.get("promptMessage") or "{sender} tells you ({recipient}): {message}"
-    header = tmpl.format(
-        sender=sender,
-        recipient=recipient,
-        message=content,
-        date=date,
-        alias=alias,
-        others_count=others_count,
-    )
-    if date and "{date}" not in tmpl:
-        header = f"[{date}] {header}"
-    return "\n".join([header, *_file_lines(msg)])
+    lines = _file_lines(msg)
+    if not lines:
+        return content
+    return "\n".join([content, *lines])
 
 
-def _expand_argv(argv: list[str], prompt: str) -> list[str]:
+def _parse_iso(date_str: str) -> datetime | None:
+    """Parse the ISO timestamp we write into messages (`...Z` UTC). Returns
+    None for empty / unparseable input."""
+    if not date_str:
+        return None
+    try:
+        if date_str.endswith("Z"):
+            return datetime.fromisoformat(date_str[:-1] + "+00:00")
+        return datetime.fromisoformat(date_str)
+    except ValueError:
+        return None
+
+
+def _format_age(date_str: str, *, now: datetime | None = None) -> str:
+    """Convert an ISO timestamp into a human-readable 'N units ago' string.
+    Empty for missing/unparseable input. `now` is injectable for tests."""
+    ts = _parse_iso(date_str)
+    if ts is None:
+        return ""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    seconds = max(0, int((now - ts).total_seconds()))
+    if seconds < 60:
+        n, unit = seconds, "second"
+    elif seconds < 3600:
+        n, unit = seconds // 60, "minute"
+    elif seconds < 86400:
+        n, unit = seconds // 3600, "hour"
+    elif seconds < 7 * 86400:
+        n, unit = seconds // 86400, "day"
+    else:
+        n, unit = seconds // (7 * 86400), "week"
+    plural = "" if n == 1 else "s"
+    return f"{n} {unit}{plural} ago"
+
+
+def _expand_argv(
+    argv: list[str],
+    sender: str,
+    recipient: str,
+    message: str,
+    timestamp: str = "",
+    age: str = "",
+) -> list[str]:
     """Expand placeholders in argv:
-      - `$PROMPT`   the wake prompt (raw or template-formatted)
-      - `$A8S_DIR`  the apps/a8s/ directory (so default.json can reference
-                    bundled scripts like dummy-cli without hardcoding paths)
-    invokeClear ignores prompt entirely; its argv should not contain $PROMPT."""
+      - `$SENDER`     sender's canonical name (empty for senderless prompts)
+      - `$RECIPIENT`  what the sender wrote in `to` (alias for fanned, agent for direct)
+      - `$MESSAGE`    content + any FILE: lines
+      - `$TIMESTAMP`  ISO 8601 UTC time the message was queued (e.g.,
+                      `2026-04-28T14:30:00.123456Z`); empty for invokeClear
+                      and for messages without a `date` field
+      - `$AGE`        human-readable age relative to now (e.g.,
+                      `5 minutes ago`); same emptiness rules as $TIMESTAMP
+      - `$A8S_DIR`    the apps/a8s/ directory (so default.json can reference
+                      bundled scripts like dummy-cli without hardcoding paths)
+    """
     a8s_dir = str(SCRIPT_DIR)
-    return [a.replace("$PROMPT", prompt).replace("$A8S_DIR", a8s_dir) for a in argv]
+    out: list[str] = []
+    for a in argv:
+        a = a.replace("$SENDER", sender)
+        a = a.replace("$RECIPIENT", recipient)
+        a = a.replace("$MESSAGE", message)
+        a = a.replace("$TIMESTAMP", timestamp)
+        a = a.replace("$AGE", age)
+        a = a.replace("$A8S_DIR", a8s_dir)
+        out.append(a)
+    return out
 
 
-def build_command(definition: dict, prompt: str, verb: str) -> list[str]:
-    """Pick the `invoke*` argv from `definition` for this verb and expand $PROMPT.
+def build_command(definition: dict, msg: dict, verb: str) -> list[str]:
+    """Pick the `invoke*` argv from `definition` for this verb and expand
+    interpolation variables.
 
     Verbs:
-      prompt        invokePrompt        senderless supervisor-direct (raw)
-      message       invokeMessage       direct tell from one agent to another
-      messageAlias  invokeMessageAlias  alias-routed tell (with opacity vars)
-      clear         invokeClear         start a fresh conversation (no prompt)
+      prompt   invokePrompt   senderless supervisor-direct (raw content)
+      message  invokeMessage  routed tell (sender + recipient + content)
+      clear    invokeClear    start a fresh conversation (no message)
+
+    `$TIMESTAMP` and `$AGE` come from `msg["date"]`; both empty for clear
+    and for messages that somehow lack a date field (defensive, shouldn't
+    happen since `_write_outbox` / `_queue_*` always stamp one).
     """
     key = VERB_KEY.get(verb)
     if key is None:
@@ -143,7 +182,14 @@ def build_command(definition: dict, prompt: str, verb: str) -> list[str]:
     argv = definition.get(key)
     if not argv:
         raise ValueError(f"definition missing {key!r}")
-    return _expand_argv(list(argv), prompt)
+    if verb == "clear":
+        return _expand_argv(list(argv), "", "", "")
+    sender = (msg.get("from") or "").strip()
+    recipient = (msg.get("to") or "").strip()
+    body = _message_body(msg)
+    date_str = (msg.get("date") or "").strip()
+    age = _format_age(date_str)
+    return _expand_argv(list(argv), sender, recipient, body, date_str, age)
 
 
 def _autodiscover_definition(root: Path) -> tuple[str, str]:
