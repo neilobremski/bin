@@ -66,6 +66,51 @@ class TestReadHandlerPid:
         pid_path("X").write_text(str(os.getpid()))
         assert _read_handler_pid("X") == os.getpid()
 
+    def test_empty_pid_file_is_cleaned_up(self, fake_home):
+        # Issue #66: a partial-write window between O_CREAT|O_EXCL and os.write
+        # can leave an empty pid file. Treat as stale and unlink.
+        pid_path("X").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("X").write_text("")
+        assert _read_handler_pid("X") is None
+        assert not pid_path("X").is_file()
+
+    def test_negative_pid_is_cleaned_up(self, fake_home):
+        # Issue #66: a non-positive pid doesn't refer to any real process —
+        # pid 0 / negative pids would target the whole process group via
+        # os.kill, which is unsafe.
+        pid_path("X").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("X").write_text("-1")
+        assert _read_handler_pid("X") is None
+        assert not pid_path("X").is_file()
+
+    def test_zero_pid_is_cleaned_up(self, fake_home):
+        pid_path("X").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("X").write_text("0")
+        assert _read_handler_pid("X") is None
+        assert not pid_path("X").is_file()
+
+    def test_garbage_pid_is_cleaned_up(self, fake_home):
+        pid_path("X").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("X").write_text("not-an-int")
+        assert _read_handler_pid("X") is None
+        assert not pid_path("X").is_file()
+
+
+class TestAtomicClaimDurability:
+    def test_claim_after_partial_write_cleanup(self, fake_home):
+        # Issue #66: if a prior writer died after O_CREAT but before the byte
+        # write, the file exists but is empty. _read_handler_pid cleans it up;
+        # the next _try_atomic_claim must then succeed.
+        pid_path("X").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("X").write_text("")  # simulate partial-write death
+        # Direct re-claim fails because the file still exists.
+        assert _try_atomic_claim("X", os.getpid()) is False
+        # _read_handler_pid reaps the empty file.
+        assert _read_handler_pid("X") is None
+        # Now _try_atomic_claim succeeds.
+        assert _try_atomic_claim("X", os.getpid()) is True
+        assert pid_path("X").read_text() == str(os.getpid())
+
 
 class TestAcquireRelease:
     def test_acquire_when_free_then_release(self, fake_home):

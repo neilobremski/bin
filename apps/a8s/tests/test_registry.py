@@ -21,7 +21,45 @@ from registry import (
     save_registry,
     sender_from_cwd,
 )
-from core import Participant, registry_path
+from core import Participant, canonical_name, registry_path
+
+
+# ---------- canonical_name ----------
+
+class TestCanonicalName:
+    """Issue #65 — names canonicalize to lowercase at registration boundaries
+    (`a8s add`, `a8s alias`) so directory keys collapse and the case-collision
+    footgun (two distinct `~/.a8s/agents/<NAME>/` dirs for `claude` vs
+    `Claude`) goes away."""
+
+    def test_lowercases(self):
+        assert canonical_name("CLAUDE") == "claude"
+
+    def test_strips(self):
+        assert canonical_name("  claude  ") == "claude"
+
+    def test_mixed_case(self):
+        assert canonical_name("Claude") == "claude"
+
+    def test_alphanumeric_passes(self):
+        assert canonical_name("agent42") == "agent42"
+
+    def test_empty_rejected(self):
+        with pytest.raises(ValueError):
+            canonical_name("")
+
+    def test_whitespace_only_rejected(self):
+        with pytest.raises(ValueError):
+            canonical_name("   ")
+
+    def test_hyphen_rejected(self):
+        # NAME_RE is [A-Za-z0-9]+ — no separators allowed.
+        with pytest.raises(ValueError):
+            canonical_name("foo-bar")
+
+    def test_space_rejected(self):
+        with pytest.raises(ValueError):
+            canonical_name("foo bar")
 
 
 # ---------- low-level I/O ----------

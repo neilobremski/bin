@@ -3,18 +3,37 @@
 Mailbox routing is process-agnostic: a per-agent daemon may write into any
 other agent's inbox even though it isn't handling them. Only `wake_once` (in
 daemon.py) requires the handler attachment.
+
+Atomic alias fan-out (issue #67): `route_outboxes` writes each routed copy
+into `<recipient>/inbox.tmp/<source-fname>` first, then renames the staged
+files into `<recipient>/inbox/` only after every recipient has staged
+successfully — so a process killed mid-fan-out leaves no half-routed state
+that would deliver duplicates on retry. Source filename is preserved (not
+uniquified) so retries are idempotent: a recipient whose final-inbox copy
+already exists is skipped.
+
+FILE: payload transfer (issue #62): each `FILE:` entry's bytes are copied
+into `<recipient>/.files/<filename>` and the routed message's path rewritten
+to the recipient-local copy. Sender paths are validated to live inside the
+sender's own root before copy — the outbox is agent-writable, so an
+unvalidated path could be a probe for files outside the sandbox.
 """
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
 from core import (
+    MAX_FILE_BYTES,
     Participant,
     _preview,
     _safe_name,
+    files_dir,
     inbox_dir,
+    inbox_tmp_dir,
     outbox_dir,
     out_agent,
     trash_dir,
@@ -26,12 +45,115 @@ from registry import resolve_name
 # ---------- mailboxes ----------
 
 def ensure_mailboxes(p: Participant) -> None:
-    """Create mailbox dirs for `p`. Inbox and trash live under ~/.a8s/ (hidden
-    from the agent); outbox lives in the agent's own root (so the agent can
-    actually write to it under a workspace sandbox)."""
-    for d in (inbox_dir(p.name), trash_dir(p.name)):
+    """Create mailbox dirs for `p`. Inbox, inbox.tmp, and trash live under
+    ~/.a8s/ (hidden from the agent); outbox and .files live in the agent's
+    own root (so the agent can write to outbox and read from .files under a
+    workspace sandbox)."""
+    for d in (inbox_dir(p.name), inbox_tmp_dir(p.name), trash_dir(p.name)):
         d.mkdir(parents=True, exist_ok=True)
     outbox_dir(p.root).mkdir(parents=True, exist_ok=True)
+    files_dir(p.root).mkdir(parents=True, exist_ok=True)
+
+
+def _transfer_file_to_recipient(
+    sender_name: str,
+    sender_root: Path,
+    recipient_root: Path,
+    entry: dict,
+) -> dict | None:
+    """Copy one `FILE:` payload from sender to `<recipient_root>/.files/`.
+    Returns the rewritten file entry (recipient-local path) or None if the
+    file was rejected (logged to sender's per-agent log).
+
+    Defenses:
+      - source must resolve INSIDE `sender_root` (the outbox is
+        agent-writable, so an unvalidated path could be a probe for files
+        outside the sandbox)
+      - source must exist and be a regular file
+      - source size must be <= MAX_FILE_BYTES (large payloads belong on a
+        side-channel; see issue #63)
+
+    On collision in `.files/`, `unique_path` appends `.1`, `.2`, ... — the
+    routed message's `files[i].path` is updated to match.
+    """
+    src_path = Path(entry.get("path") or "").expanduser()
+    sender_root_resolved = sender_root.resolve()
+    try:
+        if src_path.is_absolute():
+            src_resolved = src_path.resolve()
+        else:
+            src_resolved = (sender_root_resolved / src_path).resolve()
+    except (OSError, RuntimeError) as e:
+        out_agent(sender_name, f"FILE: cannot resolve {src_path!s}: {e}")
+        return None
+    try:
+        src_resolved.relative_to(sender_root_resolved)
+    except ValueError:
+        out_agent(
+            sender_name,
+            f"FILE: rejected — path outside sender root: {src_resolved}",
+        )
+        return None
+    if not src_resolved.is_file():
+        out_agent(sender_name, f"FILE: source missing or not a regular file: {src_resolved}")
+        return None
+    try:
+        size = src_resolved.stat().st_size
+    except OSError as e:
+        out_agent(sender_name, f"FILE: stat failed for {src_resolved}: {e}")
+        return None
+    if size > MAX_FILE_BYTES:
+        out_agent(
+            sender_name,
+            f"FILE: too large ({size} > {MAX_FILE_BYTES}): {src_resolved}",
+        )
+        return None
+    dest_dir = files_dir(recipient_root)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = unique_path(dest_dir / src_resolved.name)
+    try:
+        shutil.copyfile(src_resolved, dest)
+        os.chmod(dest, 0o644)
+    except OSError as e:
+        out_agent(sender_name, f"FILE: copy failed {src_resolved} -> {dest}: {e}")
+        return None
+    return {"filename": dest.name, "path": str(dest)}
+
+
+def _build_routed_message(
+    base_msg: dict,
+    sender_name: str,
+    sender_root: Path,
+    recipient: Participant,
+) -> dict:
+    """Construct the routed copy of `base_msg` for `recipient` — copies any
+    `FILE:` payloads into the recipient's `.files/` and rewrites the file
+    paths in the returned message. Files that fail validation are dropped
+    (logged); the message is delivered with the surviving files."""
+    routed = dict(base_msg)
+    routed["to"] = recipient.name
+    src_files = base_msg.get("files") or []
+    if src_files:
+        new_files: list[dict] = []
+        for entry in src_files:
+            rewritten = _transfer_file_to_recipient(
+                sender_name, sender_root, recipient.root, entry
+            )
+            if rewritten is not None:
+                new_files.append(rewritten)
+        routed["files"] = new_files
+    return routed
+
+
+def _commit_staged_inboxes(staged: list[tuple[Path, Path]]) -> None:
+    """Atomically promote each `(staging, final)` pair from `inbox.tmp/` into
+    `inbox/`. Uses `os.replace` so the rename is atomic on POSIX even if the
+    final already exists (re-route after partial crash). Skips entries whose
+    staging file is already gone (already promoted by a prior partial commit)."""
+    for staging, final in staged:
+        if not staging.is_file():
+            continue
+        os.replace(str(staging), str(final))
 
 
 # ---------- routing ----------
@@ -42,7 +164,14 @@ def route_outboxes(senders: list[Participant], all_agents: list[Participant] | N
     `all_agents` is the recipient lookup pool (defaults to senders for
     self-contained calls). Aliases fan out at routing time; sender is excluded
     from delivery (no self-echo). Each routed copy carries `alias` and
-    `others_count` fields for the recipient's prompt template."""
+    `others_count` fields for the recipient's prompt template.
+
+    Atomicity (issue #67): each outbox file is staged into every recipient's
+    `inbox.tmp/` first, then promoted into `inbox/` via `os.replace`, then
+    the source outbox file is unlinked. The staging filename mirrors the
+    source filename (no `unique_path` randomization), so a recipient whose
+    `inbox/<source-name>` already exists is skipped on retry — the routing
+    pass becomes idempotent across crashes."""
     if all_agents is None:
         all_agents = senders
     by_name = {p.name.lower(): p for p in all_agents}
@@ -89,31 +218,62 @@ def route_outboxes(senders: list[Participant], all_agents: list[Participant] | N
             if kind == "alias":
                 msg["alias"] = recipient_name
                 msg["others_count"] = max(0, len(recipients) - 1)
-                out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (alias of {len(recipients)}): {preview}")
-                for recipient in recipients:
-                    ensure_mailboxes(recipient)
-                    copy = dict(msg)
-                    copy["to"] = recipient.name
-                    dest = unique_path(inbox_dir(recipient.name) / f.name)
-                    with dest.open("w", encoding="utf-8") as out_f:
-                        json.dump(copy, out_f, indent=2)
-                    out_agent(recipient.name, f"received from {sender.name} (via {recipient_name} alias): {preview}")
-                f.unlink()
-                routed += len(recipients)
             else:
-                # Single agent recipient.
                 if not recipients:
                     out_agent(sender.name, f"[{sender.name}] {recipient_name!r} resolved to no agents in {f.name}")
                     continue
+
+            # Stage every recipient's copy into inbox.tmp/<source-name>. Skip
+            # any recipient whose final inbox already has the file (prior
+            # partial run already promoted that recipient's copy).
+            staged: list[tuple[Path, Path]] = []
+            try:
+                for recipient in recipients:
+                    ensure_mailboxes(recipient)
+                    final = inbox_dir(recipient.name) / f.name
+                    if final.is_file():
+                        continue  # already delivered on a prior pass
+                    staging = inbox_tmp_dir(recipient.name) / f.name
+                    routed_msg = _build_routed_message(msg, sender.name, sender.root, recipient)
+                    with staging.open("w", encoding="utf-8") as out_f:
+                        json.dump(routed_msg, out_f, indent=2)
+                    staged.append((staging, final))
+            except OSError as e:
+                # Stage failed — leave the outbox file in place for retry. Best-
+                # effort gc of any partially-staged copies; they'll be replaced
+                # on the next pass anyway (overwritten under the same name).
+                out_agent(sender.name, f"[{sender.name}] stage failed on {f.name}: {e}")
+                for staging, _ in staged:
+                    try:
+                        staging.unlink()
+                    except OSError:
+                        pass
+                continue
+
+            # All copies staged — atomic commit phase. `os.replace` is atomic
+            # on POSIX; even if we crash between iterations, the next pass
+            # detects already-promoted recipients via the `final.is_file()`
+            # skip above and finishes the rest.
+            try:
+                _commit_staged_inboxes(staged)
+            except OSError as e:
+                out_agent(sender.name, f"[{sender.name}] commit failed on {f.name}: {e}")
+                continue
+
+            if kind == "alias":
+                out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (alias of {len(recipients)}): {preview}")
+                for recipient in recipients:
+                    out_agent(recipient.name, f"received from {sender.name} (via {recipient_name} alias): {preview}")
+                routed += len(recipients)
+            else:
                 recipient = recipients[0]
-                ensure_mailboxes(recipient)
-                dest = unique_path(inbox_dir(recipient.name) / f.name)
-                with dest.open("w", encoding="utf-8") as out_f:
-                    json.dump(msg, out_f, indent=2)
-                f.unlink()
                 out_agent(sender.name, f"routed: {sender.name} -> {recipient.name}: {preview}")
                 out_agent(recipient.name, f"received from {sender.name}: {preview}")
                 routed += 1
+            try:
+                f.unlink()
+            except OSError:
+                pass
     return routed
 
 
