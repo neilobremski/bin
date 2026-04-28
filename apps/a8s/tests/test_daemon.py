@@ -104,6 +104,72 @@ class TestReadHandlerPid:
         assert not pid_path("X").is_file()
 
 
+class TestRequestFileLiveness:
+    """Issue #71: stale rendezvous files from dead requesters must not be
+    honored. Without this reap, an `acquire()` caller (or `cmd_kill`) that
+    crashes after writing the request would cause the holder's next
+    iteration to release the agent to nobody."""
+
+    def test_detach_request_dead_requester_reaped(self, fake_home):
+        dead_pid = 2**31 - 1
+        detach_request_path("X").parent.mkdir(parents=True, exist_ok=True)
+        detach_request_path("X").write_text(str(dead_pid))
+        assert _read_detach_request("X") is None
+        assert not detach_request_path("X").is_file()
+
+    def test_detach_request_live_requester_returned(self, fake_home):
+        detach_request_path("X").parent.mkdir(parents=True, exist_ok=True)
+        detach_request_path("X").write_text(str(os.getpid()))
+        assert _read_detach_request("X") == os.getpid()
+        assert detach_request_path("X").is_file()
+
+    def test_kill_request_dead_requester_reaped(self, fake_home):
+        dead_pid = 2**31 - 1
+        kill_request_path("X").parent.mkdir(parents=True, exist_ok=True)
+        kill_request_path("X").write_text(str(dead_pid))
+        assert _read_kill_request("X") is None
+        assert not kill_request_path("X").is_file()
+
+    def test_kill_request_live_requester_returned(self, fake_home):
+        kill_request_path("X").parent.mkdir(parents=True, exist_ok=True)
+        kill_request_path("X").write_text(str(os.getpid()))
+        assert _read_kill_request("X") == os.getpid()
+        assert kill_request_path("X").is_file()
+
+    def test_attached_loop_ignores_dead_requester_detach(self, fake_home, tmp_path, fixtures_dir):
+        # Without the liveness check, this dead-pid request would cause the
+        # iteration top to spuriously release X.
+        from registry import save_registry
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({
+            "X": {"root": str(d), "definition": str(fixtures_dir / "mock.json")},
+        })
+        ensure_mailboxes(Participant("X", d))
+        detach_request_path("X").parent.mkdir(parents=True, exist_ok=True)
+        detach_request_path("X").write_text(str(2**31 - 1))
+
+        rc = attached_loop(["X"], 0.1, single_pass=True)
+        assert rc == 0
+        assert "releasing to PID" not in _read_log("X")
+        # Stale request file reaped.
+        assert not detach_request_path("X").is_file()
+
+    def test_attached_loop_ignores_dead_requester_kill(self, fake_home, tmp_path, fixtures_dir):
+        from registry import save_registry
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({
+            "X": {"root": str(d), "definition": str(fixtures_dir / "mock.json")},
+        })
+        ensure_mailboxes(Participant("X", d))
+        kill_request_path("X").parent.mkdir(parents=True, exist_ok=True)
+        kill_request_path("X").write_text(str(2**31 - 1))
+
+        rc = attached_loop(["X"], 0.1, single_pass=True)
+        assert rc == 0
+        assert "killed by" not in _read_log("X")
+        assert not kill_request_path("X").is_file()
+
+
 class TestAtomicClaimDurability:
     def test_claim_after_partial_write_cleanup(self, fake_home):
         # Issue #66: if a prior writer died after O_CREAT but before the byte

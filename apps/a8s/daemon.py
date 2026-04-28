@@ -201,8 +201,10 @@ def _write_detach_request(name: str, requester_pid: int) -> None:
 
 def _read_detach_request(name: str) -> int | None:
     """Return the requester pid in the detach-request file for `name`, or None.
-    Reaps malformed contents (empty / non-int / non-positive) like the pid
-    file does."""
+    Reaps malformed contents (empty / non-int / non-positive) and stale
+    requests from dead requesters — without the liveness check, an
+    `acquire()` caller that crashes after writing the request would cause
+    the holder's next iteration to release the agent to nobody (issue #71)."""
     p = detach_request_path(name)
     if not p.is_file():
         return None
@@ -210,13 +212,19 @@ def _read_detach_request(name: str) -> int | None:
         pid = int(p.read_text().strip())
         if pid <= 0:
             raise ValueError("non-positive pid")
-        return pid
     except (OSError, ValueError):
         try:
             p.unlink()
         except OSError:
             pass
         return None
+    if _pid_alive(pid):
+        return pid
+    try:
+        p.unlink()
+    except OSError:
+        pass
+    return None
 
 
 def _clear_detach_request(name: str) -> None:
@@ -234,7 +242,8 @@ def _write_kill_request(name: str, requester_pid: int) -> None:
 
 
 def _read_kill_request(name: str) -> int | None:
-    """Same parse-and-reap discipline as `_read_detach_request`."""
+    """Same parse-and-reap discipline as `_read_detach_request`, including
+    the dead-requester reap (issue #71)."""
     p = kill_request_path(name)
     if not p.is_file():
         return None
@@ -242,13 +251,19 @@ def _read_kill_request(name: str) -> int | None:
         pid = int(p.read_text().strip())
         if pid <= 0:
             raise ValueError("non-positive pid")
-        return pid
     except (OSError, ValueError):
         try:
             p.unlink()
         except OSError:
             pass
         return None
+    if _pid_alive(pid):
+        return pid
+    try:
+        p.unlink()
+    except OSError:
+        pass
+    return None
 
 
 def _clear_kill_request(name: str) -> None:
