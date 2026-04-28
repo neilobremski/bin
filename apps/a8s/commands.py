@@ -724,8 +724,15 @@ def cmd_tell(args: list[str]) -> int:
     try:
         kind, members = resolve_name(target_query)
     except KeyError:
-        print(f"tell: no agent or alias named {target_query!r}", file=sys.stderr)
-        return 1
+        # Unknown locally. Allow the send if any remotes are configured —
+        # the recipient may live on another cluster and the broadcast +
+        # filter receive side will pick it up there. With zero remotes
+        # there's no path forward, so fail.
+        from network import configured_remote_ids
+        if not configured_remote_ids():
+            print(f"tell: no agent or alias named {target_query!r}", file=sys.stderr)
+            return 1
+        kind, members = "agent", [target_query]
     except ValueError as e:
         print(f"tell: {e}", file=sys.stderr)
         return 1

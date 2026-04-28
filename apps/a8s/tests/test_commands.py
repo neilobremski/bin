@@ -10,8 +10,17 @@ from pathlib import Path
 
 import pytest
 
-from commands import cmd_add, cmd_alias, cmd_kill, cmd_remote, cmd_remove, cmd_unalias
-from core import agent_dir, kill_request_path, pid_path
+from commands import (
+    cmd_add,
+    cmd_alias,
+    cmd_kill,
+    cmd_remote,
+    cmd_remove,
+    cmd_tell,
+    cmd_unalias,
+)
+from core import Participant, agent_dir, kill_request_path, outbox_dir, pid_path
+from mailbox import ensure_mailboxes
 from network import load_network_config, save_network_config
 from registry import load_aliases, load_registry, save_registry
 
@@ -301,3 +310,41 @@ class TestCmdRemote:
         rc = cmd_remote(["add", "with space", "mqtt://x", "t"])
         assert rc == 2
         assert "must be alphanumeric" in capsys.readouterr().err
+
+
+class TestCmdTellRemoteRecipient:
+    """When remotes are configured, `tell <name>` should accept names that
+    don't exist locally — the recipient may live on another cluster and
+    the broadcast-and-filter receive side will pick it up there. With no
+    remotes configured, an unknown recipient is a hard error (no path)."""
+
+    def _setup_sender(self, fake_home, tmp_path, monkeypatch):
+        sender_root = tmp_path / "sender"
+        sender_root.mkdir()
+        save_registry({"sender": {"root": str(sender_root)}})
+        ensure_mailboxes(Participant("sender", sender_root))
+        # cmd_tell uses sender_from_cwd() — chdir into the sender's root.
+        monkeypatch.chdir(sender_root)
+        return sender_root
+
+    def test_unknown_recipient_with_no_remotes_rejected(self, fake_home, tmp_path, monkeypatch, capsys):
+        self._setup_sender(fake_home, tmp_path, monkeypatch)
+        rc = cmd_tell(["GHOST", "hi"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "no agent or alias named" in err
+
+    def test_unknown_recipient_with_remotes_accepted(self, fake_home, tmp_path, monkeypatch):
+        sender_root = self._setup_sender(fake_home, tmp_path, monkeypatch)
+        # Configure a remote so the broadcast-and-filter path is available.
+        save_network_config({"remotes": {"hub": {"transport": "paho-mqtt", "broker": "mqtt://x", "topic": "t"}}})
+        rc = cmd_tell(["GHOST", "hi from sender"])
+        assert rc == 0
+        # Outbox file written; the routing pass will publish it. The `to`
+        # field preserves the user-typed name (mailing-list semantics).
+        outbox_files = list(outbox_dir(sender_root).iterdir())
+        assert len(outbox_files) == 1
+        import json as _json
+        msg = _json.loads(outbox_files[0].read_text())
+        assert msg["to"] == "GHOST"
+        assert msg["content"] == "hi from sender"
