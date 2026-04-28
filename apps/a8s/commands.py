@@ -35,7 +35,12 @@ from core import (
     pid_path,
 )
 from definitions import _autodiscover_definition, default_definition_path
-from daemon import _read_handler_pid, attached_loop
+from daemon import (
+    _clear_kill_request,
+    _read_handler_pid,
+    _write_kill_request,
+    attached_loop,
+)
 from mailbox import (
     _queue_clear_sentinel,
     _queue_prompt,
@@ -552,53 +557,57 @@ def cmd_stop(args: list[str]) -> int:
     return 0
 
 
+KILL_TIMEOUT_S = 10.0
+KILL_POLL_S = 0.1
+
+
 def cmd_kill(args: list[str]) -> int:
-    """`a8s kill <name>` — etiquette-then-force per unique handler PID."""
+    """`a8s kill <name>` — per-agent force-detach. For each member, write
+    a kill-request file and SIGUSR1 the holder; the holder's iteration top
+    releases just that agent (and its SIGUSR1 handler kills any in-flight
+    wake subprocess group iff the current wake target matches), so siblings
+    keep running. Falls back to whole-process SIGTERM if the holder doesn't
+    honor the request within KILL_TIMEOUT_S — that's the only path that
+    still creates collateral, and it's the user's explicit force escalation."""
     if len(args) != 1:
         print("usage: a8s kill <name>", file=sys.stderr)
         return 2
     members = _expand_to_agents(args[0])
     if members is None:
         return 1
-    seen_pids: dict[int, str] = {}
+    rc = 0
     for name in members:
-        pid = _read_handler_pid(name)
-        if pid is not None and pid not in seen_pids:
-            seen_pids[pid] = name
-    if not seen_pids:
-        for name in members:
-            print(f"{name}: not running", file=sys.stderr)
-        return 1
-    for pid, label in seen_pids.items():
-        print(f"{label}: SIGTERM PID {pid} (graceful)")
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
+        holder = _read_handler_pid(name)
+        if holder is None:
+            print(f"{name}: not running")
             continue
-        time.sleep(0.5)
-        if _pid_alive(pid):
-            print(f"{label}: still alive — second SIGTERM (forces subprocess group kill)")
+        _write_kill_request(name, os.getpid())
+        print(f"{name}: kill request → PID {holder}")
+        try:
+            os.kill(holder, signal.SIGUSR1)
+        except ProcessLookupError:
+            _clear_kill_request(name)
+            continue
+        deadline = time.time() + KILL_TIMEOUT_S
+        released = False
+        while time.time() < deadline:
+            if not pid_path(name).is_file():
+                released = True
+                break
+            time.sleep(KILL_POLL_S)
+        if not released:
+            print(
+                f"{name}: holder PID {holder} did not honor kill within {KILL_TIMEOUT_S}s — "
+                f"escalating to whole-process SIGTERM",
+                file=sys.stderr,
+            )
             try:
-                os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                continue
-            time.sleep(0.5)
-        if _pid_alive(pid):
-            print(f"{label}: still alive — SIGKILL")
-            try:
-                os.kill(pid, signal.SIGKILL)
+                os.kill(holder, signal.SIGTERM)
             except ProcessLookupError:
                 pass
-        # Clean up any pid files still pointing at this dead PID.
-        for name in members:
-            p = pid_path(name)
-            if p.is_file():
-                try:
-                    if int(p.read_text().strip()) == pid:
-                        p.unlink()
-                except (OSError, ValueError):
-                    pass
-    return 0
+            rc = 1
+        _clear_kill_request(name)
+    return rc
 
 
 def cmd_exit() -> int:

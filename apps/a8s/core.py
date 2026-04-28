@@ -118,6 +118,15 @@ def detach_request_path(name: str) -> Path:
     return agent_dir(name) / "detach-request"
 
 
+def kill_request_path(name: str) -> Path:
+    """Per-agent kill-request file. `a8s kill <name>` writes its pid here and
+    SIGUSR1s the holder. The holder's iteration top releases just <name>;
+    its SIGUSR1 handler additionally kills the in-flight wake subprocess
+    group iff the current wake target matches — so a long-running LLM call
+    for <name> dies immediately while siblings keep running."""
+    return agent_dir(name) / "kill-request"
+
+
 def outbox_dir(root: Path) -> Path:
     """Outbox lives **inside the agent's own dir** so the agent can write to it
     even under a strict workspace sandbox (codex --full-auto). Inbox and trash

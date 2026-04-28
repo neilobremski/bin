@@ -34,6 +34,7 @@ from core import (
     agent_dir,
     detach_request_path,
     inbox_dir,
+    kill_request_path,
     out_agent,
     pid_path,
     trash_dir,
@@ -46,15 +47,20 @@ from registry import participants_from_registry
 
 # ---------- subprocess execution ----------
 
-# Set by run_with_prefix; read by _kill_wake_subprocess_group via the signal handler.
+# Set by run_with_prefix; read by _kill_wake_subprocess_group via the signal
+# handler. _CURRENT_WAKE_NAME pairs with _CURRENT_WAKE_PROC so the SIGUSR1
+# kill-request handler can decide whether the in-flight wake is the one
+# being killed (per-agent kill, issue #68 follow-up).
 _CURRENT_WAKE_PROC: subprocess.Popen | None = None
+_CURRENT_WAKE_NAME: str | None = None
 
 
 def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
     """Run the wake subprocess in its own session so SIGKILL can target the
     whole process group (LLM CLI + any helpers it spawns). Tracks the live
-    process in `_CURRENT_WAKE_PROC` so the second-signal handler can find it."""
-    global _CURRENT_WAKE_PROC
+    process in `_CURRENT_WAKE_PROC` and the agent in `_CURRENT_WAKE_NAME` so
+    signal handlers can identify which agent's wake is in-flight."""
+    global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME
     prefix = f"{name}> "
     try:
         proc = subprocess.Popen(
@@ -71,6 +77,7 @@ def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
         out_agent(name, f"{prefix}command not found: {cmd[0]}")
         return 127
     _CURRENT_WAKE_PROC = proc
+    _CURRENT_WAKE_NAME = name
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -81,6 +88,7 @@ def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
         return proc.returncode
     finally:
         _CURRENT_WAKE_PROC = None
+        _CURRENT_WAKE_NAME = None
 
 
 def wake_once(p: Participant, msg_path: Path) -> None:
@@ -219,6 +227,37 @@ def _clear_detach_request(name: str) -> None:
         pass
 
 
+def _write_kill_request(name: str, requester_pid: int) -> None:
+    p = kill_request_path(name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(str(requester_pid))
+
+
+def _read_kill_request(name: str) -> int | None:
+    """Same parse-and-reap discipline as `_read_detach_request`."""
+    p = kill_request_path(name)
+    if not p.is_file():
+        return None
+    try:
+        pid = int(p.read_text().strip())
+        if pid <= 0:
+            raise ValueError("non-positive pid")
+        return pid
+    except (OSError, ValueError):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        return None
+
+
+def _clear_kill_request(name: str) -> None:
+    try:
+        kill_request_path(name).unlink()
+    except OSError:
+        pass
+
+
 def acquire(name: str) -> None:
     """Attach this process as the handler of <name>.
 
@@ -330,6 +369,21 @@ def _make_signal_handler(label: str):
     return handle
 
 
+def _on_kill_signal(_signum, _frame):
+    """SIGUSR1 from `cmd_kill`. If the in-flight wake's target agent has a
+    foreign kill-request, kill the subprocess group so `run_with_prefix`'s
+    `wait()` returns immediately. The actual release of the agent (and any
+    others with a kill-request, even when no wake is in flight) happens at
+    the next iteration top via `_read_kill_request`."""
+    name = _CURRENT_WAKE_NAME
+    if name is None:
+        return
+    req = _read_kill_request(name)
+    if req is None or req == os.getpid():
+        return
+    _kill_wake_subprocess_group()
+
+
 def attached_loop(names: list[str], interval: float, *, single_pass: bool = False) -> int:
     """Body of `a8s run` / `a8s start` / `a8s step`. ONE process handles every
     name in `names`; multi-agent handlers share a PID across each member's
@@ -374,6 +428,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     handler = _make_signal_handler(label)
     prev_sigterm = signal.signal(signal.SIGTERM, handler)
     prev_sigint = signal.signal(signal.SIGINT, handler)
+    prev_sigusr1 = signal.signal(signal.SIGUSR1, _on_kill_signal)
 
     pid = os.getpid()
     for n in names:
@@ -381,10 +436,18 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     try:
         while not _STOP_EVENT.is_set():
             try:
-                # Honor detach-requests first. Another process wrote its pid
-                # into <NAME>/detach-request; release just that agent and let
-                # the requester's atomic_claim succeed on its next poll.
+                # Honor kill-requests and detach-requests at the iteration
+                # top. Kill takes precedence (SIGUSR1 may have already killed
+                # the subprocess group, but the release happens here so the
+                # iteration body skips that agent for the rest of the pass).
                 for name in list(names):
+                    kill_req = _read_kill_request(name)
+                    if kill_req is not None and kill_req != pid:
+                        out_agent(name, f"[a8s] {name}: killed by PID {kill_req}")
+                        release(name)
+                        _clear_kill_request(name)
+                        names.remove(name)
+                        continue
                     requester = _read_detach_request(name)
                     if requester is not None and requester != pid:
                         out_agent(name, f"[a8s] {name}: releasing to PID {requester}")
@@ -433,5 +496,6 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                 out_agent(n, f"[a8s] {n}: detached")
         signal.signal(signal.SIGTERM, prev_sigterm)
         signal.signal(signal.SIGINT, prev_sigint)
+        signal.signal(signal.SIGUSR1, prev_sigusr1)
         _STOP_EVENT = None
     return 0

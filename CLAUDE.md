@@ -156,6 +156,15 @@ Key invariants:
   in `acquire`: that's what created the orphan-collateral bug. The 60s
   `DETACH_TIMEOUT_S` is the only fallback if the holder is mid-wake on a
   slow LLM call; `a8s kill` breaks the deadlock.
+- **Per-agent kill via kill-request + SIGUSR1.** `cmd_kill` writes
+  `~/.a8s/agents/<NAME>/kill-request` and SIGUSR1s the holder. The handler's
+  `_on_kill_signal` checks the kill-request for `_CURRENT_WAKE_NAME` (the
+  agent being woken right now); if present, it kills the wake subprocess
+  group so `run_with_prefix.wait()` returns immediately. The actual release
+  of the agent happens at the next iteration top via the kill-request check
+  — same shape as detach-request, but logs as "killed by" and takes
+  precedence. Whole-process SIGTERM is the last-resort escalation only
+  when the holder doesn't honor the request within 10s.
 
 ### Surface
 

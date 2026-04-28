@@ -116,7 +116,7 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 | `a8s run <name>` | Foreground attached loop. Aliases produce one process with interleaved output. Ctrl+C: graceful detach. 2nd Ctrl+C: kill the wake subprocess group. |
 | `a8s step <name>` | Attach, do one route+drain pass, release. Heavyweight: detaches the current handler if any. |
 | `a8s stop <name>` | SIGTERM the handler. Aliases dedupe by PID — one signal per multi-agent handler. Graceful detach. |
-| `a8s kill <name>` | Etiquette-then-force: SIGTERM, brief grace, SIGTERM again (kills the wake subprocess group), SIGKILL fallback. |
+| `a8s kill <name>` | Per-agent force-detach: writes a kill-request, SIGUSR1s the holder. Holder kills the in-flight wake subprocess iff it's for that agent and releases the attachment; siblings keep running. Falls back to whole-process SIGTERM only if the holder doesn't honor the request in 10s. |
 | `a8s exit` | SIGTERM every running handler. |
 | `a8s ls` | List only running agents and their handler PIDs. |
 
@@ -141,7 +141,9 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 
 Concretely: P1 is `a8s start devs` (handling `[CLAUDE, GEMINI, FOO]`). You run `a8s run CLAUDE` in another window. CLAUDE moves to your foreground process; P1 keeps handling `[GEMINI, FOO]`. If you then `a8s run GEMINI` in a third window, GEMINI moves there; P1 keeps `[FOO]`. If P1's last agent gets pulled out, P1 exits cleanly with nothing left to handle.
 
-Take-over has a 60-second timeout. If the holder is wedged on a long LLM wake and doesn't honor the request in time, `acquire` errors out — `a8s kill <name>` breaks the deadlock.
+`a8s kill <name>` works the same way but force: it writes a `kill-request` file and SIGUSR1s the holder, which kills the in-flight wake subprocess (if any) for just that agent and releases the attachment. P1 keeps its other agents either way.
+
+Take-over has a 60-second timeout (kill is 10s). If the holder is wedged on a long LLM wake and doesn't honor the request in time, the requester errors out (or, for `kill`, escalates to a whole-process SIGTERM as a last resort).
 
 ## Definitions
 

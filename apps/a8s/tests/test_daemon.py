@@ -21,15 +21,19 @@ from core import (
     agent_log_path,
     detach_request_path,
     inbox_dir,
+    kill_request_path,
     pid_path,
     trash_dir,
 )
 from daemon import (
     _clear_detach_request,
+    _clear_kill_request,
     _read_detach_request,
     _read_handler_pid,
+    _read_kill_request,
     _try_atomic_claim,
     _write_detach_request,
+    _write_kill_request,
     acquire,
     attached_loop,
     release,
@@ -366,6 +370,63 @@ class TestAttachedLoopDetachRequest:
         # Normal attached + detached.
         assert "attached (PID" in _read_log("X")
         assert "detached" in _read_log("X")
+
+
+class TestAttachedLoopKillRequest:
+    """Per-agent kill via kill-request file. Same shape as detach-request,
+    but logs as 'killed by' and the SIGUSR1 handler interrupts an in-flight
+    wake whose target matches."""
+
+    def test_releases_only_killed_agent(self, fake_home, tmp_path, fixtures_dir):
+        for n in ("A", "B"):
+            (tmp_path / n).mkdir()
+        save_registry({
+            "A": {"root": str(tmp_path / "a"), "definition": str(fixtures_dir / "mock.json")},
+            "B": {"root": str(tmp_path / "b"), "definition": str(fixtures_dir / "mock.json")},
+        })
+        for n in ("A", "B"):
+            ensure_mailboxes(Participant(n, tmp_path / n))
+
+        # Pre-place kill-request for A from a foreign pid.
+        _write_kill_request("A", os.getppid())
+        rc = attached_loop(["A", "B"], 0.1, single_pass=True)
+        assert rc == 0
+        # A's log shows 'killed by'; B's does not.
+        assert f"killed by PID {os.getppid()}" in _read_log("A")
+        assert "killed by" not in _read_log("B")
+        # B attached normally.
+        assert "B: attached" in _read_log("B")
+        # Kill-request file was cleared.
+        assert not kill_request_path("A").is_file()
+
+    def test_kill_takes_precedence_over_detach(self, fake_home, tmp_path, fixtures_dir):
+        # If both files exist for the same agent, kill wins.
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({
+            "X": {"root": str(d), "definition": str(fixtures_dir / "mock.json")},
+        })
+        ensure_mailboxes(Participant("X", d))
+
+        _write_detach_request("X", os.getppid())
+        _write_kill_request("X", os.getppid())
+
+        rc = attached_loop(["X"], 0.1, single_pass=True)
+        assert rc == 0
+        log = _read_log("X")
+        assert "killed by" in log
+        assert "releasing to PID" not in log
+
+    def test_self_kill_request_is_ignored(self, fake_home, tmp_path, fixtures_dir):
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({
+            "X": {"root": str(d), "definition": str(fixtures_dir / "mock.json")},
+        })
+        ensure_mailboxes(Participant("X", d))
+
+        _write_kill_request("X", os.getpid())
+        rc = attached_loop(["X"], 0.1, single_pass=True)
+        assert rc == 0
+        assert "killed by" not in _read_log("X")
 
     def test_multi_agent_share_one_pid(self, fake_home, tmp_path, fixtures_dir):
         # Two agents, one process — both pid files point at this pytest process.
