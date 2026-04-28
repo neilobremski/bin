@@ -127,6 +127,25 @@ def kill_request_path(name: str) -> Path:
     return agent_dir(name) / "kill-request"
 
 
+def pending_dir(name: str) -> Path:
+    """Ingested-but-not-yet-fully-routed messages. `route_outboxes` atomically
+    moves each new file from `<root>/.outbox/` into here on every pass before
+    parsing or producing any retry sidecars — the agent's outbox is one-way
+    (agent writes, a8s renames out), and everything a8s does after the rename
+    happens under ~/.a8s/. Sidecar metadata (`<file>.retry`) lives alongside
+    the pending file in this dir."""
+    return agent_dir(name) / "pending"
+
+
+def retry_sidecar_path(pending_file: Path) -> Path:
+    """Companion file to a pending message: `<file>.json.retry`. Tracks
+    attempts, next-attempt time, and which configured remotes have already
+    accepted the publish. Lifetime tied to the pending file — happy path
+    deletes both, exhaustion moves the message to trash and unlinks the
+    sidecar."""
+    return pending_file.with_suffix(pending_file.suffix + ".retry")
+
+
 def outbox_dir(root: Path) -> Path:
     """Outbox lives **inside the agent's own dir** so the agent can write to it
     even under a strict workspace sandbox (codex --full-auto). Inbox and trash
@@ -151,6 +170,32 @@ def registry_path() -> Path:
     base = Path.home() / ".a8s"
     base.mkdir(parents=True, exist_ok=True)
     return base / "a8s.json"
+
+
+def network_config_path() -> Path:
+    """`~/.a8s/network.json` — the list of configured remotes. Absent file
+    means "no remotes configured" — a8s is local-only."""
+    return _a8s_dir() / "network.json"
+
+
+def seen_ids_path() -> Path:
+    """Single cluster-wide ring file holding the last MAX_SEEN_IDS message
+    IDs the receive loops have written into local inboxes. Receive-side dedup
+    lookups read this; appends rotate when the cap is hit. Cluster-wide (not
+    per-agent) because a duplicate envelope can target any local agent and we
+    only need to know whether we've ever delivered it."""
+    return _a8s_dir() / "seen-ids"
+
+
+# Receive-side dedup ring cap. 26 chars per ULID + newline = 27 bytes per row;
+# 10k rows ≈ 270 KiB, comfortably below any sane filesystem block budget.
+MAX_SEEN_IDS = 10000
+
+# Per-message retry backoff. Index = number of failed attempts so far. After
+# the schedule is exhausted (MAX_ATTEMPTS = len), the message is moved to trash
+# with a "discarded after backoff exhausted" log line.
+BACKOFF_SCHEDULE = [30, 60, 120, 300, 900, 1800, 3600, 21600, 86400]
+MAX_ATTEMPTS = len(BACKOFF_SCHEDULE)
 
 
 # ---------- general helpers ----------

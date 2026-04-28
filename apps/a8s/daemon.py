@@ -43,6 +43,12 @@ from core import (
 )
 from definitions import build_command, load_definition, select_verb
 from mailbox import ensure_mailboxes, next_inbox_message, route_outboxes
+from network import (
+    load_remotes,
+    make_publish_remotes,
+    start_remotes,
+    stop_remotes,
+)
 from registry import participants_from_registry
 
 
@@ -449,6 +455,14 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     pid = os.getpid()
     for n in names:
         out_agent(n, f"[a8s] {n}: attached (PID {pid}{', shared' if len(names) > 1 else ''})")
+
+    # Issue #63: load configured remotes and start one subscriber loop per
+    # remote. The receive callback always asks the registry for the current
+    # participant list so agents added after startup become routable without
+    # restarting the daemon.
+    started_remotes = start_remotes(load_remotes(), participants_from_registry)
+    publish_remotes = make_publish_remotes(started_remotes) if started_remotes else None
+    configured_remote_ids = [r.id for r in started_remotes]
     try:
         while not _STOP_EVENT.is_set():
             try:
@@ -491,7 +505,12 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                     break
                 for p in handled:
                     ensure_mailboxes(p)
-                route_outboxes(handled, all_agents=all_agents)
+                route_outboxes(
+                    handled,
+                    all_agents=all_agents,
+                    publish_remotes=publish_remotes,
+                    configured_remote_ids=configured_remote_ids,
+                )
                 for p in handled:
                     while not _STOP_EVENT.is_set():
                         msg = next_inbox_message(p)
@@ -504,6 +523,11 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                 break
             _STOP_EVENT.wait(interval)
     finally:
+        # Stop subscriber threads first so paho's network loop unwinds before
+        # we release pid files (otherwise an in-flight envelope arriving
+        # during shutdown could try to write into a directory we're about to
+        # forget).
+        stop_remotes(started_remotes)
         # Release every pid file we still hold.
         for n in acquired:
             holder = _read_handler_pid(n)

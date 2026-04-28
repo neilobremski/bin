@@ -1,0 +1,332 @@
+"""Tests for network.py — config IO, seen-ids ring, receive_envelope filter,
+publish_with_backoff hook. The transport-side details live in
+test_transport_paho.py; here we use a stub Transport so we can run without
+a real broker."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Callable
+
+import pytest
+
+from core import (
+    MAX_SEEN_IDS,
+    Participant,
+    inbox_dir,
+    network_config_path,
+    seen_ids_path,
+)
+from network import (
+    configured_remote_ids,
+    load_network_config,
+    load_remotes,
+    make_publish_remotes,
+    receive_envelope,
+    save_network_config,
+    seen_id_append,
+    seen_id_contains,
+    start_remotes,
+    stop_remotes,
+)
+from registry import save_aliases, save_registry
+from transports import Transport, TransportError
+from ulid import new as new_ulid
+
+
+# ---------- StubTransport for tests ----------
+
+
+class StubTransport(Transport):
+    """Captures publishes and forwards `simulate_recv(bytes)` to its callback."""
+
+    def __init__(self, remote_id: str, *, fail_publish: bool = False):
+        self._id = remote_id
+        self.fail_publish = fail_publish
+        self.published: list[bytes] = []
+        self._on_message: Callable[[bytes], None] | None = None
+        self.started = False
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    def start(self, on_message):
+        self._on_message = on_message
+        self.started = True
+
+    def stop(self):
+        self.started = False
+        self._on_message = None
+
+    def publish(self, envelope: bytes) -> None:
+        if self.fail_publish:
+            raise TransportError(f"{self._id}: fail_publish")
+        self.published.append(envelope)
+
+    def simulate_recv(self, payload: bytes) -> None:
+        if self._on_message is None:
+            raise RuntimeError("simulate_recv before start")
+        self._on_message(payload)
+
+
+# ---------- network.json IO ----------
+
+
+class TestNetworkConfig:
+    def test_absent_file_returns_empty(self, fake_home):
+        cfg = load_network_config()
+        assert cfg == {"remotes": {}}
+
+    def test_round_trip(self, fake_home):
+        save_network_config({"remotes": {"hub": {"transport": "mqtt", "broker": "mqtt://x", "topic": "t"}}})
+        cfg = load_network_config()
+        assert cfg["remotes"]["hub"]["broker"] == "mqtt://x"
+
+    def test_malformed_treated_as_empty(self, fake_home):
+        p = network_config_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("not json {")
+        cfg = load_network_config()
+        assert cfg == {"remotes": {}}
+
+    def test_configured_remote_ids_order_preserved(self, fake_home):
+        save_network_config({"remotes": {"a": {}, "z": {}, "m": {}}})
+        ids = configured_remote_ids()
+        assert ids == ["a", "z", "m"]
+
+
+class TestLoadRemotes:
+    def test_unknown_transport_skipped(self, fake_home):
+        save_network_config({"remotes": {"weird": {"transport": "telepathy", "broker": "x", "topic": "t"}}})
+        # Should not raise; just skip the bad entry.
+        remotes = load_remotes()
+        assert remotes == []
+
+    def test_mqtt_missing_fields_skipped(self, fake_home):
+        save_network_config({"remotes": {"hub": {"transport": "mqtt"}}})
+        remotes = load_remotes()
+        assert remotes == []
+
+    def test_unknown_option_in_config_skips_remote(self, fake_home):
+        # `_build_transport` forwards unknown keys to the transport, which
+        # raises ValueError — load_remotes catches and skips. This is the
+        # backstop that makes `network.json` typo-tolerant at the system
+        # level (the bad remote is dropped, others survive).
+        save_network_config({
+            "remotes": {
+                "hub": {
+                    "transport": "mqtt",
+                    "broker": "mqtt://localhost:1883",
+                    "topic": "t",
+                    "boguskey": "x",
+                }
+            }
+        })
+        # Importing transports.mqtt requires paho.
+        import importlib
+        try:
+            importlib.import_module("paho.mqtt.client")
+        except ImportError:
+            import pytest
+            pytest.skip("paho-mqtt not installed")
+        remotes = load_remotes()
+        assert remotes == []
+
+
+# ---------- seen-ids ring ----------
+
+
+class TestSeenIdsRing:
+    def test_empty_initial_state(self, fake_home):
+        u = new_ulid()
+        assert seen_id_contains(u) is False
+
+    def test_append_then_contains(self, fake_home):
+        u = new_ulid()
+        seen_id_append(u)
+        assert seen_id_contains(u) is True
+
+    def test_distinct_ids_independent(self, fake_home):
+        a, b = new_ulid(), new_ulid()
+        seen_id_append(a)
+        assert seen_id_contains(a) is True
+        assert seen_id_contains(b) is False
+
+    def test_rotation_at_cap(self, fake_home, monkeypatch):
+        # Lower the cap so we don't have to write 10k lines.
+        monkeypatch.setattr("network.MAX_SEEN_IDS", 5)
+        ids = [new_ulid() for _ in range(8)]
+        for u in ids:
+            seen_id_append(u)
+        # First 3 were rotated out.
+        for u in ids[:3]:
+            assert seen_id_contains(u) is False
+        # Last 5 retained.
+        for u in ids[3:]:
+            assert seen_id_contains(u) is True
+
+
+# ---------- publish_with_backoff hook ----------
+
+
+class TestPublishWithBackoff:
+    def test_publishes_to_all(self, fake_home, tmp_path):
+        a_root = tmp_path / "A"; a_root.mkdir()
+        save_registry({"A": {"root": str(a_root)}})
+        r1 = StubTransport("r1")
+        r2 = StubTransport("r2")
+        publish = make_publish_remotes([r1, r2])
+        msg = {"id": new_ulid(), "from": "A", "to": "X", "content": "hi", "files": []}
+        succeeded = publish(msg, "A", [], 0)
+        assert set(succeeded) == {"r1", "r2"}
+        assert len(r1.published) == 1
+        assert len(r2.published) == 1
+        # Envelope is JSON-serialized msg.
+        assert json.loads(r1.published[0])["to"] == "X"
+
+    def test_failure_warns_and_returns_partial(self, fake_home, tmp_path):
+        a_root = tmp_path / "A"; a_root.mkdir()
+        save_registry({"A": {"root": str(a_root)}})
+        r1 = StubTransport("r1")
+        r2 = StubTransport("r2", fail_publish=True)
+        publish = make_publish_remotes([r1, r2])
+        msg = {"id": new_ulid(), "from": "A", "to": "X", "content": "hi", "files": []}
+        succeeded = publish(msg, "A", [], 0)
+        assert succeeded == ["r1"]  # r2 failed → not added
+
+    def test_skip_already_succeeded(self, fake_home, tmp_path):
+        a_root = tmp_path / "A"; a_root.mkdir()
+        save_registry({"A": {"root": str(a_root)}})
+        r1 = StubTransport("r1")
+        publish = make_publish_remotes([r1])
+        msg = {"id": new_ulid(), "from": "A", "to": "X", "content": "hi", "files": []}
+        # Pretend r1 already accepted.
+        succeeded = publish(msg, "A", ["r1"], 0)
+        assert succeeded == ["r1"]
+        assert r1.published == []  # not re-published
+
+
+# ---------- receive_envelope ----------
+
+
+@pytest.fixture
+def two_local_agents(fake_home, tmp_path):
+    a_root = tmp_path / "A"; a_root.mkdir()
+    b_root = tmp_path / "B"; b_root.mkdir()
+    save_registry({"A": {"root": str(a_root)}, "B": {"root": str(b_root)}})
+    return [Participant("A", a_root), Participant("B", b_root)]
+
+
+class TestReceiveEnvelope:
+    def test_local_recipient_is_delivered(self, two_local_agents):
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "REMOTE_X", "to": "B",
+            "content": "hello via remote", "files": [],
+        }).encode()
+        receive_envelope(envelope, two_local_agents)
+        files = list(inbox_dir("B").iterdir())
+        assert len(files) == 1
+        assert files[0].name == f"{msg_id}.json"
+        body = json.loads(files[0].read_text())
+        assert body["from"] == "REMOTE_X"
+        assert body["content"] == "hello via remote"
+
+    def test_unknown_recipient_dropped_silently(self, two_local_agents):
+        envelope = json.dumps({
+            "id": new_ulid(), "from": "X", "to": "GHOST",
+            "content": "ignored", "files": [],
+        }).encode()
+        receive_envelope(envelope, two_local_agents)
+        # No inbox writes anywhere — the dirs may not even exist.
+        for n in ("A", "B"):
+            d = inbox_dir(n)
+            assert not d.exists() or list(d.iterdir()) == []
+
+    def test_dedup_by_ulid(self, two_local_agents):
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "X", "to": "B",
+            "content": "once", "files": [],
+        }).encode()
+        receive_envelope(envelope, two_local_agents)
+        receive_envelope(envelope, two_local_agents)
+        # Only one inbox write despite two arrivals.
+        assert len(list(inbox_dir("B").iterdir())) == 1
+
+    def test_alias_fanout(self, fake_home, tmp_path):
+        a_root = tmp_path / "A"; a_root.mkdir()
+        b_root = tmp_path / "B"; b_root.mkdir()
+        save_registry({"A": {"root": str(a_root)}, "B": {"root": str(b_root)}})
+        save_aliases({"team": ["A", "B"]})
+        agents = [Participant("A", a_root), Participant("B", b_root)]
+        envelope = json.dumps({
+            "id": new_ulid(), "from": "REMOTE_X", "to": "team",
+            "content": "team msg", "files": [],
+        }).encode()
+        receive_envelope(envelope, agents)
+        # Both A and B got it (no sender-exclusion on inbound — sender lives
+        # remotely so isn't in our local registry anyway).
+        assert len(list(inbox_dir("A").iterdir())) == 1
+        assert len(list(inbox_dir("B").iterdir())) == 1
+
+    def test_files_stripped(self, two_local_agents):
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "X", "to": "B",
+            "content": "see attached", "files": [{"filename": "x.txt", "path": "/sender/x.txt"}],
+        }).encode()
+        receive_envelope(envelope, two_local_agents)
+        body = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        # files stripped — sender's path doesn't exist on receiver.
+        assert body["files"] == []
+
+    def test_malformed_json_dropped(self, two_local_agents):
+        receive_envelope(b"not json {", two_local_agents)
+        for p in two_local_agents:
+            d = inbox_dir(p.name)
+            assert not d.exists() or list(d.iterdir()) == []
+
+    def test_missing_id_dropped(self, two_local_agents):
+        envelope = json.dumps({"from": "X", "to": "B", "content": "no id"}).encode()
+        receive_envelope(envelope, two_local_agents)
+        d = inbox_dir("B")
+        assert not d.exists() or list(d.iterdir()) == []
+
+    def test_empty_to_dropped(self, two_local_agents):
+        envelope = json.dumps({
+            "id": new_ulid(), "from": "X", "to": "", "content": "x", "files": [],
+        }).encode()
+        receive_envelope(envelope, two_local_agents)
+        d = inbox_dir("B")
+        assert not d.exists() or list(d.iterdir()) == []
+
+
+# ---------- start_remotes / stop_remotes ----------
+
+
+class TestStartStop:
+    def test_starts_each_remote(self, fake_home, tmp_path):
+        r1 = StubTransport("r1")
+        r2 = StubTransport("r2")
+        started = start_remotes([r1, r2], lambda: [])
+        assert r1.started and r2.started
+        assert {r.id for r in started} == {"r1", "r2"}
+        stop_remotes(started)
+        assert not r1.started and not r2.started
+
+    def test_failed_start_skipped(self, fake_home, tmp_path):
+        class BadTransport(Transport):
+            @property
+            def id(self):
+                return "bad"
+            def start(self, on_message):
+                raise RuntimeError("nope")
+            def stop(self):
+                pass
+            def publish(self, envelope):
+                pass
+        good = StubTransport("good")
+        started = start_remotes([BadTransport(), good], lambda: [])
+        assert {r.id for r in started} == {"good"}
