@@ -1,4 +1,4 @@
-"""Tests for core helpers added for the mesh PR (issue #63)."""
+"""Tests for core helpers added for the remote-routing PR (issue #63)."""
 from __future__ import annotations
 
 from pathlib import Path

@@ -255,7 +255,7 @@ class TestCmdKillPerAgent:
 
 
 class TestCmdRemote:
-    """Mesh remote management — `a8s remote add|remove|ls`. Just edits
+    """Remote management — `a8s remote add|remove|ls`. Just edits
     `~/.a8s/network.json`; the daemon picks up the changes on next start."""
 
     def test_ls_empty(self, fake_home, capsys):
@@ -264,12 +264,12 @@ class TestCmdRemote:
         assert "no remotes configured" in capsys.readouterr().out
 
     def test_add_then_ls(self, fake_home, capsys):
-        rc = cmd_remote(["add", "hub", "mqtt://broker:1883", "a8s/mesh"])
+        rc = cmd_remote(["add", "hub", "mqtt://broker:1883", "a8s/test"])
         assert rc == 0
         cfg = load_network_config()
         assert cfg["remotes"]["hub"]["transport"] == "paho-mqtt"
         assert cfg["remotes"]["hub"]["broker"] == "mqtt://broker:1883"
-        assert cfg["remotes"]["hub"]["topic"] == "a8s/mesh"
+        assert cfg["remotes"]["hub"]["topic"] == "a8s/test"
         # ls reflects the entry.
         capsys.readouterr()  # discard prior
         cmd_remote(["ls"])

@@ -173,8 +173,8 @@ def registry_path() -> Path:
 
 
 def network_config_path() -> Path:
-    """`~/.a8s/network.json` — the list of configured remotes (mesh transports).
-    Absent file means "no remotes configured" — a8s is local-only."""
+    """`~/.a8s/network.json` — the list of configured remotes. Absent file
+    means "no remotes configured" — a8s is local-only."""
     return _a8s_dir() / "network.json"
 
 

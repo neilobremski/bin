@@ -4,7 +4,7 @@ Mailbox routing is process-agnostic: a per-agent daemon may write into any
 other agent's inbox even though it isn't handling them. Only `wake_once` (in
 daemon.py) requires the handler attachment.
 
-Routing runs in two phases per pass (issue #63 mesh prep):
+Routing runs in two phases per pass (issue #63 prep):
 
 1. INGEST — atomically move `<root>/.outbox/<f>.json` into
    `~/.a8s/agents/<sender>/pending/<f>.json`. This is the only thing a8s
@@ -17,8 +17,8 @@ Routing runs in two phases per pass (issue #63 mesh prep):
    already accepted the publish, and whether local delivery has happened.
    Local delivery uses the existing maildir-style staging (`inbox.tmp/` →
    `inbox/` via `os.replace`). Remote publishing is the chunk-7 hook —
-   chunk 4 leaves `publish_remotes=None` and the no-remote path stays
-   semantically identical to the pre-mesh code: deliver locally, unlink.
+   the no-remote path stays semantically identical to the pre-#63 code:
+   deliver locally, unlink.
 
 Backoff / retry (issue #63): when some configured remote hasn't yet
 accepted, attempts increment and the sidecar's `next_attempt` is bumped
@@ -69,8 +69,8 @@ from ulid import new as new_ulid
 
 # A function that publishes one routed-and-from-stamped message envelope to
 # every configured remote that hasn't yet accepted it. Returns the updated
-# `succeeded_remotes` list. Chunk 7 wires this up; chunk 4 passes None to
-# keep the no-mesh path purely local.
+# `succeeded_remotes` list. Daemon wires this up at startup; passing None
+# keeps the path purely local (no remotes configured).
 PublishRemotes = Callable[[dict, str, list[str], int], list[str]]
 
 
@@ -303,7 +303,7 @@ def _process_pending(
     sidecar tracks per-message progress so a partial pass can be resumed
     cheaply on the next routing iteration. Returns the count of completed
     local deliveries this pass (matches the legacy `route_outboxes` count
-    for the no-mesh path)."""
+    for the local-only path)."""
     routed = 0
     pending = pending_dir(sender.name)
     if not pending.is_dir():
@@ -414,7 +414,8 @@ def _process_pending(
                 msg, sender.name, list(sidecar["succeeded_remotes"]), sidecar["attempts"]
             )
         elif has_files and configured_remote_ids:
-            # v1 limitation (#62 deferred): file payloads don't cross the mesh.
+            # v1 limitation (#62 deferred): file payloads stay local-only —
+            # the sender's path doesn't exist on the receiving cluster.
             # Treat all configured remotes as "done" so the message finalizes
             # after local delivery instead of looping on retries.
             if sidecar["attempts"] == 0:
@@ -467,10 +468,10 @@ def route_outboxes(
          configured remote that hasn't yet accepted it. Per-message retry
          state lives in `<f>.json.retry` alongside the pending file.
 
-    `publish_remotes` and `configured_remote_ids` are the chunk-7 hooks for
-    the mesh; chunk 4 leaves both at their None / [] defaults so the no-mesh
-    path is identical to the pre-#63 behavior except for the file location
-    of in-flight messages."""
+    `publish_remotes` and `configured_remote_ids` are the daemon-wired
+    hooks for cross-cluster routing; both default to None / [] so an
+    install with no remotes configured behaves identically to pre-#63
+    except for the on-disk location of in-flight messages."""
     if all_agents is None:
         all_agents = senders
     by_name = {p.name.lower(): p for p in all_agents}

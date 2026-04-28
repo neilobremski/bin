@@ -1,11 +1,14 @@
-"""a8s mesh networking — config, publish-with-backoff, receive loop, dedup.
+"""a8s remote routing — config, publish-with-backoff, receive loop, dedup.
 
-Loads `~/.a8s/network.json` (dict-shaped: name → {transport, broker, topic, ...})
-into a list of Transport instances. The routing pass uses
-`publish_with_backoff` as its `route_outboxes(publish_remotes=...)` hook;
-each running attached_loop spawns one subscriber thread per remote that
-calls into `receive_envelope`. Cluster-wide dedup lives in the seen-ids
-ring file at `~/.a8s/seen-ids`.
+a8s only crosses cluster boundaries on outbound messages (`tell` /
+`prompt`). State queries (`logs`, `ls`, `agents`) are strictly local.
+This module wires the message side: `~/.a8s/network.json` (dict-shaped:
+name → {transport, broker, topic, ...}) becomes a list of Transport
+instances. The routing pass uses `publish_with_backoff` as its
+`route_outboxes(publish_remotes=...)` hook; each running attached_loop
+spawns one subscriber thread per remote that calls into
+`receive_envelope`. Cluster-wide dedup lives in the seen-ids ring file
+at `~/.a8s/seen-ids`.
 
 The `paho-mqtt` import is lazy. `load_remotes()` tries to import the
 transport module only when it sees a `transport: paho-mqtt` entry in the
@@ -226,8 +229,9 @@ def receive_envelope(envelope: bytes, all_agents: list[Participant]) -> None:
     try:
         kind, member_names = resolve_name(recipient_name)
     except (KeyError, ValueError):
-        # Recipient name unknown locally — broadcast filter says "not for
-        # me." Drop silently; logging every miss would be noisy on a busy mesh.
+        # Recipient name unknown locally — receive-side filter says "not
+        # for me." Drop silently; logging every miss would be noisy on a
+        # busy network.
         return
     recipients: list[Participant] = []
     for m in member_names:
@@ -239,10 +243,9 @@ def receive_envelope(envelope: bytes, all_agents: list[Participant]) -> None:
             recipients.append(rp)
     if not recipients:
         return  # alias resolved to nothing locally
-    # v1 limitation: file payloads don't cross the mesh. If the envelope
-    # arrived with `files`, strip them before writing — the FILE: paths
-    # point at the sender's filesystem and would just produce errors on
-    # the recipient side.
+    # v1 limitation: file payloads stay local-only — the FILE: paths point
+    # at the sender's filesystem and would just produce errors on the
+    # recipient side. Strip them before writing if any arrived via remote.
     if msg.get("files"):
         out(f"WARN: stripped FILE: payloads from incoming envelope id={msg_id}")
         msg = dict(msg)
@@ -266,7 +269,7 @@ def receive_envelope(envelope: bytes, all_agents: list[Participant]) -> None:
         except OSError as e:
             out_agent(recipient.name, f"WARN failed to write incoming envelope id={msg_id}: {e}")
             continue
-        out_agent(recipient.name, f"received from {sender_label} (via mesh): {preview}")
+        out_agent(recipient.name, f"received from {sender_label} (via remote): {preview}")
     seen_id_append(msg_id)
 
 

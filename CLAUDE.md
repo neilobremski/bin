@@ -132,7 +132,7 @@ Key invariants:
 | `apps/a8s/definitions.py` | `select_verb`, `build_command`, `_expand_argv` (`$SENDER`/`$RECIPIENT`/`$MESSAGE`/`$A8S_DIR`), `load_definition`, `_autodiscover_definition` | depends on `core`, `registry` |
 | `apps/a8s/ulid.py` | `new()` / `parse()` / `is_ulid()` — pure-stdlib Crockford-base32 ULIDs. Mailbox messages are named `<ulid>.json` and carry the same id in the body's `id` field for receive-side dedup. | leaf module |
 | `apps/a8s/network.py` | `~/.a8s/network.json` IO, `load_remotes`, `make_publish_remotes` (warn-and-continue per-remote publish), `receive_envelope` (decode → ULID dedup → registry filter → atomic inbox write), `start_remotes` / `stop_remotes`. paho-mqtt imported lazily. | depends on `core`, `registry`, `transports`, `ulid` |
-| `apps/a8s/transports/__init__.py` | `Transport` ABC + `TransportError`. The publish/subscribe/start/stop contract every mesh transport implements. | leaf module |
+| `apps/a8s/transports/__init__.py` | `Transport` ABC + `TransportError`. The publish/subscribe/start/stop contract every remote transport implements. | leaf module |
 | `apps/a8s/transports/mqtt_paho.py` | `PahoMqttTransport` — paho-mqtt with `clean_session=False`, QoS 1, hash-derived stable `client_id` so the broker recognizes the same persistent session across restarts. | depends on `transports`, `paho-mqtt` (soft) |
 | `apps/a8s/daemon.py` | `acquire`/`release` (pid files), `attached_loop` (also spawns subscriber threads via `start_remotes` and stops them on detach), signal handling (`_make_signal_handler`, `_kill_wake_subprocess_group`), `run_with_prefix`, `wake_once`. Mutable globals `_STOP_EVENT`/`_SIGNAL_COUNT`/`_CURRENT_WAKE_PROC` live here. Sets `core.PRINT_LOCK`. | depends on everything above |
 | `apps/a8s/commands.py` | every `cmd_*`, including `cmd_remote add/remove/ls`, `_install_skill_*` for Claude/Gemini/Codex, `_expand_to_agents` | depends on everything above |
@@ -183,14 +183,18 @@ Key invariants:
   unlink`; ULID-keyed receive-side dedup tolerates the rare interruption
   window. Don't reintroduce in-place outbox writes (sidecars, `from`
   rewrites on disk, etc.) — the agent's directory belongs to the agent.
-- **Mesh routing is layered + a8s-opaque.** `network.py` knows the
+- **Remote routing is layered + a8s-opaque.** `network.py` knows the
   publish/subscribe contract; transports under `transports/` implement it.
   Senders publish to all configured remotes; receivers dedupe by ULID. A
-  message to an unknown-locally recipient publishes to all remotes (broadcast
-  + filter). File payloads (`FILE:`) are local-only in v1 — `route_outboxes`
-  marks all configured remotes as "succeeded" for messages with files so
-  they finalize after local delivery instead of looping retries.
-- **Mesh persistent sessions.** paho-mqtt is configured with
+  message to an unknown-locally recipient publishes to all remotes (each
+  receiving cluster decides locally whether to deliver based on its own
+  registry). File payloads (`FILE:`) are local-only in v1 —
+  `route_outboxes` marks all configured remotes as "succeeded" for
+  messages with files so they finalize after local delivery instead of
+  looping retries. Note: a8s only routes *messages* across remotes —
+  state queries like `a8s logs`, `a8s ls`, `a8s agents` are strictly
+  local. There is no cross-cluster state query path by design.
+- **Persistent sessions.** paho-mqtt is configured with
   `clean_session=False` + QoS 1, with a stable hash-derived `client_id`. The
   broker holds messages for an offline subscriber until reconnect — that's
   how a Cloud-Shell-style listener catches up after coming online.
@@ -223,7 +227,7 @@ prompt <name> <message>      senderless supervisor message (raw delivery)
 tell <name> <message>        routed message (sender = agent enclosing CWD)
 clear <name>                 queue CLEAR sentinel (write-time + read-time inbox wipe)
 logs <name>... [--tail N] [-f]   merge-sorted per-agent logs
-remote add <name> <broker> <topic> [--user U --pass P]   register a paho-mqtt mesh remote
+remote add <name> <broker> <topic> [--user U --pass P]   register a paho-mqtt remote
 remote remove <name>         forget a remote
 remote ls                    list configured remotes
 install                      install canonical skills
@@ -236,7 +240,7 @@ install                      install canonical skills
 ```
 ~/.a8s/
 ├── a8s.json                  registry: { agents: {...}, aliases: {...} }
-├── network.json              configured mesh remotes (absent → no mesh)
+├── network.json              configured remotes (absent → local-only)
 ├── seen-ids                  cluster-wide ULID ring (receive-side dedup)
 ├── log.txt                   process-scoped supervisor log
 └── agents/
@@ -315,9 +319,9 @@ values silently dropped the skill on codex.
 python3 -m pytest apps/a8s/tests/
 ```
 
-~230 tests, runs in <3s. Mesh tests against a real `mosquitto` broker
-(spawned on a free port) skip cleanly when mosquitto or paho-mqtt isn't
-installed; install via `pip install -r apps/a8s/tests/requirements.txt`.
+~230 tests, runs in <3s. Remote-routing tests against a real `mosquitto`
+broker (spawned on a free port) skip cleanly when mosquitto or paho-mqtt
+isn't installed; install via `pip install -r apps/a8s/tests/requirements.txt`.
 Test scaffold:
 
 - `apps/a8s/tests/conftest.py` — adds `apps/a8s/` to sys.path, provides
@@ -343,7 +347,7 @@ The locked-design refactor (#52) is closed. The following are open:
 |---|---|---|
 | #39 | open enhancement | Copilot CLI as 4th tool kind. Trivial after the refactor: write `copilot.json`, add `COPILOT.md` → `copilot` to `core.MARKER_FILES`. |
 | #63 | partially landed | Transparent multi-cluster routing. paho-mqtt transport + layered remotes + per-message backoff + ULID dedup are in. Still open: mini-MQTT pure-stdlib fallback (auto-activates when paho isn't importable), HTTPS long-poll transport, peer-to-peer TCP transport, app-level envelope encryption (per-network PSK), cross-cluster `FILE:` payloads (rides #62). |
-| #62 | open enhancement | Cross-cluster file payload host (TempFile.org-style ephemeral storage with signed URLs and per-message symmetric keys). v1 mesh strips `files` from incoming envelopes and skips remote publish for outgoing messages with files. |
+| #62 | open enhancement | Cross-cluster file payload host (TempFile.org-style ephemeral storage with signed URLs and per-message symmetric keys). v1 strips `files` from incoming envelopes and skips remote publish for outgoing messages with files. |
 | #72 | open question | Design discussion surfaced by the review panel: mailbox file format. (#67's atomic fan-out and #63's ULID + ingest-to-pending split partially address this; revisit before mini-MQTT lands.) |
 
 ### What I tried that didn't work (concrete)

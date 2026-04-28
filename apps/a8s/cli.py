@@ -49,7 +49,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("prompt",   "<name> <message>",          "Send a message with no sender."),
     ("clear",    "<name>",                    "Start a fresh session for an agent."),
     ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
-    ("remote",   "add|remove|ls ...",         "Manage mesh transports for cross-machine routing."),
+    ("remote",   "add|remove|ls ...",         "Configure remotes for cross-machine routing."),
     ("install",  "",                          "Install the `tell` skill into supported tools."),
 ]
 

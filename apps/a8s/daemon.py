@@ -456,10 +456,10 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     for n in names:
         out_agent(n, f"[a8s] {n}: attached (PID {pid}{', shared' if len(names) > 1 else ''})")
 
-    # Issue #63 mesh: load configured remotes and start one subscriber loop
-    # per remote. The receive callback always asks the registry for the
-    # current participant list so agents added after startup become routable
-    # without restarting the daemon.
+    # Issue #63: load configured remotes and start one subscriber loop per
+    # remote. The receive callback always asks the registry for the current
+    # participant list so agents added after startup become routable without
+    # restarting the daemon.
     started_remotes = start_remotes(load_remotes(), participants_from_registry)
     publish_remotes = make_publish_remotes(started_remotes) if started_remotes else None
     configured_remote_ids = [r.id for r in started_remotes]

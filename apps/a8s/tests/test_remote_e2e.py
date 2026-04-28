@@ -1,4 +1,4 @@
-"""End-to-end mesh routing test (issue #63).
+"""End-to-end remote-routing test (issue #63).
 
 Spawns a real `mosquitto` broker, configures one cluster to send and
 another to receive, and verifies a `tell` reaches the receiver's inbox via
@@ -77,10 +77,10 @@ def _write_network_json(home: Path, port: int, topic: str, client_id: str) -> No
     }))
 
 
-def test_mesh_round_trip(tmp_path, mqtt_broker, monkeypatch):
-    """Sender publishes via attached_loop's mesh wiring; a receiver running
-    start_remotes on the same broker writes the envelope into a local
-    agent's inbox."""
+def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
+    """Sender publishes via attached_loop's remote-routing wiring; a
+    receiver running start_remotes on the same broker writes the envelope
+    into a local agent's inbox."""
     topic = f"a8s/test-{os.getpid()}-{int(time.time() * 1000)}"
     cluster_a_home = tmp_path / "clusterA"
     cluster_a_home.mkdir()
@@ -142,7 +142,7 @@ def test_mesh_round_trip(tmp_path, mqtt_broker, monkeypatch):
             if files:
                 break
             time.sleep(0.1)
-        assert files, "envelope did not arrive at TARGET via the mesh"
+        assert files, "envelope did not arrive at TARGET via the remote"
         body = json.loads(files[0].read_text())
         assert body["from"] == "SENDER"
         assert body["content"] == "ping from A"

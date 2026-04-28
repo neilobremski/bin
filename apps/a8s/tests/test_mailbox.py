@@ -651,7 +651,7 @@ class TestRemotePublishHook:
         assert any("stubborn" in f.read_text() for f in trashed)
 
     def test_file_payloads_skip_remote_publish(self, two_agents):
-        # v1 limitation: messages with FILE: payloads do NOT cross the mesh.
+        # v1 limitation: messages with FILE: payloads stay local-only.
         # The publish hook must not be called; the sidecar should treat all
         # configured remotes as already-succeeded so the message finalizes
         # on local delivery alone.

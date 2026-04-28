@@ -198,7 +198,7 @@ class TestReceiveEnvelope:
         msg_id = new_ulid()
         envelope = json.dumps({
             "id": msg_id, "from": "REMOTE_X", "to": "B",
-            "content": "hello via mesh", "files": [],
+            "content": "hello via remote", "files": [],
         }).encode()
         receive_envelope(envelope, two_local_agents)
         files = list(inbox_dir("B").iterdir())
@@ -206,7 +206,7 @@ class TestReceiveEnvelope:
         assert files[0].name == f"{msg_id}.json"
         body = json.loads(files[0].read_text())
         assert body["from"] == "REMOTE_X"
-        assert body["content"] == "hello via mesh"
+        assert body["content"] == "hello via remote"
 
     def test_unknown_recipient_dropped_silently(self, two_local_agents):
         envelope = json.dumps({

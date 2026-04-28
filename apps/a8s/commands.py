@@ -946,7 +946,7 @@ def cmd_logs(args: list[str]) -> int:
                 pass
 
 
-# ---------- mesh remotes (issue #63) ----------
+# ---------- remotes (issue #63) ----------
 
 _REMOTE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
@@ -962,7 +962,7 @@ def _remote_usage() -> int:
 
 
 def cmd_remote(args: list[str]) -> int:
-    """`a8s remote` — manage mesh transports declared in `~/.a8s/network.json`.
+    """`a8s remote` — manage cross-cluster remotes declared in `~/.a8s/network.json`.
 
     Subcommands:
       add <name> <broker> <topic>   register a paho-mqtt remote
