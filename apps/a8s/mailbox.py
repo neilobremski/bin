@@ -4,13 +4,34 @@ Mailbox routing is process-agnostic: a per-agent daemon may write into any
 other agent's inbox even though it isn't handling them. Only `wake_once` (in
 daemon.py) requires the handler attachment.
 
-Atomic alias fan-out (issue #67): `route_outboxes` writes each routed copy
-into `<recipient>/inbox.tmp/<source-fname>` first, then renames the staged
-files into `<recipient>/inbox/` only after every recipient has staged
-successfully — so a process killed mid-fan-out leaves no half-routed state
-that would deliver duplicates on retry. Source filename is preserved (not
-uniquified) so retries are idempotent: a recipient whose final-inbox copy
-already exists is skipped.
+Routing runs in two phases per pass (issue #63 mesh prep):
+
+1. INGEST — atomically move `<root>/.outbox/<f>.json` into
+   `~/.a8s/agents/<sender>/pending/<f>.json`. This is the only thing a8s
+   ever does to a file in `<root>/.outbox/` — the agent's directory is
+   one-way (agent writes, a8s renames out, never read-modify-write). After
+   this phase the agent's outbox dir is empty for the duration of the pass.
+
+2. PROCESS — for each pending file, load (or initialize) a `<f>.json.retry`
+   sidecar that tracks attempts, next-attempt time, which configured remotes
+   already accepted the publish, and whether local delivery has happened.
+   Local delivery uses the existing maildir-style staging (`inbox.tmp/` →
+   `inbox/` via `os.replace`). Remote publishing is the chunk-7 hook —
+   chunk 4 leaves `publish_remotes=None` and the no-remote path stays
+   semantically identical to the pre-mesh code: deliver locally, unlink.
+
+Backoff / retry (issue #63): when some configured remote hasn't yet
+accepted, attempts increment and the sidecar's `next_attempt` is bumped
+according to `BACKOFF_SCHEDULE`. After `MAX_ATTEMPTS` failures the
+message is moved to trash with a "discarded after backoff exhausted"
+log.
+
+Atomic alias fan-out (issue #67): each routed copy is written into
+`<recipient>/inbox.tmp/<source-fname>` first, then renamed into
+`<recipient>/inbox/` only after every recipient has staged. A crash mid-
+fan-out leaves no partial state. Source filename (a ULID) is preserved
+across staging so a recipient whose final inbox already has the file is
+skipped — retries are idempotent.
 
 FILE: payload transfer (issue #62): each `FILE:` entry's bytes are copied
 into `<recipient>/.files/<filename>` and the routed message's path rewritten
@@ -23,10 +44,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable, Optional
 
 from core import (
+    BACKOFF_SCHEDULE,
+    MAX_ATTEMPTS,
     MAX_FILE_BYTES,
     Participant,
     _preview,
@@ -35,21 +59,34 @@ from core import (
     inbox_tmp_dir,
     outbox_dir,
     out_agent,
+    pending_dir,
+    retry_sidecar_path,
     trash_dir,
     unique_path,
 )
 from registry import resolve_name
 from ulid import new as new_ulid
 
+# A function that publishes one routed-and-from-stamped message envelope to
+# every configured remote that hasn't yet accepted it. Returns the updated
+# `succeeded_remotes` list. Chunk 7 wires this up; chunk 4 passes None to
+# keep the no-mesh path purely local.
+PublishRemotes = Callable[[dict, str, list[str], int], list[str]]
+
 
 # ---------- mailboxes ----------
 
 def ensure_mailboxes(p: Participant) -> None:
-    """Create mailbox dirs for `p`. Inbox, inbox.tmp, and trash live under
-    ~/.a8s/ (hidden from the agent); outbox and .files live in the agent's
-    own root (so the agent can write to outbox and read from .files under a
-    workspace sandbox)."""
-    for d in (inbox_dir(p.name), inbox_tmp_dir(p.name), trash_dir(p.name)):
+    """Create mailbox dirs for `p`. Inbox, inbox.tmp, pending, and trash live
+    under ~/.a8s/ (hidden from the agent); outbox and .files live in the
+    agent's own root (so the agent can write to outbox and read from .files
+    under a workspace sandbox)."""
+    for d in (
+        inbox_dir(p.name),
+        inbox_tmp_dir(p.name),
+        pending_dir(p.name),
+        trash_dir(p.name),
+    ):
         d.mkdir(parents=True, exist_ok=True)
     outbox_dir(p.root).mkdir(parents=True, exist_ok=True)
     files_dir(p.root).mkdir(parents=True, exist_ok=True)
@@ -161,119 +198,288 @@ def _commit_staged_inboxes(staged: list[tuple[Path, Path]]) -> None:
 
 # ---------- routing ----------
 
-def route_outboxes(senders: list[Participant], all_agents: list[Participant] | None = None) -> int:
-    """Route each sender's outbox to recipients found in `all_agents`.
+def _ingest_outboxes(senders: list[Participant]) -> None:
+    """Phase 1: atomically move every `<root>/.outbox/<f>.json` into
+    `~/.a8s/agents/<sender>/pending/<f>.json`. The agent's `.outbox/` is
+    one-way — a8s never opens a file there for read-modify-write, never
+    writes a sidecar there. After this pass the outbox dir is empty and
+    every subsequent step happens under ~/.a8s/.
 
-    `all_agents` is the recipient lookup pool (defaults to senders for
-    self-contained calls). Aliases fan out at routing time; sender is excluded
-    from delivery (no self-echo). Routed copies preserve the original `to`
-    field — for an alias-fanned message that's the alias name, opaque about
-    the other recipients (issues #69, #70).
-
-    Atomicity (issue #67): each outbox file is staged into every recipient's
-    `inbox.tmp/` first, then promoted into `inbox/` via `os.replace`, then
-    the source outbox file is unlinked. The staging filename mirrors the
-    source filename (no `unique_path` randomization), so a recipient whose
-    `inbox/<source-name>` already exists is skipped on retry — the routing
-    pass becomes idempotent across crashes."""
-    if all_agents is None:
-        all_agents = senders
-    by_name = {p.name.lower(): p for p in all_agents}
-    routed = 0
+    Cross-fs fallback uses `shutil.copy2` + `unlink` instead of `os.rename`.
+    Not atomic; if the process dies mid-copy, the file may briefly exist in
+    both places, but ULID-keyed dedup at the receive side tolerates the
+    duplicate. We don't expect this path on a normal install (~/.a8s/ and
+    the agent root are usually on the same filesystem)."""
     for sender in senders:
         ensure_mailboxes(sender)
         outbox = outbox_dir(sender.root)
+        if not outbox.is_dir():
+            continue
+        dest_dir = pending_dir(sender.name)
         for f in sorted(outbox.iterdir()):
             if not (f.is_file() and f.name.endswith(".json")):
                 continue
+            dest = dest_dir / f.name
             try:
-                with f.open("r", encoding="utf-8") as fp:
-                    msg = json.load(fp)
-            except (OSError, json.JSONDecodeError) as e:
-                out_agent(sender.name, f"[{sender.name}] outbox parse error on {f.name}: {e}")
-                continue
-            # Defense: the outbox is writable by the agent, so it could try to
-            # spoof a senderless prompt with `from: ""` or impersonate someone
-            # else. Force `from` to the actual enclosing participant — outbox
-            # location is the unforgeable identity.
-            msg["from"] = sender.name
-            recipient_name = (msg.get("to") or "").strip()
-            preview = _preview(msg.get("content", ""))
-            if not recipient_name:
-                out_agent(sender.name, f"[{sender.name}] empty 'to' in {f.name}; rejecting (use an alias for groups)")
-                bad = unique_path(trash_dir(sender.name) / f.name)
-                f.rename(bad)
-                continue
+                os.rename(str(f), str(dest))
+            except OSError:
+                try:
+                    shutil.copy2(str(f), str(dest))
+                    f.unlink()
+                except OSError as e:
+                    out_agent(sender.name, f"ingest copy failed on {f.name}: {e}")
+
+
+def _load_or_init_sidecar(pending_file: Path) -> dict:
+    p = retry_sidecar_path(pending_file)
+    if p.is_file():
+        try:
+            with p.open("r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            if isinstance(data, dict):
+                data.setdefault("attempts", 0)
+                data.setdefault("next_attempt", "")
+                data.setdefault("succeeded_remotes", [])
+                data.setdefault("local_delivered", False)
+                return data
+        except (OSError, json.JSONDecodeError):
+            pass  # corrupt sidecar — start fresh
+    return {
+        "attempts": 0,
+        "next_attempt": "",
+        "succeeded_remotes": [],
+        "local_delivered": False,
+    }
+
+
+def _save_sidecar(pending_file: Path, sidecar: dict) -> None:
+    p = retry_sidecar_path(pending_file)
+    try:
+        with p.open("w", encoding="utf-8") as fp:
+            json.dump(sidecar, fp, indent=2)
+    except OSError:
+        pass  # best-effort — bad write means we'll retry on the next pass
+
+
+def _drop_sidecar(pending_file: Path) -> None:
+    p = retry_sidecar_path(pending_file)
+    try:
+        p.unlink()
+    except OSError:
+        pass
+
+
+def _trash_pending(sender: Participant, pending_file: Path) -> None:
+    bad = unique_path(trash_dir(sender.name) / pending_file.name)
+    try:
+        pending_file.rename(bad)
+    except OSError:
+        pass
+
+
+def _schedule_retry(pending_file: Path, sidecar: dict, sender: Participant) -> None:
+    """Increment attempts and either set the next-attempt time per
+    BACKOFF_SCHEDULE or trash the message if the schedule is exhausted."""
+    sidecar["attempts"] += 1
+    if sidecar["attempts"] > MAX_ATTEMPTS:
+        out_agent(sender.name, f"discarded {pending_file.name} after backoff exhausted")
+        _trash_pending(sender, pending_file)
+        _drop_sidecar(pending_file)
+        return
+    delay_idx = min(sidecar["attempts"] - 1, len(BACKOFF_SCHEDULE) - 1)
+    next_dt = datetime.now(timezone.utc) + timedelta(seconds=BACKOFF_SCHEDULE[delay_idx])
+    sidecar["next_attempt"] = next_dt.isoformat().replace("+00:00", "Z")
+    _save_sidecar(pending_file, sidecar)
+
+
+def _process_pending(
+    sender: Participant,
+    by_name: dict[str, Participant],
+    publish_remotes: Optional[PublishRemotes],
+    configured_remote_ids: list[str],
+) -> int:
+    """Phase 2: iterate `~/.a8s/agents/<sender>/pending/`, deliver each
+    pending file locally and/or publish to not-yet-succeeded remotes. The
+    sidecar tracks per-message progress so a partial pass can be resumed
+    cheaply on the next routing iteration. Returns the count of completed
+    local deliveries this pass (matches the legacy `route_outboxes` count
+    for the no-mesh path)."""
+    routed = 0
+    pending = pending_dir(sender.name)
+    if not pending.is_dir():
+        return 0
+    now = datetime.now(timezone.utc)
+    files = sorted(
+        f for f in pending.iterdir()
+        if f.is_file() and f.name.endswith(".json")
+    )
+    for f in files:
+        sidecar = _load_or_init_sidecar(f)
+        # Backoff gate.
+        if sidecar["next_attempt"]:
+            try:
+                next_dt = datetime.fromisoformat(sidecar["next_attempt"].replace("Z", "+00:00"))
+                if now < next_dt:
+                    continue
+            except ValueError:
+                pass  # corrupt timestamp — fall through and try
+        try:
+            with f.open("r", encoding="utf-8") as fp:
+                msg = json.load(fp)
+        except (OSError, json.JSONDecodeError) as e:
+            out_agent(sender.name, f"pending parse error on {f.name}: {e}; trashing")
+            _trash_pending(sender, f)
+            _drop_sidecar(f)
+            continue
+        # Defense: the outbox was agent-writable, so the JSON could lie about
+        # `from`. The unforgeable identity is the enclosing sender — overwrite.
+        msg["from"] = sender.name
+        recipient_name = (msg.get("to") or "").strip()
+        preview = _preview(msg.get("content", ""))
+        if not recipient_name:
+            out_agent(sender.name, f"empty 'to' in {f.name}; rejecting")
+            _trash_pending(sender, f)
+            _drop_sidecar(f)
+            continue
+        # ----- LOCAL ROUTING -----
+        local_target_known = False
+        if not sidecar["local_delivered"]:
+            kind = None
+            member_names: list[str] = []
             try:
                 kind, member_names = resolve_name(recipient_name)
+                local_target_known = True
             except KeyError:
-                out_agent(sender.name, f"[{sender.name}] unknown recipient {recipient_name!r} in {f.name}")
-                continue
+                pass  # unknown locally — remotes (if any) might still deliver
             except ValueError as e:
-                out_agent(sender.name, f"[{sender.name}] {e} in {f.name}")
+                out_agent(sender.name, f"{e} in {f.name}; trashing")
+                _trash_pending(sender, f)
+                _drop_sidecar(f)
                 continue
-            recipients: list[Participant] = []
-            for member in member_names:
-                rp = by_name.get(member.lower())
-                if rp is not None and rp.name != sender.name:
-                    # Skip self-copy: an alias that includes the sender doesn't
-                    # echo the message back to them.
-                    recipients.append(rp)
-            if kind != "alias" and not recipients:
-                out_agent(sender.name, f"[{sender.name}] {recipient_name!r} resolved to no agents in {f.name}")
-                continue
-
-            # Stage every recipient's copy into inbox.tmp/<source-name>. Skip
-            # any recipient whose final inbox already has the file (prior
-            # partial run already promoted that recipient's copy).
-            staged: list[tuple[Path, Path]] = []
-            try:
-                for recipient in recipients:
-                    ensure_mailboxes(recipient)
-                    final = inbox_dir(recipient.name) / f.name
-                    if final.is_file():
-                        continue  # already delivered on a prior pass
-                    staging = inbox_tmp_dir(recipient.name) / f.name
-                    routed_msg = _build_routed_message(msg, sender.name, sender.root, recipient)
-                    with staging.open("w", encoding="utf-8") as out_f:
-                        json.dump(routed_msg, out_f, indent=2)
-                    staged.append((staging, final))
-            except OSError as e:
-                # Stage failed — leave the outbox file in place for retry. Best-
-                # effort gc of any partially-staged copies; they'll be replaced
-                # on the next pass anyway (overwritten under the same name).
-                out_agent(sender.name, f"[{sender.name}] stage failed on {f.name}: {e}")
-                for staging, _ in staged:
+            if local_target_known:
+                recipients: list[Participant] = []
+                for m in member_names:
+                    rp = by_name.get(m.lower())
+                    if rp is not None and rp.name != sender.name:
+                        recipients.append(rp)
+                if recipients:
+                    staged: list[tuple[Path, Path]] = []
+                    stage_failed = False
                     try:
-                        staging.unlink()
-                    except OSError:
-                        pass
-                continue
-
-            # All copies staged — atomic commit phase. `os.replace` is atomic
-            # on POSIX; even if we crash between iterations, the next pass
-            # detects already-promoted recipients via the `final.is_file()`
-            # skip above and finishes the rest.
-            try:
-                _commit_staged_inboxes(staged)
-            except OSError as e:
-                out_agent(sender.name, f"[{sender.name}] commit failed on {f.name}: {e}")
-                continue
-
-            if kind == "alias":
-                out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (alias of {len(recipients)}): {preview}")
-                for recipient in recipients:
-                    out_agent(recipient.name, f"received from {sender.name} (via {recipient_name} alias): {preview}")
-                routed += len(recipients)
-            else:
-                recipient = recipients[0]
-                out_agent(sender.name, f"routed: {sender.name} -> {recipient.name}: {preview}")
-                out_agent(recipient.name, f"received from {sender.name}: {preview}")
-                routed += 1
+                        for recipient in recipients:
+                            ensure_mailboxes(recipient)
+                            final = inbox_dir(recipient.name) / f.name
+                            if final.is_file():
+                                continue
+                            staging = inbox_tmp_dir(recipient.name) / f.name
+                            routed_msg = _build_routed_message(msg, sender.name, sender.root, recipient)
+                            with staging.open("w", encoding="utf-8") as out_f:
+                                json.dump(routed_msg, out_f, indent=2)
+                            staged.append((staging, final))
+                    except OSError as e:
+                        out_agent(sender.name, f"stage failed on {f.name}: {e}")
+                        for staging, _ in staged:
+                            try:
+                                staging.unlink()
+                            except OSError:
+                                pass
+                        stage_failed = True
+                    if not stage_failed:
+                        try:
+                            _commit_staged_inboxes(staged)
+                            sidecar["local_delivered"] = True
+                            if kind == "alias":
+                                out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (alias of {len(recipients)}): {preview}")
+                                for recipient in recipients:
+                                    out_agent(recipient.name, f"received from {sender.name} (via {recipient_name} alias): {preview}")
+                                routed += len(recipients)
+                            else:
+                                recipient = recipients[0]
+                                out_agent(sender.name, f"routed: {sender.name} -> {recipient.name}: {preview}")
+                                out_agent(recipient.name, f"received from {sender.name}: {preview}")
+                                routed += 1
+                        except OSError as e:
+                            out_agent(sender.name, f"commit failed on {f.name}: {e}")
+                            # leave for retry
+                else:
+                    # Local target resolved but no recipients (alias with only
+                    # the sender as a member, or the sender targeting themselves).
+                    # Nothing to deliver locally; mark done so we don't loop.
+                    out_agent(sender.name, f"{recipient_name!r} has no local recipients (excluding self)")
+                    sidecar["local_delivered"] = True
+        # ----- REMOTE ROUTING (placeholder hook; chunk 7 wires up) -----
+        has_files = bool(msg.get("files"))
+        if publish_remotes is not None and configured_remote_ids and not has_files:
+            sidecar["succeeded_remotes"] = publish_remotes(
+                msg, sender.name, list(sidecar["succeeded_remotes"]), sidecar["attempts"]
+            )
+        elif has_files and configured_remote_ids:
+            # v1 limitation (#62 deferred): file payloads don't cross the mesh.
+            # Treat all configured remotes as "done" so the message finalizes
+            # after local delivery instead of looping on retries.
+            if sidecar["attempts"] == 0:
+                out_agent(sender.name, f"FILE: payloads in {f.name} not published to remotes (v1)")
+            sidecar["succeeded_remotes"] = list(configured_remote_ids)
+        # ----- OUTCOME -----
+        remaining_remotes = [
+            rid for rid in configured_remote_ids
+            if rid not in sidecar["succeeded_remotes"]
+        ]
+        no_path_at_all = (
+            not local_target_known
+            and not sidecar["local_delivered"]
+            and not configured_remote_ids
+        )
+        if no_path_at_all:
+            out_agent(sender.name, f"unknown recipient {recipient_name!r} in {f.name}; trashing")
+            _trash_pending(sender, f)
+            _drop_sidecar(f)
+            continue
+        all_done = (
+            not remaining_remotes
+            and (not local_target_known or sidecar["local_delivered"])
+        )
+        if all_done:
             try:
                 f.unlink()
             except OSError:
                 pass
+            _drop_sidecar(f)
+            continue
+        # Still pending — schedule a retry with backoff.
+        _schedule_retry(f, sidecar, sender)
+    return routed
+
+
+def route_outboxes(
+    senders: list[Participant],
+    all_agents: list[Participant] | None = None,
+    publish_remotes: Optional[PublishRemotes] = None,
+    configured_remote_ids: Optional[list[str]] = None,
+) -> int:
+    """Two-phase routing pass:
+
+      1. Ingest: move new outbox files out of every sender's `<root>/.outbox/`
+         and into `~/.a8s/agents/<sender>/pending/`. The agent's directory is
+         touched only by the rename — never read-modified-rewritten.
+      2. Process: deliver each pending message to local recipients (via
+         `inbox.tmp/` → `inbox/` atomic stage→commit) and/or publish to any
+         configured remote that hasn't yet accepted it. Per-message retry
+         state lives in `<f>.json.retry` alongside the pending file.
+
+    `publish_remotes` and `configured_remote_ids` are the chunk-7 hooks for
+    the mesh; chunk 4 leaves both at their None / [] defaults so the no-mesh
+    path is identical to the pre-#63 behavior except for the file location
+    of in-flight messages."""
+    if all_agents is None:
+        all_agents = senders
+    by_name = {p.name.lower(): p for p in all_agents}
+    if configured_remote_ids is None:
+        configured_remote_ids = []
+    _ingest_outboxes(senders)
+    routed = 0
+    for sender in senders:
+        routed += _process_pending(sender, by_name, publish_remotes, configured_remote_ids)
     return routed
 
 

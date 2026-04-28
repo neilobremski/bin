@@ -7,12 +7,16 @@ from pathlib import Path
 import pytest
 
 from core import (
+    BACKOFF_SCHEDULE,
+    MAX_ATTEMPTS,
     MAX_FILE_BYTES,
     Participant,
     files_dir,
     inbox_dir,
     inbox_tmp_dir,
     outbox_dir,
+    pending_dir,
+    retry_sidecar_path,
     trash_dir,
 )
 from mailbox import (
@@ -242,7 +246,11 @@ class TestRouteOutboxes:
         assert not bad.is_file()
         assert any("rogue" in f.read_text() for f in trash_dir("A").iterdir())
 
-    def test_unknown_recipient_left_in_outbox(self, two_agents):
+    def test_unknown_recipient_with_no_remotes_is_trashed(self, two_agents):
+        # With the two-phase ingest + process design, an unknown recipient
+        # has no path forward when no remotes are configured: local has no
+        # match, and there's nothing to publish to. Trash immediately so the
+        # outbox dir doesn't accumulate undeliverable messages.
         a, b = two_agents
         outbox = outbox_dir(a.root)
         bad = outbox / "20260101T000000_A.json"
@@ -251,9 +259,11 @@ class TestRouteOutboxes:
         }))
         n = route_outboxes([a, b], all_agents=[a, b])
         assert n == 0
-        # Unknown-recipient messages are LEFT in the outbox (not trashed) so
-        # they can be picked up if the recipient is added later.
-        assert bad.is_file()
+        # Original outbox file is gone (ingest moved it out).
+        assert not bad.is_file()
+        # The message landed in A's trash — terminal failure.
+        trashed = list(trash_dir("A").iterdir())
+        assert any("BOGUS" in f.read_text() for f in trashed)
 
     def test_from_is_force_overwritten(self, two_agents):
         a, b = two_agents
@@ -470,3 +480,199 @@ class TestNextInboxMessage:
         p = Participant("X", agent_root)
         ensure_mailboxes(p)
         assert next_inbox_message(p) is None
+
+
+class TestIngestPhase:
+    """Phase 1 of `route_outboxes` (issue #63): a8s never reads a file in
+    `<root>/.outbox/`; on every pass it atomically moves new outbox files
+    out to `~/.a8s/agents/<sender>/pending/` before any further processing.
+    Retry sidecars and trash all live under ~/.a8s/."""
+
+    def test_outbox_emptied_after_pass(self, two_agents):
+        a, b = two_agents
+        out_path = _write_outbox("A", a.root, "B", "hi", [])
+        # Pre-pass: file is in A's outbox.
+        assert out_path.is_file()
+        route_outboxes([a, b], all_agents=[a, b])
+        # Post-pass: outbox dir is empty for both senders.
+        assert list(outbox_dir(a.root).iterdir()) == []
+        assert list(outbox_dir(b.root).iterdir()) == []
+
+    def test_pending_dir_holds_messages_during_routing(self, fake_home, tmp_path):
+        # Solo sender with no recipients in the registry — ingest still happens
+        # but processing trashes the message (no path). Verifying the ingest
+        # rename in isolation requires watching the filesystem, but we can
+        # observe via the trash that the file flowed through pending/.
+        a_root = tmp_path / "solo"; a_root.mkdir()
+        save_registry({"SOLO": {"root": str(a_root)}})
+        a = Participant("SOLO", a_root)
+        ensure_mailboxes(a)
+        _write_outbox("SOLO", a.root, "GHOST", "lost", [])
+        route_outboxes([a], all_agents=[a])
+        # Outbox empty.
+        assert list(outbox_dir(a.root).iterdir()) == []
+        # Pending also empty (no path forward → trashed in phase 2).
+        assert list(pending_dir("SOLO").iterdir()) == []
+        # Trashed.
+        assert any("lost" in f.read_text() for f in trash_dir("SOLO").iterdir())
+
+
+class TestRetrySidecar:
+    """Per-message retry sidecar. With no remotes configured, the happy path
+    never creates a sidecar — local delivery succeeds in one pass. The
+    sidecar machinery only kicks in when something can't be delivered."""
+
+    def test_no_sidecar_left_after_happy_path(self, two_agents):
+        a, b = two_agents
+        _write_outbox("A", a.root, "B", "hi", [])
+        route_outboxes([a, b], all_agents=[a, b])
+        # No sidecars left over for either sender.
+        for s in (a, b):
+            for f in pending_dir(s.name).iterdir():
+                assert not f.name.endswith(".retry")
+        # Pending dirs empty for both senders.
+        assert list(pending_dir(a.name).iterdir()) == []
+
+    def test_unknown_recipient_with_no_remotes_trashes_immediately(self, two_agents):
+        # Defensive: with no remotes there's no point retrying — terminal
+        # failure happens on the first pass. No sidecar is left behind.
+        a, b = two_agents
+        _write_outbox("A", a.root, "BOGUS", "lost", [])
+        route_outboxes([a, b], all_agents=[a, b])
+        assert list(pending_dir("A").iterdir()) == []
+        trashed = list(trash_dir("A").iterdir())
+        assert any("lost" in f.read_text() for f in trashed)
+
+
+class TestRemotePublishHook:
+    """Chunk 4 leaves the publish_remotes hook unwired. Stub it here to
+    confirm the contract: when at least one configured remote hasn't yet
+    accepted, the sidecar persists with bumped attempts; once every remote
+    is in `succeeded_remotes`, the message finalizes (unlinks)."""
+
+    def test_remote_failure_creates_sidecar_with_attempts(self, two_agents):
+        a, b = two_agents
+
+        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+            # Always fail — return the input unchanged (no remote IDs added).
+            return list(succeeded_so_far)
+
+        _write_outbox("A", a.root, "B", "hi", [])
+        route_outboxes(
+            [a, b],
+            all_agents=[a, b],
+            publish_remotes=stub_publish,
+            configured_remote_ids=["hub"],
+        )
+        # Local delivery succeeded — B has the message.
+        assert len(list(inbox_dir("B").iterdir())) == 1
+        # But the sidecar persists in A's pending/, with attempts=1 and a
+        # next_attempt scheduled per BACKOFF_SCHEDULE[0].
+        pending_files = [f for f in pending_dir("A").iterdir()
+                         if f.name.endswith(".json") and not f.name.endswith(".retry")]
+        assert len(pending_files) == 1
+        sidecar_path = retry_sidecar_path(pending_files[0])
+        assert sidecar_path.is_file()
+        side = json.loads(sidecar_path.read_text())
+        assert side["attempts"] == 1
+        assert side["local_delivered"] is True
+        assert side["succeeded_remotes"] == []
+        assert side["next_attempt"]  # ISO timestamp set
+
+    def test_remote_success_finalizes(self, two_agents):
+        a, b = two_agents
+
+        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+            # Mark hub as succeeded.
+            return list(succeeded_so_far) + ["hub"]
+
+        _write_outbox("A", a.root, "B", "hi", [])
+        route_outboxes(
+            [a, b],
+            all_agents=[a, b],
+            publish_remotes=stub_publish,
+            configured_remote_ids=["hub"],
+        )
+        # Local delivery + remote publish both succeeded → no sidecar, no
+        # pending file.
+        remaining = list(pending_dir("A").iterdir())
+        assert remaining == []
+
+    def test_remote_only_delivery_unknown_local(self, two_agents):
+        # `to: GHOST` is unknown locally but remotes are configured. The
+        # message should publish and finalize even without a local match.
+        a, b = two_agents
+
+        published = []
+
+        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+            published.append(msg.get("to"))
+            return list(succeeded_so_far) + ["hub"]
+
+        _write_outbox("A", a.root, "GHOST", "remote-only", [])
+        route_outboxes(
+            [a, b],
+            all_agents=[a, b],
+            publish_remotes=stub_publish,
+            configured_remote_ids=["hub"],
+        )
+        # The publish hook saw the envelope.
+        assert published == ["GHOST"]
+        # Pending is clean — remote-only delivery counts as success.
+        assert list(pending_dir("A").iterdir()) == []
+        # Nothing in trash either.
+        assert list(trash_dir("A").iterdir()) == []
+
+    def test_backoff_exhaustion_trashes(self, two_agents):
+        a, b = two_agents
+
+        def always_fails(msg, sender_name, succeeded_so_far, attempt_count):
+            return list(succeeded_so_far)
+
+        _write_outbox("A", a.root, "B", "stubborn", [])
+        # Run MAX_ATTEMPTS + 1 passes, manually overriding the sidecar's
+        # next_attempt each time so the backoff gate doesn't skip us.
+        for _ in range(MAX_ATTEMPTS + 1):
+            route_outboxes(
+                [a, b],
+                all_agents=[a, b],
+                publish_remotes=always_fails,
+                configured_remote_ids=["hub"],
+            )
+            # Force the sidecar to allow another pass right away.
+            for f in pending_dir("A").iterdir():
+                if f.name.endswith(".retry"):
+                    side = json.loads(f.read_text())
+                    side["next_attempt"] = ""
+                    f.write_text(json.dumps(side))
+        # After exhaustion the message is in trash, sidecar is gone.
+        assert list(pending_dir("A").iterdir()) == []
+        trashed = list(trash_dir("A").iterdir())
+        assert any("stubborn" in f.read_text() for f in trashed)
+
+    def test_file_payloads_skip_remote_publish(self, two_agents):
+        # v1 limitation: messages with FILE: payloads do NOT cross the mesh.
+        # The publish hook must not be called; the sidecar should treat all
+        # configured remotes as already-succeeded so the message finalizes
+        # on local delivery alone.
+        a, b = two_agents
+        payload = a.root / "doc.txt"
+        payload.write_text("payload")
+        called = []
+
+        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+            called.append(msg)
+            return list(succeeded_so_far) + ["hub"]
+
+        _write_outbox("A", a.root, "B", "see attached", [
+            {"filename": "doc.txt", "path": str(payload)},
+        ])
+        route_outboxes(
+            [a, b],
+            all_agents=[a, b],
+            publish_remotes=stub_publish,
+            configured_remote_ids=["hub"],
+        )
+        assert called == []  # publish hook not invoked
+        assert list(pending_dir("A").iterdir()) == []  # finalized
+        assert len(list(inbox_dir("B").iterdir())) == 1  # local delivery happened
