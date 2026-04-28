@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from commands import cmd_add, cmd_alias, cmd_kill, cmd_unalias
+from commands import cmd_add, cmd_alias, cmd_kill, cmd_remove, cmd_unalias
 from core import agent_dir, kill_request_path, pid_path
 from registry import load_aliases, load_registry, save_registry
 
@@ -99,6 +99,72 @@ class TestCmdAliasCanonicalization:
         assert rc == 1
         err = capsys.readouterr().err
         assert "unknown member" in err
+
+
+class TestCmdRemove:
+    def test_unknown_agent_rejected(self, fake_home, capsys):
+        rc = cmd_remove(["nobody"])
+        assert rc == 1
+        assert "no agent" in capsys.readouterr().err
+
+    def test_invalid_name_rejected(self, fake_home, capsys):
+        rc = cmd_remove(["foo-bar"])
+        assert rc == 2
+        assert "alphanumeric" in capsys.readouterr().err
+
+    def test_usage_on_wrong_arity(self, fake_home, capsys):
+        assert cmd_remove([]) == 2
+        assert cmd_remove(["a", "b"]) == 2
+
+    def test_running_handler_blocks_removal(self, fake_home, agent_root, capsys):
+        cmd_add(["claude", str(agent_root)])
+        # Claim claude under our own (live) pid.
+        pid_path("claude").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("claude").write_text(str(os.getpid()))
+        rc = cmd_remove(["claude"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "running" in err
+        # Registry untouched.
+        assert "claude" in load_registry()
+
+    def test_basic_removal_wipes_dir_and_registry(self, fake_home, agent_root):
+        cmd_add(["claude", str(agent_root)])
+        # Materialize the agent dir so we can verify it's wiped.
+        agent_dir("claude").mkdir(parents=True, exist_ok=True)
+        (agent_dir("claude") / "log.txt").write_text("hi")
+        rc = cmd_remove(["claude"])
+        assert rc == 0
+        assert "claude" not in load_registry()
+        assert not agent_dir("claude").exists()
+
+    def test_case_insensitive(self, fake_home, agent_root):
+        cmd_add(["claude", str(agent_root)])
+        rc = cmd_remove(["Claude"])
+        assert rc == 0
+        assert load_registry() == {}
+
+    def test_cascade_prunes_alias_member(self, fake_home, tmp_path, agent_root, capsys):
+        cmd_add(["claude", str(agent_root)])
+        other = tmp_path / "g"; other.mkdir()
+        cmd_add(["gemini", str(other)])
+        cmd_alias(["devs", "claude"])
+        cmd_alias(["devs", "gemini"])
+        rc = cmd_remove(["claude"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "pruned from aliases" in out
+        # Alias remains with just gemini.
+        assert load_aliases() == {"devs": ["gemini"]}
+
+    def test_cascade_drops_now_empty_alias(self, fake_home, agent_root, capsys):
+        cmd_add(["claude", str(agent_root)])
+        cmd_alias(["devs", "claude"])
+        rc = cmd_remove(["claude"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "dropped now-empty aliases" in out
+        assert load_aliases() == {}
 
 
 class TestCmdUnaliasCaseInsensitive:

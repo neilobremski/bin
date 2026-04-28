@@ -176,6 +176,7 @@ Key invariants:
 
 ```
 add <name> <dir> [<def>]    register an agent (auto-detects definition from marker)
+remove <name>                unregister an agent; wipes its mailbox dir and prunes aliases. Refuses if a handler is running.
 agents                       list all registered
 discover <path>              read-only scan; suggests add+define commands
 define <name> [<path>]       show or set definition
