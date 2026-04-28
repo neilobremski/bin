@@ -306,6 +306,11 @@ class TestWakeOnceVerbs:
         assert "FROM:|TO:MOCK|TS:" in log
         assert "|MSG:show capabilities" in log
         assert "AGE:0 seconds ago" in log or "AGE:1 seconds ago" in log
+        # The full argv is logged before invocation so operators can see the
+        # real prompt that was sent to the wake subprocess.
+        assert "[MOCK] exec: " in log
+        assert "verb=prompt" in log
+        assert "MSG:show capabilities" in log
 
     def test_message_verb_argv_via_routing(self, fake_home, tmp_path, fixtures_dir):
         # Two agents, both using mock.json.

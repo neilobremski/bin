@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -127,6 +128,7 @@ def wake_once(p: Participant, msg_path: Path) -> None:
     else:
         out_agent(p.name, f"[{p.name}] waking ({verb}) from {trashed.name}: {_preview(msg.get('content', ''))}")
     cmd = build_command(definition, msg, verb)
+    out_agent(p.name, f"[{p.name}] exec: {shlex.join(cmd)}")
     run_with_prefix(p.name, cmd, p.root)
 
 
