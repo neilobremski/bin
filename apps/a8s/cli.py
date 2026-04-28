@@ -18,6 +18,7 @@ from commands import (
     cmd_logs,
     cmd_ls,
     cmd_prompt,
+    cmd_remove,
     cmd_run,
     cmd_start,
     cmd_step,
@@ -28,25 +29,26 @@ from commands import (
 
 
 COMMANDS: list[tuple[str, str, str]] = [
-    ("add",      "<name> <dir> [<def>]", "Register a new agent. Without <def>, scans <dir> for marker files (CLAUDE.md/GEMINI.md/CODEX.md) and auto-links the matching built-in definition."),
-    ("agents",   "",                     "List every registered agent and definition status."),
-    ("discover", "<path>",               "Walk <path> for marker files; print suggested `a8s add`/`a8s define` commands. Read-only."),
-    ("define",   "<name> [<path>]",      "Show or set <name>'s definition JSON. Without <path>, prints the effective definition."),
-    ("alias",    "[<alias> <member>]",   "Add member to alias (creates if new). Bare lists all aliases. Members may be agents or other aliases."),
-    ("unalias",  "<alias> [<member>]",   "Remove a member from alias, or remove the whole alias."),
-    ("aliases",  "",                     "List every alias and its members."),
-    ("start",    "<name>",               "Detached background process handling <name>. Aliases produce ONE process handling all members (each member's pid file points at it)."),
-    ("run",      "<name>",               "Foreground attached loop. Aliases produce one process handling all members (interleaved output). Ctrl+C: graceful detach. 2nd Ctrl+C: kill subprocess group."),
-    ("step",     "<name>",               "Attach as handler, one route+drain pass across all members, release. Heavyweight: detaches current handler."),
-    ("stop",     "<name>",               "SIGTERM each unique handler PID (one signal per multi-agent handler). Graceful detach — collateral on other members of the same handler."),
-    ("kill",     "<name>",               "Per unique handler PID: SIGTERM, brief grace, 2nd SIGTERM (kills subprocess group), SIGKILL fallback."),
-    ("exit",     "",                     "SIGTERM every running handler. Each detaches gracefully on its own."),
-    ("ls",       "",                     "List only running agents and their handler PIDs."),
-    ("prompt",   "<name> <message>",     "Queue a senderless message. <name> may be an agent or alias (queues per member)."),
-    ("tell",     "<name> <message>",     "Routed message to <name>. <name> may be an agent or alias (fans out at routing time). Sender = agent enclosing CWD."),
-    ("clear",    "<name>",               "Queue a CLEAR sentinel (wipes inbox first; next wake runs invokeClear). Aliases iterate."),
-    ("install",  "",                     "Install canonical skills into each supported tool's user scope."),
-    ("logs",     "<name>... [--tail N] [-f]", "Read per-agent log files; merge-sort multiple by timestamp. Names may include aliases."),
+    ("add",      "<name> <dir> [<def>]",      "Register an agent."),
+    ("remove",   "<name>",                    "Unregister an agent and delete its mailbox."),
+    ("agents",   "",                          "List registered agents."),
+    ("discover", "<path>",                    "Scan a path for agents and suggest `add` commands."),
+    ("define",   "<name> [<path>]",           "Show or set an agent's command definition."),
+    ("alias",    "[<alias> <member>]",        "Group agents under an alias name."),
+    ("unalias",  "<alias> [<member>]",        "Remove a member from an alias, or the whole alias."),
+    ("aliases",  "",                          "List aliases and their members."),
+    ("start",    "<name>",                    "Run an agent in the background."),
+    ("run",      "<name>",                    "Run an agent in the foreground."),
+    ("step",     "<name>",                    "Run an agent for one pass and exit."),
+    ("stop",     "<name>",                    "Stop a running agent."),
+    ("kill",     "<name>",                    "Force-stop a running agent."),
+    ("exit",     "",                          "Stop every running agent."),
+    ("ls",       "",                          "List running agents."),
+    ("tell",     "<name> <message>",          "Send a message to an agent or alias."),
+    ("prompt",   "<name> <message>",          "Send a message with no sender."),
+    ("clear",    "<name>",                    "Start a fresh session for an agent."),
+    ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
+    ("install",  "",                          "Install the `tell` skill into supported tools."),
 ]
 
 KNOWN_COMMANDS = {name for name, _, _ in COMMANDS}
@@ -67,6 +69,8 @@ CLI_EPILOG = "Commands:\n" + _format_commands(COMMANDS)
 def dispatch(cmd: str, args: list[str], interval: float) -> int:
     if cmd == "add":
         return cmd_add(args)
+    if cmd == "remove":
+        return cmd_remove(args)
     if cmd == "agents":
         return cmd_agents()
     if cmd == "discover":

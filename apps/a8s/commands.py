@@ -28,6 +28,7 @@ from core import (
     BIN_ROOT,
     _pid_alive,
     _preview,
+    agent_dir,
     agent_log_path,
     canonical_name,
     out,
@@ -185,6 +186,58 @@ def cmd_add(args: list[str]) -> int:
     save_registry(reg)
     print(f"added {name} -> {root}")
     print(f"definition: {definition_path}  ({note})")
+    return 0
+
+
+def cmd_remove(args: list[str]) -> int:
+    """`a8s remove <name>` — unregister an agent. Refuses if a handler is
+    running (the user must `a8s stop` it first). Cascades into aliases:
+    drops <name> from any alias's member list, and deletes any alias that
+    becomes empty as a result. Wipes the on-disk per-agent dir
+    (~/.a8s/agents/<NAME>/) — inbox, trash, log, pid file all gone."""
+    if len(args) != 1:
+        print("usage: a8s remove <name>", file=sys.stderr)
+        return 2
+    raw = args[0]
+    try:
+        name = canonical_name(raw)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    reg = load_registry()
+    if name not in reg:
+        print(f"no agent named {raw!r}", file=sys.stderr)
+        return 1
+    holder = _read_handler_pid(name)
+    if holder is not None:
+        print(f"{name} is running (PID {holder}); stop it first: `a8s stop {name}`", file=sys.stderr)
+        return 1
+    aliases = load_aliases()
+    pruned: list[str] = []
+    dropped: list[str] = []
+    for alias_name in list(aliases.keys()):
+        members = aliases[alias_name]
+        kept = [m for m in members if m.lower() != name]
+        if len(kept) == len(members):
+            continue
+        if kept:
+            aliases[alias_name] = kept
+            pruned.append(alias_name)
+        else:
+            del aliases[alias_name]
+            dropped.append(alias_name)
+    if pruned or dropped:
+        save_aliases(aliases)
+    d = agent_dir(name)
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)
+    del reg[name]
+    save_registry(reg)
+    print(f"removed {name}")
+    if pruned:
+        print(f"  pruned from aliases: {', '.join(sorted(pruned))}")
+    if dropped:
+        print(f"  dropped now-empty aliases: {', '.join(sorted(dropped))}")
     return 0
 
 
