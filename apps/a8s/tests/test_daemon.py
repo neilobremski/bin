@@ -300,8 +300,12 @@ class TestWakeOnceVerbs:
         # mock-cli echoes each argv element prefixed with "MOCK-CLI:"
         assert "MOCK> MOCK-CLI: verb=prompt" in log
         # Senderless prompt: $SENDER is empty, $RECIPIENT is the agent's own
-        # name, $MESSAGE is the raw content.
-        assert "MOCK> MOCK-CLI: FROM:|TO:MOCK|MSG:show capabilities" in log
+        # name, $MESSAGE is the raw content. $TIMESTAMP / $AGE are populated
+        # from msg["date"]; assert the surrounding structure rather than the
+        # exact dynamic values.
+        assert "FROM:|TO:MOCK|TS:" in log
+        assert "|MSG:show capabilities" in log
+        assert "AGE:0 seconds ago" in log or "AGE:1 seconds ago" in log
 
     def test_message_verb_argv_via_routing(self, fake_home, tmp_path, fixtures_dir):
         # Two agents, both using mock.json.
@@ -321,9 +325,11 @@ class TestWakeOnceVerbs:
         rc = attached_loop(["A", "B"], 0.1, single_pass=True)
         assert rc == 0
         log_b = _read_log("B")
-        # invokeMessage interpolates $SENDER, $RECIPIENT, $MESSAGE directly.
+        # invokeMessage interpolates $SENDER, $RECIPIENT, $TIMESTAMP, $AGE,
+        # $MESSAGE directly.
         assert "MOCK-CLI: verb=message" in log_b
-        assert "FROM:A|TO:B|MSG:design review" in log_b
+        assert "FROM:A|TO:B|TS:" in log_b
+        assert "|MSG:design review" in log_b
 
     def test_alias_routed_message_uses_message_verb(self, fake_home, tmp_path, fixtures_dir):
         # Strict opacity (#69, #70): alias-routed messages dispatch to
@@ -349,12 +355,14 @@ class TestWakeOnceVerbs:
         # No "messageAlias" verb, no others_count leak — just the regular
         # message verb with $RECIPIENT preserving the alias name.
         assert "MOCK-CLI: verb=message" in log_b
-        assert "FROM:A|TO:devs|MSG:all-hands" in log_b
+        assert "FROM:A|TO:devs|TS:" in log_b
+        assert "|MSG:all-hands" in log_b
         assert "OTHERS:" not in log_b
         assert "ALIAS:" not in log_b
         # C sees the same shape — both recipients are indistinguishable.
         log_c = _read_log("C")
-        assert "FROM:A|TO:devs|MSG:all-hands" in log_c
+        assert "FROM:A|TO:devs|TS:" in log_c
+        assert "|MSG:all-hands" in log_c
 
     def test_clear_verb_via_sentinel(self, mock_agent):
         # Pre-queue a normal prompt + then a clear; the clear should wipe

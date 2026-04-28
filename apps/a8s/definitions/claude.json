@@ -12,7 +12,7 @@
     "--permission-mode", "dontAsk",
     "--allowedTools", "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
     "--continue",
-    "-p", "$SENDER tells $RECIPIENT: $MESSAGE"
+    "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ],
   "invokeClear": [
     "claude",

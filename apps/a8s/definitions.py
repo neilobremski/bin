@@ -2,8 +2,8 @@
 
 Each agent has a definition JSON (built-in or custom) that encodes argv for
 three verbs. `select_verb` picks the verb from the queued message;
-`build_command` substitutes `$SENDER` / `$RECIPIENT` / `$MESSAGE` / `$A8S_DIR`
-into the chosen argv.
+`build_command` substitutes `$SENDER` / `$RECIPIENT` / `$MESSAGE` /
+`$TIMESTAMP` / `$AGE` / `$A8S_DIR` into the chosen argv.
 
 Strict opacity (issues #69, #70): the recipient sees only sender + message
 content — no `alias` or `others_count` leak. A direct tell and an
@@ -15,6 +15,7 @@ mailing list: you know it came via the list, you don't know who else got it).
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core import (
@@ -93,11 +94,59 @@ def _message_body(msg: dict) -> str:
     return "\n".join([content, *lines])
 
 
-def _expand_argv(argv: list[str], sender: str, recipient: str, message: str) -> list[str]:
+def _parse_iso(date_str: str) -> datetime | None:
+    """Parse the ISO timestamp we write into messages (`...Z` UTC). Returns
+    None for empty / unparseable input."""
+    if not date_str:
+        return None
+    try:
+        if date_str.endswith("Z"):
+            return datetime.fromisoformat(date_str[:-1] + "+00:00")
+        return datetime.fromisoformat(date_str)
+    except ValueError:
+        return None
+
+
+def _format_age(date_str: str, *, now: datetime | None = None) -> str:
+    """Convert an ISO timestamp into a human-readable 'N units ago' string.
+    Empty for missing/unparseable input. `now` is injectable for tests."""
+    ts = _parse_iso(date_str)
+    if ts is None:
+        return ""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    seconds = max(0, int((now - ts).total_seconds()))
+    if seconds < 60:
+        n, unit = seconds, "second"
+    elif seconds < 3600:
+        n, unit = seconds // 60, "minute"
+    elif seconds < 86400:
+        n, unit = seconds // 3600, "hour"
+    elif seconds < 7 * 86400:
+        n, unit = seconds // 86400, "day"
+    else:
+        n, unit = seconds // (7 * 86400), "week"
+    plural = "" if n == 1 else "s"
+    return f"{n} {unit}{plural} ago"
+
+
+def _expand_argv(
+    argv: list[str],
+    sender: str,
+    recipient: str,
+    message: str,
+    timestamp: str = "",
+    age: str = "",
+) -> list[str]:
     """Expand placeholders in argv:
       - `$SENDER`     sender's canonical name (empty for senderless prompts)
       - `$RECIPIENT`  what the sender wrote in `to` (alias for fanned, agent for direct)
       - `$MESSAGE`    content + any FILE: lines
+      - `$TIMESTAMP`  ISO 8601 UTC time the message was queued (e.g.,
+                      `2026-04-28T14:30:00.123456Z`); empty for invokeClear
+                      and for messages without a `date` field
+      - `$AGE`        human-readable age relative to now (e.g.,
+                      `5 minutes ago`); same emptiness rules as $TIMESTAMP
       - `$A8S_DIR`    the apps/a8s/ directory (so default.json can reference
                       bundled scripts like dummy-cli without hardcoding paths)
     """
@@ -107,6 +156,8 @@ def _expand_argv(argv: list[str], sender: str, recipient: str, message: str) -> 
         a = a.replace("$SENDER", sender)
         a = a.replace("$RECIPIENT", recipient)
         a = a.replace("$MESSAGE", message)
+        a = a.replace("$TIMESTAMP", timestamp)
+        a = a.replace("$AGE", age)
         a = a.replace("$A8S_DIR", a8s_dir)
         out.append(a)
     return out
@@ -120,6 +171,10 @@ def build_command(definition: dict, msg: dict, verb: str) -> list[str]:
       prompt   invokePrompt   senderless supervisor-direct (raw content)
       message  invokeMessage  routed tell (sender + recipient + content)
       clear    invokeClear    start a fresh conversation (no message)
+
+    `$TIMESTAMP` and `$AGE` come from `msg["date"]`; both empty for clear
+    and for messages that somehow lack a date field (defensive, shouldn't
+    happen since `_write_outbox` / `_queue_*` always stamp one).
     """
     key = VERB_KEY.get(verb)
     if key is None:
@@ -132,7 +187,9 @@ def build_command(definition: dict, msg: dict, verb: str) -> list[str]:
     sender = (msg.get("from") or "").strip()
     recipient = (msg.get("to") or "").strip()
     body = _message_body(msg)
-    return _expand_argv(list(argv), sender, recipient, body)
+    date_str = (msg.get("date") or "").strip()
+    age = _format_age(date_str)
+    return _expand_argv(list(argv), sender, recipient, body, date_str, age)
 
 
 def _autodiscover_definition(root: Path) -> tuple[str, str]:

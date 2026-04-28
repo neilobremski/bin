@@ -10,7 +10,7 @@
     "gemini",
     "--yolo",
     "--resume", "latest",
-    "--prompt", "$SENDER tells $RECIPIENT: $MESSAGE"
+    "--prompt", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ],
   "invokeClear": [
     "gemini",

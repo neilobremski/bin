@@ -6,9 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from datetime import datetime, timezone
+
 from definitions import (
     _autodiscover_definition,
     _expand_argv,
+    _format_age,
     _message_body,
     build_command,
     default_definition_path,
@@ -42,6 +45,57 @@ class TestSelectVerb:
         # as direct ones — the only difference is what `to` resolves to.
         msg = {"from": "GERRY", "to": "devs", "content": "hi"}
         assert select_verb(msg) == "message"
+
+
+# ---------- _format_age ----------
+
+class TestFormatAge:
+    NOW = datetime(2026, 4, 28, 14, 30, 0, tzinfo=timezone.utc)
+
+    def _ago(self, **kwargs):
+        from datetime import timedelta
+        return (self.NOW - timedelta(**kwargs)).isoformat().replace("+00:00", "Z")
+
+    def test_seconds(self):
+        assert _format_age(self._ago(seconds=5), now=self.NOW) == "5 seconds ago"
+
+    def test_singular_second(self):
+        assert _format_age(self._ago(seconds=1), now=self.NOW) == "1 second ago"
+
+    def test_zero_seconds(self):
+        assert _format_age(self._ago(seconds=0), now=self.NOW) == "0 seconds ago"
+
+    def test_minutes(self):
+        assert _format_age(self._ago(minutes=5), now=self.NOW) == "5 minutes ago"
+
+    def test_singular_minute(self):
+        assert _format_age(self._ago(minutes=1), now=self.NOW) == "1 minute ago"
+
+    def test_hours(self):
+        assert _format_age(self._ago(hours=3), now=self.NOW) == "3 hours ago"
+
+    def test_days(self):
+        assert _format_age(self._ago(days=2), now=self.NOW) == "2 days ago"
+
+    def test_weeks(self):
+        assert _format_age(self._ago(days=14), now=self.NOW) == "2 weeks ago"
+
+    def test_future_clamps_to_zero(self):
+        # Clock skew shouldn't produce negative ages.
+        from datetime import timedelta
+        future = (self.NOW + timedelta(seconds=10)).isoformat().replace("+00:00", "Z")
+        assert _format_age(future, now=self.NOW) == "0 seconds ago"
+
+    def test_empty_string(self):
+        assert _format_age("", now=self.NOW) == ""
+
+    def test_unparseable(self):
+        assert _format_age("not-a-date", now=self.NOW) == ""
+
+    def test_iso_without_z_suffix(self):
+        # `_write_outbox` writes `Z` but accept timezone-aware ISO too.
+        ts = "2026-04-28T14:25:00+00:00"
+        assert _format_age(ts, now=self.NOW) == "5 minutes ago"
 
 
 # ---------- _message_body ----------
@@ -130,6 +184,53 @@ class TestBuildCommand:
         argv = build_command(defn, msg, "message")
         assert argv == ["x", "review\n\nFILE: /tmp/x"]
 
+    def test_timestamp_substitution_from_msg_date(self):
+        # $TIMESTAMP comes from msg["date"] verbatim — useful for backlog
+        # context when an agent finally drains a long-queued message.
+        defn = {"invokeMessage": ["x", "[$TIMESTAMP] $SENDER: $MESSAGE"]}
+        msg = {
+            "from": "GERRY",
+            "to": "CLAUDE",
+            "date": "2026-04-28T14:30:00.000000Z",
+            "content": "hi",
+        }
+        argv = build_command(defn, msg, "message")
+        assert argv == ["x", "[2026-04-28T14:30:00.000000Z] GERRY: hi"]
+
+    def test_age_substitution_relative_to_now(self, monkeypatch):
+        # Freeze the clock by monkeypatching `datetime` in definitions module.
+        from datetime import timedelta
+        import definitions as dmod
+        frozen = datetime(2026, 4, 28, 14, 35, 0, tzinfo=timezone.utc)
+        msg_date = (frozen - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+
+        class FakeDT(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return frozen
+        monkeypatch.setattr(dmod, "datetime", FakeDT)
+
+        defn = {"invokeMessage": ["x", "($AGE) $MESSAGE"]}
+        msg = {"from": "G", "to": "C", "date": msg_date, "content": "hi"}
+        argv = build_command(defn, msg, "message")
+        assert argv == ["x", "(5 minutes ago) hi"]
+
+    def test_clear_does_not_substitute_timestamp_or_age(self):
+        # invokeClear deliberately gets empty strings for all message-shaped
+        # vars, including $TIMESTAMP and $AGE — there's no message to age.
+        defn = {"invokeClear": ["x", "TS:$TIMESTAMP", "AGE:$AGE"]}
+        msg = {"clear": True, "date": "2026-04-28T14:30:00Z"}
+        argv = build_command(defn, msg, "clear")
+        assert argv == ["x", "TS:", "AGE:"]
+
+    def test_missing_date_yields_empty_age_and_timestamp(self):
+        # Defensive: a message without `date` (shouldn't normally happen)
+        # gets empty $TIMESTAMP / $AGE rather than crashing.
+        defn = {"invokeMessage": ["x", "TS:$TIMESTAMP", "AGE:$AGE", "$MESSAGE"]}
+        msg = {"from": "G", "to": "C", "content": "hi"}
+        argv = build_command(defn, msg, "message")
+        assert argv == ["x", "TS:", "AGE:", "hi"]
+
 
 class TestExpandArgv:
     def test_no_placeholders(self):
@@ -142,6 +243,15 @@ class TestExpandArgv:
 
     def test_sender_recipient_message_in_one_arg(self):
         assert _expand_argv(["$SENDER->$RECIPIENT: $MESSAGE"], "A", "B", "hi") == ["A->B: hi"]
+
+    def test_timestamp_and_age(self):
+        argv = _expand_argv(
+            ["[$TIMESTAMP][$AGE] $MESSAGE"],
+            "A", "B", "hi",
+            timestamp="2026-04-28T14:30:00Z",
+            age="5 minutes ago",
+        )
+        assert argv == ["[2026-04-28T14:30:00Z][5 minutes ago] hi"]
 
     def test_a8s_dir_substitution(self):
         from core import SCRIPT_DIR

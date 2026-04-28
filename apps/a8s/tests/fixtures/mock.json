@@ -1,6 +1,6 @@
 {
   "description": "Test-only mock CLI definition. Each invoke* runs the bundled mock-cli script which echoes its argv. Single-arg payloads use the FROM:|TO:|MSG: format so daemon tests can grep stable strings.",
-  "invokePrompt":  ["$A8S_DIR/tests/fixtures/mock-cli", "verb=prompt", "FROM:$SENDER|TO:$RECIPIENT|MSG:$MESSAGE"],
-  "invokeMessage": ["$A8S_DIR/tests/fixtures/mock-cli", "verb=message", "FROM:$SENDER|TO:$RECIPIENT|MSG:$MESSAGE"],
+  "invokePrompt":  ["$A8S_DIR/tests/fixtures/mock-cli", "verb=prompt", "FROM:$SENDER|TO:$RECIPIENT|TS:$TIMESTAMP|AGE:$AGE|MSG:$MESSAGE"],
+  "invokeMessage": ["$A8S_DIR/tests/fixtures/mock-cli", "verb=message", "FROM:$SENDER|TO:$RECIPIENT|TS:$TIMESTAMP|AGE:$AGE|MSG:$MESSAGE"],
   "invokeClear":   ["$A8S_DIR/tests/fixtures/mock-cli", "verb=clear"]
 }

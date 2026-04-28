@@ -174,16 +174,20 @@ There is no separate alias verb. Strict opacity (issues #69, #70): a routed mess
 {
   "description": "...",
   "invokePrompt":  ["claude", "...", "--continue", "-p", "$MESSAGE"],
-  "invokeMessage": ["claude", "...", "--continue", "-p", "$SENDER tells $RECIPIENT: $MESSAGE"],
+  "invokeMessage": ["claude", "...", "--continue", "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"],
   "invokeClear":   ["claude", "-p", "Conversation cleared. New conversation starts now."]
 }
 ```
 
-Argv elements run through four substitutions:
+Argv elements run through six substitutions:
 - `$SENDER` → sender's canonical name (empty for senderless prompts).
 - `$RECIPIENT` → what the sender wrote in `to` (alias name for fanned messages, agent name for direct ones).
 - `$MESSAGE` → the message body (`content`, with any `FILE: <path>` lines appended).
+- `$TIMESTAMP` → ISO 8601 UTC timestamp the message was queued (e.g. `2026-04-28T14:30:00.123456Z`). Useful when you want a stable machine-readable time.
+- `$AGE` → human-readable age relative to now (e.g. `5 minutes ago`). Computed at wake time, so a long backlog gets accurate values per message. Pick this OR `$TIMESTAMP` per definition based on which the LLM will read more naturally.
 - `$A8S_DIR` → `apps/a8s/` itself, so definitions can point at bundled scripts (`default.json` uses this for `dummy-cli`).
+
+`$TIMESTAMP` and `$AGE` are empty for `invokeClear` and for any message without a `date` field.
 
 Override per-agent with `a8s define <name> <path>` — point at any JSON. The file isn't moved or copied; the registry stores the path.
 

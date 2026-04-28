@@ -139,10 +139,13 @@ Key invariants:
 - **`cmd_start` re-execs via `core.ENTRYPOINT`**, not `__file__`. After the
   modular split, `__file__` inside `commands.py` resolves to the wrong path.
   `core.ENTRYPOINT = SCRIPT_DIR / "a8s.py"` is the canonical re-exec target.
-- **Argv interpolation** (`$SENDER`, `$RECIPIENT`, `$MESSAGE`, `$A8S_DIR`)
-  expands via `definitions._expand_argv`. `invokeClear` always gets empty
-  strings for the message-shaped vars. Don't introduce more placeholders
-  without checking they make sense across all three `invoke*` verbs.
+- **Argv interpolation** (`$SENDER`, `$RECIPIENT`, `$MESSAGE`, `$TIMESTAMP`,
+  `$AGE`, `$A8S_DIR`) expands via `definitions._expand_argv`. `$TIMESTAMP`
+  is the ISO date the message was queued; `$AGE` is the human-readable
+  delta from now (computed each wake, so backlogs get accurate per-message
+  ages). `invokeClear` always gets empty strings for the message-shaped
+  vars. Don't introduce more placeholders without checking they make
+  sense across all three `invoke*` verbs.
 - **`core.PRINT_LOCK` is the cross-module log lock.** It's `None` at module
   load and only set when `daemon.attached_loop` starts. Threading is intentional:
   multi-agent handlers may interleave wake events. If you write a new code path
@@ -218,8 +221,8 @@ install                      install canonical skills
 
 | Verb | Trigger | Argv vars typically used |
 |---|---|---|
-| `invokePrompt` | `from` is empty (queued by `a8s prompt`) | `$MESSAGE` only |
-| `invokeMessage` | `from` set | `$SENDER`, `$RECIPIENT`, `$MESSAGE` |
+| `invokePrompt` | `from` is empty (queued by `a8s prompt`) | `$MESSAGE` (and optionally `$AGE`/`$TIMESTAMP`) |
+| `invokeMessage` | `from` set | `$SENDER`, `$RECIPIENT`, `$AGE` or `$TIMESTAMP`, `$MESSAGE` |
 | `invokeClear` | `clear: true` field set | none — argv is literal |
 
 There's no separate alias verb. Strict opacity (#69, #70) makes a direct
