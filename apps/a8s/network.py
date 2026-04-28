@@ -324,3 +324,65 @@ def stop_remotes(remotes: list[Transport]) -> None:
             r.stop()
         except Exception as e:
             out(f"WARN: remote {r.id} stop raised: {e}")
+
+
+# ---------- one-shot supervisor publish ----------
+
+# How long to keep retrying the publish while transports finish their
+# (possibly slow) initial handshake. TLS to a cloud broker can take 1–3s
+# beyond the local-only case, so the retry budget needs to comfortably
+# cover that. The inner per-attempt sleep is short so we exit promptly
+# once at least one remote becomes ready.
+_SUPERVISOR_PUBLISH_TIMEOUT_S = 30.0
+_SUPERVISOR_PUBLISH_POLL_S = 0.25
+
+
+def publish_once_to_remotes(msg: dict) -> tuple[list[str], list[str]]:
+    """Synchronously publish one envelope to every configured remote and
+    return (succeeded_ids, failed_ids).
+
+    Used by supervisor commands (`a8s prompt`, `a8s clear`) when the
+    recipient is unknown locally — those commands don't have a sender
+    context to drop the message into an outbox, so they go through this
+    direct path instead of the daemon's per-message backoff retry. No
+    persistence: if every remote fails, the user retries the CLI command.
+
+    Each transport is started, publish() is retried quietly while paho's
+    background thread completes the (possibly slow) TLS handshake, then
+    stop()'d. Unlike the daemon path, the retry here doesn't go through
+    `make_publish_remotes` — that one warn-logs every attempt, which
+    would be noisy during the normal handshake window. The first
+    successful publish per remote ends its retry."""
+    import time as _time
+
+    remotes = load_remotes()
+    if not remotes:
+        return [], []
+    started = start_remotes(remotes, lambda: [])
+    envelope = json.dumps(msg).encode("utf-8")
+    succeeded: list[str] = []
+    last_errors: dict[str, str] = {}
+    pending: list[Transport] = list(started)
+    deadline = _time.time() + _SUPERVISOR_PUBLISH_TIMEOUT_S
+    try:
+        while pending and _time.time() < deadline:
+            still_pending: list[Transport] = []
+            for r in pending:
+                try:
+                    r.publish(envelope)
+                    succeeded.append(r.id)
+                except TransportError as e:
+                    last_errors[r.id] = str(e)
+                    still_pending.append(r)
+                except Exception as e:
+                    last_errors[r.id] = f"{type(e).__name__}: {e}"
+                    still_pending.append(r)
+            pending = still_pending
+            if pending:
+                _time.sleep(_SUPERVISOR_PUBLISH_POLL_S)
+    finally:
+        stop_remotes(started)
+    failed = [r.id for r in started if r.id not in succeeded]
+    for fid in failed:
+        out(f"WARN remote {fid} publish failed: {last_errors.get(fid, 'unknown error')}")
+    return succeeded, failed

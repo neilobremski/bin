@@ -227,7 +227,10 @@ prompt <name> <message>      senderless supervisor message (raw delivery)
 tell <name> <message>        routed message (sender = agent enclosing CWD)
 clear <name>                 queue CLEAR sentinel (write-time + read-time inbox wipe)
 logs <name>... [--tail N] [-f]   merge-sorted per-agent logs
-remote add <name> <broker> <topic> [--<opt> <value> ...]   register an MQTT remote (extras forwarded to transport)
+remote                                  list all configured remotes
+remote <name>                           show one remote's spec (passwords masked)
+remote <name> <broker> <topic> [--<k> <v> ...]   register or overwrite (extras forwarded to transport)
+unremote <name>                          forget a remote
 remote remove <name>         forget a remote
 remote ls                    list configured remotes
 install                      install canonical skills

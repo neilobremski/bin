@@ -26,6 +26,7 @@ from commands import (
     cmd_stop,
     cmd_tell,
     cmd_unalias,
+    cmd_unremote,
 )
 
 
@@ -49,7 +50,8 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("prompt",   "<name> <message>",          "Send a message with no sender."),
     ("clear",    "<name>",                    "Start a fresh session for an agent."),
     ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
-    ("remote",   "add|remove|ls ...",         "Configure remotes for cross-machine routing."),
+    ("remote",   "[<name> [<broker> <topic> [--<k> <v> ...]]]", "List, show, or set a cross-machine remote."),
+    ("unremote", "<name>",                    "Remove a configured remote."),
     ("install",  "",                          "Install the `tell` skill into supported tools."),
 ]
 
@@ -111,6 +113,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_logs(args)
     if cmd == "remote":
         return cmd_remote(args)
+    if cmd == "unremote":
+        return cmd_unremote(args)
     raise ValueError(f"unknown command: {cmd!r}")
 
 

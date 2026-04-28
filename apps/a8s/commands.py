@@ -48,7 +48,12 @@ from mailbox import (
     _split_content_and_files,
     _write_outbox,
 )
-from network import load_network_config, save_network_config
+from network import (
+    configured_remote_ids,
+    load_network_config,
+    publish_once_to_remotes,
+    save_network_config,
+)
 from registry import (
     _scan_for_markers,
     find_participant,
@@ -725,10 +730,9 @@ def cmd_tell(args: list[str]) -> int:
         kind, members = resolve_name(target_query)
     except KeyError:
         # Unknown locally. Allow the send if any remotes are configured —
-        # the recipient may live on another cluster and the broadcast +
-        # filter receive side will pick it up there. With zero remotes
-        # there's no path forward, so fail.
-        from network import configured_remote_ids
+        # the recipient may live on another cluster and the receive-side
+        # filter will pick it up there. With zero remotes there's no path
+        # forward, so fail.
         if not configured_remote_ids():
             print(f"tell: no agent or alias named {target_query!r}", file=sys.stderr)
             return 1
@@ -757,8 +761,9 @@ def cmd_tell(args: list[str]) -> int:
 
 def cmd_prompt(args: list[str]) -> int:
     """`a8s prompt <name> <message>` — queue a senderless prompt. <name> may
-    be an agent or alias; aliases queue one copy per member. The literal
-    `all` target is gone — create an `all` alias if you want broadcast."""
+    be an agent or alias; aliases queue one copy per member. For unknown-
+    locally recipients with remotes configured, the prompt is published
+    synchronously to every remote (no retry on failure — re-run the CLI)."""
     if len(args) < 2:
         print("usage: a8s prompt <name> <message>", file=sys.stderr)
         return 2
@@ -766,9 +771,20 @@ def cmd_prompt(args: list[str]) -> int:
     prompt = " ".join(rest)
     parts = participants_from_registry()
 
-    members = _expand_to_agents(name)
-    if members is None:
+    try:
+        _kind, members = resolve_name(name)
+    except KeyError:
+        if not configured_remote_ids():
+            print(f"prompt: no agent or alias named {name!r}", file=sys.stderr)
+            return 1
+        return _publish_supervisor_to_remotes(name, prompt, clear=False, label="prompt")
+    except ValueError as e:
+        print(f"prompt: {e}", file=sys.stderr)
         return 1
+    if not members:
+        print(f"prompt: {name!r} resolves to no agents", file=sys.stderr)
+        return 1
+
     queued = 0
     for member in members:
         target = find_participant(parts, member)
@@ -783,11 +799,60 @@ def cmd_prompt(args: list[str]) -> int:
     return 0 if queued > 0 else 1
 
 
+def _publish_supervisor_to_remotes(name: str, content: str, *, clear: bool, label: str) -> int:
+    """Build a senderless envelope (`from: ""`) targeting `name` and publish
+    once to every configured remote. Used by `cmd_prompt` and `cmd_clear`
+    when the recipient lives on another cluster.
+
+    `clear=True` adds the CLEAR-sentinel marker so the receiver's wake_once
+    dispatches `invokeClear` (and runs the read-time inbox wipe). `label`
+    is the user-facing command name for log messages."""
+    from datetime import datetime, timezone
+    from ulid import new as new_ulid
+
+    msg_id = new_ulid()
+    now = datetime.now(timezone.utc)
+    envelope: dict = {
+        "id": msg_id,
+        "date": now.isoformat().replace("+00:00", "Z"),
+        "from": "",
+        "to": name,
+        "content": content,
+        "files": [],
+    }
+    if clear:
+        envelope["clear"] = True
+    succeeded, failed = publish_once_to_remotes(envelope)
+    if not succeeded and not failed:
+        # publish_once_to_remotes returns ([], []) only when no remotes were
+        # configured — but we wouldn't be here in that case (caller checks).
+        # Defensive fallback:
+        print(f"{label}: no remotes available for delivery", file=sys.stderr)
+        return 1
+    if not succeeded:
+        print(
+            f"{label}: failed to publish to any remote (failed: {sorted(failed)})",
+            file=sys.stderr,
+        )
+        return 1
+    if failed:
+        print(
+            f"{label}: published to {sorted(succeeded)}; failed: {sorted(failed)} "
+            f"(id {msg_id})",
+            file=sys.stderr,
+        )
+    else:
+        print(f"{label} -> {name} via {sorted(succeeded)} (id {msg_id})")
+    return 0
+
+
 def cmd_clear(args: list[str]) -> int:
     """`a8s clear <name>` queues a CLEAR sentinel into the agent's (or alias
     members') inbox. The sentinel is the only message at write time (current
     inbox is moved to trash). When the wake-loop processes it, invokeClear
-    runs (no prompt) — starts a fresh conversation."""
+    runs (no prompt) — starts a fresh conversation. For unknown-locally
+    recipients with remotes configured, the sentinel is published once to
+    every remote (the receiver's wake_once handles the read-time wipe)."""
     if not args:
         print("usage: a8s clear <name>", file=sys.stderr)
         print("       <name> can be an agent or alias; alias members are all cleared.", file=sys.stderr)
@@ -796,8 +861,10 @@ def cmd_clear(args: list[str]) -> int:
     try:
         _kind, members = resolve_name(name)
     except KeyError:
-        print(f"clear: no agent or alias named {name!r}", file=sys.stderr)
-        return 1
+        if not configured_remote_ids():
+            print(f"clear: no agent or alias named {name!r}", file=sys.stderr)
+            return 1
+        return _publish_supervisor_to_remotes(name, "", clear=True, label="clear")
     except ValueError as e:
         print(f"clear: {e}", file=sys.stderr)
         return 1
@@ -949,13 +1016,15 @@ def cmd_logs(args: list[str]) -> int:
 # ---------- remotes (issue #63) ----------
 
 _REMOTE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_SECRET_KEYS = {"pass", "password"}
 
 
 def _remote_usage() -> int:
     print(
-        "usage: a8s remote add <name> <broker-url> <topic> [--<opt> <value> ...]\n"
-        "       a8s remote remove <name>\n"
-        "       a8s remote ls\n"
+        "usage: a8s remote                                         # list all\n"
+        "       a8s remote <name>                                  # show one\n"
+        "       a8s remote <name> <broker> <topic> [--<k> <v> ...]   # add or overwrite\n"
+        "       a8s unremote <name>                                # remove\n"
         "\n"
         "Any --<opt> <value> pair past the broker and topic is passed verbatim\n"
         "to the transport (e.g. --user / --pass for mqtt). Unknown options are\n"
@@ -965,29 +1034,40 @@ def _remote_usage() -> int:
     return 2
 
 
+def _format_remote_summary(spec: dict) -> str:
+    kind = spec.get("transport", "?")
+    broker = spec.get("broker", "?")
+    topic = spec.get("topic", "?")
+    extras = " ".join(
+        f"--{k}=***" if k in _SECRET_KEYS else f"--{k}={v}"
+        for k, v in spec.items()
+        if k not in {"transport", "broker", "topic"}
+    )
+    line = f"{kind} {broker} topic={topic}"
+    if extras:
+        line += f" {extras}"
+    return line
+
+
 def cmd_remote(args: list[str]) -> int:
     """`a8s remote` — manage cross-cluster remotes declared in `~/.a8s/network.json`.
 
-    Subcommands:
-      add <name> <broker> <topic> [--<opt> <value> ...]   register an MQTT remote
-      remove <name>                 forget a remote
-      ls                            list configured remotes
+    Forms (mirror `a8s alias`):
+      a8s remote                                          list all
+      a8s remote <name>                                   show one
+      a8s remote <name> <broker> <topic> [--<k> <v> ...]  add or overwrite
+      a8s unremote <name>                                 remove (see `cmd_unremote`)
     """
-    if not args:
-        return _remote_usage()
-    sub = args[0]
-    if sub == "ls":
-        return _cmd_remote_ls(args[1:])
-    if sub == "add":
-        return _cmd_remote_add(args[1:])
-    if sub == "remove":
-        return _cmd_remote_remove(args[1:])
+    if len(args) == 0:
+        return _cmd_remote_list()
+    if len(args) == 1:
+        return _cmd_remote_show(args[0])
+    if len(args) >= 3:
+        return _cmd_remote_set(args[0], args[1], args[2], args[3:])
     return _remote_usage()
 
 
-def _cmd_remote_ls(args: list[str]) -> int:
-    if args:
-        return _remote_usage()
+def _cmd_remote_list() -> int:
     cfg = load_network_config()
     remotes = cfg.get("remotes", {})
     if not remotes:
@@ -995,57 +1075,56 @@ def _cmd_remote_ls(args: list[str]) -> int:
         return 0
     name_w = max(len(n) for n in remotes)
     for name, spec in remotes.items():
-        kind = spec.get("transport", "?")
-        broker = spec.get("broker", "?")
-        topic = spec.get("topic", "?")
-        print(f"  {name.ljust(name_w)}  {kind:<10}  {broker}  topic={topic}")
+        print(f"  {name.ljust(name_w)}  {_format_remote_summary(spec)}")
     return 0
 
 
-def _cmd_remote_add(args: list[str]) -> int:
-    if len(args) < 3:
-        return _remote_usage()
-    name, broker, topic = args[0], args[1], args[2]
-    rest = args[3:]
+def _cmd_remote_show(name: str) -> int:
+    cfg = load_network_config()
+    if name not in cfg["remotes"]:
+        print(f"no remote named {name!r}", file=sys.stderr)
+        return 1
+    print(f"{name}: {_format_remote_summary(cfg['remotes'][name])}")
+    return 0
+
+
+def _cmd_remote_set(name: str, broker: str, topic: str, opt_tokens: list[str]) -> int:
     if not _REMOTE_NAME_RE.match(name):
         print(f"remote name must be alphanumeric (with -, _, .): {name!r}", file=sys.stderr)
         return 2
     extras: dict = {}
     i = 0
-    while i < len(rest):
-        tok = rest[i]
+    while i < len(opt_tokens):
+        tok = opt_tokens[i]
         if not tok.startswith("--") or len(tok) <= 2:
             print(f"expected --<opt> <value> pair, got: {tok!r}", file=sys.stderr)
             return _remote_usage()
         key = tok[2:]
         i += 1
-        if i >= len(rest):
+        if i >= len(opt_tokens):
             print(f"missing value for {tok}", file=sys.stderr)
             return _remote_usage()
         if key in extras:
             print(f"duplicate option: {tok}", file=sys.stderr)
             return _remote_usage()
-        extras[key] = rest[i]
+        extras[key] = opt_tokens[i]
         i += 1
     cfg = load_network_config()
-    if name in cfg["remotes"]:
-        print(f"remote {name!r} already exists", file=sys.stderr)
-        return 1
+    overwriting = name in cfg["remotes"]
     spec: dict = {"transport": "mqtt", "broker": broker, "topic": topic, **extras}
     cfg["remotes"][name] = spec
     save_network_config(cfg)
-    extras_summary = " ".join(f"--{k}=***" if k in ("pass", "password") else f"--{k}={v}"
-                              for k, v in extras.items())
-    summary = f"{spec['transport']} {broker} topic={topic}"
-    if extras_summary:
-        summary += f" {extras_summary}"
-    print(f"added remote {name} ({summary})")
+    verb = "updated" if overwriting else "added"
+    print(f"{verb} remote {name} ({_format_remote_summary(spec)})")
     return 0
 
 
-def _cmd_remote_remove(args: list[str]) -> int:
+def cmd_unremote(args: list[str]) -> int:
+    """`a8s unremote <name>` — remove a configured remote. Mirrors `unalias`'s
+    shape so the surface stays uniform across registry primitives."""
     if len(args) != 1:
-        return _remote_usage()
+        print("usage: a8s unremote <name>", file=sys.stderr)
+        return 2
     name = args[0]
     cfg = load_network_config()
     if name not in cfg["remotes"]:

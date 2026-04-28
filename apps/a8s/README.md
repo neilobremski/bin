@@ -137,9 +137,10 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 ### Remotes (issue #63)
 | | |
 |---|---|
-| `a8s remote add <name> <broker-url> <topic> [--<opt> <value> ...]` | Register an MQTT remote. Broker URL is `mqtt://host[:1883]` or `mqtts://host[:8883]`. Persistent session + QoS 1 are wired automatically so an offline cluster catches up on reconnect. Any `--<opt> <value>` past the broker and topic is forwarded verbatim to the transport — common ones are `--user U --pass P`, `--client_id ID`, `--keepalive N`. The transport rejects unknown options at load time so typos fail loud. |
-| `a8s remote remove <name>` | Forget a remote. Running daemons keep using the prior config until restart. |
-| `a8s remote ls` | List configured remotes (transport, broker, topic). |
+| `a8s remote` | List configured remotes (transport, broker, topic, opts; passwords masked). |
+| `a8s remote <name>` | Show one remote's spec. |
+| `a8s remote <name> <broker-url> <topic> [--<opt> <value> ...]` | Register or overwrite a remote. Broker URL is `mqtt://host[:1883]` or `mqtts://host[:8883]`. Persistent session + QoS 1 are wired automatically so an offline cluster catches up on reconnect. Any `--<opt> <value>` past the broker and topic is forwarded verbatim to the transport — common ones are `--user U --pass P`, `--client_id ID`, `--keepalive N`. The transport rejects unknown options at load time so typos fail loud. |
+| `a8s unremote <name>` | Forget a remote. Running daemons keep using the prior config until restart. |
 
 Remotes are git-shaped: an explicit list of places to fan messages out to. a8s only crosses cluster boundaries on `tell` / `prompt` — everything else (`a8s logs`, `a8s ls`, `a8s agents`) is strictly local. If you want cross-cluster log access, register an a8s connector that turns inbound tells into local `a8s logs` calls; a8s itself just enables the message + invocation path.
 
