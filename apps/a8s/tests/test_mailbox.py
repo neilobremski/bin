@@ -95,6 +95,17 @@ class TestWriteOutbox:
         assert msg["files"] == []
         assert "date" in msg
 
+    def test_filename_is_ulid_and_matches_id(self, fake_home, tmp_path):
+        from ulid import is_ulid
+        path = _write_outbox("A", tmp_path, "B", "hi", [])
+        # Filename = "<ulid>.json" — sortable, opaque, no sender leak in name.
+        stem = path.stem
+        assert is_ulid(stem)
+        # The message's `id` field equals the filename stem so receivers can
+        # dedupe by ID without re-parsing the filename.
+        msg = json.loads(path.read_text())
+        assert msg["id"] == stem
+
 
 class TestQueuePrompt:
     def test_writes_senderless_to_inbox(self, fake_home, tmp_path):
@@ -133,7 +144,10 @@ class TestQueueClearSentinel:
         # Inbox should now contain ONLY the CLEAR sentinel.
         files = list(inbox_dir("X").iterdir())
         assert len(files) == 1
-        assert "_CLEAR" in files[0].name
+        # The CLEAR sentinel is identified by its body (`clear: true`), not
+        # by the filename — filenames are now opaque ULIDs.
+        body = json.loads(files[0].read_text())
+        assert body.get("clear") is True
         # The 3 prior messages are in trash.
         assert len(list(trash_dir("X").iterdir())) == 3
 

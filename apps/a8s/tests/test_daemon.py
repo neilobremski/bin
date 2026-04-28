@@ -382,8 +382,13 @@ class TestWakeOnceVerbs:
         # The stale prompt was NOT processed (its content shouldn't appear
         # as a wake line).
         assert "MOCK> MOCK-CLI: stale" not in log
-        # Stale prompt landed in trash (read-time wipe).
-        assert any("PROMPT" in f.name for f in trash_dir("MOCK").iterdir())
+        # Stale prompt landed in trash (read-time wipe). With ULID filenames
+        # the messages are identified by their JSON body, not their name.
+        import json as _json
+        trashed_bodies = [
+            _json.loads(f.read_text()) for f in trash_dir("MOCK").iterdir()
+        ]
+        assert any(b.get("content") == "stale" for b in trashed_bodies)
 
 
 class TestAttachedLoopLifecycle:

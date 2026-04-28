@@ -30,7 +30,6 @@ from core import (
     MAX_FILE_BYTES,
     Participant,
     _preview,
-    _safe_name,
     files_dir,
     inbox_dir,
     inbox_tmp_dir,
@@ -40,6 +39,7 @@ from core import (
     unique_path,
 )
 from registry import resolve_name
+from ulid import new as new_ulid
 
 
 # ---------- mailboxes ----------
@@ -301,16 +301,16 @@ def _write_outbox(sender_name: str, sender_root: Path, to: str, content: str, fi
     outbox = outbox_dir(sender_root)
     outbox.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
+    msg_id = new_ulid()
     msg = {
+        "id": msg_id,
         "date": now.isoformat().replace("+00:00", "Z"),
         "from": sender_name,
         "to": to,
         "content": content,
         "files": files,
     }
-    safe_sender = _safe_name(sender_name)
-    fname = f"{now.strftime('%Y%m%dT%H%M%S%f')}_{safe_sender}.json"
-    dest = unique_path(outbox / fname)
+    dest = unique_path(outbox / f"{msg_id}.json")
     with dest.open("w", encoding="utf-8") as f:
         json.dump(msg, f, indent=2)
     return dest
@@ -324,15 +324,16 @@ def _queue_prompt(p: Participant, content: str) -> Path:
     wakes the agent."""
     ensure_mailboxes(p)
     now = datetime.now(timezone.utc)
+    msg_id = new_ulid()
     msg = {
+        "id": msg_id,
         "date": now.isoformat().replace("+00:00", "Z"),
         "from": "",
         "to": p.name,
         "content": content,
         "files": [],
     }
-    fname = f"{now.strftime('%Y%m%dT%H%M%S%f')}_PROMPT.json"
-    dest = unique_path(inbox_dir(p.name) / fname)
+    dest = unique_path(inbox_dir(p.name) / f"{msg_id}.json")
     with dest.open("w", encoding="utf-8") as f:
         json.dump(msg, f, indent=2)
     return dest
@@ -354,7 +355,9 @@ def _queue_clear_sentinel(p: Participant) -> Path:
             trashed = unique_path(trash_dir(p.name) / f.name)
             f.rename(trashed)
     now = datetime.now(timezone.utc)
+    msg_id = new_ulid()
     msg = {
+        "id": msg_id,
         "date": now.isoformat().replace("+00:00", "Z"),
         "from": "",
         "to": p.name,
@@ -362,8 +365,7 @@ def _queue_clear_sentinel(p: Participant) -> Path:
         "files": [],
         "clear": True,
     }
-    fname = f"{now.strftime('%Y%m%dT%H%M%S%f')}_CLEAR.json"
-    dest = unique_path(inbox_dir(p.name) / fname)
+    dest = unique_path(inbox_dir(p.name) / f"{msg_id}.json")
     with dest.open("w", encoding="utf-8") as f:
         json.dump(msg, f, indent=2)
     return dest
