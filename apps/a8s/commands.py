@@ -48,6 +48,7 @@ from mailbox import (
     _split_content_and_files,
     _write_outbox,
 )
+from network import load_network_config, save_network_config
 from registry import (
     _scan_for_markers,
     find_participant,
@@ -936,3 +937,111 @@ def cmd_logs(args: list[str]) -> int:
                 f.close()
             except Exception:
                 pass
+
+
+# ---------- mesh remotes (issue #63) ----------
+
+_REMOTE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _remote_usage() -> int:
+    print(
+        "usage: a8s remote add <name> <broker-url> <topic> [--user U --pass P]\n"
+        "       a8s remote remove <name>\n"
+        "       a8s remote ls",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def cmd_remote(args: list[str]) -> int:
+    """`a8s remote` — manage mesh transports declared in `~/.a8s/network.json`.
+
+    Subcommands:
+      add <name> <broker> <topic>   register a paho-mqtt remote
+      remove <name>                 forget a remote
+      ls                            list configured remotes
+    """
+    if not args:
+        return _remote_usage()
+    sub = args[0]
+    if sub == "ls":
+        return _cmd_remote_ls(args[1:])
+    if sub == "add":
+        return _cmd_remote_add(args[1:])
+    if sub == "remove":
+        return _cmd_remote_remove(args[1:])
+    return _remote_usage()
+
+
+def _cmd_remote_ls(args: list[str]) -> int:
+    if args:
+        return _remote_usage()
+    cfg = load_network_config()
+    remotes = cfg.get("remotes", {})
+    if not remotes:
+        print("(no remotes configured)")
+        return 0
+    name_w = max(len(n) for n in remotes)
+    for name, spec in remotes.items():
+        kind = spec.get("transport", "?")
+        broker = spec.get("broker", "?")
+        topic = spec.get("topic", "?")
+        print(f"  {name.ljust(name_w)}  {kind:<10}  {broker}  topic={topic}")
+    return 0
+
+
+def _cmd_remote_add(args: list[str]) -> int:
+    if len(args) < 3:
+        return _remote_usage()
+    name, broker, topic = args[0], args[1], args[2]
+    rest = args[3:]
+    if not _REMOTE_NAME_RE.match(name):
+        print(f"remote name must be alphanumeric (with -, _, .): {name!r}", file=sys.stderr)
+        return 2
+    username: str | None = None
+    password: str | None = None
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok in ("--user", "--username"):
+            i += 1
+            if i >= len(rest):
+                return _remote_usage()
+            username = rest[i]
+        elif tok in ("--pass", "--password"):
+            i += 1
+            if i >= len(rest):
+                return _remote_usage()
+            password = rest[i]
+        else:
+            print(f"unknown remote option: {tok}", file=sys.stderr)
+            return _remote_usage()
+        i += 1
+    cfg = load_network_config()
+    if name in cfg["remotes"]:
+        print(f"remote {name!r} already exists", file=sys.stderr)
+        return 1
+    spec: dict = {"transport": "paho-mqtt", "broker": broker, "topic": topic}
+    if username is not None:
+        spec["username"] = username
+    if password is not None:
+        spec["password"] = password
+    cfg["remotes"][name] = spec
+    save_network_config(cfg)
+    print(f"added remote {name} ({spec['transport']} {broker} topic={topic})")
+    return 0
+
+
+def _cmd_remote_remove(args: list[str]) -> int:
+    if len(args) != 1:
+        return _remote_usage()
+    name = args[0]
+    cfg = load_network_config()
+    if name not in cfg["remotes"]:
+        print(f"no remote named {name!r}", file=sys.stderr)
+        return 1
+    del cfg["remotes"][name]
+    save_network_config(cfg)
+    print(f"removed remote {name}")
+    return 0

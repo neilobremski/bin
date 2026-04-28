@@ -18,6 +18,7 @@ from commands import (
     cmd_logs,
     cmd_ls,
     cmd_prompt,
+    cmd_remote,
     cmd_remove,
     cmd_run,
     cmd_start,
@@ -48,6 +49,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("prompt",   "<name> <message>",          "Send a message with no sender."),
     ("clear",    "<name>",                    "Start a fresh session for an agent."),
     ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
+    ("remote",   "add|remove|ls ...",         "Manage mesh transports for cross-machine routing."),
     ("install",  "",                          "Install the `tell` skill into supported tools."),
 ]
 
@@ -107,6 +109,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_install()
     if cmd == "logs":
         return cmd_logs(args)
+    if cmd == "remote":
+        return cmd_remote(args)
     raise ValueError(f"unknown command: {cmd!r}")
 
 

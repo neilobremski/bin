@@ -10,8 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from commands import cmd_add, cmd_alias, cmd_kill, cmd_remove, cmd_unalias
+from commands import cmd_add, cmd_alias, cmd_kill, cmd_remote, cmd_remove, cmd_unalias
 from core import agent_dir, kill_request_path, pid_path
+from network import load_network_config, save_network_config
 from registry import load_aliases, load_registry, save_registry
 
 
@@ -242,3 +243,61 @@ class TestCmdKillPerAgent:
         assert rc == 0
         out = capsys.readouterr().out
         assert "not running" in out
+
+
+class TestCmdRemote:
+    """Mesh remote management — `a8s remote add|remove|ls`. Just edits
+    `~/.a8s/network.json`; the daemon picks up the changes on next start."""
+
+    def test_ls_empty(self, fake_home, capsys):
+        rc = cmd_remote(["ls"])
+        assert rc == 0
+        assert "no remotes configured" in capsys.readouterr().out
+
+    def test_add_then_ls(self, fake_home, capsys):
+        rc = cmd_remote(["add", "hub", "mqtt://broker:1883", "a8s/mesh"])
+        assert rc == 0
+        cfg = load_network_config()
+        assert cfg["remotes"]["hub"]["transport"] == "paho-mqtt"
+        assert cfg["remotes"]["hub"]["broker"] == "mqtt://broker:1883"
+        assert cfg["remotes"]["hub"]["topic"] == "a8s/mesh"
+        # ls reflects the entry.
+        capsys.readouterr()  # discard prior
+        cmd_remote(["ls"])
+        out = capsys.readouterr().out
+        assert "hub" in out
+        assert "paho-mqtt" in out
+
+    def test_add_with_credentials(self, fake_home):
+        rc = cmd_remote(["add", "hub", "mqtts://x", "t", "--user", "alice", "--pass", "secret"])
+        assert rc == 0
+        spec = load_network_config()["remotes"]["hub"]
+        assert spec["username"] == "alice"
+        assert spec["password"] == "secret"
+
+    def test_add_duplicate_rejected(self, fake_home, capsys):
+        cmd_remote(["add", "hub", "mqtt://x", "t"])
+        rc = cmd_remote(["add", "hub", "mqtt://y", "t"])
+        assert rc == 1
+        assert "already exists" in capsys.readouterr().err
+
+    def test_remove(self, fake_home):
+        cmd_remote(["add", "hub", "mqtt://x", "t"])
+        rc = cmd_remote(["remove", "hub"])
+        assert rc == 0
+        assert "hub" not in load_network_config()["remotes"]
+
+    def test_remove_unknown(self, fake_home, capsys):
+        rc = cmd_remote(["remove", "nope"])
+        assert rc == 1
+        assert "no remote named" in capsys.readouterr().err
+
+    def test_invalid_subcommand(self, fake_home, capsys):
+        rc = cmd_remote(["bogus"])
+        assert rc == 2
+        assert "usage:" in capsys.readouterr().err
+
+    def test_invalid_name(self, fake_home, capsys):
+        rc = cmd_remote(["add", "with space", "mqtt://x", "t"])
+        assert rc == 2
+        assert "must be alphanumeric" in capsys.readouterr().err
