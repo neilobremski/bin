@@ -134,6 +134,17 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 |---|---|
 | `a8s install` | Install canonical skills (`tell`) into Claude / Gemini / Codex user scope. |
 
+### Mesh remotes (issue #63)
+| | |
+|---|---|
+| `a8s remote add <name> <broker-url> <topic> [--user U --pass P]` | Register a paho-mqtt remote. Broker URL is `mqtt://host[:1883]` or `mqtts://host[:8883]`. Persistent session + QoS 1 are wired automatically so an offline cluster catches up on reconnect. |
+| `a8s remote remove <name>` | Forget a remote. Running daemons keep using the prior config until restart. |
+| `a8s remote ls` | List configured remotes (transport, broker, topic). |
+
+Remotes are layered: configure as many as you want and a8s publishes to all of them in parallel; receivers dedupe by ULID, so adding redundant brokers improves delivery without producing duplicate inbox writes. A message to an unknown-locally recipient publishes to all configured remotes and is delivered by whichever cluster has the recipient registered locally. Per-message exponential backoff (30s → 1m → 2m → 5m → 15m → 30m → 1h → 6h → 24h) retries unreachable remotes; after the schedule is exhausted the message is moved to the sender's trash with a "discarded after backoff" log.
+
+File payloads (`FILE:`) are local-only in v1 — the sender's path doesn't exist on the receiving cluster. Cross-cluster file transfer rides issue #62.
+
 `a8s` with no command prints help. There is no auto-discovery of agents from CWD — registration is always explicit.
 
 ### Per-agent take-over
@@ -201,19 +212,27 @@ The default definitions follow the opacity rule — `$SENDER tells $RECIPIENT: $
 ```
 ~/.a8s/
 ├── a8s.json                  registry: { agents: {...}, aliases: {...} }
+├── network.json              configured mesh remotes (absent → no mesh)
+├── seen-ids                  cluster-wide ULID ring for receive-side dedup
 ├── log.txt                   process-scoped supervisor log
 └── agents/
     └── <NAME>/
         ├── inbox/            pending JSON messages (drained by wake_once)
-        ├── trash/            processed messages
-        ├── log.txt           per-agent log (wakes, routing involving this agent, subprocess output)
-        └── pid               handler attachment
+        ├── inbox.tmp/        maildir-style atomic stage for fan-out
+        ├── pending/          messages a8s has ingested from .outbox/
+        │                     awaiting full delivery — `<ulid>.json` plus
+        │                     optional `<ulid>.json.retry` sidecar tracking
+        │                     attempts + per-remote success
+        ├── trash/             processed messages
+        ├── log.txt            per-agent log (wakes, routing, subprocess output)
+        └── pid                handler attachment
 
 <agent-root>/
-└── .outbox/                  agent writes here; route_outboxes re-stamps `from` to enclose
+└── .outbox/                  agent writes here; a8s renames out — never
+                              read-modify-writes — to ~/.a8s/agents/<NAME>/pending/
 ```
 
-The outbox lives in the agent's own dir because some sandboxes (codex `--full-auto`) only let the agent write inside its workspace. Inbox/trash live in `~/.a8s/` so the agent can't see them — keeps the abstraction clean.
+The outbox lives in the agent's own dir because some sandboxes (codex `--full-auto`) only let the agent write inside its workspace. Inbox/trash/pending live under `~/.a8s/` where the agent can't see them — and per the agent-directory invariant, a8s never sidecars or rewrites in `.outbox/`. New outbox files are atomically renamed to `pending/` on every routing pass; everything from there (sidecars, retries, trash, mesh publishes) happens in `~/.a8s/`.
 
 `from` is force-overwritten at routing time. An agent that hand-writes a JSON with `from: "VICTIM"` doesn't get to spoof — the file's outbox location is the unforgeable identity.
 
@@ -224,9 +243,14 @@ apps/a8s/
 ├── a8s.py            entry shim (~30 lines)
 ├── core.py           paths, logging, Participant, helpers, MARKER_FILES
 ├── registry.py       ~/.a8s/a8s.json I/O + alias resolution + sender_from_cwd
-├── mailbox.py        ensure_mailboxes, route_outboxes, queue helpers
+├── mailbox.py        ensure_mailboxes, route_outboxes (ingest+process), queue helpers
 ├── definitions.py    invoke* verbs, prompt formatting, definition loading
 ├── daemon.py         wake subprocess, pid attachment, signal handling
+├── ulid.py           pure-stdlib ULID generator/parser (mesh message IDs)
+├── network.py        ~/.a8s/network.json + publish_with_backoff + receive loop
+├── transports/       Transport ABC + per-kind implementations
+│   ├── __init__.py   abstract publish/subscribe/start/stop interface
+│   └── mqtt_paho.py  paho-mqtt transport (persistent session, QoS 1)
 ├── commands.py       every cmd_*
 ├── cli.py            COMMANDS table, dispatch, main
 ├── definitions/      built-in JSONs (claude/gemini/codex/default)
@@ -235,8 +259,9 @@ apps/a8s/
 └── tests/
     ├── agents/       per-tool fixture dirs (CLAUDE/GEMINI/CODEX/Llama)
     ├── fixtures/     mock-cli + mock.json for end-to-end tests
+    ├── requirements.txt   test-only deps (paho-mqtt for transport tests)
     ├── conftest.py   pytest scaffolding (sys.path + fake_home fixture)
-    └── test_*.py     98 tests, runs in <100ms
+    └── test_*.py     ~230 tests, runs in <3s
 ```
 
 ## Testing
@@ -251,11 +276,11 @@ Tests are isolated via a `fake_home` fixture that monkey-patches `HOME` to a tmp
 
 Pre-v1 — the surface still moves. Tracked threads:
 
-- **#62** — File transfer. `FILE: <path>` entries currently carry the sender's path verbatim. Routing should stage payloads into `<recipient>/.files/<filename>` so messages with attachments work across sandboxes (and, eventually, machines).
-- **#63** — Transparent multi-cluster routing. Two a8s clusters on the same network see each other and route messages as peers. Recipient opacity carries through. Proposed initial transports: MQTT for the control plane, an ephemeral payload host (TempFile.org-style) for files. Spec is implementation-agnostic.
-- **#39** — GitHub Copilot CLI as a fourth tool kind. Now trivial after the verb-scheme refactor: a `copilot.json` definition + an entry in `core.MARKER_FILES`.
+- **#63 mesh extensions** — paho-mqtt is the first transport (`a8s remote add`); follow-up PRs add a pure-stdlib mini-MQTT fallback that auto-activates when paho-mqtt isn't installed, an HTTPS long-poll transport for self-hosted rendezvous, and a peer-to-peer TCP transport. App-level envelope encryption (per-network PSK, AES-GCM) lands as an implementation detail of specific remote types when wanted.
+- **#62** — Cross-cluster file payloads. `FILE:` entries currently stay local-only across the mesh; cross-cluster transfer needs a payload host (TempFile.org-style ephemeral storage with signed URLs and per-message symmetric keys) so the sender's bytes can move with the message envelope.
+- **#39** — GitHub Copilot CLI as a fourth tool kind. Trivial after the verb-scheme refactor: a `copilot.json` definition + an entry in `core.MARKER_FILES`.
 
-Beyond what's filed: human participants via SMS/email gateways; synchronous `tell --wait <id>` via message-id completion polling on `trash/`; web/local UI; shared knowledge stores between teams.
+Beyond what's filed: human participants via SMS/email connectors; synchronous `tell --wait <id>` via message-id completion polling on `trash/`; web/local UI; shared knowledge stores between teams.
 
 ## Pre-v1 / scorch-the-earth note
 
