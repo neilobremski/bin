@@ -29,6 +29,11 @@ MARKER_FILES = {
 
 NAME_RE = re.compile(r"[A-Za-z0-9]+")
 
+# File-transfer cap for FILE: payloads. Larger sources are dropped at routing
+# time with a log line; agents needing larger payloads should use a side-
+# channel (see issue #63 — TempFile.org-style staging supports 100 MiB).
+MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MiB
+
 # Path constants — computed once at module load.
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILLS_DIR = SCRIPT_DIR / "skills"
@@ -61,6 +66,18 @@ def _safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", name)
 
 
+def canonical_name(name: str) -> str:
+    """Canonical form of an agent or alias name: stripped, lowercase, validated
+    against NAME_RE. Raises ValueError on invalid input. Used at registration
+    boundaries (`a8s add`, `a8s alias`) so the on-disk directory key is the
+    same regardless of input casing — eliminates the case-collision footgun
+    where `claude` and `Claude` produced two separate agent dirs."""
+    s = (name or "").strip().lower()
+    if not s or not NAME_RE.fullmatch(s):
+        raise ValueError(f"name must be alphanumeric: {name!r}")
+    return s
+
+
 def agent_dir(name: str) -> Path:
     """Per-agent internal directory under ~/.a8s/. Holds inbox/, trash/,
     log.txt, and the pid file."""
@@ -69,6 +86,14 @@ def agent_dir(name: str) -> Path:
 
 def inbox_dir(name: str) -> Path:
     return agent_dir(name) / "inbox"
+
+
+def inbox_tmp_dir(name: str) -> Path:
+    """Maildir-style staging dir. `route_outboxes` writes routed copies here
+    first and renames them into `inbox/` only after every recipient's stage
+    succeeds — so a crash mid-fan-out leaves no partial state to be re-routed
+    as duplicates."""
+    return agent_dir(name) / "inbox.tmp"
 
 
 def trash_dir(name: str) -> Path:
@@ -93,6 +118,14 @@ def outbox_dir(root: Path) -> Path:
     a JSON with `from: ""`.
     """
     return root / ".outbox"
+
+
+def files_dir(root: Path) -> Path:
+    """Recipient-side staging dir for `FILE:` payloads. Sender's `FILE:` paths
+    point inside the sender's root; routing copies the bytes here so the
+    recipient can read them under their own sandbox (codex --full-auto, etc.)
+    without knowing the sender's filesystem layout."""
+    return root / ".files"
 
 
 def registry_path() -> Path:

@@ -24,12 +24,12 @@ from pathlib import Path
 
 from core import (
     ENTRYPOINT,
-    NAME_RE,
     SKILLS_DIR,
     BIN_ROOT,
     _pid_alive,
     _preview,
     agent_log_path,
+    canonical_name,
     out,
     out_agent,
     pid_path,
@@ -121,6 +121,11 @@ def _install_skill_codex(skill_dir: Path) -> str:
 def cmd_add(args: list[str]) -> int:
     """`a8s add <name> <dir> [<definition>]` — register a new agent.
 
+    The name is canonicalized (lowercase, alphanumeric) at registration so
+    `a8s add CLAUDE` and `a8s add claude` collapse to the same agent — closes
+    the case-collision footgun where independent registry entries each got
+    their own dir but lookups conflated them (issue #65).
+
     Without `<definition>`, `<dir>` is scanned for a marker file
     (CLAUDE.md/GEMINI.md/CODEX.md) and the matching built-in definition is
     auto-linked. Multiple or zero markers fall back to the bundled default.
@@ -132,10 +137,12 @@ def cmd_add(args: list[str]) -> int:
     if len(args) < 2 or len(args) > 3:
         print("usage: a8s add <name> <dir> [<definition>]", file=sys.stderr)
         return 2
-    name, dir_str = args[0], args[1]
+    raw_name, dir_str = args[0], args[1]
     definition_arg = args[2] if len(args) == 3 else None
-    if not NAME_RE.fullmatch(name):
-        print(f"name must be alphanumeric: {name!r}", file=sys.stderr)
+    try:
+        name = canonical_name(raw_name)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
         return 2
     root = Path(dir_str).expanduser()
     if not root.is_dir():
@@ -144,12 +151,12 @@ def cmd_add(args: list[str]) -> int:
     root = root.resolve()
     reg = load_registry()
     for k in reg:
-        if k.lower() == name.lower():
+        if k.lower() == name:
             print(f"agent already exists with name: {k}", file=sys.stderr)
             return 1
     aliases = load_aliases()
     for k in aliases:
-        if k.lower() == name.lower():
+        if k.lower() == name:
             print(f"alias already exists with name: {k} — pick a different agent name", file=sys.stderr)
             return 1
 
@@ -302,42 +309,51 @@ def cmd_alias(args: list[str]) -> int:
     """`a8s alias <alias> <member>` — add member to alias, creating the alias
     if new. Members may be agent names OR existing alias names (nesting OK,
     cycles rejected at resolve time). The alias name must not collide with
-    an existing agent name."""
+    an existing agent name. Both alias name and member are canonicalized
+    (lowercase) so `a8s alias Devs CLAUDE` and `a8s alias devs claude` are
+    the same operation (issue #65)."""
     if len(args) == 0:
         return cmd_aliases()
     if len(args) != 2:
         print("usage: a8s alias <alias> <member>     # add or create", file=sys.stderr)
         print("       a8s alias                      # list", file=sys.stderr)
         return 2
-    alias_name, member = args
-    if not NAME_RE.fullmatch(alias_name):
-        print(f"alias name must be alphanumeric: {alias_name!r}", file=sys.stderr)
+    raw_alias, raw_member = args
+    try:
+        alias_name = canonical_name(raw_alias)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    try:
+        member = canonical_name(raw_member)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
         return 2
     agents = load_registry()
     aliases = load_aliases()
     for k in agents:
-        if k.lower() == alias_name.lower():
+        if k.lower() == alias_name:
             print(f"agent already exists with name: {k} — pick a different alias", file=sys.stderr)
             return 1
     member_resolved: str | None = None
     for k in agents:
-        if k.lower() == member.lower():
+        if k.lower() == member:
             member_resolved = k
             break
     if member_resolved is None:
         for k in aliases:
-            if k.lower() == member.lower():
+            if k.lower() == member:
                 member_resolved = k
                 break
     if member_resolved is None:
-        print(f"unknown member {member!r} (not an agent or alias)", file=sys.stderr)
+        print(f"unknown member {raw_member!r} (not an agent or alias)", file=sys.stderr)
         return 1
-    if member_resolved.lower() == alias_name.lower():
+    if member_resolved.lower() == alias_name:
         print(f"cannot add alias {alias_name!r} to itself", file=sys.stderr)
         return 1
     canonical_alias = alias_name
     for k in aliases:
-        if k.lower() == alias_name.lower():
+        if k.lower() == alias_name:
             canonical_alias = k
             break
     members = aliases.get(canonical_alias) or []
@@ -365,14 +381,15 @@ def cmd_alias(args: list[str]) -> int:
 
 def cmd_unalias(args: list[str]) -> int:
     """`a8s unalias <alias> [<member>]` — remove a single member, or the whole
-    alias if no member given."""
+    alias if no member given. Both names are case-insensitive."""
     if not args or len(args) > 2:
         print("usage: a8s unalias <alias> [<member>]", file=sys.stderr)
         return 2
+    target = args[0].strip().lower()
     aliases = load_aliases()
     canonical: str | None = None
     for k in aliases:
-        if k.lower() == args[0].lower():
+        if k.lower() == target:
             canonical = k
             break
     if canonical is None:
@@ -384,8 +401,9 @@ def cmd_unalias(args: list[str]) -> int:
         print(f"removed alias {canonical}")
         return 0
     member = args[1]
+    member_lc = member.strip().lower()
     members = aliases[canonical]
-    new_members = [m for m in members if m.lower() != member.lower()]
+    new_members = [m for m in members if m.lower() != member_lc]
     if len(new_members) == len(members):
         print(f"{canonical}: not a member: {member!r}", file=sys.stderr)
         return 1

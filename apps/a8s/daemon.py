@@ -126,12 +126,17 @@ def wake_once(p: Participant, msg_path: Path) -> None:
 
 def _read_handler_pid(name: str) -> int | None:
     """Return the live PID currently handling <name>, or None. Cleans up stale
-    pid files."""
+    pid files. Treats empty / non-int / non-positive contents as stale (the
+    O_CREAT|O_EXCL window allows a partial-write to leave an empty pid file
+    if the writer dies before `os.write`; non-positive values don't refer to
+    any real process — `os.kill(0, ...)` would target the whole process group)."""
     p = pid_path(name)
     if not p.is_file():
         return None
     try:
         pid = int(p.read_text().strip())
+        if pid <= 0:
+            raise ValueError("non-positive pid")
     except (OSError, ValueError):
         try:
             p.unlink()
@@ -149,7 +154,12 @@ def _read_handler_pid(name: str) -> int | None:
 
 def _try_atomic_claim(name: str, pid: int) -> bool:
     """Attempt to write `pid` into `pid_path(name)` using O_CREAT|O_EXCL.
-    Returns True iff this process now holds the handler attachment."""
+    Returns True iff this process now holds the handler attachment.
+
+    `os.fsync` after the write makes the pid bytes durable before the fd
+    closes — without it, a kernel-level crash window between create and write
+    could leave readers parsing an empty file (which `_read_handler_pid` now
+    treats as stale and cleans up)."""
     p = pid_path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -158,6 +168,7 @@ def _try_atomic_claim(name: str, pid: int) -> bool:
         return False
     try:
         os.write(fd, str(pid).encode())
+        os.fsync(fd)
     finally:
         os.close(fd)
     return True

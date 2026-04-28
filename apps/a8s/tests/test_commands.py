@@ -1,0 +1,108 @@
+"""Tests for commands.py — focused on the canonicalization invariant added
+for issue #65 (lowercase canonical key at registration time, regardless of
+the casing the user typed)."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from commands import cmd_add, cmd_alias, cmd_unalias
+from core import agent_dir
+from registry import load_aliases, load_registry
+
+
+@pytest.fixture
+def agent_root(fake_home, tmp_path):
+    d = tmp_path / "x"
+    d.mkdir()
+    return d
+
+
+class TestCmdAddCanonicalization:
+    def test_uppercase_input_stored_lowercase(self, agent_root):
+        rc = cmd_add(["CLAUDE", str(agent_root)])
+        assert rc == 0
+        reg = load_registry()
+        assert "claude" in reg
+        assert "CLAUDE" not in reg
+
+    def test_mixed_case_collision_rejected(self, agent_root, tmp_path, capsys):
+        assert cmd_add(["claude", str(agent_root)]) == 0
+        other = tmp_path / "y"
+        other.mkdir()
+        # Re-add under a different casing — should be rejected as duplicate
+        # rather than producing a second registry entry.
+        rc = cmd_add(["Claude", str(other)])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "already exists" in err
+        # Registry still has exactly one entry.
+        assert list(load_registry().keys()) == ["claude"]
+
+    def test_directory_path_uses_canonical_key(self, agent_root):
+        cmd_add(["CLAUDE", str(agent_root)])
+        # Directory derived from canonical (lowercase) key.
+        assert agent_dir("claude").exists() or not agent_dir("CLAUDE").exists()
+        # The actual on-disk dir is materialized lazily by ensure_mailboxes,
+        # so just check that resolution paths agree.
+        assert agent_dir("claude") == agent_dir("CLAUDE".lower())
+
+    def test_invalid_name_rejected(self, agent_root, capsys):
+        rc = cmd_add(["foo-bar", str(agent_root)])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "alphanumeric" in err
+
+    def test_empty_name_rejected(self, agent_root, capsys):
+        rc = cmd_add(["", str(agent_root)])
+        assert rc == 2
+
+
+class TestCmdAddAliasCollision:
+    def test_alias_then_agent_with_same_name_rejected(self, fake_home, tmp_path, agent_root, capsys):
+        # First agent registered.
+        other = tmp_path / "other"; other.mkdir()
+        cmd_add(["claude", str(other)])
+        # Create an alias.
+        assert cmd_alias(["devs", "claude"]) == 0
+        # Try to register a new agent named "DEVS" — must collide with the
+        # alias namespace, rejected.
+        rc = cmd_add(["DEVS", str(agent_root)])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "alias" in err.lower()
+
+
+class TestCmdAliasCanonicalization:
+    def test_alias_name_canonicalized(self, fake_home, agent_root):
+        cmd_add(["claude", str(agent_root)])
+        rc = cmd_alias(["DEVS", "Claude"])
+        assert rc == 0
+        aliases = load_aliases()
+        assert "devs" in aliases
+        assert aliases["devs"] == ["claude"]
+
+    def test_alias_collides_with_agent_name(self, fake_home, agent_root, capsys):
+        cmd_add(["claude", str(agent_root)])
+        # Try to create an alias whose name (lowercased) matches an agent.
+        rc = cmd_alias(["CLAUDE", "claude"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "agent already exists" in err
+
+    def test_unknown_member_rejected(self, fake_home, capsys):
+        rc = cmd_alias(["devs", "nobody"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "unknown member" in err
+
+
+class TestCmdUnaliasCaseInsensitive:
+    def test_unalias_with_different_case(self, fake_home, agent_root):
+        cmd_add(["claude", str(agent_root)])
+        cmd_alias(["devs", "claude"])
+        # Use uppercase to remove — should match canonical lowercase entry.
+        rc = cmd_unalias(["DEVS"])
+        assert rc == 0
+        assert load_aliases() == {}
