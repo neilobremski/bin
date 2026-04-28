@@ -1,15 +1,18 @@
 """Tests for commands.py — focused on the canonicalization invariant added
 for issue #65 (lowercase canonical key at registration time, regardless of
-the casing the user typed)."""
+the casing the user typed) and the per-agent kill / no-orphan rule from
+issue #68."""
 from __future__ import annotations
 
+import os
+import signal
 from pathlib import Path
 
 import pytest
 
-from commands import cmd_add, cmd_alias, cmd_unalias
-from core import agent_dir
-from registry import load_aliases, load_registry
+from commands import cmd_add, cmd_alias, cmd_kill, cmd_unalias
+from core import agent_dir, kill_request_path, pid_path
+from registry import load_aliases, load_registry, save_registry
 
 
 @pytest.fixture
@@ -106,3 +109,70 @@ class TestCmdUnaliasCaseInsensitive:
         rc = cmd_unalias(["DEVS"])
         assert rc == 0
         assert load_aliases() == {}
+
+
+class TestCmdKillPerAgent:
+    """`a8s kill <name>` writes a kill-request file and SIGUSR1s the holder.
+    Tests stub `os.kill` so we don't actually signal a real process; we
+    verify the file mechanics + that the SIGUSR1 was directed at the
+    holder pid."""
+
+    def test_writes_kill_request_and_signals_holder(self, fake_home, tmp_path, monkeypatch, capsys):
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({"claude": {"root": str(d)}})
+        # Pre-attach claude to a foreign live pid.
+        pid_path("claude").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("claude").write_text(str(os.getppid()))
+
+        signaled = []
+        def fake_kill(pid, sig):
+            signaled.append((pid, sig))
+            # Simulate the holder honoring the request: unlink the pid file.
+            if sig == signal.SIGUSR1:
+                pid_path("claude").unlink()
+        monkeypatch.setattr("commands.os.kill", fake_kill)
+
+        rc = cmd_kill(["claude"])
+        assert rc == 0
+        # SIGUSR1 went to the holder.
+        assert (os.getppid(), signal.SIGUSR1) in signaled
+        # No SIGTERM escalation (holder responded).
+        assert not any(s == signal.SIGTERM for _, s in signaled)
+        # Kill-request file was cleared at the end.
+        assert not kill_request_path("claude").is_file()
+        # Output includes the request notice.
+        out = capsys.readouterr().out
+        assert "kill request" in out
+
+    def test_escalates_to_sigterm_on_unresponsive_holder(self, fake_home, tmp_path, monkeypatch, capsys):
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({"claude": {"root": str(d)}})
+        pid_path("claude").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("claude").write_text(str(os.getppid()))
+
+        signaled = []
+        def fake_kill(pid, sig):
+            signaled.append((pid, sig))
+            # DON'T release — simulate a wedged holder.
+        monkeypatch.setattr("commands.os.kill", fake_kill)
+        # Tighten the timeout so the test isn't slow.
+        monkeypatch.setattr("commands.KILL_TIMEOUT_S", 0.3)
+        monkeypatch.setattr("commands.KILL_POLL_S", 0.05)
+
+        rc = cmd_kill(["claude"])
+        assert rc == 1
+        # Both SIGUSR1 and the SIGTERM escalation got delivered.
+        sigs = {s for _, s in signaled}
+        assert signal.SIGUSR1 in sigs
+        assert signal.SIGTERM in sigs
+        err = capsys.readouterr().err
+        assert "did not honor kill" in err
+
+    def test_not_running_is_no_op(self, fake_home, tmp_path, capsys):
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({"claude": {"root": str(d)}})
+        # No pid file → not running.
+        rc = cmd_kill(["claude"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "not running" in out

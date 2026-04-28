@@ -148,6 +148,23 @@ Key invariants:
 - **`run_with_prefix` uses `start_new_session=True`** so SIGKILL targets the
   whole subprocess group (claude/gemini/codex CLI plus any helpers it spawned).
   Don't drop this — it's the only way the second-signal kill path works.
+- **Per-agent take-over via detach-request (no orphans).** When `acquire`
+  hits a live conflict, it writes `~/.a8s/agents/<NAME>/detach-request` with
+  its pid and polls. The holder's `attached_loop` checks for that file at
+  the top of each iteration and releases just that one agent — its sibling
+  attachments stay running. Don't reintroduce process-level SIGTERM-and-wait
+  in `acquire`: that's what created the orphan-collateral bug. The 60s
+  `DETACH_TIMEOUT_S` is the only fallback if the holder is mid-wake on a
+  slow LLM call; `a8s kill` breaks the deadlock.
+- **Per-agent kill via kill-request + SIGUSR1.** `cmd_kill` writes
+  `~/.a8s/agents/<NAME>/kill-request` and SIGUSR1s the holder. The handler's
+  `_on_kill_signal` checks the kill-request for `_CURRENT_WAKE_NAME` (the
+  agent being woken right now); if present, it kills the wake subprocess
+  group so `run_with_prefix.wait()` returns immediately. The actual release
+  of the agent happens at the next iteration top via the kill-request check
+  — same shape as detach-request, but logs as "killed by" and takes
+  precedence. Whole-process SIGTERM is the last-resort escalation only
+  when the holder doesn't honor the request within 10s.
 
 ### Surface
 
@@ -269,12 +286,7 @@ The locked-design refactor (#52) is closed. The following are open:
 | # | State | Topic |
 |---|---|---|
 | #39 | open enhancement | Copilot CLI as 4th tool kind. Trivial after the refactor: write `copilot.json`, add `COPILOT.md` → `copilot` to `core.MARKER_FILES`. |
-| #62 | open enhancement | File transfer: `FILE:` payloads must be staged into `<recipient>/.files/`. Path-validation defense is critical (post-#62 without it = sandbox escape). |
 | #63 | open enhancement | Transparent multi-cluster routing (peer mesh). MQTT + ephemeral payload host as initial transports. Spec is implementation-agnostic. Armstrong's 5-item retrofit list (UUIDs, expiry, priority, dedup, acks) lands locally first. |
-| #65 | open bug | Agent name case-collision (`claude` vs `Claude` produces two dirs but lookups conflate them). Canonicalize at registration. |
-| #66 | open bug | pid file integrity — `os.fsync` after write + validate parsed pid. |
-| #67 | open bug | Atomic alias fan-out — adopt maildir-style `tmp/` → `new/` rename. Crash mid-fan-out leaves inconsistent state today. |
-| #68 | open enhancement | Per-agent attachment (replace process-level pid). Fixes "take-over collateral" footgun. Multiple reviewers flagged this. |
 | #69–72 | open question | Design discussions surfaced by the review panel: verb-scheme collapse vs eliminate; opacity strictness; supervision model; mailbox file format. Resolve before #63 hardens. |
 
 ### What I tried that didn't work (concrete)

@@ -32,7 +32,9 @@ from core import (
     _pid_alive,
     _preview,
     agent_dir,
+    detach_request_path,
     inbox_dir,
+    kill_request_path,
     out_agent,
     pid_path,
     trash_dir,
@@ -45,15 +47,20 @@ from registry import participants_from_registry
 
 # ---------- subprocess execution ----------
 
-# Set by run_with_prefix; read by _kill_wake_subprocess_group via the signal handler.
+# Set by run_with_prefix; read by _kill_wake_subprocess_group via the signal
+# handler. _CURRENT_WAKE_NAME pairs with _CURRENT_WAKE_PROC so the SIGUSR1
+# kill-request handler can decide whether the in-flight wake is the one
+# being killed (per-agent kill, issue #68 follow-up).
 _CURRENT_WAKE_PROC: subprocess.Popen | None = None
+_CURRENT_WAKE_NAME: str | None = None
 
 
 def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
     """Run the wake subprocess in its own session so SIGKILL can target the
     whole process group (LLM CLI + any helpers it spawns). Tracks the live
-    process in `_CURRENT_WAKE_PROC` so the second-signal handler can find it."""
-    global _CURRENT_WAKE_PROC
+    process in `_CURRENT_WAKE_PROC` and the agent in `_CURRENT_WAKE_NAME` so
+    signal handlers can identify which agent's wake is in-flight."""
+    global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME
     prefix = f"{name}> "
     try:
         proc = subprocess.Popen(
@@ -70,6 +77,7 @@ def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
         out_agent(name, f"{prefix}command not found: {cmd[0]}")
         return 127
     _CURRENT_WAKE_PROC = proc
+    _CURRENT_WAKE_NAME = name
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -80,6 +88,7 @@ def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
         return proc.returncode
     finally:
         _CURRENT_WAKE_PROC = None
+        _CURRENT_WAKE_NAME = None
 
 
 def wake_once(p: Participant, msg_path: Path) -> None:
@@ -174,64 +183,141 @@ def _try_atomic_claim(name: str, pid: int) -> bool:
     return True
 
 
-# Wait up to this long for an existing handler to release after SIGTERM.
-ACQUIRE_TIMEOUT_S = 30.0
-ACQUIRE_POLL_S = 0.1
+# How long to wait for the holder to honor a detach-request before giving up.
+# Long enough to cover an in-flight LLM wake (the holder only checks the
+# request between iterations, so an active subprocess delays response).
+DETACH_TIMEOUT_S = 60.0
+DETACH_POLL_S = 0.2
+
+
+def _write_detach_request(name: str, requester_pid: int) -> None:
+    """Write `requester_pid` into the detach-request file for `name` (overwrites
+    any prior request — last writer wins, which is fine since whichever
+    requester is the most recent will get the agent next)."""
+    p = detach_request_path(name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(str(requester_pid))
+
+
+def _read_detach_request(name: str) -> int | None:
+    """Return the requester pid in the detach-request file for `name`, or None.
+    Reaps malformed contents (empty / non-int / non-positive) like the pid
+    file does."""
+    p = detach_request_path(name)
+    if not p.is_file():
+        return None
+    try:
+        pid = int(p.read_text().strip())
+        if pid <= 0:
+            raise ValueError("non-positive pid")
+        return pid
+    except (OSError, ValueError):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        return None
+
+
+def _clear_detach_request(name: str) -> None:
+    """Best-effort unlink of the detach-request file."""
+    try:
+        detach_request_path(name).unlink()
+    except OSError:
+        pass
+
+
+def _write_kill_request(name: str, requester_pid: int) -> None:
+    p = kill_request_path(name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(str(requester_pid))
+
+
+def _read_kill_request(name: str) -> int | None:
+    """Same parse-and-reap discipline as `_read_detach_request`."""
+    p = kill_request_path(name)
+    if not p.is_file():
+        return None
+    try:
+        pid = int(p.read_text().strip())
+        if pid <= 0:
+            raise ValueError("non-positive pid")
+        return pid
+    except (OSError, ValueError):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        return None
+
+
+def _clear_kill_request(name: str) -> None:
+    try:
+        kill_request_path(name).unlink()
+    except OSError:
+        pass
 
 
 def acquire(name: str) -> None:
-    """Attach this process as the handler of <name>. If another live process
-    is currently handling it, send SIGTERM (graceful detach) and wait for
-    release. Always wins (per locked design). Raises TimeoutError if the prior
-    handler doesn't release within ACQUIRE_TIMEOUT_S."""
+    """Attach this process as the handler of <name>.
+
+    If another live process holds <name>, write a detach-request file and
+    poll for it to release. The holder's `attached_loop` checks the request
+    at the top of each iteration and releases just <name> (not its other
+    handled agents) — so a multi-agent handler losing one member keeps
+    serving the rest. Raises `TimeoutError` if the holder doesn't honor
+    the request within `DETACH_TIMEOUT_S` (typically because an in-flight
+    LLM wake is taking a long time; `a8s kill <name>` breaks the deadlock).
+
+    Stale pid files (writer dead) are reaped by `_read_handler_pid` and
+    the claim retried."""
     me = os.getpid()
+    requested = False
+    deadline: float | None = None
     while True:
         if _try_atomic_claim(name, me):
+            # If the pending request was OURS (we placed it earlier in this
+            # call), clear it — it's been satisfied. Leave foreign requests
+            # alone: those belong to whichever process placed them, and our
+            # next iteration as the new holder will honor them.
+            if _read_detach_request(name) == me:
+                _clear_detach_request(name)
             return
         existing = _read_handler_pid(name)
         if existing is None:
-            continue  # stale or freed; retry
+            continue  # stale; retry the claim
         if existing == me:
             return
-        sys.stderr.write(f"[a8s] detach in progress: {name} from PID {existing}\n")
-        sys.stderr.flush()
-        try:
-            os.kill(existing, signal.SIGTERM)
-        except ProcessLookupError:
-            try:
-                pid_path(name).unlink()
-            except OSError:
-                pass
-            continue
-        deadline = _time.time() + ACQUIRE_TIMEOUT_S
-        while _time.time() < deadline:
-            if not pid_path(name).is_file():
-                break
-            if not _pid_alive(existing):
-                try:
-                    pid_path(name).unlink()
-                except OSError:
-                    pass
-                break
-            _time.sleep(ACQUIRE_POLL_S)
-        else:
+        if not requested:
+            _write_detach_request(name, me)
+            sys.stderr.write(
+                f"[a8s] {name}: requesting release from PID {existing}...\n"
+            )
+            sys.stderr.flush()
+            requested = True
+            deadline = _time.time() + DETACH_TIMEOUT_S
+        if deadline is not None and _time.time() >= deadline:
+            _clear_detach_request(name)
             raise TimeoutError(
-                f"PID {existing} did not release {name} within {ACQUIRE_TIMEOUT_S}s — "
+                f"PID {existing} did not release {name} within {DETACH_TIMEOUT_S}s — "
                 f"try `a8s kill {name}`"
             )
+        _time.sleep(DETACH_POLL_S)
 
 
 def release(name: str) -> None:
-    """Unlink the pid file iff it points at our pid. Safe to call repeatedly."""
+    """Unlink the pid file iff it points at our pid. Safe to call repeatedly.
+    Also clears any pending detach-request for `name` since the request was
+    aimed at the now-released attachment."""
     p = pid_path(name)
     try:
-        if not p.is_file():
-            return
-        pid = int(p.read_text().strip())
-        if pid == os.getpid():
-            p.unlink()
+        if p.is_file():
+            pid = int(p.read_text().strip())
+            if pid == os.getpid():
+                p.unlink()
     except (OSError, ValueError):
         pass
+    _clear_detach_request(name)
 
 
 # ---------- attached loop (daemon body for 1+ agents) ----------
@@ -283,25 +369,39 @@ def _make_signal_handler(label: str):
     return handle
 
 
+def _on_kill_signal(_signum, _frame):
+    """SIGUSR1 from `cmd_kill`. If the in-flight wake's target agent has a
+    foreign kill-request, kill the subprocess group so `run_with_prefix`'s
+    `wait()` returns immediately. The actual release of the agent (and any
+    others with a kill-request, even when no wake is in flight) happens at
+    the next iteration top via `_read_kill_request`."""
+    name = _CURRENT_WAKE_NAME
+    if name is None:
+        return
+    req = _read_kill_request(name)
+    if req is None or req == os.getpid():
+        return
+    _kill_wake_subprocess_group()
+
+
 def attached_loop(names: list[str], interval: float, *, single_pass: bool = False) -> int:
     """Body of `a8s run` / `a8s start` / `a8s step`. ONE process handles every
-    name in `names` (multiple agents share the same handler PID, recorded in
-    each agent's `~/.a8s/agents/<NAME>/pid`).
+    name in `names`; multi-agent handlers share a PID across each member's
+    pid file.
 
     Per iteration:
+      - honor any detach-requests for our handled agents (per-agent take-over,
+        issue #68): release just the requested agent and keep serving the rest
       - reload registry (so newly-added agents become routable recipients)
-      - check each handled agent's pid file is still ours (drop if taken over)
-      - route each handled agent's outbox to recipients
-      - drain each handled agent's inbox
+      - drop any agent whose pid file no longer points at us (defense)
+      - route each handled agent's outbox; drain each handled agent's inbox
 
     On 1st signal: detach all currently-handled agents (graceful — finish the
     in-flight wake first). On 2nd signal: SIGTERM-then-SIGKILL the wake
-    subprocess group.
-
-    Take-over collateral: SIGTERM is process-level, so when one of our handled
-    agents is targeted by another `a8s start`, this whole handler detaches
-    everything. Other agents in our set become orphaned. The user's footgun;
-    documented in #52."""
+    subprocess group. The whole-process detach is the path for explicit
+    `a8s stop` / `a8s kill`; per-agent take-over for `a8s start`/`run`/`step`
+    against an already-attached agent goes through the detach-request file
+    instead, leaving siblings handled — no orphans."""
     global _STOP_EVENT, _SIGNAL_COUNT
     core.PRINT_LOCK = threading.Lock()
     _STOP_EVENT = threading.Event()
@@ -311,7 +411,8 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
         print("attached_loop: empty names list", file=sys.stderr)
         return 2
 
-    # Acquire each pid file. If any fails (timeout), release whatever we got.
+    # Acquire each pid file. If any fails (holder didn't honor the
+    # detach-request in time), release whatever we got.
     acquired: list[str] = []
     try:
         for name in names:
@@ -327,6 +428,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     handler = _make_signal_handler(label)
     prev_sigterm = signal.signal(signal.SIGTERM, handler)
     prev_sigint = signal.signal(signal.SIGINT, handler)
+    prev_sigusr1 = signal.signal(signal.SIGUSR1, _on_kill_signal)
 
     pid = os.getpid()
     for n in names:
@@ -334,8 +436,25 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     try:
         while not _STOP_EVENT.is_set():
             try:
+                # Honor kill-requests and detach-requests at the iteration
+                # top. Kill takes precedence (SIGUSR1 may have already killed
+                # the subprocess group, but the release happens here so the
+                # iteration body skips that agent for the rest of the pass).
+                for name in list(names):
+                    kill_req = _read_kill_request(name)
+                    if kill_req is not None and kill_req != pid:
+                        out_agent(name, f"[a8s] {name}: killed by PID {kill_req}")
+                        release(name)
+                        _clear_kill_request(name)
+                        names.remove(name)
+                        continue
+                    requester = _read_detach_request(name)
+                    if requester is not None and requester != pid:
+                        out_agent(name, f"[a8s] {name}: releasing to PID {requester}")
+                        release(name)
+                        names.remove(name)
+
                 all_agents = participants_from_registry()
-                # Filter to agents we still hold and that still exist.
                 handled: list[Participant] = []
                 for name in list(names):
                     p = next((q for q in all_agents if q.name == name), None)
@@ -345,7 +464,9 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                         continue
                     holder = _read_handler_pid(name)
                     if holder is not None and holder != pid:
-                        out_agent(name, f"[a8s] {name}: detaching (taken over by PID {holder})")
+                        # Defense: someone manually overwrote the pid file
+                        # outside of the detach-request handshake.
+                        out_agent(name, f"[a8s] {name}: pid file diverged (now PID {holder}); dropping")
                         names.remove(name)
                         continue
                     handled.append(p)
@@ -375,5 +496,6 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                 out_agent(n, f"[a8s] {n}: detached")
         signal.signal(signal.SIGTERM, prev_sigterm)
         signal.signal(signal.SIGINT, prev_sigint)
+        signal.signal(signal.SIGUSR1, prev_sigusr1)
         _STOP_EVENT = None
     return 0
