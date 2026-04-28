@@ -651,9 +651,9 @@ def cmd_ls() -> int:
 
 def cmd_tell(args: list[str]) -> int:
     """`a8s tell <name> <msg>` — write a single outbox message; `name` may be
-    an agent or alias. Fan-out to alias members happens at routing time so the
-    `to` field stays the original alias name (recipients can see it via
-    `promptMessageAlias`)."""
+    an agent or alias. Fan-out to alias members happens at routing time and
+    preserves the original `to` (alias name) — strict opacity, mailing-list
+    style: the recipient knows it came via the list, not who else got it."""
     if len(args) < 2:
         print("usage: tell <name> <message>", file=sys.stderr)
         return 2

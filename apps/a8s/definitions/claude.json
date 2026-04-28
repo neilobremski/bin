@@ -5,27 +5,18 @@
     "--permission-mode", "dontAsk",
     "--allowedTools", "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
     "--continue",
-    "-p", "$PROMPT"
+    "-p", "$MESSAGE"
   ],
   "invokeMessage": [
     "claude",
     "--permission-mode", "dontAsk",
     "--allowedTools", "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
     "--continue",
-    "-p", "$PROMPT"
-  ],
-  "invokeMessageAlias": [
-    "claude",
-    "--permission-mode", "dontAsk",
-    "--allowedTools", "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
-    "--continue",
-    "-p", "$PROMPT"
+    "-p", "$SENDER tells $RECIPIENT: $MESSAGE"
   ],
   "invokeClear": [
     "claude",
     "--permission-mode", "dontAsk",
     "-p", "Conversation cleared. New conversation starts now."
-  ],
-  "promptMessage": "{sender} tells you ({recipient}): {message}",
-  "promptMessageAlias": "{sender} tells you ({recipient}) and {others_count} others on the {alias} alias: {message}"
+  ]
 }

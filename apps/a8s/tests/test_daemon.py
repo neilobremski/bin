@@ -299,7 +299,9 @@ class TestWakeOnceVerbs:
         log = _read_log("MOCK")
         # mock-cli echoes each argv element prefixed with "MOCK-CLI:"
         assert "MOCK> MOCK-CLI: verb=prompt" in log
-        assert "MOCK> MOCK-CLI: show capabilities" in log
+        # Senderless prompt: $SENDER is empty, $RECIPIENT is the agent's own
+        # name, $MESSAGE is the raw content.
+        assert "MOCK> MOCK-CLI: FROM:|TO:MOCK|MSG:show capabilities" in log
 
     def test_message_verb_argv_via_routing(self, fake_home, tmp_path, fixtures_dir):
         # Two agents, both using mock.json.
@@ -313,23 +315,20 @@ class TestWakeOnceVerbs:
         b = Participant("B", tmp_path / "b")
         ensure_mailboxes(a)
         ensure_mailboxes(b)
-        # A writes to B's outbox path... no, A's outbox.
         from mailbox import _write_outbox
         _write_outbox("A", a.root, "B", "design review", [])
 
-        # Run B's loop — its outbox is empty but B will receive A's routed msg.
-        # attached_loop routes ALL agents' outboxes via route_outboxes(handled).
-        # We need A's outbox to be routed too. Pass [A, B].
         rc = attached_loop(["A", "B"], 0.1, single_pass=True)
         assert rc == 0
         log_b = _read_log("B")
-        # B's invokeMessage runs with the formatted promptMessage template
-        # containing "FROM:A|TO:B|MSG:design review".
+        # invokeMessage interpolates $SENDER, $RECIPIENT, $MESSAGE directly.
         assert "MOCK-CLI: verb=message" in log_b
         assert "FROM:A|TO:B|MSG:design review" in log_b
 
-    def test_messageAlias_verb_with_others_count(self, fake_home, tmp_path, fixtures_dir):
-        # A, B, C all using mock.json. devs alias = [A, B, C]. A sends to devs.
+    def test_alias_routed_message_uses_message_verb(self, fake_home, tmp_path, fixtures_dir):
+        # Strict opacity (#69, #70): alias-routed messages dispatch to
+        # invokeMessage just like direct ones. The only difference visible to
+        # the recipient is that $RECIPIENT resolves to the alias name.
         from mailbox import _write_outbox
         agents = {}
         for n in ("A", "B", "C"):
@@ -347,9 +346,15 @@ class TestWakeOnceVerbs:
         rc = attached_loop(["A", "B", "C"], 0.1, single_pass=True)
         assert rc == 0
         log_b = _read_log("B")
-        # Sender excluded → recipients = [B, C] → B sees others_count=1.
-        assert "MOCK-CLI: verb=messageAlias" in log_b
-        assert "FROM:A|TO:B|ALIAS:devs|OTHERS:1|MSG:all-hands" in log_b
+        # No "messageAlias" verb, no others_count leak — just the regular
+        # message verb with $RECIPIENT preserving the alias name.
+        assert "MOCK-CLI: verb=message" in log_b
+        assert "FROM:A|TO:devs|MSG:all-hands" in log_b
+        assert "OTHERS:" not in log_b
+        assert "ALIAS:" not in log_b
+        # C sees the same shape — both recipients are indistinguishable.
+        log_c = _read_log("C")
+        assert "FROM:A|TO:devs|MSG:all-hands" in log_c
 
     def test_clear_verb_via_sentinel(self, mock_agent):
         # Pre-queue a normal prompt + then a clear; the clear should wipe

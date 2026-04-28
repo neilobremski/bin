@@ -40,7 +40,7 @@ from core import (
     trash_dir,
     unique_path,
 )
-from definitions import build_command, build_prompt, load_definition, select_verb
+from definitions import build_command, load_definition, select_verb
 from mailbox import ensure_mailboxes, next_inbox_message, route_outboxes
 from registry import participants_from_registry
 
@@ -120,14 +120,13 @@ def wake_once(p: Participant, msg_path: Path) -> None:
                 trashed = unique_path(trash_dir(p.name) / f.name)
                 f.rename(trashed)
 
-    prompt = build_prompt(msg, definition, verb)
     trashed = unique_path(trash_dir(p.name) / msg_path.name)
     msg_path.rename(trashed)
     if verb == "clear":
         out_agent(p.name, f"[{p.name}] waking ({verb}) from {trashed.name}")
     else:
         out_agent(p.name, f"[{p.name}] waking ({verb}) from {trashed.name}: {_preview(msg.get('content', ''))}")
-    cmd = build_command(definition, prompt, verb)
+    cmd = build_command(definition, msg, verb)
     run_with_prefix(p.name, cmd, p.root)
 
 

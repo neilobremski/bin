@@ -194,24 +194,25 @@ class TestRouteOutboxes:
         assert n == 2
         assert list(inbox_dir("A").iterdir()) == []
         b_msg = json.loads(next(inbox_dir("B").iterdir()).read_text())
-        assert b_msg["alias"] == "devs"
-        assert b_msg["others_count"] == 1  # B sees 1 OTHER (C)
-        assert b_msg["to"] == "B"
+        # Strict opacity (#69, #70): no `alias` / `others_count` fields, and
+        # `to` preserves the alias name (mailing-list semantics).
+        assert "alias" not in b_msg
+        assert "others_count" not in b_msg
+        assert b_msg["to"] == "devs"
         assert b_msg["from"] == "A"
 
-    def test_alias_fanout_others_count_when_outsider_sends(self, three_agents):
+    def test_alias_fanout_preserves_to_for_all_recipients(self, three_agents):
+        # Both fanout recipients see `to: devs`; the message shape is
+        # identical for them (no individual "you got this" leak).
         a, b, c = three_agents
-        # An outsider (also A here, but pretending) sends to alias of all 3.
-        # If sender is NOT on the alias, all 3 get it. But our setup has
-        # A in the alias, so let's test by removing A from the alias.
         save_aliases({"devs": ["B", "C"]})
         _write_outbox("A", a.root, "devs", "msg", [])
-        n = route_outboxes([a, b, c], all_agents=[a, b, c])
-        # All members (B and C) get it.
-        assert n == 2
-        b_msg = json.loads(next(inbox_dir("B").iterdir()).read_text())
-        assert b_msg["alias"] == "devs"
-        assert b_msg["others_count"] == 1  # B sees 1 OTHER (C)
+        route_outboxes([a, b, c], all_agents=[a, b, c])
+        for n in ("B", "C"):
+            m = json.loads(next(inbox_dir(n).iterdir()).read_text())
+            assert m["to"] == "devs"
+            assert "alias" not in m
+            assert "others_count" not in m
 
     def test_empty_to_is_rejected_to_trash(self, two_agents):
         a, b = two_agents
@@ -298,9 +299,7 @@ class TestAtomicFanout:
         with out_path.open("r", encoding="utf-8") as f:
             base_msg = json.load(f)
         base_msg["from"] = "A"  # routing force-overwrites this anyway
-        base_msg["to"] = "B"
-        base_msg["alias"] = "devs"
-        base_msg["others_count"] = 1
+        # `to` stays at "devs" — strict opacity preserves the original target.
         b_pre = inbox_dir("B") / out_path.name
         with b_pre.open("w", encoding="utf-8") as f:
             json.dump(base_msg, f)

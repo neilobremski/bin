@@ -129,9 +129,12 @@ def _build_routed_message(
     """Construct the routed copy of `base_msg` for `recipient` — copies any
     `FILE:` payloads into the recipient's `.files/` and rewrites the file
     paths in the returned message. Files that fail validation are dropped
-    (logged); the message is delivered with the surviving files."""
+    (logged); the message is delivered with the surviving files.
+
+    Strict opacity (#69, #70): the `to` field is left at whatever the sender
+    wrote — alias for fanned messages, agent name for direct ones — same as
+    a public mailing list's `To:` header."""
     routed = dict(base_msg)
-    routed["to"] = recipient.name
     src_files = base_msg.get("files") or []
     if src_files:
         new_files: list[dict] = []
@@ -163,8 +166,9 @@ def route_outboxes(senders: list[Participant], all_agents: list[Participant] | N
 
     `all_agents` is the recipient lookup pool (defaults to senders for
     self-contained calls). Aliases fan out at routing time; sender is excluded
-    from delivery (no self-echo). Each routed copy carries `alias` and
-    `others_count` fields for the recipient's prompt template.
+    from delivery (no self-echo). Routed copies preserve the original `to`
+    field — for an alias-fanned message that's the alias name, opaque about
+    the other recipients (issues #69, #70).
 
     Atomicity (issue #67): each outbox file is staged into every recipient's
     `inbox.tmp/` first, then promoted into `inbox/` via `os.replace`, then
@@ -215,13 +219,9 @@ def route_outboxes(senders: list[Participant], all_agents: list[Participant] | N
                     # Skip self-copy: an alias that includes the sender doesn't
                     # echo the message back to them.
                     recipients.append(rp)
-            if kind == "alias":
-                msg["alias"] = recipient_name
-                msg["others_count"] = max(0, len(recipients) - 1)
-            else:
-                if not recipients:
-                    out_agent(sender.name, f"[{sender.name}] {recipient_name!r} resolved to no agents in {f.name}")
-                    continue
+            if kind != "alias" and not recipients:
+                out_agent(sender.name, f"[{sender.name}] {recipient_name!r} resolved to no agents in {f.name}")
+                continue
 
             # Stage every recipient's copy into inbox.tmp/<source-name>. Skip
             # any recipient whose final inbox already has the file (prior
@@ -319,9 +319,9 @@ def _write_outbox(sender_name: str, sender_root: Path, to: str, content: str, fi
 def _queue_prompt(p: Participant, content: str) -> Path:
     """Drop a senderless message JSON directly into <p>/inbox/.
 
-    The empty `from` is the signal to `build_prompt` to deliver the raw
-    content (no `tells you` template wrapping). The next inbox-drain wakes
-    the agent."""
+    The empty `from` is the signal to `select_verb` to dispatch via
+    `invokePrompt` (raw content, no sender header). The next inbox-drain
+    wakes the agent."""
     ensure_mailboxes(p)
     now = datetime.now(timezone.utc)
     msg = {
