@@ -79,7 +79,7 @@ class TestNetworkConfig:
         assert cfg == {"remotes": {}}
 
     def test_round_trip(self, fake_home):
-        save_network_config({"remotes": {"hub": {"transport": "paho-mqtt", "broker": "mqtt://x", "topic": "t"}}})
+        save_network_config({"remotes": {"hub": {"transport": "mqtt", "broker": "mqtt://x", "topic": "t"}}})
         cfg = load_network_config()
         assert cfg["remotes"]["hub"]["broker"] == "mqtt://x"
 
@@ -103,8 +103,33 @@ class TestLoadRemotes:
         remotes = load_remotes()
         assert remotes == []
 
-    def test_paho_missing_fields_skipped(self, fake_home):
-        save_network_config({"remotes": {"hub": {"transport": "paho-mqtt"}}})
+    def test_mqtt_missing_fields_skipped(self, fake_home):
+        save_network_config({"remotes": {"hub": {"transport": "mqtt"}}})
+        remotes = load_remotes()
+        assert remotes == []
+
+    def test_unknown_option_in_config_skips_remote(self, fake_home):
+        # `_build_transport` forwards unknown keys to the transport, which
+        # raises ValueError — load_remotes catches and skips. This is the
+        # backstop that makes `network.json` typo-tolerant at the system
+        # level (the bad remote is dropped, others survive).
+        save_network_config({
+            "remotes": {
+                "hub": {
+                    "transport": "mqtt",
+                    "broker": "mqtt://localhost:1883",
+                    "topic": "t",
+                    "boguskey": "x",
+                }
+            }
+        })
+        # Importing transports.mqtt requires paho.
+        import importlib
+        try:
+            importlib.import_module("paho.mqtt.client")
+        except ImportError:
+            import pytest
+            pytest.skip("paho-mqtt not installed")
         remotes = load_remotes()
         assert remotes == []
 

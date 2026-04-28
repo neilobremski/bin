@@ -68,7 +68,7 @@ def _write_network_json(home: Path, port: int, topic: str, client_id: str) -> No
     (a8s_dir / "network.json").write_text(json.dumps({
         "remotes": {
             "hub": {
-                "transport": "paho-mqtt",
+                "transport": "mqtt",
                 "broker": f"mqtt://127.0.0.1:{port}",
                 "topic": topic,
                 "client_id": client_id,

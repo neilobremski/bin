@@ -267,7 +267,7 @@ class TestCmdRemote:
         rc = cmd_remote(["add", "hub", "mqtt://broker:1883", "a8s/test"])
         assert rc == 0
         cfg = load_network_config()
-        assert cfg["remotes"]["hub"]["transport"] == "paho-mqtt"
+        assert cfg["remotes"]["hub"]["transport"] == "mqtt"
         assert cfg["remotes"]["hub"]["broker"] == "mqtt://broker:1883"
         assert cfg["remotes"]["hub"]["topic"] == "a8s/test"
         # ls reflects the entry.
@@ -275,14 +275,37 @@ class TestCmdRemote:
         cmd_remote(["ls"])
         out = capsys.readouterr().out
         assert "hub" in out
-        assert "paho-mqtt" in out
+        assert "mqtt" in out
 
-    def test_add_with_credentials(self, fake_home):
-        rc = cmd_remote(["add", "hub", "mqtts://x", "t", "--user", "alice", "--pass", "secret"])
+    def test_add_passes_arbitrary_options_to_spec(self, fake_home):
+        # Any --<key> <value> past the broker and topic lands verbatim in
+        # the spec — the transport handles its own option vocabulary.
+        rc = cmd_remote([
+            "add", "hub", "mqtts://x", "t",
+            "--user", "alice", "--pass", "secret",
+            "--keepalive", "120",
+        ])
         assert rc == 0
         spec = load_network_config()["remotes"]["hub"]
-        assert spec["username"] == "alice"
-        assert spec["password"] == "secret"
+        # Stored under the user-typed key — no translation here.
+        assert spec["user"] == "alice"
+        assert spec["pass"] == "secret"
+        assert spec["keepalive"] == "120"
+
+    def test_add_rejects_dangling_option(self, fake_home, capsys):
+        rc = cmd_remote(["add", "hub", "mqtt://x", "t", "--user"])
+        assert rc == 2
+        assert "missing value" in capsys.readouterr().err
+
+    def test_add_rejects_bare_value(self, fake_home, capsys):
+        rc = cmd_remote(["add", "hub", "mqtt://x", "t", "alice"])
+        assert rc == 2
+        assert "expected --<opt>" in capsys.readouterr().err
+
+    def test_add_rejects_duplicate_option(self, fake_home, capsys):
+        rc = cmd_remote(["add", "hub", "mqtt://x", "t", "--user", "a", "--user", "b"])
+        assert rc == 2
+        assert "duplicate option" in capsys.readouterr().err
 
     def test_add_duplicate_rejected(self, fake_home, capsys):
         cmd_remote(["add", "hub", "mqtt://x", "t"])
@@ -337,7 +360,7 @@ class TestCmdTellRemoteRecipient:
     def test_unknown_recipient_with_remotes_accepted(self, fake_home, tmp_path, monkeypatch):
         sender_root = self._setup_sender(fake_home, tmp_path, monkeypatch)
         # Configure a remote so the broadcast-and-filter path is available.
-        save_network_config({"remotes": {"hub": {"transport": "paho-mqtt", "broker": "mqtt://x", "topic": "t"}}})
+        save_network_config({"remotes": {"hub": {"transport": "mqtt", "broker": "mqtt://x", "topic": "t"}}})
         rc = cmd_tell(["GHOST", "hi from sender"])
         assert rc == 0
         # Outbox file written; the routing pass will publish it. The `to`

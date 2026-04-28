@@ -137,7 +137,7 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 ### Remotes (issue #63)
 | | |
 |---|---|
-| `a8s remote add <name> <broker-url> <topic> [--user U --pass P]` | Register a paho-mqtt remote. Broker URL is `mqtt://host[:1883]` or `mqtts://host[:8883]`. Persistent session + QoS 1 are wired automatically so an offline cluster catches up on reconnect. |
+| `a8s remote add <name> <broker-url> <topic> [--<opt> <value> ...]` | Register an MQTT remote. Broker URL is `mqtt://host[:1883]` or `mqtts://host[:8883]`. Persistent session + QoS 1 are wired automatically so an offline cluster catches up on reconnect. Any `--<opt> <value>` past the broker and topic is forwarded verbatim to the transport — common ones are `--user U --pass P`, `--client_id ID`, `--keepalive N`. The transport rejects unknown options at load time so typos fail loud. |
 | `a8s remote remove <name>` | Forget a remote. Running daemons keep using the prior config until restart. |
 | `a8s remote ls` | List configured remotes (transport, broker, topic). |
 
@@ -252,7 +252,7 @@ apps/a8s/
 ├── network.py        ~/.a8s/network.json + publish_with_backoff + receive loop
 ├── transports/       Transport ABC + per-kind implementations
 │   ├── __init__.py   abstract publish/subscribe/start/stop interface
-│   └── mqtt_paho.py  paho-mqtt transport (persistent session, QoS 1)
+│   └── mqtt.py       MQTT transport (paho-mqtt impl; persistent session, QoS 1)
 ├── commands.py       every cmd_*
 ├── cli.py            COMMANDS table, dispatch, main
 ├── definitions/      built-in JSONs (claude/gemini/codex/default)
@@ -278,7 +278,7 @@ Tests are isolated via a `fake_home` fixture that monkey-patches `HOME` to a tmp
 
 Pre-v1 — the surface still moves. Tracked threads:
 
-- **#63 transport extensions** — paho-mqtt is the first transport (`a8s remote add`); follow-up PRs add a pure-stdlib mini-MQTT fallback that auto-activates when paho-mqtt isn't installed, an HTTPS long-poll transport for self-hosted rendezvous, and a peer-to-peer TCP transport. App-level envelope encryption (per-network PSK, AES-GCM) lands as an implementation detail of specific remote types when wanted.
+- **#63 transport extensions** — MQTT (paho-mqtt impl) is the first transport (`a8s remote add`); follow-up PRs add a pure-stdlib mini-MQTT fallback that auto-activates when paho-mqtt isn't installed (same `mqtt` config kind), an HTTPS long-poll transport for self-hosted rendezvous, and a peer-to-peer TCP transport. App-level envelope encryption (per-network PSK, AES-GCM) lands as an implementation detail of specific remote types when wanted.
 - **#62** — Cross-cluster file payloads. `FILE:` entries currently stay local-only across remotes; cross-cluster transfer needs a payload host (TempFile.org-style ephemeral storage with signed URLs and per-message symmetric keys) so the sender's bytes can move with the message envelope.
 - **#39** — GitHub Copilot CLI as a fourth tool kind. Trivial after the verb-scheme refactor: a `copilot.json` definition + an entry in `core.MARKER_FILES`.
 

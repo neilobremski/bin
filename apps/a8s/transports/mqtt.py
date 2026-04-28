@@ -1,4 +1,4 @@
-"""paho-mqtt Transport implementation.
+"""MQTT Transport implementation.
 
 Uses MQTT 3.1.1 with `clean_session=False` and QoS 1 so the broker holds
 messages for an offline subscriber until reconnect — this is the persistent-
@@ -6,22 +6,43 @@ session shape decided in the #63 plan. The client_id needs to be stable
 across runs (same machine, same a8s install) for the broker to recognize the
 session and replay; we default to `a8s-<machine-hash>-<remote_id>`.
 
-This module is import-soft: importing it requires `paho-mqtt`, but
-`network.py` only imports it lazily so a8s with no remotes runs fine without
-paho-mqtt installed. The mini-MQTT fallback (deferred to a follow-up PR)
-will plug into the same `Transport` ABC.
+Today the implementation is paho-mqtt. A pure-stdlib mini-MQTT fallback is
+deferred to a follow-up PR; when it lands, this module will auto-select
+(paho if importable, mini otherwise) so the user-facing config kind stays
+`mqtt` either way.
+
+Construction is option-bag-shaped: anything past `remote_id`, `broker`,
+`topic` arrives as `**opts` — the constructor aliases common shorthand
+(`user`/`pass` → `username`/`password`), pulls known keys, and rejects
+anything left over so an obvious typo in `network.json` fails loud.
 """
 from __future__ import annotations
 
 import hashlib
 import socket
 import threading
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import paho.mqtt.client as mqtt
 
 from transports import OnMessage, Transport, TransportError
+
+
+# Aliases the option bag accepts in addition to the canonical names.
+_OPT_ALIASES: dict[str, str] = {
+    "user": "username",
+    "pass": "password",
+}
+
+# Recognized option keys (post-aliasing). Anything else raises.
+_KNOWN_OPTS: set[str] = {
+    "username",
+    "password",
+    "client_id",
+    "keepalive",
+    "connect_timeout_s",
+}
 
 
 def _default_client_id(remote_id: str) -> str:
@@ -31,41 +52,59 @@ def _default_client_id(remote_id: str) -> str:
     return f"a8s-{h}"
 
 
-class PahoMqttTransport(Transport):
+class MqttTransport(Transport):
     """One configured MQTT remote.
 
     Args:
         remote_id: stable name from `network.json` (used for dedup keying).
-        broker_url: e.g. `mqtt://broker.example:1883` or `mqtts://...:8883`.
+        broker: URL — `mqtt://host[:1883]` or `mqtts://host[:8883]`.
         topic: the broadcast topic both publish and subscribe target.
-        username/password: optional broker credentials.
-        client_id: optional override (defaults to a stable hash of host + id).
-        keepalive: MQTT keepalive seconds; default 60.
-        connect_timeout_s: how long `start()` waits for the initial CONNACK
-            before giving up. Setting this low (a few seconds) keeps a8s
-            startup snappy when a broker is unreachable; the loop then
-            keeps trying to reconnect in the background.
+        **opts: per-remote options forwarded from `network.json`. Recognized:
+            username / password (aliased from `user` / `pass`), client_id,
+            keepalive (seconds, default 60), connect_timeout_s (default 5.0).
+            Unknown keys raise ValueError so a typo in the config doesn't
+            silently produce a broken remote.
     """
 
     def __init__(
         self,
         remote_id: str,
-        broker_url: str,
-        topic: str,
         *,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
-        client_id: Optional[str] = None,
-        keepalive: int = 60,
-        connect_timeout_s: float = 5.0,
+        broker: str,
+        topic: str,
+        **opts: Any,
     ) -> None:
+        # Normalize alias keys (user → username, etc.). If both alias and
+        # canonical are present, canonical wins and the alias is dropped
+        # silently — the user might have set both during a config edit; we
+        # don't surprise them with an error there.
+        for short, full in _OPT_ALIASES.items():
+            if short in opts and full not in opts:
+                opts[full] = opts.pop(short)
+            elif short in opts:
+                opts.pop(short)
+        unknown = set(opts) - _KNOWN_OPTS
+        if unknown:
+            raise ValueError(
+                f"remote {remote_id!r}: unknown option(s) {sorted(unknown)} "
+                f"(known: {sorted(_KNOWN_OPTS)} + aliases {sorted(_OPT_ALIASES)})"
+            )
+        username: Optional[str] = opts.get("username")
+        password: Optional[str] = opts.get("password")
+        client_id: Optional[str] = opts.get("client_id")
+        keepalive: int = int(opts.get("keepalive", 60))
+        connect_timeout_s: float = float(opts.get("connect_timeout_s", 5.0))
+
         self._remote_id = remote_id
         self._topic = topic
         self._keepalive = keepalive
         self._connect_timeout_s = connect_timeout_s
-        parsed = urlparse(broker_url)
+        parsed = urlparse(broker)
         if parsed.scheme not in ("mqtt", "mqtts"):
-            raise ValueError(f"unsupported scheme {parsed.scheme!r} (expected mqtt or mqtts)")
+            raise ValueError(
+                f"remote {remote_id!r}: unsupported scheme {parsed.scheme!r} "
+                f"(expected mqtt or mqtts)"
+            )
         self._host = parsed.hostname or "localhost"
         self._port = parsed.port or (8883 if parsed.scheme == "mqtts" else 1883)
         self._tls = parsed.scheme == "mqtts"
@@ -116,7 +155,7 @@ class PahoMqttTransport(Transport):
         self._client.loop_start()
         self._started = True
         # Wait for initial CONNACK so a fast-failing broker surfaces here
-        # rather than silently buffering publishes. After this, paho's loop
+        # rather than silently buffering publishes. After this, the loop
         # auto-reconnects on disconnect.
         if not self._connected.wait(timeout=self._connect_timeout_s):
             # Don't raise — let the background loop keep retrying. publish()

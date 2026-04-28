@@ -131,9 +131,9 @@ Key invariants:
 | `apps/a8s/mailbox.py` | `route_outboxes` (two-phase: ingest → process), `ensure_mailboxes`, `_queue_prompt`, `_queue_clear_sentinel`, `_split_content_and_files`, `_write_outbox`. Per-message `.retry` sidecars live in `pending/` and drive backoff retries via `BACKOFF_SCHEDULE`. | depends on `core`, `registry`, `ulid` |
 | `apps/a8s/definitions.py` | `select_verb`, `build_command`, `_expand_argv` (`$SENDER`/`$RECIPIENT`/`$MESSAGE`/`$A8S_DIR`), `load_definition`, `_autodiscover_definition` | depends on `core`, `registry` |
 | `apps/a8s/ulid.py` | `new()` / `parse()` / `is_ulid()` — pure-stdlib Crockford-base32 ULIDs. Mailbox messages are named `<ulid>.json` and carry the same id in the body's `id` field for receive-side dedup. | leaf module |
-| `apps/a8s/network.py` | `~/.a8s/network.json` IO, `load_remotes`, `make_publish_remotes` (warn-and-continue per-remote publish), `receive_envelope` (decode → ULID dedup → registry filter → atomic inbox write), `start_remotes` / `stop_remotes`. paho-mqtt imported lazily. | depends on `core`, `registry`, `transports`, `ulid` |
+| `apps/a8s/network.py` | `~/.a8s/network.json` IO, `load_remotes` (forwards every key past `transport`/`broker`/`topic` to the transport as `**opts` — each transport handles its own option vocabulary), `make_publish_remotes` (warn-and-continue per-remote publish), `receive_envelope` (decode → ULID dedup → registry filter → atomic inbox write), `start_remotes` / `stop_remotes`. Transport modules imported lazily. | depends on `core`, `registry`, `transports`, `ulid` |
 | `apps/a8s/transports/__init__.py` | `Transport` ABC + `TransportError`. The publish/subscribe/start/stop contract every remote transport implements. | leaf module |
-| `apps/a8s/transports/mqtt_paho.py` | `PahoMqttTransport` — paho-mqtt with `clean_session=False`, QoS 1, hash-derived stable `client_id` so the broker recognizes the same persistent session across restarts. | depends on `transports`, `paho-mqtt` (soft) |
+| `apps/a8s/transports/mqtt.py` | `MqttTransport` — MQTT 3.1.1 with `clean_session=False`, QoS 1, hash-derived stable `client_id` so the broker recognizes the same persistent session across restarts. Today's implementation is paho-mqtt; mini-MQTT pure-stdlib fallback lands as a follow-up and the user-facing config kind stays `mqtt`. The constructor takes a `**opts` bag, aliases `user`/`pass` → `username`/`password`, and rejects unknown keys so a typo in `network.json` fails loud. | depends on `transports`, `paho-mqtt` (soft) |
 | `apps/a8s/daemon.py` | `acquire`/`release` (pid files), `attached_loop` (also spawns subscriber threads via `start_remotes` and stops them on detach), signal handling (`_make_signal_handler`, `_kill_wake_subprocess_group`), `run_with_prefix`, `wake_once`. Mutable globals `_STOP_EVENT`/`_SIGNAL_COUNT`/`_CURRENT_WAKE_PROC` live here. Sets `core.PRINT_LOCK`. | depends on everything above |
 | `apps/a8s/commands.py` | every `cmd_*`, including `cmd_remote add/remove/ls`, `_install_skill_*` for Claude/Gemini/Codex, `_expand_to_agents` | depends on everything above |
 | `apps/a8s/cli.py` | `COMMANDS` table (the source of truth for help text), `dispatch`, `main` | depends on `commands` only |
@@ -194,7 +194,7 @@ Key invariants:
   looping retries. Note: a8s only routes *messages* across remotes —
   state queries like `a8s logs`, `a8s ls`, `a8s agents` are strictly
   local. There is no cross-cluster state query path by design.
-- **Persistent sessions.** paho-mqtt is configured with
+- **Persistent sessions.** The MQTT transport is configured with
   `clean_session=False` + QoS 1, with a stable hash-derived `client_id`. The
   broker holds messages for an offline subscriber until reconnect — that's
   how a Cloud-Shell-style listener catches up after coming online.
@@ -227,7 +227,7 @@ prompt <name> <message>      senderless supervisor message (raw delivery)
 tell <name> <message>        routed message (sender = agent enclosing CWD)
 clear <name>                 queue CLEAR sentinel (write-time + read-time inbox wipe)
 logs <name>... [--tail N] [-f]   merge-sorted per-agent logs
-remote add <name> <broker> <topic> [--user U --pass P]   register a paho-mqtt remote
+remote add <name> <broker> <topic> [--<opt> <value> ...]   register an MQTT remote (extras forwarded to transport)
 remote remove <name>         forget a remote
 remote ls                    list configured remotes
 install                      install canonical skills
@@ -346,7 +346,7 @@ The locked-design refactor (#52) is closed. The following are open:
 | # | State | Topic |
 |---|---|---|
 | #39 | open enhancement | Copilot CLI as 4th tool kind. Trivial after the refactor: write `copilot.json`, add `COPILOT.md` → `copilot` to `core.MARKER_FILES`. |
-| #63 | partially landed | Transparent multi-cluster routing. paho-mqtt transport + layered remotes + per-message backoff + ULID dedup are in. Still open: mini-MQTT pure-stdlib fallback (auto-activates when paho isn't importable), HTTPS long-poll transport, peer-to-peer TCP transport, app-level envelope encryption (per-network PSK), cross-cluster `FILE:` payloads (rides #62). |
+| #63 | partially landed | Transparent multi-cluster routing. MQTT transport (paho-mqtt impl) + layered remotes + per-message backoff + ULID dedup are in. Still open: mini-MQTT pure-stdlib fallback (auto-activates when paho isn't importable), HTTPS long-poll transport, peer-to-peer TCP transport, app-level envelope encryption (per-network PSK), cross-cluster `FILE:` payloads (rides #62). |
 | #62 | open enhancement | Cross-cluster file payload host (TempFile.org-style ephemeral storage with signed URLs and per-message symmetric keys). v1 strips `files` from incoming envelopes and skips remote publish for outgoing messages with files. |
 | #72 | open question | Design discussion surfaced by the review panel: mailbox file format. (#67's atomic fan-out and #63's ULID + ingest-to-pending split partially address this; revisit before mini-MQTT lands.) |
 

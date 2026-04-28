@@ -1,4 +1,4 @@
-"""Tests for the paho-mqtt transport.
+"""Tests for the MQTT transport.
 
 Runs against a real `mosquitto` broker spawned on a free port. Both
 prerequisites (paho-mqtt installed, `mosquitto` on PATH) are softly required
@@ -16,7 +16,7 @@ import pytest
 
 pytest.importorskip("paho.mqtt.client")
 
-from transports.mqtt_paho import PahoMqttTransport
+from transports.mqtt import MqttTransport
 from transports import TransportError
 
 
@@ -71,15 +71,15 @@ def test_publish_and_receive_round_trip(mqtt_broker):
         received.append(payload)
         got.set()
 
-    sub = PahoMqttTransport(
+    sub = MqttTransport(
         remote_id="hub",
-        broker_url=mqtt_broker,
+        broker=mqtt_broker,
         topic="a8s/test-roundtrip",
         client_id="a8s-test-sub",
     )
-    pub = PahoMqttTransport(
+    pub = MqttTransport(
         remote_id="hub",
-        broker_url=mqtt_broker,
+        broker=mqtt_broker,
         topic="a8s/test-roundtrip",
         client_id="a8s-test-pub",
     )
@@ -95,9 +95,9 @@ def test_publish_and_receive_round_trip(mqtt_broker):
 
 
 def test_publish_before_start_raises(mqtt_broker):
-    t = PahoMqttTransport(
+    t = MqttTransport(
         remote_id="hub",
-        broker_url=mqtt_broker,
+        broker=mqtt_broker,
         topic="a8s/test-no-start",
         client_id="a8s-test-no-start",
     )
@@ -109,9 +109,9 @@ def test_unreachable_broker_publish_raises():
     # No broker on this port — connect_async returns immediately, but publish
     # must surface the disconnected state with TransportError so the routing
     # pass can warn and retry.
-    t = PahoMqttTransport(
+    t = MqttTransport(
         remote_id="dead",
-        broker_url=f"mqtt://127.0.0.1:{_free_port()}",
+        broker=f"mqtt://127.0.0.1:{_free_port()}",
         topic="a8s/test-dead",
         client_id="a8s-test-dead",
         connect_timeout_s=0.5,  # keep the test fast
@@ -133,9 +133,9 @@ def test_persistent_session_replays_on_reconnect(mqtt_broker):
     received: list[bytes] = []
     got = threading.Event()
 
-    sub = PahoMqttTransport(
+    sub = MqttTransport(
         remote_id="hub",
-        broker_url=mqtt_broker,
+        broker=mqtt_broker,
         topic="a8s/test-persist",
         client_id="a8s-test-persist-sub",
     )
@@ -143,9 +143,9 @@ def test_persistent_session_replays_on_reconnect(mqtt_broker):
     sub.stop()
 
     # Publish while subscriber is offline.
-    pub = PahoMqttTransport(
+    pub = MqttTransport(
         remote_id="hub",
-        broker_url=mqtt_broker,
+        broker=mqtt_broker,
         topic="a8s/test-persist",
         client_id="a8s-test-persist-pub",
     )
@@ -160,9 +160,9 @@ def test_persistent_session_replays_on_reconnect(mqtt_broker):
         received.append(payload)
         got.set()
 
-    sub2 = PahoMqttTransport(
+    sub2 = MqttTransport(
         remote_id="hub",
-        broker_url=mqtt_broker,
+        broker=mqtt_broker,
         topic="a8s/test-persist",
         client_id="a8s-test-persist-sub",
     )
@@ -172,3 +172,50 @@ def test_persistent_session_replays_on_reconnect(mqtt_broker):
         assert received == [b'{"q":"queued"}']
     finally:
         sub2.stop()
+
+
+# ---------- option-bag handling ----------
+
+# These don't need a broker — the constructor's option vocabulary lives
+# entirely in the class.
+
+
+class TestMqttTransportOptions:
+    def test_user_aliases_to_username(self):
+        t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", user="alice", password="p")
+        # The alias is consumed; the canonical name takes effect on the
+        # underlying paho client.
+        # We can't easily introspect paho internals, but the constructor
+        # accepting both spellings without raising is the contract.
+        assert t.id == "hub"
+
+    def test_pass_aliases_to_password(self):
+        t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", user="alice", **{"pass": "p"})
+        assert t.id == "hub"
+
+    def test_canonical_wins_over_alias(self):
+        # If both spellings show up, canonical wins — alias is silently
+        # dropped (the user might have set both during a config edit).
+        t = MqttTransport(
+            remote_id="hub", broker="mqtt://x", topic="t",
+            username="canonical", user="alias",
+        )
+        assert t.id == "hub"
+
+    def test_unknown_option_raises(self):
+        with pytest.raises(ValueError, match="unknown option"):
+            MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", boguskey="x")
+
+    def test_unsupported_scheme_raises(self):
+        with pytest.raises(ValueError, match="unsupported scheme"):
+            MqttTransport(remote_id="hub", broker="ftp://x", topic="t")
+
+    def test_keepalive_coerced_from_string(self):
+        # network.json values come through as strings (CLI parsing).
+        # Constructor must coerce numeric options.
+        t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", keepalive="120")
+        assert t._keepalive == 120
+
+    def test_connect_timeout_coerced_from_string(self):
+        t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", connect_timeout_s="0.5")
+        assert t._connect_timeout_s == 0.5

@@ -10,9 +10,15 @@ spawns one subscriber thread per remote that calls into
 `receive_envelope`. Cluster-wide dedup lives in the seen-ids ring file
 at `~/.a8s/seen-ids`.
 
-The `paho-mqtt` import is lazy. `load_remotes()` tries to import the
-transport module only when it sees a `transport: paho-mqtt` entry in the
-config; an a8s install with no remotes never imports paho.
+Transport modules are imported lazily. `load_remotes()` only pulls in
+e.g. `transports.mqtt` when it sees a `transport: mqtt` entry in the
+config; an a8s install with no remotes never imports paho-mqtt or any
+other transport library.
+
+`_build_transport` forwards every key past `transport`/`broker`/`topic`
+to the transport constructor as `**opts`, so adding a new transport
+option doesn't require touching this dispatcher — only the transport's
+own option-bag handling.
 """
 from __future__ import annotations
 
@@ -71,26 +77,28 @@ def save_network_config(cfg: dict) -> None:
         json.dump(cfg, f, indent=2)
 
 
+# Top-level keys in a network.json entry that are not transport options
+# (they're consumed by the dispatcher itself before forwarding the rest).
+_RESERVED_SPEC_KEYS = {"transport", "broker", "topic"}
+
+
 def _build_transport(name: str, spec: dict) -> Transport:
-    """Instantiate one Transport from a network.json entry."""
+    """Instantiate one Transport from a network.json entry. Forwards every
+    key past `transport` / `broker` / `topic` as `**opts` to the transport
+    constructor — each transport handles its own option vocabulary,
+    aliases (e.g. `user` → `username`), and rejects unknowns."""
     kind = (spec.get("transport") or "").strip().lower()
-    if kind == "paho-mqtt":
+    broker = spec.get("broker")
+    topic = spec.get("topic")
+    if not broker or not topic:
+        raise ValueError(f"remote {name!r}: every transport requires `broker` and `topic`")
+    opts = {k: v for k, v in spec.items() if k not in _RESERVED_SPEC_KEYS}
+    if kind == "mqtt":
         # Lazy import — keeps paho out of the import graph for users with no
         # remotes configured.
-        from transports.mqtt_paho import PahoMqttTransport
+        from transports.mqtt import MqttTransport
 
-        broker = spec.get("broker")
-        topic = spec.get("topic")
-        if not broker or not topic:
-            raise ValueError(f"remote {name!r}: paho-mqtt requires `broker` and `topic`")
-        return PahoMqttTransport(
-            remote_id=name,
-            broker_url=broker,
-            topic=topic,
-            username=spec.get("username"),
-            password=spec.get("password"),
-            client_id=spec.get("client_id"),
-        )
+        return MqttTransport(remote_id=name, broker=broker, topic=topic, **opts)
     raise ValueError(f"remote {name!r}: unsupported transport {kind!r}")
 
 

@@ -953,9 +953,13 @@ _REMOTE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 def _remote_usage() -> int:
     print(
-        "usage: a8s remote add <name> <broker-url> <topic> [--user U --pass P]\n"
+        "usage: a8s remote add <name> <broker-url> <topic> [--<opt> <value> ...]\n"
         "       a8s remote remove <name>\n"
-        "       a8s remote ls",
+        "       a8s remote ls\n"
+        "\n"
+        "Any --<opt> <value> pair past the broker and topic is passed verbatim\n"
+        "to the transport (e.g. --user / --pass for mqtt). Unknown options are\n"
+        "rejected by the transport at load time.",
         file=sys.stderr,
     )
     return 2
@@ -965,7 +969,7 @@ def cmd_remote(args: list[str]) -> int:
     """`a8s remote` — manage cross-cluster remotes declared in `~/.a8s/network.json`.
 
     Subcommands:
-      add <name> <broker> <topic>   register a paho-mqtt remote
+      add <name> <broker> <topic> [--<opt> <value> ...]   register an MQTT remote
       remove <name>                 forget a remote
       ls                            list configured remotes
     """
@@ -1006,37 +1010,36 @@ def _cmd_remote_add(args: list[str]) -> int:
     if not _REMOTE_NAME_RE.match(name):
         print(f"remote name must be alphanumeric (with -, _, .): {name!r}", file=sys.stderr)
         return 2
-    username: str | None = None
-    password: str | None = None
+    extras: dict = {}
     i = 0
     while i < len(rest):
         tok = rest[i]
-        if tok in ("--user", "--username"):
-            i += 1
-            if i >= len(rest):
-                return _remote_usage()
-            username = rest[i]
-        elif tok in ("--pass", "--password"):
-            i += 1
-            if i >= len(rest):
-                return _remote_usage()
-            password = rest[i]
-        else:
-            print(f"unknown remote option: {tok}", file=sys.stderr)
+        if not tok.startswith("--") or len(tok) <= 2:
+            print(f"expected --<opt> <value> pair, got: {tok!r}", file=sys.stderr)
             return _remote_usage()
+        key = tok[2:]
+        i += 1
+        if i >= len(rest):
+            print(f"missing value for {tok}", file=sys.stderr)
+            return _remote_usage()
+        if key in extras:
+            print(f"duplicate option: {tok}", file=sys.stderr)
+            return _remote_usage()
+        extras[key] = rest[i]
         i += 1
     cfg = load_network_config()
     if name in cfg["remotes"]:
         print(f"remote {name!r} already exists", file=sys.stderr)
         return 1
-    spec: dict = {"transport": "paho-mqtt", "broker": broker, "topic": topic}
-    if username is not None:
-        spec["username"] = username
-    if password is not None:
-        spec["password"] = password
+    spec: dict = {"transport": "mqtt", "broker": broker, "topic": topic, **extras}
     cfg["remotes"][name] = spec
     save_network_config(cfg)
-    print(f"added remote {name} ({spec['transport']} {broker} topic={topic})")
+    extras_summary = " ".join(f"--{k}=***" if k in ("pass", "password") else f"--{k}={v}"
+                              for k, v in extras.items())
+    summary = f"{spec['transport']} {broker} topic={topic}"
+    if extras_summary:
+        summary += f" {extras_summary}"
+    print(f"added remote {name} ({summary})")
     return 0
 
 
