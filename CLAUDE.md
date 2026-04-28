@@ -128,13 +128,14 @@ Key invariants:
 | `apps/a8s/a8s.py` | thin entry shim (~30 lines) | `cli.main` invocation only |
 | `apps/a8s/core.py` | paths, logging, helpers, `Participant`, mutable `PRINT_LOCK`, path constants (`SCRIPT_DIR`, `DEFINITIONS_DIR`, `ENTRYPOINT`) | leaf module — no a8s imports |
 | `apps/a8s/registry.py` | `~/.a8s/a8s.json` I/O, `resolve_name` (alias resolution with diamond/cycle detection), `sender_from_cwd`, `_scan_for_markers` | depends on `core` |
-| `apps/a8s/mailbox.py` | `route_outboxes` (two-phase: ingest → process), `ensure_mailboxes`, `_queue_prompt`, `_queue_clear_sentinel`, `_split_content_and_files`, `_write_outbox`. Per-message `.retry` sidecars live in `pending/` and drive backoff retries via `BACKOFF_SCHEDULE`. | depends on `core`, `registry`, `ulid` |
+| `apps/a8s/mailbox.py` | `route_outboxes` (two-phase: ingest → process), `ensure_mailboxes`, `_queue_prompt`, `_queue_clear_sentinel`, `_split_content_and_files`, `_write_outbox`. Per-message `.retry` sidecars live in `pending/` and drive backoff retries via `BACKOFF_SCHEDULE`. `_build_routed_message` filters outbox JSON through `ALLOWED_OUTBOX_FIELDS` (anti-spoof: system sentinels like `ask` / `clear` set only by system paths, never copied through agent-written JSON). | depends on `core`, `registry`, `ulid` |
 | `apps/a8s/definitions.py` | `select_verb`, `build_command`, `_expand_argv` (`$SENDER`/`$RECIPIENT`/`$MESSAGE`/`$A8S_DIR`), `load_definition`, `_autodiscover_definition` | depends on `core`, `registry` |
 | `apps/a8s/ulid.py` | `new()` / `parse()` / `is_ulid()` — pure-stdlib Crockford-base32 ULIDs. Mailbox messages are named `<ulid>.json` and carry the same id in the body's `id` field for receive-side dedup. | leaf module |
+| `apps/a8s/transient.py` | `register(name)` / `cleanup(name)` / `is_live(name)` / `prune_stale(...)` — per-process transient agent dirs at `~/.a8s/transient/<NAME>/`. Used by `a8s ask` to mint `ASK_<ulid>` so two terminals' replies don't conflate. `network.receive_envelope` checks `is_live` before the registry filter. | depends on `core` |
 | `apps/a8s/network.py` | `~/.a8s/network.json` IO, `load_remotes` (forwards every key past `transport`/`broker`/`topic` to the transport as `**opts` — each transport handles its own option vocabulary), `make_publish_remotes` (warn-and-continue per-remote publish), `receive_envelope` (decode → ULID dedup → registry filter → atomic inbox write), `start_remotes` / `stop_remotes`. Transport modules imported lazily. | depends on `core`, `registry`, `transports`, `ulid` |
 | `apps/a8s/transports/__init__.py` | `Transport` ABC + `TransportError`. The publish/subscribe/start/stop contract every remote transport implements. | leaf module |
 | `apps/a8s/transports/mqtt.py` | `MqttTransport` — MQTT 3.1.1 with `clean_session=False`, QoS 1, hash-derived stable `client_id` so the broker recognizes the same persistent session across restarts. Today's implementation is paho-mqtt; mini-MQTT pure-stdlib fallback lands as a follow-up and the user-facing config kind stays `mqtt`. The constructor takes a `**opts` bag, aliases `user`/`pass` → `username`/`password`, and rejects unknown keys so a typo in `network.json` fails loud. | depends on `transports`, `paho-mqtt` (soft) |
-| `apps/a8s/daemon.py` | `acquire`/`release` (pid files), `attached_loop` (also spawns subscriber threads via `start_remotes` and stops them on detach), signal handling (`_make_signal_handler`, `_kill_wake_subprocess_group`), `run_with_prefix`, `wake_once`. Mutable globals `_STOP_EVENT`/`_SIGNAL_COUNT`/`_CURRENT_WAKE_PROC` live here. Sets `core.PRINT_LOCK`. | depends on everything above |
+| `apps/a8s/daemon.py` | `acquire`/`release` (pid files), `attached_loop` (also spawns subscriber threads via `start_remotes` and stops them on detach), signal handling (`_make_signal_handler`, `_kill_wake_subprocess_group`), `run_with_prefix` (optional `capture` param for `ask` messages), `wake_once` (writes `<recipient>/.responses/<msg_id>.txt` and dispatches a transient reply when the message is `ask: true`). Mutable globals `_STOP_EVENT`/`_SIGNAL_COUNT`/`_CURRENT_WAKE_PROC` live here. Sets `core.PRINT_LOCK`. | depends on everything above |
 | `apps/a8s/commands.py` | every `cmd_*`, including `cmd_remote add/remove/ls`, `_install_skill_*` for Claude/Gemini/Codex, `_expand_to_agents` | depends on everything above |
 | `apps/a8s/cli.py` | `COMMANDS` table (the source of truth for help text), `dispatch`, `main` | depends on `commands` only |
 
@@ -204,6 +205,31 @@ Key invariants:
   → 24h). After `MAX_ATTEMPTS` failures the message moves to trash with a
   "discarded after backoff exhausted" log. Don't introduce per-pass
   unconditional retries — they generate excess log noise and broker traffic.
+- **Outbox-routing allowlist.** `_build_routed_message` only copies the
+  fields in `ALLOWED_OUTBOX_FIELDS` (`id`, `date`, `to`, `content`,
+  `files`) plus a force-stamped `from`. System sentinels — today `ask`
+  (set by `cmd_ask` to mark request/response messages) and `clear` (set
+  by `cmd_clear` for the inbox-wipe sentinel) — are dropped at routing.
+  Reasoning: an agent's `.outbox/` is agent-writable JSON, so any field
+  that triggers system behavior must be unforgeable. System paths
+  (`cmd_ask`, `cmd_clear`, `cmd_prompt`, the daemon's ask-reply
+  dispatch) bypass `route_outboxes` entirely — they write directly to
+  inbox or publish supervisor envelopes. When introducing a new system
+  sentinel, add it nowhere except the system path that produces it; the
+  allowlist is the wall that prevents agents from inventing it.
+- **`a8s ask` is single-recipient request/response.** `tell` and
+  `prompt` accept aliases and fan out; `ask` rejects aliases (there's
+  exactly one response slot). Local recipients: `wake_once` captures
+  the wake subprocess output (via `run_with_prefix`'s optional
+  `capture` parameter, only enabled when the message has `ask: true`)
+  and writes `~/.a8s/agents/<recipient>/.responses/<msg_id>.txt`. The
+  asker polls that file. Remote recipients: `cmd_ask` mints
+  `ASK_<ulid>` via `transient.register`, spawns its own subscribers on
+  every configured remote so two terminals don't conflate replies, and
+  `_deliver_ask_response` publishes the reply envelope back through
+  `publish_once_to_remotes`. Don't repurpose the `.responses/` channel
+  for non-ask messages — TTL cleanup runs at the top of every routing
+  pass and would clobber anything left there.
 
 ### Surface
 
@@ -225,6 +251,7 @@ exit                         SIGTERM every running handler
 ls                           list only running agents + their handler PIDs
 prompt <name> <message>      senderless supervisor message (raw delivery)
 tell <name> <message>        routed message (sender = agent enclosing CWD)
+ask <name> <message> [--timeout <s>]   send a prompt and print the captured response (single recipient; no aliases)
 clear <name>                 queue CLEAR sentinel (write-time + read-time inbox wipe)
 logs <name>... [--tail N] [-f]   merge-sorted per-agent logs
 remote                                  list all configured remotes
@@ -246,6 +273,11 @@ install                      install canonical skills
 ├── network.json              configured remotes (absent → local-only)
 ├── seen-ids                  cluster-wide ULID ring (receive-side dedup)
 ├── log.txt                   process-scoped supervisor log
+├── transient/                per-process transient agent dirs (a8s ask uses
+│   └── ASK_<ulid>/           ASK_<ulid> as its private reply inbox)
+│       ├── inbox/
+│       ├── inbox.tmp/
+│       └── pid               liveness check for receive_envelope's transient fallback
 └── agents/
     └── <NAME>/
         ├── inbox/            JSON messages waiting for wake_once
@@ -254,6 +286,9 @@ install                      install canonical skills
         │                     awaiting full delivery; <ulid>.json plus
         │                     optional <ulid>.json.retry sidecar tracking
         │                     attempts and per-remote success
+        ├── .responses/       captured wake stdout for `ask: true` messages,
+        │                     keyed by <msg_id>.txt; consumer reads + unlinks,
+        │                     handler-side TTL prunes orphans
         ├── trash/             processed / discarded messages
         ├── log.txt            agent-scoped log
         └── pid                handler attachment (one or more agents may share a PID)

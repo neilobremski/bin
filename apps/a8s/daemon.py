@@ -29,6 +29,7 @@ from pathlib import Path
 
 import core
 from core import (
+    ASK_PREFIX,
     Participant,
     _pid_alive,
     _preview,
@@ -38,18 +39,25 @@ from core import (
     kill_request_path,
     out_agent,
     pid_path,
+    response_path,
+    responses_dir,
     trash_dir,
     unique_path,
 )
+from datetime import datetime, timezone
 from definitions import build_command, load_definition, select_verb
 from mailbox import ensure_mailboxes, next_inbox_message, route_outboxes
 from network import (
+    _deliver_to_transient,
     load_remotes,
     make_publish_remotes,
+    publish_once_to_remotes,
     start_remotes,
     stop_remotes,
 )
 from registry import participants_from_registry
+import transient as transient_dirs
+from ulid import new as new_ulid
 
 
 # ---------- subprocess execution ----------
@@ -62,11 +70,21 @@ _CURRENT_WAKE_PROC: subprocess.Popen | None = None
 _CURRENT_WAKE_NAME: str | None = None
 
 
-def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
+def run_with_prefix(
+    name: str,
+    cmd: list[str],
+    cwd: Path,
+    capture: list[str] | None = None,
+) -> int:
     """Run the wake subprocess in its own session so SIGKILL can target the
     whole process group (LLM CLI + any helpers it spawns). Tracks the live
     process in `_CURRENT_WAKE_PROC` and the agent in `_CURRENT_WAKE_NAME` so
-    signal handlers can identify which agent's wake is in-flight."""
+    signal handlers can identify which agent's wake is in-flight.
+
+    When `capture` is given, every output line is appended to it (the raw
+    line, no prefix) in addition to the per-agent log write. `wake_once`
+    enables capture only for `ask: true` messages so the response can be
+    sent back to the asker — non-ask wakes pay no extra cost."""
     global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME
     prefix = f"{name}> "
     try:
@@ -88,7 +106,10 @@ def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
-            out_agent(name, prefix + line.rstrip("\n"))
+            stripped = line.rstrip("\n")
+            out_agent(name, prefix + stripped)
+            if capture is not None:
+                capture.append(stripped)
         proc.wait()
         if proc.returncode != 0:
             out_agent(name, f"{prefix}(exit {proc.returncode})")
@@ -135,7 +156,66 @@ def wake_once(p: Participant, msg_path: Path) -> None:
         out_agent(p.name, f"[{p.name}] waking ({verb}) from {trashed.name}: {_preview(msg.get('content', ''))}")
     cmd = build_command(definition, msg, verb)
     out_agent(p.name, f"[{p.name}] exec: {shlex.join(cmd)}")
-    run_with_prefix(p.name, cmd, p.root)
+    is_ask = msg.get("ask") is True
+    capture: list[str] | None = [] if is_ask else None
+    run_with_prefix(p.name, cmd, p.root, capture=capture)
+    if is_ask:
+        response_text = "\n".join(capture or []).rstrip()
+        _deliver_ask_response(p, msg, response_text)
+
+
+def _deliver_ask_response(p: Participant, msg: dict, text: str) -> None:
+    """Two delivery channels for an ask response:
+
+    1. Always write the captured text to
+       `~/.a8s/agents/<recipient>/.responses/<msg_id>.txt` (atomic
+       stage→rename). A local asker polls this path; this is the only
+       channel the local case needs and avoids a transient subscriber.
+
+    2. If the message's `from` looks like a transient asker name
+       (`ASK_<ulid>`), also dispatch a reply envelope to that name. Local
+       transient → write directly to its inbox. Remote asker → publish
+       to all configured remotes (the asker's cluster's subscribers
+       deliver into its transient inbox)."""
+    msg_id = msg.get("id") or ""
+    if not msg_id:
+        out_agent(p.name, f"[{p.name}] ask response dropped — message had no id")
+        return
+    final = response_path(p.name, msg_id)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    staging = final.with_suffix(final.suffix + ".tmp")
+    try:
+        with staging.open("w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(str(staging), str(final))
+    except OSError as e:
+        out_agent(p.name, f"[{p.name}] WARN failed to write ask response: {e}")
+
+    asker = (msg.get("from") or "").strip()
+    if not asker.startswith(ASK_PREFIX):
+        return
+    reply = {
+        "id": new_ulid(),
+        "date": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "from": p.name,
+        "to": asker,
+        "content": text,
+        "files": [],
+    }
+    if transient_dirs.is_live(asker):
+        # Asker is on this same cluster — short-circuit straight into its
+        # transient inbox without going through MQTT.
+        _deliver_to_transient(asker, reply["id"], reply)
+        out_agent(p.name, f"[{p.name}] ask reply delivered locally to {asker}")
+        return
+    # Asker lives on a remote cluster. Publish synchronously; warn-and-
+    # continue if every remote fails (the asker times out and the user
+    # re-runs the CLI command).
+    succeeded, failed = publish_once_to_remotes(reply)
+    if succeeded:
+        out_agent(p.name, f"[{p.name}] ask reply published to {','.join(succeeded)}")
+    if failed:
+        out_agent(p.name, f"[{p.name}] WARN ask reply failed on {','.join(failed)}")
 
 
 # ---------- per-agent attachment ----------

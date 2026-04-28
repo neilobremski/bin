@@ -20,9 +20,12 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core import (
+    ASK_PREFIX,
+    ASK_TIMEOUT_DEFAULT_S,
     ENTRYPOINT,
     SKILLS_DIR,
     BIN_ROOT,
@@ -31,9 +34,13 @@ from core import (
     agent_dir,
     agent_log_path,
     canonical_name,
+    inbox_dir,
+    inbox_tmp_dir,
     out,
     out_agent,
     pid_path,
+    response_path,
+    transient_inbox_dir,
 )
 from definitions import _autodiscover_definition, default_definition_path
 from daemon import (
@@ -51,9 +58,15 @@ from mailbox import (
 from network import (
     configured_remote_ids,
     load_network_config,
+    load_remotes,
+    make_receive_callback,
     publish_once_to_remotes,
     save_network_config,
+    start_remotes,
+    stop_remotes,
 )
+import transient as transient_dirs
+from ulid import new as new_ulid
 from registry import (
     _scan_for_markers,
     find_participant,
@@ -879,6 +892,231 @@ def cmd_clear(args: list[str]) -> int:
         queued += 1
     print(f"queued clear for {queued} agent(s)")
     return 0
+
+
+# ---------- ask ----------
+
+def _parse_ask_args(args: list[str]) -> tuple[str, str, float] | int:
+    """Pull `--timeout <seconds>` out of the argv tail. Returns
+    (recipient, message, timeout_s) or an int exit code on usage error."""
+    timeout = float(ASK_TIMEOUT_DEFAULT_S)
+    rest: list[str] = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--timeout" and i + 1 < len(args):
+            try:
+                timeout = float(args[i + 1])
+            except ValueError:
+                print("ask: --timeout requires a number of seconds", file=sys.stderr)
+                return 2
+            i += 2
+            continue
+        rest.append(args[i])
+        i += 1
+    if len(rest) < 2:
+        print("usage: a8s ask <name> <message> [--timeout <seconds>]", file=sys.stderr)
+        return 2
+    recipient, *body = rest
+    return recipient, " ".join(body), timeout
+
+
+def _ask_local(recipient_name: str, content: str, timeout: float) -> int:
+    """Local recipient path. Write directly to the recipient's inbox with
+    `ask: true`, then poll `~/.a8s/agents/<recipient>/.responses/<id>.txt`
+    for the captured wake output. No transient name needed — the response
+    file is keyed by message id."""
+    parts = participants_from_registry()
+    target = find_participant(parts, recipient_name)
+    if target is None:
+        print(f"ask: registry inconsistency — {recipient_name!r} not found", file=sys.stderr)
+        return 1
+
+    msg_id = new_ulid()
+    now = datetime.now(timezone.utc)
+    msg = {
+        "id": msg_id,
+        "date": now.isoformat().replace("+00:00", "Z"),
+        "from": "",
+        "to": target.name,
+        "content": content,
+        "files": [],
+        "ask": True,
+    }
+    inbox_dir(target.name).mkdir(parents=True, exist_ok=True)
+    inbox_tmp_dir(target.name).mkdir(parents=True, exist_ok=True)
+    staging = inbox_tmp_dir(target.name) / f"{msg_id}.json"
+    final = inbox_dir(target.name) / f"{msg_id}.json"
+    with staging.open("w", encoding="utf-8") as f:
+        json.dump(msg, f, indent=2)
+    os.replace(str(staging), str(final))
+
+    deadline = time.time() + timeout
+    rpath = response_path(target.name, msg_id)
+    while time.time() < deadline:
+        if rpath.is_file():
+            try:
+                text = rpath.read_text(encoding="utf-8")
+            except OSError as e:
+                print(f"ask: failed to read response: {e}", file=sys.stderr)
+                return 1
+            try:
+                rpath.unlink()
+            except OSError:
+                pass
+            sys.stdout.write(text)
+            if not text.endswith("\n"):
+                sys.stdout.write("\n")
+            return 0
+        time.sleep(0.2)
+    print(f"ask: timed out after {timeout:g}s waiting for {target.name}", file=sys.stderr)
+    return 1
+
+
+def _ask_remote(recipient_name: str, content: str, timeout: float) -> int:
+    """Remote recipient path. Mint a transient `ASK_<ulid>` so two terminals
+    can each run `ask` without conflating replies. Spawn this process's
+    own subscribers on every configured remote (the seen-ids ring + the
+    `transient.is_live` check make `receive_envelope` deliver matching
+    replies into our transient inbox), publish the ask envelope, poll the
+    transient inbox for the first reply."""
+    transient_name = f"{ASK_PREFIX}{new_ulid()}"
+    transient_dirs.prune_stale()
+    transient_dirs.register(transient_name)
+    inbox = transient_inbox_dir(transient_name)
+    started: list = []
+    cleaned = {"done": False}
+
+    def cleanup() -> None:
+        if cleaned["done"]:
+            return
+        cleaned["done"] = True
+        try:
+            stop_remotes(started)
+        except Exception:
+            pass
+        transient_dirs.cleanup(transient_name)
+
+    def on_signal(_signum, _frame):
+        cleanup()
+        sys.exit(130)
+
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
+
+    remotes = load_remotes()
+    if not remotes:
+        cleanup()
+        print(
+            f"ask: no agent or alias named {recipient_name!r} and no remotes configured",
+            file=sys.stderr,
+        )
+        return 1
+    started = start_remotes(remotes, lambda: [])
+
+    msg_id = new_ulid()
+    now = datetime.now(timezone.utc)
+    envelope = {
+        "id": msg_id,
+        "date": now.isoformat().replace("+00:00", "Z"),
+        "from": transient_name,
+        "to": recipient_name,
+        "content": content,
+        "files": [],
+        "ask": True,
+    }
+    try:
+        # The supervisor publish path (publish_once_to_remotes) starts and
+        # stops its own short-lived transports, so we use the started
+        # transports directly for the publish here. That keeps our
+        # subscribers running for the response window without juggling
+        # two transport sets.
+        from transports import TransportError as _TransportError
+
+        envelope_bytes = json.dumps(envelope).encode("utf-8")
+        publish_deadline = time.time() + min(timeout, 30.0)
+        publish_succeeded: list[str] = []
+        last_errors: dict[str, str] = {}
+        pending = list(started)
+        while pending and time.time() < publish_deadline:
+            still: list = []
+            for r in pending:
+                try:
+                    r.publish(envelope_bytes)
+                    publish_succeeded.append(r.id)
+                except _TransportError as e:
+                    last_errors[r.id] = str(e)
+                    still.append(r)
+                except Exception as e:
+                    last_errors[r.id] = f"{type(e).__name__}: {e}"
+                    still.append(r)
+            pending = still
+            if pending:
+                time.sleep(0.25)
+        if not publish_succeeded:
+            print(
+                "ask: publish failed on every remote: "
+                + ", ".join(f"{rid}: {last_errors.get(rid, '?')}" for rid in last_errors),
+                file=sys.stderr,
+            )
+            return 1
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            replies = sorted(inbox.iterdir()) if inbox.is_dir() else []
+            for entry in replies:
+                if not entry.is_file():
+                    continue
+                try:
+                    with entry.open("r", encoding="utf-8") as f:
+                        reply = json.load(f)
+                except (OSError, json.JSONDecodeError) as e:
+                    print(f"ask: malformed reply: {e}", file=sys.stderr)
+                    return 1
+                text = reply.get("content", "")
+                sys.stdout.write(text)
+                if not text.endswith("\n"):
+                    sys.stdout.write("\n")
+                return 0
+            time.sleep(0.25)
+        print(f"ask: timed out after {timeout:g}s waiting for reply from {recipient_name}", file=sys.stderr)
+        return 1
+    finally:
+        cleanup()
+
+
+def cmd_ask(args: list[str]) -> int:
+    """`a8s ask <name> <message> [--timeout <s>]` — send a prompt to a single
+    agent and print its captured response on stdout. Unlike `tell` and
+    `prompt`, ask is single-recipient: aliases are rejected (there's only
+    one response slot)."""
+    parsed = _parse_ask_args(args)
+    if isinstance(parsed, int):
+        return parsed
+    recipient_query, content, timeout = parsed
+
+    try:
+        kind, members = resolve_name(recipient_query)
+    except KeyError:
+        # Unknown locally — treat as remote if any remotes configured.
+        if not configured_remote_ids():
+            print(f"ask: no agent or alias named {recipient_query!r}", file=sys.stderr)
+            return 1
+        return _ask_remote(recipient_query, content, timeout)
+    except ValueError as e:
+        print(f"ask: {e}", file=sys.stderr)
+        return 1
+
+    if kind == "alias":
+        print(
+            f"ask: {recipient_query!r} is an alias; ask is single-recipient only",
+            file=sys.stderr,
+        )
+        print("hint: use `a8s tell` for fan-out, or ask a specific member by name", file=sys.stderr)
+        return 1
+    if not members:
+        print(f"ask: {recipient_query!r} resolves to no agents", file=sys.stderr)
+        return 1
+    return _ask_local(members[0], content, timeout)
 
 
 # ---------- logs ----------

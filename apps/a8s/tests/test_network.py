@@ -302,6 +302,49 @@ class TestReceiveEnvelope:
         d = inbox_dir("B")
         assert not d.exists() or list(d.iterdir()) == []
 
+    def test_transient_recipient_delivered(self, fake_home):
+        # Live transient (e.g. ASK_<ulid> minted by `a8s ask`) should accept
+        # incoming envelopes addressed to it even though it isn't in the
+        # registry.
+        import transient as transient_dirs
+        from core import transient_inbox_dir
+        name = "ASK_TESTONLY"
+        transient_dirs.register(name)
+        try:
+            msg_id = new_ulid()
+            envelope = json.dumps({
+                "id": msg_id, "from": "GERRY", "to": name,
+                "content": "the answer", "files": [],
+            }).encode()
+            receive_envelope(envelope, [])
+            files = list(transient_inbox_dir(name).iterdir())
+            assert len(files) == 1
+            body = json.loads(files[0].read_text())
+            assert body["content"] == "the answer"
+        finally:
+            transient_dirs.cleanup(name)
+
+    def test_transient_dead_pid_does_not_match(self, fake_home):
+        # A transient dir whose pid file points at a dead process is not
+        # considered live; envelopes addressed to it fall through to the
+        # registry path (and get dropped if the name isn't in the registry).
+        import transient as transient_dirs
+        from core import transient_dir, transient_inbox_dir
+        name = "ASK_STALE"
+        transient_dirs.register(name)
+        try:
+            (transient_dir(name) / "pid").write_text("99999999")
+            assert not transient_dirs.is_live(name)
+            envelope = json.dumps({
+                "id": new_ulid(), "from": "X", "to": name,
+                "content": "ignored", "files": [],
+            }).encode()
+            receive_envelope(envelope, [])
+            d = transient_inbox_dir(name)
+            assert not d.exists() or list(d.iterdir()) == []
+        finally:
+            transient_dirs.cleanup(name)
+
 
 # ---------- start_remotes / stop_remotes ----------
 

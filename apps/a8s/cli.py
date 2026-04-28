@@ -9,6 +9,7 @@ from commands import (
     cmd_agents,
     cmd_alias,
     cmd_aliases,
+    cmd_ask,
     cmd_clear,
     cmd_define,
     cmd_discover,
@@ -48,6 +49,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("ls",       "",                          "List running agents."),
     ("tell",     "<name> <message>",          "Send a message to an agent or alias."),
     ("prompt",   "<name> <message>",          "Send a message with no sender."),
+    ("ask",      "<name> <message> [--timeout <s>]", "Send a message and print the response."),
     ("clear",    "<name>",                    "Start a fresh session for an agent."),
     ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
     ("remote",   "[<name> [<broker> <topic> [--<k> <v> ...]]]", "List, show, or set a cross-machine remote."),
@@ -107,6 +109,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_tell(args)
     if cmd == "clear":
         return cmd_clear(args)
+    if cmd == "ask":
+        return cmd_ask(args)
     if cmd == "install":
         return cmd_install()
     if cmd == "logs":

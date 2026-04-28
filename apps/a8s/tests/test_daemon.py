@@ -391,6 +391,44 @@ class TestWakeOnceVerbs:
         assert any(b.get("content") == "stale" for b in trashed_bodies)
 
 
+class TestAskWakeCapture:
+    """`ask: true` messages cause `wake_once` to capture the wake subprocess
+    stdout into `<agent>/.responses/<msg_id>.txt`. Local askers poll that
+    file rather than spawning their own subscribers."""
+
+    def test_captures_ask_response_locally(self, mock_agent):
+        from core import response_path
+        from ulid import new as new_ulid
+        msg_id = new_ulid()
+        msg = {
+            "id": msg_id,
+            "date": "2026-04-28T00:00:00Z",
+            "from": "",
+            "to": "MOCK",
+            "content": "what's up",
+            "files": [],
+            "ask": True,
+        }
+        (inbox_dir("MOCK") / f"{msg_id}.json").write_text(json.dumps(msg))
+        rc = attached_loop(["MOCK"], 0.1, single_pass=True)
+        assert rc == 0
+        rpath = response_path("MOCK", msg_id)
+        assert rpath.is_file(), "ask response file should be created"
+        body = rpath.read_text()
+        # Mock CLI prints `MOCK-CLI: <arg>` per argv element. Captured stdout
+        # has those raw lines (no per-agent prefix).
+        assert "MOCK-CLI: verb=prompt" in body
+
+    def test_non_ask_does_not_create_response_file(self, mock_agent):
+        from core import responses_dir
+        _queue_prompt(mock_agent, "regular")
+        rc = attached_loop(["MOCK"], 0.1, single_pass=True)
+        assert rc == 0
+        # Non-ask wake never writes a response file.
+        d = responses_dir("MOCK")
+        assert not d.is_dir() or not list(d.iterdir())
+
+
 class TestAttachedLoopLifecycle:
     def test_attaches_and_detaches(self, mock_agent):
         # No messages — single_pass attaches, sees nothing, detaches.

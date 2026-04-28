@@ -38,8 +38,11 @@ from core import (
     out,
     out_agent,
     seen_ids_path,
+    transient_inbox_dir,
+    transient_inbox_tmp_dir,
 )
 from registry import resolve_name
+import transient as transient_dirs
 from transports import OnMessage, Transport, TransportError
 from ulid import is_ulid
 
@@ -211,6 +214,25 @@ def make_publish_remotes(remotes: list[Transport]) -> Callable:
 
 # ---------- receive ----------
 
+def _deliver_to_transient(name: str, msg_id: str, msg: dict) -> None:
+    """Atomic stage→commit into a live transient's inbox. Used by both the
+    daemon's subscribers (so a remote reply to `ASK_<ulid>` finds its way
+    home even when the asker isn't running its own subscriber) and by
+    `a8s ask` itself when its self-spawned subscriber receives the reply."""
+    transient_inbox_dir(name).mkdir(parents=True, exist_ok=True)
+    transient_inbox_tmp_dir(name).mkdir(parents=True, exist_ok=True)
+    final = transient_inbox_dir(name) / f"{msg_id}.json"
+    if final.is_file():
+        return
+    staging = transient_inbox_tmp_dir(name) / f"{msg_id}.json"
+    try:
+        with staging.open("w", encoding="utf-8") as f:
+            json.dump(msg, f, indent=2)
+        os.replace(str(staging), str(final))
+    except OSError as e:
+        out(f"WARN failed to write transient envelope id={msg_id} to {name}: {e}")
+
+
 def receive_envelope(envelope: bytes, all_agents: list[Participant]) -> None:
     """Decode an incoming envelope, dedupe, filter against the local
     registry, and atomically write into each matched local recipient's
@@ -233,6 +255,17 @@ def receive_envelope(envelope: bytes, all_agents: list[Participant]) -> None:
     recipient_name = (msg.get("to") or "").strip()
     if not recipient_name:
         return  # malformed; nothing to filter on
+    # Transient recipients (today: `ASK_<ulid>` minted by `a8s ask`) bypass the
+    # registry. The asker process registers a live transient dir; subscribers
+    # check it before the registry filter and deliver into its private inbox
+    # so a remote reply lands where the asker is polling.
+    if transient_dirs.is_live(recipient_name):
+        if msg.get("files"):
+            msg = dict(msg)
+            msg["files"] = []
+        _deliver_to_transient(recipient_name, msg_id, msg)
+        seen_id_append(msg_id)
+        return
     by_name = {p.name.lower(): p for p in all_agents}
     try:
         kind, member_names = resolve_name(recipient_name)

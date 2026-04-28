@@ -282,6 +282,65 @@ class TestRouteOutboxes:
         assert delivered["from"] == "A"
 
 
+class TestOutboxAllowlist:
+    """Outbox routing only copies known-safe fields through to the delivered
+    envelope. System sentinels like `ask` (used by cmd_ask to mark messages
+    that should capture+reply) and `clear` (used by cmd_clear sentinels) get
+    dropped here so an agent can't manufacture them by hand-writing JSON to
+    its outbox."""
+
+    def test_ask_field_stripped(self, two_agents):
+        a, b = two_agents
+        outbox = outbox_dir(a.root)
+        f = outbox / "20260101T000000_A.json"
+        f.write_text(json.dumps({
+            "id": "01ABCDEFGHJKMNPQRSTVWXYZ12",
+            "date": "2026-04-28T00:00:00Z",
+            "from": "A",
+            "to": "B",
+            "content": "spoof",
+            "files": [],
+            "ask": True,
+        }))
+        route_outboxes([a, b], all_agents=[a, b])
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert "ask" not in delivered
+
+    def test_clear_field_stripped(self, two_agents):
+        a, b = two_agents
+        outbox = outbox_dir(a.root)
+        f = outbox / "20260101T000001_A.json"
+        f.write_text(json.dumps({
+            "id": "01ABCDEFGHJKMNPQRSTVWXYZ13",
+            "date": "2026-04-28T00:00:00Z",
+            "from": "A",
+            "to": "B",
+            "content": "",
+            "files": [],
+            "clear": True,
+        }))
+        route_outboxes([a, b], all_agents=[a, b])
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert "clear" not in delivered
+
+    def test_unknown_custom_field_stripped(self, two_agents):
+        a, b = two_agents
+        outbox = outbox_dir(a.root)
+        f = outbox / "20260101T000002_A.json"
+        f.write_text(json.dumps({
+            "id": "01ABCDEFGHJKMNPQRSTVWXYZ14",
+            "date": "2026-04-28T00:00:00Z",
+            "from": "A",
+            "to": "B",
+            "content": "hi",
+            "files": [],
+            "secret_internal_flag": "owned",
+        }))
+        route_outboxes([a, b], all_agents=[a, b])
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert "secret_internal_flag" not in delivered
+
+
 class TestAtomicFanout:
     """Issue #67 — `route_outboxes` stages routed copies under each recipient's
     `inbox.tmp/<source-name>` and only renames them into `inbox/` after every

@@ -52,6 +52,7 @@ from core import (
     BACKOFF_SCHEDULE,
     MAX_ATTEMPTS,
     MAX_FILE_BYTES,
+    RESPONSE_TTL_S,
     Participant,
     _preview,
     files_dir,
@@ -60,6 +61,7 @@ from core import (
     outbox_dir,
     out_agent,
     pending_dir,
+    responses_dir,
     retry_sidecar_path,
     trash_dir,
     unique_path,
@@ -72,6 +74,15 @@ from ulid import new as new_ulid
 # `succeeded_remotes` list. Daemon wires this up at startup; passing None
 # keeps the path purely local (no remotes configured).
 PublishRemotes = Callable[[dict, str, list[str], int], list[str]]
+
+
+# Outbox messages are agent-writable: an agent can put any JSON it likes in
+# `<root>/.outbox/<f>.json`. Routing copies only these fields through to the
+# delivered envelope. System-only fields (today: `ask`, `clear`) get dropped
+# so an agent can't manufacture a system sentinel by spoofing JSON it wrote.
+# `from` is force-stamped at process_pending — never copied through the
+# allowlist — so it's not in this set.
+ALLOWED_OUTBOX_FIELDS = {"id", "date", "to", "content", "files"}
 
 
 # ---------- mailboxes ----------
@@ -170,8 +181,16 @@ def _build_routed_message(
 
     Strict opacity (#69, #70): the `to` field is left at whatever the sender
     wrote — alias for fanned messages, agent name for direct ones — same as
-    a public mailing list's `To:` header."""
-    routed = dict(base_msg)
+    a public mailing list's `To:` header.
+
+    Anti-spoofing: the routed copy is built from an allowlist
+    (`ALLOWED_OUTBOX_FIELDS`). System sentinels like `ask` and `clear` are
+    set only on system-path messages (cmd_ask, cmd_clear, daemon-side
+    replies) that bypass this routing — so even if an agent JSON-injects
+    `"ask": true` into its outbox, the field is dropped here. `from` is
+    force-stamped to the (trusted) sender name so it survives the filter."""
+    routed = {k: v for k, v in base_msg.items() if k in ALLOWED_OUTBOX_FIELDS}
+    routed["from"] = sender_name
     src_files = base_msg.get("files") or []
     if src_files:
         new_files: list[dict] = []
@@ -452,6 +471,24 @@ def _process_pending(
     return routed
 
 
+def _prune_stale_responses(agents: list[Participant], ttl_s: int) -> None:
+    """Best-effort TTL cleanup of `.responses/<id>.txt` files. A local ask
+    consumer reads-and-unlinks its own response; this catches the orphan
+    case where an asker died after the handler wrote the response but
+    before the asker could read it."""
+    cutoff = datetime.now(timezone.utc).timestamp() - ttl_s
+    for p in agents:
+        d = responses_dir(p.name)
+        if not d.is_dir():
+            continue
+        for entry in d.iterdir():
+            try:
+                if entry.is_file() and entry.stat().st_mtime < cutoff:
+                    entry.unlink()
+            except OSError:
+                pass
+
+
 def route_outboxes(
     senders: list[Participant],
     all_agents: list[Participant] | None = None,
@@ -477,6 +514,7 @@ def route_outboxes(
     by_name = {p.name.lower(): p for p in all_agents}
     if configured_remote_ids is None:
         configured_remote_ids = []
+    _prune_stale_responses(all_agents, RESPONSE_TTL_S)
     _ingest_outboxes(senders)
     routed = 0
     for sender in senders:

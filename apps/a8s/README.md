@@ -126,6 +126,7 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 |---|---|
 | `a8s tell <name> <msg>` | Routed message. `<name>` may be an agent or alias (fans out at routing time). Sender = agent enclosing CWD. |
 | `a8s prompt <name> <msg>` | Senderless supervisor message — delivered raw, no template wrapping. |
+| `a8s ask <name> <msg> [--timeout <s>]` | Send a prompt and print the recipient's captured response on stdout. Single-recipient only — aliases are rejected. Local recipient: handler writes the captured wake stdout to a per-message response file; ask polls it. Remote recipient: ask spawns a transient subscriber so two terminals don't conflate replies. Default timeout 60s. |
 | `a8s clear <name>` | Queue a CLEAR sentinel. Inbox is wiped at write time and at read time; the next wake runs `invokeClear`. Aliases iterate. |
 | `a8s logs <name>... [--tail N] [-f]` | Read per-agent log files; merge-sort by ISO timestamp across multiple agents. `-f` follows. |
 
@@ -218,6 +219,11 @@ The default definitions follow the opacity rule — `$SENDER tells $RECIPIENT: $
 ├── network.json              configured remotes (absent → local-only)
 ├── seen-ids                  cluster-wide ULID ring for receive-side dedup
 ├── log.txt                   process-scoped supervisor log
+├── transient/                per-process transient agent dirs (used by `a8s ask`
+│   └── ASK_<ulid>/           to mint a private reply inbox; cleaned on exit)
+│       ├── inbox/
+│       ├── inbox.tmp/
+│       └── pid
 └── agents/
     └── <NAME>/
         ├── inbox/            pending JSON messages (drained by wake_once)
@@ -226,6 +232,8 @@ The default definitions follow the opacity rule — `$SENDER tells $RECIPIENT: $
         │                     awaiting full delivery — `<ulid>.json` plus
         │                     optional `<ulid>.json.retry` sidecar tracking
         │                     attempts + per-remote success
+        ├── .responses/       captured wake stdout for `ask: true` messages,
+        │                     keyed by message id; consumer reads + unlinks
         ├── trash/             processed messages
         ├── log.txt            per-agent log (wakes, routing, subprocess output)
         └── pid                handler attachment

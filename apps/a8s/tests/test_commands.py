@@ -13,6 +13,7 @@ import pytest
 from commands import (
     cmd_add,
     cmd_alias,
+    cmd_ask,
     cmd_clear,
     cmd_kill,
     cmd_prompt,
@@ -474,3 +475,75 @@ class TestCmdClearRemoteRecipient:
         rc = cmd_clear(["GHOST"])
         assert rc == 1
         assert "failed to publish" in capsys.readouterr().err
+
+
+class TestCmdAsk:
+    """`a8s ask` is single-recipient request/response. Local path writes the
+    ask to the recipient's inbox with `ask: true`, polls a per-message
+    response file. Aliases are rejected — there's only one response slot."""
+
+    def test_alias_rejected(self, fake_home, tmp_path, capsys):
+        d = tmp_path / "a"
+        d.mkdir()
+        save_registry({"A": {"root": str(d), "definition": ""}})
+        cmd_alias(["TEAM", "A"])
+        rc = cmd_ask(["TEAM", "hello"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "alias" in err and "single-recipient" in err
+
+    def test_unknown_no_remotes_rejected(self, fake_home, capsys):
+        rc = cmd_ask(["GHOST", "hello"])
+        assert rc == 1
+        assert "no agent or alias" in capsys.readouterr().err
+
+    def test_local_writes_ask_to_inbox_and_times_out(self, fake_home, tmp_path, capsys):
+        # No handler is running, so the ask never gets a response — it
+        # should time out promptly and exit non-zero.
+        from core import inbox_dir
+        import json as _json
+        d = tmp_path / "a"
+        d.mkdir()
+        save_registry({"A": {"root": str(d), "definition": ""}})
+        rc = cmd_ask(["A", "hello", "--timeout", "0.5"])
+        assert rc == 1
+        # The ask envelope did land in the inbox so a real handler would
+        # have something to wake on.
+        files = list(inbox_dir("A").iterdir())
+        assert len(files) == 1
+        body = _json.loads(files[0].read_text())
+        assert body["ask"] is True
+        assert body["from"] == ""
+        assert body["to"] == "A"
+        assert body["content"] == "hello"
+        err = capsys.readouterr().err
+        assert "timed out" in err
+
+    def test_local_returns_response_when_file_appears(self, fake_home, tmp_path, monkeypatch, capsys):
+        # Simulate the handler by writing the response file ourselves between
+        # ask invocation and timeout. Easiest: monkeypatch time.sleep in the
+        # poll loop to drop the file in.
+        from core import inbox_dir, response_path
+        import commands as _commands
+        import json as _json
+        d = tmp_path / "a"
+        d.mkdir()
+        save_registry({"A": {"root": str(d), "definition": ""}})
+
+        # Capture the message id by intercepting the inbox write.
+        original_sleep = _commands.time.sleep
+
+        def fake_sleep(seconds):
+            files = list(inbox_dir("A").iterdir())
+            if files:
+                msg = _json.loads(files[0].read_text())
+                rpath = response_path("A", msg["id"])
+                rpath.parent.mkdir(parents=True, exist_ok=True)
+                rpath.write_text("the answer is 42")
+            original_sleep(0)  # don't actually sleep — just return immediately
+
+        monkeypatch.setattr(_commands.time, "sleep", fake_sleep)
+        rc = cmd_ask(["A", "what's the answer", "--timeout", "5"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "the answer is 42" in out

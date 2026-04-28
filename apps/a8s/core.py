@@ -178,6 +178,41 @@ def network_config_path() -> Path:
     return _a8s_dir() / "network.json"
 
 
+def transient_dir(name: str) -> Path:
+    """Per-process transient agent directory under ~/.a8s/transient/. Lives
+    only for the duration of a single CLI invocation (today: `a8s ask` mints
+    `ASK_<ulid>` so two terminals don't conflate replies). Each transient
+    has its own inbox/inbox.tmp; a pid file marks it as live."""
+    return _a8s_dir() / "transient" / _safe_name(name)
+
+
+def transient_inbox_dir(name: str) -> Path:
+    return transient_dir(name) / "inbox"
+
+
+def transient_inbox_tmp_dir(name: str) -> Path:
+    return transient_dir(name) / "inbox.tmp"
+
+
+def responses_dir(name: str) -> Path:
+    """Per-agent ask-response staging area. The handler writes captured wake
+    output for an `ask` message to `<msg_id>.txt` here so a local asker can
+    poll for a single file rather than spinning up a transient subscriber.
+    Cleaned up by both consumer (cmd_ask reads + unlinks) and producer-side
+    TTL (`prune_stale_responses`)."""
+    return agent_dir(name) / ".responses"
+
+
+def response_path(name: str, msg_id: str) -> Path:
+    return responses_dir(name) / f"{_safe_name(msg_id)}.txt"
+
+
+# `ask` lifetime constants.
+ASK_PREFIX = "ASK_"
+ASK_TIMEOUT_DEFAULT_S = 60
+RESPONSE_TTL_S = 3600  # 1 hour — handler-side cleanup of orphaned response files
+
+
 def seen_ids_path() -> Path:
     """Single cluster-wide ring file holding the last MAX_SEEN_IDS message
     IDs the receive loops have written into local inboxes. Receive-side dedup

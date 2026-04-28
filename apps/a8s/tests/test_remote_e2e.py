@@ -77,6 +77,77 @@ def _write_network_json(home: Path, port: int, topic: str, client_id: str) -> No
     }))
 
 
+def test_ask_reply_round_trip(tmp_path, mqtt_broker, monkeypatch):
+    """An ask reply (from recipient cluster's handler back to the asker's
+    transient name) rides MQTT just like any other envelope: the asker's
+    cluster has a subscriber registered for the topic and `receive_envelope`
+    delivers into the live transient's inbox when `to` matches."""
+    topic = f"a8s/test-ask-{os.getpid()}-{int(time.time() * 1000)}"
+    cluster_a_home = tmp_path / "askA"
+    cluster_a_home.mkdir()
+    cluster_b_home = tmp_path / "respB"
+    cluster_b_home.mkdir()
+    _write_network_json(cluster_a_home, mqtt_broker, topic, "a8s-test-askA")
+    _write_network_json(cluster_b_home, mqtt_broker, topic, "a8s-test-respB")
+
+    import core
+    core.PRINT_LOCK = None
+
+    # Cluster A registers its transient ASK_<ulid> first so the subscriber
+    # we spin up will accept envelopes addressed to it. Pre-warm the
+    # persistent session so the broker holds messages while B publishes.
+    monkeypatch.setenv("HOME", str(cluster_a_home))
+    monkeypatch.delenv("USERPROFILE", raising=False)
+    import transient as transient_dirs
+    from core import transient_inbox_dir
+    from network import load_remotes, start_remotes, stop_remotes
+    transient_name = "ASK_E2ETESTONLY"
+    transient_dirs.register(transient_name)
+    warmup = start_remotes(load_remotes(), lambda: [])
+    stop_remotes(warmup)
+
+    # Cluster B publishes the ask reply envelope through the supervisor
+    # publish helper (same path the daemon's _deliver_ask_response uses for
+    # remote askers).
+    monkeypatch.setenv("HOME", str(cluster_b_home))
+    core.PRINT_LOCK = None
+    from network import publish_once_to_remotes
+    from ulid import new as new_ulid
+    reply = {
+        "id": new_ulid(),
+        "date": "2026-04-28T00:00:00Z",
+        "from": "TARGET",
+        "to": transient_name,
+        "content": "the answer is 42",
+        "files": [],
+    }
+    succeeded, failed = publish_once_to_remotes(reply)
+    assert succeeded, f"publish failed: {failed}"
+
+    # Cluster A reconnects its subscriber; broker replays the held message.
+    monkeypatch.setenv("HOME", str(cluster_a_home))
+    core.PRINT_LOCK = None
+    rx_remotes = start_remotes(load_remotes(), lambda: [])
+    try:
+        deadline = time.time() + 5.0
+        files: list[Path] = []
+        while time.time() < deadline:
+            inbox = transient_inbox_dir(transient_name)
+            if inbox.is_dir():
+                files = list(inbox.iterdir())
+            if files:
+                break
+            time.sleep(0.1)
+        assert files, "ask reply did not arrive at the transient inbox"
+        body = json.loads(files[0].read_text())
+        assert body["from"] == "TARGET"
+        assert body["to"] == transient_name
+        assert body["content"] == "the answer is 42"
+    finally:
+        stop_remotes(rx_remotes)
+        transient_dirs.cleanup(transient_name)
+
+
 def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
     """Sender publishes via attached_loop's remote-routing wiring; a
     receiver running start_remotes on the same broker writes the envelope
