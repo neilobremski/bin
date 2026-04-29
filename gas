@@ -1,125 +1,860 @@
 #!/usr/bin/env python3
-"""gas — CLI for the GAS Bridge. Pure Python, no dependencies beyond stdlib.
+"""gas — CLI for the GAS Bridge.
 
-Usage: gas <action> [key=value ...]
+Hierarchical argparse interface mirroring the deployed bridge's HANDLERS map.
+Run `gas --help` for the full subcommand tree, `gas <group> --help` for a
+group, and `gas <group> <command> --help` for a specific action.
 
-Examples:
-  gas info
-  gas gmail.search query="is:unread" count=5
-  gas drive.list query="title contains 'circ-'" count=3
-  gas drive.upload name=test.txt data_base64=@file.txt
-  gas drive.download id=1abc...
-  echo "hello" | gas drive.upload name=test.txt data_base64=-
+Auth: GAS_BRIDGE_URL and GAS_BRIDGE_KEY via env vars or ~/lib/gas-bridge-{url,key}.txt
+(resolved through the `local-secret` helper).
 
-Secrets resolved via local-secret:
-  GAS_BRIDGE_URL — env var or ~/lib/gas-bridge-url.txt
-  GAS_BRIDGE_KEY — env var or ~/lib/gas-bridge-key.txt
+Output: JSON on stdout (pretty when isatty, compact when piped). Status and
+errors on stderr. Append `--jq <expr>` anywhere to pipe stdout JSON through jq.
+
+Long-text args (`--body`, `--query`, `--prompt`, etc.) accept three forms:
+  inline string, `@/path/to/file` to read from a file, or `-` to read stdin.
+Binary blobs (`--data-base64`) accept `@/path` (read + base64-encode the
+file) or `-` (base64-encode stdin).
 """
-import json, os, sys, urllib.request
+import argparse
+import base64
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
 
-def _log(action, args, result_snippet):
-    """Append one line to ~/.gas/logs/YYYY-MM-DD.txt. Never raises."""
+JQ_ARGS = None
+BRIDGE_URL = None
+BRIDGE_KEY = None
+
+
+def err(msg):
+    print(f"gas: {msg}", file=sys.stderr)
+
+
+def info(msg):
+    print(f"  {msg}", file=sys.stderr)
+
+
+def json_out(obj):
+    pretty = sys.stdout.isatty()
+    text = json.dumps(obj, indent=2 if pretty else None)
+    if JQ_ARGS is not None:
+        proc = subprocess.run(["jq"] + JQ_ARGS, input=text, text=True)
+        if proc.returncode != 0:
+            sys.exit(proc.returncode)
+    else:
+        print(text)
+
+
+def local_secret(name):
+    try:
+        out = subprocess.check_output(
+            ["local-secret", name], text=True, stderr=subprocess.DEVNULL
+        )
+        return out.strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return ""
+
+
+def load_credentials():
+    global BRIDGE_URL, BRIDGE_KEY
+    if BRIDGE_URL and BRIDGE_KEY:
+        return
+    BRIDGE_URL = local_secret("GAS_BRIDGE_URL")
+    BRIDGE_KEY = local_secret("GAS_BRIDGE_KEY")
+    if not BRIDGE_URL or not BRIDGE_KEY:
+        err("missing credentials.")
+        info("set GAS_BRIDGE_URL and GAS_BRIDGE_KEY env vars,")
+        info("or write ~/lib/gas-bridge-url.txt and ~/lib/gas-bridge-key.txt")
+        sys.exit(1)
+
+
+def read_text(value):
+    """Three-tier text input: inline / @file / - (stdin)."""
+    if value is None:
+        return None
+    if value == "-":
+        if sys.stdin.isatty():
+            err("expected text on stdin (got terminal)")
+            sys.exit(1)
+        return sys.stdin.read()
+    if value.startswith("@"):
+        path = value[1:]
+        if not os.path.isfile(path):
+            err(f"file not found: {path}")
+            sys.exit(1)
+        with open(path) as f:
+            return f.read()
+    return value
+
+
+def read_bytes_b64(value):
+    """Read raw bytes (file or stdin) and base64-encode. `-` for stdin, `@path`
+    or bare path for a file. Plain strings without the prefix are still
+    accepted as already-encoded base64 (passthrough)."""
+    if value is None:
+        return None
+    if value == "-":
+        if sys.stdin.isatty():
+            err("expected binary on stdin (got terminal)")
+            sys.exit(1)
+        return base64.b64encode(sys.stdin.buffer.read()).decode()
+    if value.startswith("@"):
+        path = value[1:]
+        if not os.path.isfile(path):
+            err(f"file not found: {path}")
+            sys.exit(1)
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    return value
+
+
+def parse_kv(items):
+    """Convert a list of KEY=VALUE strings into a dict. Used for --header / --param."""
+    result = {}
+    for item in items or []:
+        if "=" not in item:
+            err(f"expected KEY=VALUE: {item}")
+            sys.exit(1)
+        k, _, v = item.partition("=")
+        result[k] = v
+    return result
+
+
+def log_call(action, summary, snippet):
     try:
         log_dir = Path.home() / ".gas" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         now = datetime.now()
-        log_file = log_dir / f"{now:%Y-%m-%d}.txt"
-        args_str = " ".join(args) if args else ""
-        line = f"{now:%H:%M:%S} {action} {args_str} -> {result_snippet}\n"
-        with open(log_file, "a") as f:
+        path = log_dir / f"{now:%Y-%m-%d}.txt"
+        line = f"{now:%H:%M:%S} {action} {summary} -> {snippet}\n"
+        with open(path, "a") as f:
             f.write(line)
     except Exception:
         pass
 
 
-def _snippet(body):
-    """Extract a short status snippet from a response body string."""
+def snippet_of(body):
     try:
         obj = json.loads(body)
-        if isinstance(obj, dict):
-            if "error" in obj:
-                msg = str(obj["error"])[:80]
-                return f"error: {msg}"
-            if "status" in obj:
-                return f"status: {obj['status']}"
-        if isinstance(obj, list):
-            return f"list[{len(obj)}]"
     except (json.JSONDecodeError, TypeError):
-        pass
+        return "ok"
+    if isinstance(obj, dict):
+        if "error" in obj:
+            return f"error: {str(obj['error'])[:80]}"
+        if "status" in obj:
+            return f"status: {obj['status']}"
+        if "count" in obj:
+            return f"ok ({obj['count']} items)"
+    if isinstance(obj, list):
+        return f"list[{len(obj)}]"
     return "ok"
 
-def local_secret(name):
-    """Resolve via local-secret utility."""
-    import subprocess
+
+def summarize_payload(payload):
+    keys = [k for k in payload if k not in ("action", "key")]
+    return ",".join(keys) if keys else ""
+
+
+def call(action, payload):
+    """POST to the bridge. payload is action-specific; auth is added here."""
+    load_credentials()
+    body = {"action": action, "key": BRIDGE_KEY}
+    body.update({k: v for k, v in payload.items() if v is not None})
+
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        BRIDGE_URL,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    summary = summarize_payload(body)
+
     try:
-        return subprocess.check_output(["local-secret", name], text=True, stderr=subprocess.DEVNULL).strip()
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return ""
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            text = resp.read().decode()
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode()[:500] if e.fp else ""
+        log_call(action, summary, f"HTTP {e.code}")
+        err(f"HTTP {e.code} from bridge")
+        if err_body:
+            info(err_body)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        log_call(action, summary, f"network error: {e.reason}")
+        err(f"network error: {e.reason}")
+        sys.exit(1)
+    except Exception as e:
+        log_call(action, summary, f"exception: {str(e)[:80]}")
+        err(f"unexpected error: {e}")
+        sys.exit(1)
 
-url = local_secret("GAS_BRIDGE_URL")
-key = local_secret("GAS_BRIDGE_KEY")
+    log_call(action, summary, snippet_of(text))
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        err("non-JSON response from bridge")
+        info(text[:300])
+        sys.exit(1)
 
-if not url or not key:
-    print("error: BRIDGE_URL and BRIDGE_KEY required", file=sys.stderr)
-    sys.exit(1)
+    if isinstance(parsed, dict) and "error" in parsed:
+        err(f"bridge error: {parsed['error']}")
+        json_out(parsed)
+        sys.exit(1)
+    json_out(parsed)
 
-if len(sys.argv) < 2:
-    print("Usage: gas <action> [key=value ...]", file=sys.stderr)
-    sys.exit(1)
 
-action = sys.argv[1]
-payload = {"action": action, "key": key}
+# ── Command handlers ─────────────────────────────────────────────────────────
+#
+# Each cmd_* takes the parsed argparse Namespace and dispatches a single
+# bridge action. Field names match the bridge's `req.<name>` lookups.
 
-import base64
+# Gmail
 
-for arg in sys.argv[2:]:
-    k, _, v = arg.partition("=")
-    # @- reads from stdin, @filename reads from file — both base64-encode
-    if v == "@-":
-        payload[k] = base64.b64encode(sys.stdin.buffer.read()).decode()
-    elif v.startswith("@"):
-        filepath = v[1:]
-        with open(filepath, "rb") as f:
-            payload[k] = base64.b64encode(f.read()).decode()
-    # Auto-detect types
-    elif v.startswith("[") or v.startswith("{"):
-        try:
-            payload[k] = json.loads(v)
-        except json.JSONDecodeError:
-            payload[k] = v
-    elif v.isdigit():
-        payload[k] = int(v)
-    elif v in ("true", "false"):
-        payload[k] = v == "true"
-    else:
-        payload[k] = v
+def cmd_gmail_send(a):
+    call("gmail.send", {
+        "to": a.to,
+        "subject": a.subject,
+        "body": read_text(a.body),
+        "cc": a.cc,
+        "bcc": a.bcc,
+        "html": read_text(a.html),
+        "replyTo": a.reply_to,
+    })
 
-data = json.dumps(payload).encode()
-req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
 
-cli_args = sys.argv[2:]
+def cmd_gmail_search(a):
+    call("gmail.search", {"query": read_text(a.query), "count": a.count})
 
-try:
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        body = resp.read().decode()
-        _log(action, cli_args, _snippet(body))
-        # Pretty-print if terminal, raw if piped
-        if sys.stdout.isatty():
-            try:
-                print(json.dumps(json.loads(body), indent=2))
-            except json.JSONDecodeError:
-                print(body)
+
+def cmd_gmail_check(a):
+    call("gmail.check", {"query": read_text(a.query), "count": a.count})
+
+
+def cmd_gmail_get(a):
+    call("gmail.get", {"thread_id": a.thread_id})
+
+
+def cmd_gmail_read(a):
+    call("gmail.read", {"thread_id": a.thread_id})
+
+
+def cmd_gmail_archive(a):
+    call("gmail.archive", {"thread_id": a.thread_id})
+
+
+def cmd_gmail_reply(a):
+    call("gmail.reply", {
+        "thread_id": a.thread_id,
+        "body": read_text(a.body),
+        "html": read_text(a.html),
+        "cc": a.cc,
+    })
+
+
+def cmd_gmail_label(a):
+    call("gmail.label", {"thread_id": a.thread_id, "add": a.add, "remove": a.remove})
+
+
+def cmd_gmail_attachments(a):
+    call("gmail.attachments", {
+        "message_id": a.message_id,
+        "thread_id": a.thread_id,
+        "save_to_drive": a.save_to_drive,
+        "folder_id": a.folder_id,
+    })
+
+
+def cmd_gmail_draft_create(a):
+    call("gmail.draft.create", {
+        "to": a.to,
+        "subject": a.subject,
+        "body": read_text(a.body),
+        "html": read_text(a.html),
+    })
+
+
+def cmd_gmail_draft_list(a):
+    call("gmail.draft.list", {"count": a.count})
+
+
+def cmd_gmail_draft_get(a):
+    call("gmail.draft.get", {"draft_id": a.draft_id})
+
+
+def cmd_gmail_draft_send(a):
+    call("gmail.draft.send", {"draft_id": a.draft_id})
+
+
+def cmd_gmail_draft_delete(a):
+    call("gmail.draft.delete", {"draft_id": a.draft_id})
+
+
+# Drive
+
+def cmd_drive_list(a):
+    call("drive.list", {"query": read_text(a.query), "count": a.count, "folder_id": a.folder_id})
+
+
+def cmd_drive_create(a):
+    call("drive.create", {
+        "name": a.name,
+        "type": a.type,
+        "content": read_text(a.content),
+        "mime": a.mime,
+        "folder_id": a.folder_id,
+    })
+
+
+def cmd_drive_upload(a):
+    call("drive.upload", {
+        "name": a.name,
+        "data_base64": read_bytes_b64(a.data_base64),
+        "mime": a.mime,
+        "folder_id": a.folder_id,
+    })
+
+
+def cmd_drive_upsert(a):
+    call("drive.upsert", {
+        "name": a.name,
+        "data_base64": read_bytes_b64(a.data_base64),
+        "mime": a.mime,
+        "folder_id": a.folder_id,
+    })
+
+
+def cmd_drive_download(a):
+    call("drive.download", {"id": a.id, "name": a.name})
+
+
+def cmd_drive_delete(a):
+    call("drive.delete", {"id": a.id})
+
+
+def cmd_drive_folders(a):
+    call("drive.folders", {
+        "create": a.create,
+        "parent_id": a.parent_id,
+        "query": read_text(a.query),
+        "count": a.count,
+    })
+
+
+# Sheets
+
+def cmd_sheets_read(a):
+    call("sheets.read", {
+        "spreadsheet_id": a.spreadsheet_id,
+        "name": a.name,
+        "range": a.range,
+    })
+
+
+def cmd_sheets_append(a):
+    rows = json.loads(read_text(a.rows)) if a.rows else None
+    call("sheets.append", {
+        "spreadsheet_id": a.spreadsheet_id,
+        "name": a.name,
+        "sheet": a.sheet,
+        "rows": rows,
+    })
+
+
+def cmd_sheets_create(a):
+    headers = json.loads(read_text(a.headers)) if a.headers else None
+    call("sheets.create", {"name": a.name, "headers": headers})
+
+
+def cmd_sheets_update(a):
+    values = json.loads(read_text(a.values)) if a.values else None
+    call("sheets.update", {
+        "spreadsheet_id": a.spreadsheet_id,
+        "name": a.name,
+        "range": a.range,
+        "values": values,
+    })
+
+
+# Calendar
+
+def cmd_calendar_list(a):
+    call("calendar.list", {"days": a.days, "calendarId": a.calendar_id})
+
+
+def cmd_calendar_create(a):
+    guests = a.guests
+    call("calendar.create", {
+        "title": a.title,
+        "start": a.start,
+        "end": a.end,
+        "description": read_text(a.description),
+        "location": a.location,
+        "guests": guests,
+        "calendarId": a.calendar_id,
+    })
+
+
+def cmd_calendar_delete(a):
+    call("calendar.delete", {"event_id": a.event_id, "calendarId": a.calendar_id})
+
+
+def cmd_calendar_calendars(a):
+    call("calendar.calendars", {})
+
+
+# Tasks
+
+def cmd_tasks_list(a):
+    call("tasks.list", {})
+
+
+def cmd_tasks_create(a):
+    call("tasks.create", {
+        "title": a.title,
+        "notes": read_text(a.notes),
+        "due": a.due,
+        "status": a.status,
+        "list_id": a.list_id,
+    })
+
+
+def cmd_tasks_update(a):
+    call("tasks.update", {
+        "task_id": a.task_id,
+        "list_id": a.list_id,
+        "title": a.title,
+        "notes": read_text(a.notes),
+        "due": a.due,
+        "status": a.status,
+    })
+
+
+# Contacts
+
+def cmd_contacts_list(a):
+    call("contacts.list", {"count": a.count})
+
+
+# Config
+
+def cmd_config_get(a):
+    call("config.get", {"key": a.key})
+
+
+def cmd_config_set(a):
+    cfg = parse_kv(a.set)
+    if not cfg:
+        err("at least one --set KEY=VALUE required")
+        sys.exit(1)
+    call("config.set", {"config": cfg})
+
+
+# Docs
+
+def cmd_docs_create(a):
+    call("docs.create", {"title": a.title, "body": read_text(a.body)})
+
+
+# Gemini
+
+def cmd_gemini_ask(a):
+    call("gemini.ask", {
+        "prompt": read_text(a.prompt),
+        "system": read_text(a.system),
+        "model": a.model,
+        "maxTokens": a.max_tokens,
+        "temperature": a.temperature,
+    })
+
+
+# Top-level
+
+def cmd_info(a):
+    call("info", {})
+
+
+def cmd_quota(a):
+    call("quota", {})
+
+
+def cmd_translate(a):
+    call("translate", {
+        "text": read_text(a.text),
+        "from": a.source,
+        "to": a.target,
+    })
+
+
+def cmd_fetch(a):
+    headers = parse_kv(a.header) if a.header else None
+    call("fetch", {
+        "url": a.url,
+        "method": a.method,
+        "payload": read_text(a.payload),
+        "contentType": a.content_type,
+        "headers": headers,
+    })
+
+
+def cmd_token_get(a):
+    call("token.get", {})
+
+
+# ── Parser ──────────────────────────────────────────────────────────────────
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="gas",
+        description="CLI for the GAS Bridge — Gmail, Drive, Sheets, Calendar, Tasks, Contacts, Gemini.",
+    )
+    parser.add_argument("--jq", nargs="?", const=".", default=None,
+                        help="(pre-parsed) jq filter applied to stdout JSON")
+
+    sub = parser.add_subparsers(dest="group", help="Service group")
+
+    # gmail
+    gmail = sub.add_parser("gmail", help="Gmail: send/search/get/read/archive/reply/label/attachments + drafts")
+    gmail_sub = gmail.add_subparsers(dest="command")
+
+    p = gmail_sub.add_parser("send", help="Send a new email")
+    p.add_argument("--to", required=True, help="Recipient address")
+    p.add_argument("--subject", required=True, help="Subject line")
+    p.add_argument("--body", help="Plain-text body (inline, @file, or -)")
+    p.add_argument("--cc", help="CC address(es)")
+    p.add_argument("--bcc", help="BCC address(es)")
+    p.add_argument("--html", help="HTML body (inline, @file, or -)")
+    p.add_argument("--reply-to", help="Reply-To address")
+    p.set_defaults(func=cmd_gmail_send)
+
+    p = gmail_sub.add_parser("search", help="Search threads (Gmail query syntax)")
+    p.add_argument("--query", default="is:unread", help="Gmail query (default: is:unread)")
+    p.add_argument("--count", type=int, default=10, help="Max threads to return (default: 10)")
+    p.set_defaults(func=cmd_gmail_search)
+
+    p = gmail_sub.add_parser("check", help="Alias for `search` (bridge-level alias)")
+    p.add_argument("--query", default="is:unread", help="Gmail query (default: is:unread)")
+    p.add_argument("--count", type=int, default=10, help="Max threads to return (default: 10)")
+    p.set_defaults(func=cmd_gmail_check)
+
+    p = gmail_sub.add_parser("get", help="Get full thread by ID")
+    p.add_argument("--thread-id", required=True, help="Thread ID")
+    p.set_defaults(func=cmd_gmail_get)
+
+    p = gmail_sub.add_parser("read", help="Mark a thread as read")
+    p.add_argument("--thread-id", required=True, help="Thread ID")
+    p.set_defaults(func=cmd_gmail_read)
+
+    p = gmail_sub.add_parser("archive", help="Mark read and archive a thread")
+    p.add_argument("--thread-id", required=True, help="Thread ID")
+    p.set_defaults(func=cmd_gmail_archive)
+
+    p = gmail_sub.add_parser("reply", help="Reply to the latest message in a thread")
+    p.add_argument("--thread-id", required=True, help="Thread ID")
+    p.add_argument("--body", required=True, help="Reply body (inline, @file, or -)")
+    p.add_argument("--html", help="HTML body (inline, @file, or -)")
+    p.add_argument("--cc", help="CC address(es)")
+    p.set_defaults(func=cmd_gmail_reply)
+
+    p = gmail_sub.add_parser("label", help="Add or remove a label / star / unread on a thread")
+    p.add_argument("--thread-id", required=True, help="Thread ID")
+    p.add_argument("--add", help="Label to add (special: UNREAD, STARRED)")
+    p.add_argument("--remove", help="Label to remove (special: UNREAD, STARRED)")
+    p.set_defaults(func=cmd_gmail_label)
+
+    p = gmail_sub.add_parser("attachments", help="List or save attachments from a message or thread")
+    p.add_argument("--message-id", help="Message ID (or use --thread-id)")
+    p.add_argument("--thread-id", help="Thread ID (use instead of --message-id)")
+    p.add_argument("--save-to-drive", action="store_true", help="Also save attachments to Drive")
+    p.add_argument("--folder-id", help="Drive folder ID for --save-to-drive")
+    p.set_defaults(func=cmd_gmail_attachments)
+
+    p = gmail_sub.add_parser("draft.create", help="Create a draft email")
+    p.add_argument("--to", required=True, help="Recipient address")
+    p.add_argument("--subject", help="Subject line")
+    p.add_argument("--body", help="Plain-text body (inline, @file, or -)")
+    p.add_argument("--html", help="HTML body (inline, @file, or -)")
+    p.set_defaults(func=cmd_gmail_draft_create)
+
+    p = gmail_sub.add_parser("draft.list", help="List drafts")
+    p.add_argument("--count", type=int, default=10, help="Max drafts to return (default: 10)")
+    p.set_defaults(func=cmd_gmail_draft_list)
+
+    p = gmail_sub.add_parser("draft.get", help="Get a draft by ID")
+    p.add_argument("--draft-id", required=True, help="Draft ID")
+    p.set_defaults(func=cmd_gmail_draft_get)
+
+    p = gmail_sub.add_parser("draft.send", help="Send a previously-created draft")
+    p.add_argument("--draft-id", required=True, help="Draft ID")
+    p.set_defaults(func=cmd_gmail_draft_send)
+
+    p = gmail_sub.add_parser("draft.delete", help="Delete a draft")
+    p.add_argument("--draft-id", required=True, help="Draft ID")
+    p.set_defaults(func=cmd_gmail_draft_delete)
+
+    # drive
+    drive = sub.add_parser("drive", help="Drive: list/create/upload/upsert/download/delete/folders")
+    drive_sub = drive.add_subparsers(dest="command")
+
+    p = drive_sub.add_parser("list", help="List or search files and folders")
+    p.add_argument("--query", help="Drive query (e.g. \"title contains 'foo'\")")
+    p.add_argument("--count", type=int, default=10, help="Max items to return (default: 10)")
+    p.add_argument("--folder-id", help="Restrict to a specific folder")
+    p.set_defaults(func=cmd_drive_list)
+
+    p = drive_sub.add_parser("create", help="Create a Doc / Sheet / folder / arbitrary file")
+    p.add_argument("--name", required=True, help="File or folder name")
+    p.add_argument("--type", default="document", choices=["document", "spreadsheet", "folder", "file"],
+                   help="What to create (default: document)")
+    p.add_argument("--content", help="Initial content for `file` type (inline, @file, -)")
+    p.add_argument("--mime", help="MIME type for `file` type (default: text/plain)")
+    p.add_argument("--folder-id", help="Parent folder (default: My Drive root)")
+    p.set_defaults(func=cmd_drive_create)
+
+    p = drive_sub.add_parser("upload", help="Upload a file (`@/path` or `-` for stdin)")
+    p.add_argument("--name", required=True, help="Filename in Drive")
+    p.add_argument("--data-base64", required=True, help="`@/path/to/file`, `-` for stdin, or pre-encoded base64")
+    p.add_argument("--mime", help="MIME type (default: application/octet-stream)")
+    p.add_argument("--folder-id", help="Parent folder")
+    p.set_defaults(func=cmd_drive_upload)
+
+    p = drive_sub.add_parser("upsert", help="Upload, replacing any existing file of the same name in the folder")
+    p.add_argument("--name", required=True, help="Filename in Drive")
+    p.add_argument("--data-base64", required=True, help="`@/path/to/file`, `-` for stdin, or pre-encoded base64")
+    p.add_argument("--mime", help="MIME type (default: application/octet-stream)")
+    p.add_argument("--folder-id", help="Parent folder")
+    p.set_defaults(func=cmd_drive_upsert)
+
+    p = drive_sub.add_parser("download", help="Download a file as base64")
+    p.add_argument("--id", help="File ID")
+    p.add_argument("--name", help="Filename to look up (newest match wins)")
+    p.set_defaults(func=cmd_drive_download)
+
+    p = drive_sub.add_parser("delete", help="Trash a file or folder by ID")
+    p.add_argument("--id", required=True, help="File or folder ID")
+    p.set_defaults(func=cmd_drive_delete)
+
+    p = drive_sub.add_parser("folders", help="List or create folders")
+    p.add_argument("--query", help="Folder name query")
+    p.add_argument("--count", type=int, default=20, help="Max folders to list (default: 20)")
+    p.add_argument("--create", help="Create a new folder with this name")
+    p.add_argument("--parent-id", help="Parent folder for --create")
+    p.set_defaults(func=cmd_drive_folders)
+
+    # sheets
+    sheets = sub.add_parser("sheets", help="Sheets: read/append/create/update")
+    sheets_sub = sheets.add_subparsers(dest="command")
+
+    p = sheets_sub.add_parser("read", help="Read a range from a spreadsheet")
+    p.add_argument("--spreadsheet-id", help="Spreadsheet ID")
+    p.add_argument("--name", help="Spreadsheet name (alternative to --spreadsheet-id)")
+    p.add_argument("--range", default="Sheet1!A1:Z100", help="A1 range (default: Sheet1!A1:Z100)")
+    p.set_defaults(func=cmd_sheets_read)
+
+    p = sheets_sub.add_parser("append", help="Append rows to a sheet")
+    p.add_argument("--spreadsheet-id", help="Spreadsheet ID")
+    p.add_argument("--name", help="Spreadsheet name")
+    p.add_argument("--sheet", default="Sheet1", help="Tab name (default: Sheet1)")
+    p.add_argument("--rows", required=True, help="Rows as 2D JSON array (inline, @file, or -)")
+    p.set_defaults(func=cmd_sheets_append)
+
+    p = sheets_sub.add_parser("create", help="Create a new spreadsheet")
+    p.add_argument("--name", required=True, help="Spreadsheet name")
+    p.add_argument("--headers", help="Header row as 1D JSON array (inline, @file, or -)")
+    p.set_defaults(func=cmd_sheets_create)
+
+    p = sheets_sub.add_parser("update", help="Set values in a range")
+    p.add_argument("--spreadsheet-id", help="Spreadsheet ID")
+    p.add_argument("--name", help="Spreadsheet name")
+    p.add_argument("--range", required=True, help="A1 range to overwrite")
+    p.add_argument("--values", required=True, help="2D JSON array of values (inline, @file, or -)")
+    p.set_defaults(func=cmd_sheets_update)
+
+    # calendar
+    cal = sub.add_parser("calendar", help="Calendar: list/create/delete + list calendars")
+    cal_sub = cal.add_subparsers(dest="command")
+
+    p = cal_sub.add_parser("list", help="List upcoming events")
+    p.add_argument("--days", type=int, default=7, help="Window size in days (default: 7)")
+    p.add_argument("--calendar-id", help="Specific calendar ID (default: primary)")
+    p.set_defaults(func=cmd_calendar_list)
+
+    p = cal_sub.add_parser("create", help="Create a calendar event")
+    p.add_argument("--title", required=True, help="Event title")
+    p.add_argument("--start", required=True, help="Start time (ISO 8601)")
+    p.add_argument("--end", required=True, help="End time (ISO 8601)")
+    p.add_argument("--description", help="Description (inline, @file, or -)")
+    p.add_argument("--location", help="Location string")
+    p.add_argument("--guests", help="Guest emails (comma-separated)")
+    p.add_argument("--calendar-id", help="Specific calendar ID (default: primary)")
+    p.set_defaults(func=cmd_calendar_create)
+
+    p = cal_sub.add_parser("delete", help="Delete an event by ID")
+    p.add_argument("--event-id", required=True, help="Event ID")
+    p.add_argument("--calendar-id", help="Specific calendar ID")
+    p.set_defaults(func=cmd_calendar_delete)
+
+    p = cal_sub.add_parser("calendars", help="List all calendars on the account")
+    p.set_defaults(func=cmd_calendar_calendars)
+
+    # tasks
+    tasks = sub.add_parser("tasks", help="Google Tasks: list/create/update")
+    tasks_sub = tasks.add_subparsers(dest="command")
+
+    p = tasks_sub.add_parser("list", help="List all task lists with their tasks")
+    p.set_defaults(func=cmd_tasks_list)
+
+    p = tasks_sub.add_parser("create", help="Create a task")
+    p.add_argument("--title", required=True, help="Task title")
+    p.add_argument("--notes", help="Notes (inline, @file, or -)")
+    p.add_argument("--due", help="Due date (RFC 3339)")
+    p.add_argument("--status", help="Status (e.g. needsAction, completed)")
+    p.add_argument("--list-id", help="Task list ID (default: first list)")
+    p.set_defaults(func=cmd_tasks_create)
+
+    p = tasks_sub.add_parser("update", help="Patch an existing task")
+    p.add_argument("--task-id", required=True, help="Task ID")
+    p.add_argument("--list-id", required=True, help="Task list ID")
+    p.add_argument("--title", help="New title")
+    p.add_argument("--notes", help="Notes (inline, @file, or -)")
+    p.add_argument("--due", help="Due date (RFC 3339)")
+    p.add_argument("--status", help="Status (e.g. needsAction, completed)")
+    p.set_defaults(func=cmd_tasks_update)
+
+    # contacts
+    contacts = sub.add_parser("contacts", help="Contacts: list (read-only)")
+    contacts_sub = contacts.add_subparsers(dest="command")
+
+    p = contacts_sub.add_parser("list", help="List contacts (name + first email + first phone)")
+    p.add_argument("--count", type=int, default=20, help="Max contacts (default: 20)")
+    p.set_defaults(func=cmd_contacts_list)
+
+    # config
+    config = sub.add_parser("config", help="Script Properties (must be enabled at the bridge)")
+    config_sub = config.add_subparsers(dest="command")
+
+    p = config_sub.add_parser("get", help="Get one or all properties")
+    p.add_argument("--key", help="Specific property name (omit for all)")
+    p.set_defaults(func=cmd_config_get)
+
+    p = config_sub.add_parser("set", help="Set one or more properties")
+    p.add_argument("--set", action="append", metavar="KEY=VALUE",
+                   help="Property to set (repeatable)")
+    p.set_defaults(func=cmd_config_set)
+
+    # docs
+    docs = sub.add_parser("docs", help="Google Docs: create")
+    docs_sub = docs.add_subparsers(dest="command")
+
+    p = docs_sub.add_parser("create", help="Create a new doc")
+    p.add_argument("--title", required=True, help="Document title")
+    p.add_argument("--body", help="Initial body paragraph (inline, @file, or -)")
+    p.set_defaults(func=cmd_docs_create)
+
+    # gemini
+    gemini = sub.add_parser("gemini", help="Gemini API proxy (uses bridge's API key)")
+    gemini_sub = gemini.add_subparsers(dest="command")
+
+    p = gemini_sub.add_parser("ask", help="One-shot generation")
+    p.add_argument("--prompt", required=True, help="Prompt (inline, @file, or -)")
+    p.add_argument("--system", help="System instruction (inline, @file, or -)")
+    p.add_argument("--model", default="gemini-2.0-flash", help="Model name (default: gemini-2.0-flash)")
+    p.add_argument("--max-tokens", type=int, dest="max_tokens", default=2048,
+                   help="Max output tokens (default: 2048)")
+    p.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature (default: 0.7)")
+    p.set_defaults(func=cmd_gemini_ask)
+
+    # token (single-action group; mirrors the `token.get` handler name)
+    token = sub.add_parser("token", help="OAuth token (must be enabled at the bridge)")
+    token_sub = token.add_subparsers(dest="command")
+
+    p = token_sub.add_parser("get", help="Return the bridge's OAuth access token")
+    p.set_defaults(func=cmd_token_get)
+
+    # info / quota / translate / fetch — top-level
+    p = sub.add_parser("info", help="Bridge metadata: account, version, available actions")
+    p.set_defaults(func=cmd_info)
+
+    p = sub.add_parser("quota", help="Daily quotas + today's usage counters")
+    p.set_defaults(func=cmd_quota)
+
+    p = sub.add_parser("translate", help="Translate text via LanguageApp")
+    p.add_argument("--text", required=True, help="Text to translate (inline, @file, or -)")
+    p.add_argument("--from", dest="source", default="auto", help="Source language (default: auto)")
+    p.add_argument("--to", dest="target", default="en", help="Target language (default: en)")
+    p.set_defaults(func=cmd_translate)
+
+    p = sub.add_parser("fetch", help="Server-side URL fetch (must be enabled at the bridge)")
+    p.add_argument("--url", required=True, help="Target URL")
+    p.add_argument("--method", default="get", help="HTTP method (default: get)")
+    p.add_argument("--payload", help="Request body (inline, @file, or -)")
+    p.add_argument("--content-type", dest="content_type", help="Content-Type header")
+    p.add_argument("--header", action="append", metavar="KEY=VALUE",
+                   help="Extra header (repeatable)")
+    p.set_defaults(func=cmd_fetch)
+
+    return parser
+
+
+def extract_jq(argv):
+    """Pre-parse `--jq <expr>` from argv. Returns (jq_expr_or_None, remaining_argv).
+    Recognizes both `--jq EXPR` and `--jq=EXPR`. If `--jq` is the last token,
+    defaults to `.`."""
+    out = []
+    jq_expr = None
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--jq":
+            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                jq_expr = argv[i + 1]
+                i += 2
+            else:
+                jq_expr = "."
+                i += 1
+            continue
+        if tok.startswith("--jq="):
+            jq_expr = tok[len("--jq="):] or "."
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return jq_expr, out
+
+
+def main():
+    global JQ_ARGS
+    argv = sys.argv[1:]
+    jq_expr, remaining = extract_jq(argv)
+    if jq_expr is not None:
+        JQ_ARGS = [jq_expr]
+
+    parser = build_parser()
+    if not remaining:
+        parser.print_help(file=sys.stderr)
+        sys.exit(1)
+
+    args = parser.parse_args(remaining)
+
+    if not hasattr(args, "func"):
+        # Group with no subcommand
+        if args.group:
+            sub_help = parser._subparsers._group_actions[0].choices.get(args.group)
+            if sub_help:
+                sub_help.print_help(file=sys.stderr)
         else:
-            print(body)
-except urllib.error.HTTPError as e:
-    err_body = e.read().decode()[:200]
-    _log(action, cli_args, f"HTTP {e.code}")
-    print(json.dumps({"error": f"HTTP {e.code}", "body": err_body}))
-    sys.exit(1)
-except Exception as e:
-    _log(action, cli_args, f"exception: {str(e)[:80]}")
-    print(json.dumps({"error": str(e)}))
-    sys.exit(1)
+            parser.print_help(file=sys.stderr)
+        sys.exit(1)
+
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
