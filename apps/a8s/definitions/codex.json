@@ -1,23 +1,10 @@
 {
   "description": "Codex CLI default — workspace-write sandbox via --full-auto, resumes most recent.",
-  "invokePrompt": [
-    "codex", "exec",
-    "resume", "--last",
-    "--full-auto",
-    "--skip-git-repo-check",
-    "$MESSAGE"
-  ],
-  "invokeMessage": [
+  "invoke": [
     "codex", "exec",
     "resume", "--last",
     "--full-auto",
     "--skip-git-repo-check",
     "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
-  ],
-  "invokeClear": [
-    "codex", "exec",
-    "--full-auto",
-    "--skip-git-repo-check",
-    "Conversation cleared. New conversation starts now."
   ]
 }

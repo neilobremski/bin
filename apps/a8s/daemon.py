@@ -41,7 +41,7 @@ from core import (
     trash_dir,
     unique_path,
 )
-from definitions import build_command, load_definition, select_verb
+from definitions import build_command, load_definition
 from mailbox import ensure_mailboxes, next_inbox_message, route_outboxes
 from network import (
     load_remotes,
@@ -116,24 +116,10 @@ def wake_once(p: Participant, msg_path: Path) -> None:
         msg_path.rename(bad)
         return
 
-    verb = select_verb(msg)
-    if verb == "clear":
-        # Read-time wipe (locked design Q1, belt-and-suspenders): trash any
-        # other messages currently in the inbox so the clear is the only thing
-        # this wake processes. Anything that arrives during the wake will land
-        # for the next iteration.
-        for f in inbox_dir(p.name).iterdir():
-            if f.is_file() and f != msg_path:
-                trashed = unique_path(trash_dir(p.name) / f.name)
-                f.rename(trashed)
-
     trashed = unique_path(trash_dir(p.name) / msg_path.name)
     msg_path.rename(trashed)
-    if verb == "clear":
-        out_agent(p.name, f"[{p.name}] waking ({verb}) from {trashed.name}")
-    else:
-        out_agent(p.name, f"[{p.name}] waking ({verb}) from {trashed.name}: {_preview(msg.get('content', ''))}")
-    cmd = build_command(definition, msg, verb)
+    out_agent(p.name, f"[{p.name}] waking from {trashed.name}: {_preview(msg.get('content', ''))}")
+    cmd = build_command(definition, msg)
     out_agent(p.name, f"[{p.name}] exec: {shlex.join(cmd)}")
     run_with_prefix(p.name, cmd, p.root)
 

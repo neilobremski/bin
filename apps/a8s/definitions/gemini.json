@@ -1,20 +1,9 @@
 {
   "description": "Gemini CLI default — --yolo because Policy Engine doesn't apply in headless mode (google-gemini/gemini-cli#20469).",
-  "invokePrompt": [
-    "gemini",
-    "--yolo",
-    "--resume", "latest",
-    "--prompt", "$MESSAGE"
-  ],
-  "invokeMessage": [
+  "invoke": [
     "gemini",
     "--yolo",
     "--resume", "latest",
     "--prompt", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
-  ],
-  "invokeClear": [
-    "gemini",
-    "--yolo",
-    "--prompt", "Conversation cleared. New conversation starts now."
   ]
 }

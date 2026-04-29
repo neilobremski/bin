@@ -1,9 +1,8 @@
-"""a8s definitions — invoke* verbs and argv interpolation.
+"""a8s definitions — single `invoke` verb and argv interpolation.
 
-Each agent has a definition JSON (built-in or custom) that encodes argv for
-three verbs. `select_verb` picks the verb from the queued message;
-`build_command` substitutes `$SENDER` / `$RECIPIENT` / `$MESSAGE` /
-`$TIMESTAMP` / `$AGE` / `$A8S_DIR` into the chosen argv.
+Each agent has a definition JSON (built-in or custom) that encodes one argv
+under the `invoke` key. `build_command` substitutes `$SENDER` / `$RECIPIENT`
+/ `$MESSAGE` / `$TIMESTAMP` / `$AGE` / `$A8S_DIR` into it.
 
 Strict opacity (issues #69, #70): the recipient sees only sender + message
 content — no `alias` or `others_count` leak. A direct tell and an
@@ -24,13 +23,6 @@ from core import (
     SCRIPT_DIR,
 )
 from registry import load_registry
-
-
-VERB_KEY = {
-    "prompt": "invokePrompt",
-    "message": "invokeMessage",
-    "clear": "invokeClear",
-}
 
 
 def default_definition_path(kind: str) -> Path:
@@ -69,20 +61,6 @@ def _file_lines(msg: dict) -> list[str]:
         if path:
             out.append(f"FILE: {path}")
     return out
-
-
-def select_verb(msg: dict) -> str:
-    """Determine the wake verb from a queued message JSON.
-
-    Order matters: clear first (so the sentinel takes precedence), then
-    senderless prompt, then plain message. Alias-routed messages take
-    `message` like direct ones — strict opacity collapses the dispatch."""
-    if msg.get("clear") is True:
-        return "clear"
-    sender = (msg.get("from") or "").strip()
-    if not sender:
-        return "prompt"
-    return "message"
 
 
 def _message_body(msg: dict) -> str:
@@ -163,27 +141,17 @@ def _expand_argv(
     return out
 
 
-def build_command(definition: dict, msg: dict, verb: str) -> list[str]:
-    """Pick the `invoke*` argv from `definition` for this verb and expand
-    interpolation variables.
+def build_command(definition: dict, msg: dict) -> list[str]:
+    """Pick the `invoke` argv from `definition` and expand interpolation
+    variables. There is one verb — every routed message is a `tell` — so
+    no dispatch table is needed.
 
-    Verbs:
-      prompt   invokePrompt   senderless supervisor-direct (raw content)
-      message  invokeMessage  routed tell (sender + recipient + content)
-      clear    invokeClear    start a fresh conversation (no message)
-
-    `$TIMESTAMP` and `$AGE` come from `msg["date"]`; both empty for clear
-    and for messages that somehow lack a date field (defensive, shouldn't
-    happen since `_write_outbox` / `_queue_*` always stamp one).
-    """
-    key = VERB_KEY.get(verb)
-    if key is None:
-        raise ValueError(f"unknown verb: {verb!r}")
-    argv = definition.get(key)
+    `$TIMESTAMP` and `$AGE` come from `msg["date"]`; both fall back to
+    empty for messages that somehow lack a date field (defensive — every
+    `_write_outbox` stamps one)."""
+    argv = definition.get("invoke")
     if not argv:
-        raise ValueError(f"definition missing {key!r}")
-    if verb == "clear":
-        return _expand_argv(list(argv), "", "", "")
+        raise ValueError("definition missing 'invoke'")
     sender = (msg.get("from") or "").strip()
     recipient = (msg.get("to") or "").strip()
     body = _message_body(msg)

@@ -20,8 +20,6 @@ from core import (
     trash_dir,
 )
 from mailbox import (
-    _queue_clear_sentinel,
-    _queue_prompt,
     _split_content_and_files,
     _write_outbox,
     ensure_mailboxes,
@@ -80,7 +78,7 @@ class TestEnsureMailboxes:
         assert outbox_dir(agent_root).is_dir()
 
 
-# ---------- _write_outbox / _queue_prompt / _queue_clear_sentinel ----------
+# ---------- _write_outbox ----------
 
 class TestWriteOutbox:
     def test_writes_message_json(self, fake_home, tmp_path):
@@ -109,51 +107,6 @@ class TestWriteOutbox:
         # dedupe by ID without re-parsing the filename.
         msg = json.loads(path.read_text())
         assert msg["id"] == stem
-
-
-class TestQueuePrompt:
-    def test_writes_senderless_to_inbox(self, fake_home, tmp_path):
-        agent_root = tmp_path / "x"
-        agent_root.mkdir()
-        p = Participant("X", agent_root)
-        path = _queue_prompt(p, "do the thing")
-        assert path.parent == inbox_dir("X")
-        msg = json.loads(path.read_text())
-        assert msg["from"] == ""
-        assert msg["to"] == "X"
-        assert msg["content"] == "do the thing"
-
-
-class TestQueueClearSentinel:
-    def test_writes_clear_sentinel(self, fake_home, tmp_path):
-        agent_root = tmp_path / "x"
-        agent_root.mkdir()
-        p = Participant("X", agent_root)
-        path = _queue_clear_sentinel(p)
-        msg = json.loads(path.read_text())
-        assert msg["clear"] is True
-        assert msg["from"] == ""
-
-    def test_write_time_wipe_trashes_existing(self, fake_home, tmp_path):
-        agent_root = tmp_path / "x"
-        agent_root.mkdir()
-        p = Participant("X", agent_root)
-        # Pre-existing inbox messages.
-        _queue_prompt(p, "msg1")
-        _queue_prompt(p, "msg2")
-        _queue_prompt(p, "msg3")
-        assert len(list(inbox_dir("X").iterdir())) == 3
-
-        _queue_clear_sentinel(p)
-        # Inbox should now contain ONLY the CLEAR sentinel.
-        files = list(inbox_dir("X").iterdir())
-        assert len(files) == 1
-        # The CLEAR sentinel is identified by its body (`clear: true`), not
-        # by the filename — filenames are now opaque ULIDs.
-        body = json.loads(files[0].read_text())
-        assert body.get("clear") is True
-        # The 3 prior messages are in trash.
-        assert len(list(trash_dir("X").iterdir())) == 3
 
 
 # ---------- route_outboxes ----------
@@ -465,13 +418,18 @@ class TestNextInboxMessage:
         agent_root.mkdir()
         p = Participant("X", agent_root)
         ensure_mailboxes(p)
-        first = _queue_prompt(p, "first")
-        second = _queue_prompt(p, "second")
+        # Drop two ULID-named JSON files directly into the inbox; ULID
+        # lex-order matches creation order, so first should sort first.
+        from ulid import new as new_ulid
+        first_id = new_ulid()
+        first = inbox_dir("X") / f"{first_id}.json"
+        first.write_text(json.dumps({"id": first_id, "to": "X", "content": "first"}))
+        second_id = new_ulid()
+        second = inbox_dir("X") / f"{second_id}.json"
+        second.write_text(json.dumps({"id": second_id, "to": "X", "content": "second"}))
+
         result = next_inbox_message(p)
-        # Both filenames sort lexicographically; first written has earlier ts.
-        assert result.name in {first.name, second.name}
-        # The function returns the SORTED-FIRST file (lex order, which matches
-        # creation order due to timestamp prefixes).
+        # next_inbox_message returns the SORTED-FIRST file.
         assert result.name == sorted([first.name, second.name])[0]
 
     def test_returns_none_when_empty(self, fake_home, tmp_path):

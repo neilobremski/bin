@@ -4,8 +4,9 @@ Grouped by section:
   registry mgmt    — add, define, agents, discover, install
   aliases          — alias, unalias, aliases
   process control  — start, run, step, stop, kill, exit, ls
-  messaging        — tell, prompt, clear
+  messaging        — tell
   logs             — logs
+  remotes          — remote, unremote
 
 `cmd_start` re-execs the entry script via `core.ENTRYPOINT` (NOT __file__,
 which would resolve to commands.py after the modular split).
@@ -43,15 +44,12 @@ from daemon import (
     attached_loop,
 )
 from mailbox import (
-    _queue_clear_sentinel,
-    _queue_prompt,
     _split_content_and_files,
     _write_outbox,
 )
 from network import (
     configured_remote_ids,
     load_network_config,
-    publish_once_to_remotes,
     save_network_config,
 )
 from registry import (
@@ -756,128 +754,6 @@ def cmd_tell(args: list[str]) -> int:
         out_agent(sender_name, f"tell -> {canonical} (alias of {len(members)}): {_preview(content)}")
     else:
         out_agent(sender_name, f"tell -> {canonical}: {_preview(content)}")
-    return 0
-
-
-def cmd_prompt(args: list[str]) -> int:
-    """`a8s prompt <name> <message>` — queue a senderless prompt. <name> may
-    be an agent or alias; aliases queue one copy per member. For unknown-
-    locally recipients with remotes configured, the prompt is published
-    synchronously to every remote (no retry on failure — re-run the CLI)."""
-    if len(args) < 2:
-        print("usage: a8s prompt <name> <message>", file=sys.stderr)
-        return 2
-    name, *rest = args
-    prompt = " ".join(rest)
-    parts = participants_from_registry()
-
-    try:
-        _kind, members = resolve_name(name)
-    except KeyError:
-        if not configured_remote_ids():
-            print(f"prompt: no agent or alias named {name!r}", file=sys.stderr)
-            return 1
-        return _publish_supervisor_to_remotes(name, prompt, clear=False, label="prompt")
-    except ValueError as e:
-        print(f"prompt: {e}", file=sys.stderr)
-        return 1
-    if not members:
-        print(f"prompt: {name!r} resolves to no agents", file=sys.stderr)
-        return 1
-
-    queued = 0
-    for member in members:
-        target = find_participant(parts, member)
-        if target is None:
-            print(f"prompt: registry inconsistency — {member!r} not found", file=sys.stderr)
-            continue
-        _queue_prompt(target, prompt)
-        out_agent(target.name, f"queued prompt to {target.name}: {_preview(prompt)}")
-        queued += 1
-    if queued > 1:
-        out(f"queued prompt to {queued} agent(s)")
-    return 0 if queued > 0 else 1
-
-
-def _publish_supervisor_to_remotes(name: str, content: str, *, clear: bool, label: str) -> int:
-    """Build a senderless envelope (`from: ""`) targeting `name` and publish
-    once to every configured remote. Used by `cmd_prompt` and `cmd_clear`
-    when the recipient lives on another cluster.
-
-    `clear=True` adds the CLEAR-sentinel marker so the receiver's wake_once
-    dispatches `invokeClear` (and runs the read-time inbox wipe). `label`
-    is the user-facing command name for log messages."""
-    from datetime import datetime, timezone
-    from ulid import new as new_ulid
-
-    msg_id = new_ulid()
-    now = datetime.now(timezone.utc)
-    envelope: dict = {
-        "id": msg_id,
-        "date": now.isoformat().replace("+00:00", "Z"),
-        "from": "",
-        "to": name,
-        "content": content,
-        "files": [],
-    }
-    if clear:
-        envelope["clear"] = True
-    succeeded, failed = publish_once_to_remotes(envelope)
-    if not succeeded and not failed:
-        # publish_once_to_remotes returns ([], []) only when no remotes were
-        # configured — but we wouldn't be here in that case (caller checks).
-        # Defensive fallback:
-        print(f"{label}: no remotes available for delivery", file=sys.stderr)
-        return 1
-    if not succeeded:
-        print(
-            f"{label}: failed to publish to any remote (failed: {sorted(failed)})",
-            file=sys.stderr,
-        )
-        return 1
-    if failed:
-        print(
-            f"{label}: published to {sorted(succeeded)}; failed: {sorted(failed)} "
-            f"(id {msg_id})",
-            file=sys.stderr,
-        )
-    else:
-        print(f"{label} -> {name} via {sorted(succeeded)} (id {msg_id})")
-    return 0
-
-
-def cmd_clear(args: list[str]) -> int:
-    """`a8s clear <name>` queues a CLEAR sentinel into the agent's (or alias
-    members') inbox. The sentinel is the only message at write time (current
-    inbox is moved to trash). When the wake-loop processes it, invokeClear
-    runs (no prompt) — starts a fresh conversation. For unknown-locally
-    recipients with remotes configured, the sentinel is published once to
-    every remote (the receiver's wake_once handles the read-time wipe)."""
-    if not args:
-        print("usage: a8s clear <name>", file=sys.stderr)
-        print("       <name> can be an agent or alias; alias members are all cleared.", file=sys.stderr)
-        return 2
-    name = args[0]
-    try:
-        _kind, members = resolve_name(name)
-    except KeyError:
-        if not configured_remote_ids():
-            print(f"clear: no agent or alias named {name!r}", file=sys.stderr)
-            return 1
-        return _publish_supervisor_to_remotes(name, "", clear=True, label="clear")
-    except ValueError as e:
-        print(f"clear: {e}", file=sys.stderr)
-        return 1
-    parts = participants_from_registry()
-    queued = 0
-    for member in members:
-        target = find_participant(parts, member)
-        if target is None:
-            continue
-        _queue_clear_sentinel(target)
-        out_agent(target.name, f"[{target.name}] clear queued")
-        queued += 1
-    print(f"queued clear for {queued} agent(s)")
     return 0
 
 
