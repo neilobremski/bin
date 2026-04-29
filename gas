@@ -127,6 +127,45 @@ def parse_kv(items):
     return result
 
 
+def coerce_value(v):
+    """Best-effort type coercion for `gas call` k=v pairs. Mirrors the prior
+    pure-passthrough CLI: JSON arrays/objects parse, digits become ints,
+    true/false become booleans, @path reads a file, '-' reads stdin, else
+    string."""
+    if v.startswith("@"):
+        path = v[1:]
+        if not Path(path).is_file():
+            err(f"file not found: {path}")
+            sys.exit(1)
+        return Path(path).read_text()
+    if v == "-":
+        return sys.stdin.read()
+    if v.startswith("[") or v.startswith("{"):
+        try:
+            return json.loads(v)
+        except json.JSONDecodeError:
+            return v
+    if v == "true":
+        return True
+    if v == "false":
+        return False
+    if v.lstrip("-").isdigit():
+        return int(v)
+    return v
+
+
+def parse_typed_kv(items):
+    """Like parse_kv but applies coerce_value. For `gas call` passthrough."""
+    result = {}
+    for item in items or []:
+        if "=" not in item:
+            err(f"expected KEY=VALUE: {item}")
+            sys.exit(1)
+        k, _, v = item.partition("=")
+        result[k] = coerce_value(v)
+    return result
+
+
 def log_call(action, summary, snippet):
     try:
         log_dir = Path.home() / ".gas" / "logs"
@@ -508,6 +547,18 @@ def cmd_token_get(a):
     call("token.get", {})
 
 
+def cmd_actions(a):
+    global JQ_ARGS
+    if JQ_ARGS is None:
+        JQ_ARGS = [".actions"]
+    call("info", {})
+
+
+def cmd_call(a):
+    payload = parse_typed_kv(a.params)
+    call(a.action, payload)
+
+
 # ── Parser ──────────────────────────────────────────────────────────────────
 
 def build_parser():
@@ -778,9 +829,26 @@ def build_parser():
     p = token_sub.add_parser("get", help="Return the bridge's OAuth access token")
     p.set_defaults(func=cmd_token_get)
 
-    # info / quota / translate / fetch — top-level
+    # info / quota / actions / call / translate / fetch — top-level
     p = sub.add_parser("info", help="Bridge metadata: account, version, available actions")
     p.set_defaults(func=cmd_info)
+
+    p = sub.add_parser("actions", help="List actions the live bridge supports (server-side discovery)")
+    p.set_defaults(func=cmd_actions)
+
+    p = sub.add_parser(
+        "call",
+        help="Call any bridge action with arbitrary KEY=VALUE params (passthrough escape hatch)",
+        description=(
+            "Generic escape hatch — invokes ANY action by name with arbitrary KEY=VALUE params. "
+            "Values are type-coerced like the prior CLI: JSON arrays/objects, integers, booleans, "
+            "@/path file reads, and '-' for stdin. Use this for actions not yet curated as "
+            "subcommands (or for future bridge actions added after this CLI was built)."
+        ),
+    )
+    p.add_argument("action", help="Bridge action name (e.g. chat.send, gmail.search)")
+    p.add_argument("params", nargs="*", metavar="KEY=VALUE", help="Action parameters")
+    p.set_defaults(func=cmd_call)
 
     p = sub.add_parser("quota", help="Daily quotas + today's usage counters")
     p.set_defaults(func=cmd_quota)

@@ -103,6 +103,8 @@ echo "hello" | gas drive upload --name greeting.txt --data-base64 -
 ## Top-level actions
 
 - `info` — bridge metadata (account, version, available actions).
+- `actions` — list of actions the live bridge supports (calls `info` and filters to `.actions`). Use this when you want a quick capability check before running something.
+- `call <action> [KEY=VALUE ...]` — passthrough escape hatch. Invokes any action by name with arbitrary KEY=VALUE params, type-coerced like the prior CLI (JSON arrays/objects, ints, booleans, `@/path` for file contents, `-` for stdin). Use this for actions not curated as subcommands here, or for future bridge actions added after this CLI was built. Unknown actions fail loudly with the bridge's own `available` list.
 - `quota` — daily Gmail/Drive quotas plus today's per-service usage counters.
 - `translate --text <text> [--from auto] [--to en]` — `LanguageApp.translate`.
 - `fetch --url <URL> [--method get] [--payload <body>] [--content-type <ct>] [--header K=V]` — server-side `UrlFetchApp` (disabled by default at the bridge).
@@ -111,10 +113,15 @@ echo "hello" | gas drive upload --name greeting.txt --data-base64 -
 
 ```
 gas info
+gas actions                                         # list of action names the live bridge supports
 gas quota --jq '.email_remaining'
 gas gmail send --to me@example.com --subject "ping" --body "hello"
 gas drive list --query "title contains 'meeting'"
 gas drive upload --name screenshot.png --data-base64 @/tmp/shot.png
 gas sheets read --name "Q3 Plan" --range "Sheet1!A1:D50"
 gas gemini ask --prompt "Summarize Apps Script Properties Service in 3 bullets."
+
+# call escape hatch — useful when the bridge gains a new action
+gas call gmail.search query="is:unread" count=5
+gas call chat.send space="spaces/abc" message="hi"  # if not yet implemented, bridge replies with available[]
 ```
