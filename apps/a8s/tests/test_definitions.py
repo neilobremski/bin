@@ -248,3 +248,61 @@ class TestLoadDefinition:
         registry.save_registry({"X": {"root": "/tmp", "definition": "/nonexistent.json"}})
         with pytest.raises(FileNotFoundError):
             load_definition("X")
+
+
+# ---------- build_idle_command + idle_timeout_seconds ----------
+
+class TestBuildIdleCommand:
+    def test_returns_none_when_no_idle(self):
+        from definitions import build_idle_command
+        assert build_idle_command({"invoke": ["x"]}, "neil") is None
+
+    def test_returns_none_when_idle_invoke_missing(self):
+        from definitions import build_idle_command
+        assert build_idle_command({"invoke": ["x"], "idle": {"timeout": 60}}, "neil") is None
+
+    def test_expands_recipient_to_agent_name(self):
+        from definitions import build_idle_command
+        defn = {"invoke": ["x"], "idle": {"timeout": 60, "invoke": ["claude", "$RECIPIENT idle"]}}
+        assert build_idle_command(defn, "neil") == ["claude", "neil idle"]
+
+    def test_message_fields_are_empty(self):
+        # Idle has no incoming message — sender/message/timestamp/age all blank.
+        from definitions import build_idle_command
+        defn = {"invoke": ["x"], "idle": {"timeout": 60, "invoke": [
+            "echo", "S=$SENDER", "M=$MESSAGE", "T=$TIMESTAMP", "A=$AGE",
+        ]}}
+        assert build_idle_command(defn, "neil") == [
+            "echo", "S=", "M=", "T=", "A=",
+        ]
+
+    def test_a8s_dir_substitution_works(self):
+        from core import SCRIPT_DIR
+        from definitions import build_idle_command
+        defn = {"invoke": ["x"], "idle": {"timeout": 60, "invoke": ["$A8S_DIR/check"]}}
+        assert build_idle_command(defn, "neil") == [f"{SCRIPT_DIR}/check"]
+
+
+class TestIdleTimeoutSeconds:
+    def test_none_when_no_idle(self):
+        from definitions import idle_timeout_seconds
+        assert idle_timeout_seconds({"invoke": ["x"]}) is None
+
+    def test_returns_float_when_set(self):
+        from definitions import idle_timeout_seconds
+        assert idle_timeout_seconds({"idle": {"timeout": 60}}) == 60.0
+
+    def test_string_numeric_parses(self):
+        from definitions import idle_timeout_seconds
+        assert idle_timeout_seconds({"idle": {"timeout": "120"}}) == 120.0
+
+    def test_zero_or_negative_returns_none(self):
+        # Treat 0 and negative as "disabled" — caller skips if None.
+        from definitions import idle_timeout_seconds
+        assert idle_timeout_seconds({"idle": {"timeout": 0}}) is None
+        assert idle_timeout_seconds({"idle": {"timeout": -10}}) is None
+
+    def test_garbage_returns_none(self):
+        from definitions import idle_timeout_seconds
+        assert idle_timeout_seconds({"idle": {"timeout": "soon"}}) is None
+        assert idle_timeout_seconds({"idle": {"timeout": None}}) is None

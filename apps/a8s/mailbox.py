@@ -64,6 +64,7 @@ from core import (
     trash_dir,
     unique_path,
 )
+from network import seen_id_append
 from registry import resolve_name
 from ulid import new as new_ulid
 
@@ -388,6 +389,15 @@ def _process_pending(
                         try:
                             _commit_staged_inboxes(staged)
                             sidecar["local_delivered"] = True
+                            # Claim the ULID in the cluster-wide seen-ids ring
+                            # so a remote round-trip (we publish to MQTT below;
+                            # the broker pushes back to our own subscriber)
+                            # gets deduped instead of writing a second inbox
+                            # entry. Whichever recipient(s) accepted the local
+                            # write counts — one append per envelope.
+                            local_msg_id = msg.get("id", "")
+                            if local_msg_id:
+                                seen_id_append(local_msg_id)
                             if kind == "alias":
                                 out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (alias of {len(recipients)}): {preview}")
                                 for recipient in recipients:
