@@ -202,8 +202,10 @@ The default definitions follow the opacity rule — `$SENDER tells $RECIPIENT: $
 
 ## State on disk
 
+The state root is `$HOME/.a8s` by default; set `A8S_HOME` to relocate it. This is the only relocation knob — everything below is relative to whichever path `A8S_HOME` points at (or the default). Useful for sandboxed end-to-end tests that mustn't touch the operator's real configuration.
+
 ```
-~/.a8s/
+~/.a8s/                       (or wherever A8S_HOME points)
 ├── a8s.json                  registry: { agents: {...}, aliases: {...} }
 ├── network.json              configured remotes (absent → local-only)
 ├── seen-ids                  cluster-wide ULID ring for receive-side dedup

@@ -51,7 +51,11 @@ PRINT_LOCK: threading.Lock | None = None
 # ---------- ~/.a8s/ paths ----------
 
 def _a8s_dir() -> Path:
-    base = Path.home() / ".a8s"
+    """State directory for the registry, mailboxes, and process logs. Defaults
+    to `$HOME/.a8s` and can be overridden by setting `A8S_HOME` — useful for
+    sandboxed test runs that must not touch the real configuration."""
+    override = os.environ.get("A8S_HOME")
+    base = Path(override) if override else Path.home() / ".a8s"
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -167,9 +171,7 @@ def files_dir(root: Path) -> Path:
 
 
 def registry_path() -> Path:
-    base = Path.home() / ".a8s"
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "a8s.json"
+    return _a8s_dir() / "a8s.json"
 
 
 def network_config_path() -> Path:
