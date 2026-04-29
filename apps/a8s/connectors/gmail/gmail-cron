@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+echo `# <#` >/dev/null
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_DEF="${A8S_GMAIL_DEF:-$HOME/.neil-gmail.json}"
+exec python3 "$SCRIPT_DIR/gmail_cron.py" --from-def "$DEFAULT_DEF" "$@"
+#> > $null
+
+$ScriptPath = $PSCommandPath
+if (-not $ScriptPath) {
+    $ScriptPath = $MyInvocation.MyCommand.Path
+}
+if (-not $ScriptPath) {
+    $ScriptPath = Join-Path (Get-Location) "gmail-cron"
+}
+
+$ScriptDir = Split-Path -Parent $ScriptPath
+$CronPath = Join-Path $ScriptDir "gmail_cron.py"
+
+if ($env:A8S_GMAIL_DEF) {
+    $DefaultDef = $env:A8S_GMAIL_DEF
+} else {
+    $DefaultDef = Join-Path $HOME ".neil-gmail.json"
+}
+
+$Python = Get-Command python3 -ErrorAction SilentlyContinue
+if ($Python) {
+    & $Python.Source $CronPath --from-def $DefaultDef @args
+    exit $LASTEXITCODE
+}
+
+$Python = Get-Command python -ErrorAction SilentlyContinue
+if ($Python) {
+    & $Python.Source $CronPath --from-def $DefaultDef @args
+    exit $LASTEXITCODE
+}
+
+$Python = Get-Command py -ErrorAction SilentlyContinue
+if ($Python) {
+    & $Python.Source -3 $CronPath --from-def $DefaultDef @args
+    exit $LASTEXITCODE
+}
+
+Write-Error "Could not find python3, python, or py on PATH."
+exit 127

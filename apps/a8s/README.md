@@ -231,6 +231,12 @@ The outbox lives in the agent's own dir because some sandboxes (codex `--full-au
 
 `from` is force-overwritten at routing time. An agent that hand-writes a JSON with `from: "VICTIM"` doesn't get to spoof — the file's outbox location is the unforgeable identity.
 
+## Connectors
+
+A connector is just an a8s agent whose `definition.invoke` runs a script instead of an LLM CLI. The first reference connector is the Gmail connector at `apps/a8s/connectors/gmail/`, which lets a human read and respond to a8s messages over email.
+
+Strict recipient opacity holds: other participants `tell <name> ...` with no awareness that the recipient is Gmail-backed, a script, a human, or another LLM agent. The connector is the only thing that knows about its bridge format. See `apps/a8s/connectors/gmail/README.md` for setup.
+
 ## Source layout
 
 ```
