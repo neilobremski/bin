@@ -1,4 +1,4 @@
-"""Tests for definitions.py — verb selection, argv interpolation,
+"""Tests for definitions.py — single-verb argv interpolation, age formatting,
 and auto-discovery."""
 from __future__ import annotations
 
@@ -16,35 +16,7 @@ from definitions import (
     build_command,
     default_definition_path,
     load_definition,
-    select_verb,
 )
-
-
-# ---------- select_verb ----------
-
-class TestSelectVerb:
-    def test_clear_takes_precedence(self):
-        # Even with a sender + alias-style `to`, clear:true wins.
-        msg = {"from": "GERRY", "to": "devs", "clear": True}
-        assert select_verb(msg) == "clear"
-
-    def test_senderless_is_prompt(self):
-        msg = {"from": "", "to": "CLAUDE", "content": "hi"}
-        assert select_verb(msg) == "prompt"
-
-    def test_missing_from_is_prompt(self):
-        msg = {"to": "CLAUDE", "content": "hi"}
-        assert select_verb(msg) == "prompt"
-
-    def test_with_sender_is_message(self):
-        msg = {"from": "GERRY", "to": "CLAUDE", "content": "hi"}
-        assert select_verb(msg) == "message"
-
-    def test_alias_routed_is_still_message(self):
-        # Strict opacity: alias-routed messages dispatch via the same verb
-        # as direct ones — the only difference is what `to` resolves to.
-        msg = {"from": "GERRY", "to": "devs", "content": "hi"}
-        assert select_verb(msg) == "message"
 
 
 # ---------- _format_age ----------
@@ -118,87 +90,60 @@ class TestMessageBody:
 # ---------- build_command + _expand_argv ----------
 
 class TestBuildCommand:
-    def test_dispatches_to_invokePrompt(self):
-        defn = {"invokePrompt": ["claude", "-p", "$MESSAGE"]}
-        msg = {"from": "", "to": "CLAUDE", "content": "hello"}
-        argv = build_command(defn, msg, "prompt")
-        assert argv == ["claude", "-p", "hello"]
-
-    def test_dispatches_to_invokeMessage(self):
-        defn = {"invokeMessage": ["claude", "--continue", "-p", "$SENDER tells $RECIPIENT: $MESSAGE"]}
+    def test_substitutes_sender_recipient_message(self):
+        defn = {"invoke": ["claude", "--continue", "-p", "$SENDER tells $RECIPIENT: $MESSAGE"]}
         msg = {"from": "GERRY", "to": "CLAUDE", "content": "fix this"}
-        argv = build_command(defn, msg, "message")
+        argv = build_command(defn, msg)
         assert argv == ["claude", "--continue", "-p", "GERRY tells CLAUDE: fix this"]
 
-    def test_alias_routed_message_keeps_alias_in_recipient(self):
+    def test_alias_routed_keeps_alias_in_recipient(self):
         # Strict opacity / mailing-list semantics: when the sender wrote
-        # `to: devs`, the recipient's $RECIPIENT resolves to "devs" — they
-        # know it came via the list, but not who else got it.
-        defn = {"invokeMessage": ["claude", "-p", "$SENDER tells $RECIPIENT: $MESSAGE"]}
+        # `to: devs`, the recipient's $RECIPIENT resolves to "devs".
+        defn = {"invoke": ["claude", "-p", "$SENDER tells $RECIPIENT: $MESSAGE"]}
         msg = {"from": "GERRY", "to": "devs", "content": "standup"}
-        argv = build_command(defn, msg, "message")
+        argv = build_command(defn, msg)
         assert argv == ["claude", "-p", "GERRY tells devs: standup"]
 
-    def test_dispatches_to_invokeClear(self):
-        defn = {"invokeClear": ["claude", "-p", "/clear"]}
-        argv = build_command(defn, {"clear": True}, "clear")
-        assert argv == ["claude", "-p", "/clear"]
-
-    def test_clear_ignores_message_fields(self):
-        # invokeClear shouldn't leak prior content into argv even if the
-        # sentinel msg happens to carry stale fields.
-        defn = {"invokeClear": ["x", "$SENDER", "$RECIPIENT", "$MESSAGE"]}
-        msg = {"from": "GERRY", "to": "CLAUDE", "content": "stale", "clear": True}
-        argv = build_command(defn, msg, "clear")
-        assert argv == ["x", "", "", ""]
-
-    def test_unknown_verb_raises(self):
-        with pytest.raises(ValueError, match="unknown verb"):
-            build_command({}, {}, "bogus")
-
     def test_missing_invoke_raises(self):
-        with pytest.raises(ValueError, match="invokeMessage"):
-            build_command({"invokePrompt": ["x"]}, {"from": "G", "to": "C"}, "message")
+        with pytest.raises(ValueError, match="invoke"):
+            build_command({}, {"from": "G", "to": "C"})
 
     def test_a8s_dir_substitution(self):
         from core import SCRIPT_DIR
-        defn = {"invokePrompt": ["$A8S_DIR/dummy-cli", "$MESSAGE"]}
-        msg = {"from": "", "to": "X", "content": "hi"}
-        argv = build_command(defn, msg, "prompt")
+        defn = {"invoke": ["$A8S_DIR/dummy-cli", "$MESSAGE"]}
+        msg = {"from": "A", "to": "B", "content": "hi"}
+        argv = build_command(defn, msg)
         assert argv == [f"{SCRIPT_DIR}/dummy-cli", "hi"]
 
     def test_does_not_mutate_original_argv(self):
-        defn = {"invokePrompt": ["claude", "-p", "$MESSAGE"]}
-        original = list(defn["invokePrompt"])
-        build_command(defn, {"from": "", "content": "hello"}, "prompt")
-        assert defn["invokePrompt"] == original
+        defn = {"invoke": ["claude", "-p", "$MESSAGE"]}
+        original = list(defn["invoke"])
+        build_command(defn, {"from": "A", "to": "B", "content": "hello"})
+        assert defn["invoke"] == original
 
     def test_message_body_includes_files(self):
-        defn = {"invokeMessage": ["x", "$MESSAGE"]}
+        defn = {"invoke": ["x", "$MESSAGE"]}
         msg = {
             "from": "GERRY",
             "to": "CLAUDE",
             "content": "review",
             "files": [{"path": "/tmp/x"}],
         }
-        argv = build_command(defn, msg, "message")
+        argv = build_command(defn, msg)
         assert argv == ["x", "review\n\nFILE: /tmp/x"]
 
     def test_timestamp_substitution_from_msg_date(self):
-        # $TIMESTAMP comes from msg["date"] verbatim — useful for backlog
-        # context when an agent finally drains a long-queued message.
-        defn = {"invokeMessage": ["x", "[$TIMESTAMP] $SENDER: $MESSAGE"]}
+        defn = {"invoke": ["x", "[$TIMESTAMP] $SENDER: $MESSAGE"]}
         msg = {
             "from": "GERRY",
             "to": "CLAUDE",
             "date": "2026-04-28T14:30:00.000000Z",
             "content": "hi",
         }
-        argv = build_command(defn, msg, "message")
+        argv = build_command(defn, msg)
         assert argv == ["x", "[2026-04-28T14:30:00.000000Z] GERRY: hi"]
 
     def test_age_substitution_relative_to_now(self, monkeypatch):
-        # Freeze the clock by monkeypatching `datetime` in definitions module.
         from datetime import timedelta
         import definitions as dmod
         frozen = datetime(2026, 4, 28, 14, 35, 0, tzinfo=timezone.utc)
@@ -210,25 +155,15 @@ class TestBuildCommand:
                 return frozen
         monkeypatch.setattr(dmod, "datetime", FakeDT)
 
-        defn = {"invokeMessage": ["x", "($AGE) $MESSAGE"]}
+        defn = {"invoke": ["x", "($AGE) $MESSAGE"]}
         msg = {"from": "G", "to": "C", "date": msg_date, "content": "hi"}
-        argv = build_command(defn, msg, "message")
+        argv = build_command(defn, msg)
         assert argv == ["x", "(5 minutes ago) hi"]
 
-    def test_clear_does_not_substitute_timestamp_or_age(self):
-        # invokeClear deliberately gets empty strings for all message-shaped
-        # vars, including $TIMESTAMP and $AGE — there's no message to age.
-        defn = {"invokeClear": ["x", "TS:$TIMESTAMP", "AGE:$AGE"]}
-        msg = {"clear": True, "date": "2026-04-28T14:30:00Z"}
-        argv = build_command(defn, msg, "clear")
-        assert argv == ["x", "TS:", "AGE:"]
-
     def test_missing_date_yields_empty_age_and_timestamp(self):
-        # Defensive: a message without `date` (shouldn't normally happen)
-        # gets empty $TIMESTAMP / $AGE rather than crashing.
-        defn = {"invokeMessage": ["x", "TS:$TIMESTAMP", "AGE:$AGE", "$MESSAGE"]}
+        defn = {"invoke": ["x", "TS:$TIMESTAMP", "AGE:$AGE", "$MESSAGE"]}
         msg = {"from": "G", "to": "C", "content": "hi"}
-        argv = build_command(defn, msg, "message")
+        argv = build_command(defn, msg)
         assert argv == ["x", "TS:", "AGE:", "hi"]
 
 
@@ -291,13 +226,13 @@ class TestAutodiscoverDefinition:
 class TestLoadDefinition:
     def test_loads_explicit_definition(self, fake_home, tmp_path, monkeypatch):
         defn_path = tmp_path / "custom.json"
-        defn_path.write_text('{"invokePrompt": ["echo", "$MESSAGE"]}')
+        defn_path.write_text('{"invoke": ["echo", "$MESSAGE"]}')
 
         import registry
         registry.save_registry({"X": {"root": str(tmp_path), "definition": str(defn_path)}})
 
         loaded = load_definition("X")
-        assert loaded == {"invokePrompt": ["echo", "$MESSAGE"]}
+        assert loaded == {"invoke": ["echo", "$MESSAGE"]}
 
     def test_falls_back_to_default(self, fake_home):
         # Agent registered with NO definition field — load_definition falls
@@ -306,8 +241,7 @@ class TestLoadDefinition:
         registry.save_registry({"X": {"root": "/tmp"}})
 
         loaded = load_definition("X")
-        assert "invokePrompt" in loaded
-        assert "invokeClear" in loaded
+        assert "invoke" in loaded
 
     def test_missing_file_raises(self, fake_home):
         import registry

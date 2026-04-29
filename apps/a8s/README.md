@@ -124,9 +124,7 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 ### Messaging
 | | |
 |---|---|
-| `a8s tell <name> <msg>` | Routed message. `<name>` may be an agent or alias (fans out at routing time). Sender = agent enclosing CWD. |
-| `a8s prompt <name> <msg>` | Senderless supervisor message — delivered raw, no template wrapping. |
-| `a8s clear <name>` | Queue a CLEAR sentinel. Inbox is wiped at write time and at read time; the next wake runs `invokeClear`. Aliases iterate. |
+| `a8s tell <name> <msg>` | Routed message. `<name>` may be an agent or alias (fans out at routing time). Sender = agent enclosing CWD; `tell` from outside any agent root errors. There is no senderless channel — every message has a force-stamped agent `from`. |
 | `a8s logs <name>... [--tail N] [-f]` | Read per-agent log files; merge-sort by ISO timestamp across multiple agents. `-f` follows. |
 
 ### Skills
@@ -171,38 +169,30 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `codex.json` | Codex CLI with `--full-auto` workspace-write sandbox + `resume --last` |
 | `default.json` | Fallback — runs `dummy-cli` and prints "no real CLI configured" |
 
-### The three verbs
+### The single verb
 
-The wake routine reads the message and selects one of:
+Every wake reads `definition["invoke"]` — one argv per definition. There is no verb dispatch and no special-case branches: `prompt` and `clear` are gone. Every message is a `tell` with a force-stamped agent `from`, so the same argv shape covers every wake.
 
-| Verb | Trigger | Body |
-|---|---|---|
-| `invokePrompt` | `from` is empty (queued by `a8s prompt`) | `$MESSAGE` only — raw content, no sender header |
-| `invokeMessage` | `from` is set | `$SENDER`/`$RECIPIENT`/`$MESSAGE` interpolated into argv directly |
-| `invokeClear` | `clear: true` sentinel | No prompt; runs the CLI fresh to start a new conversation |
-
-There is no separate alias verb. Strict opacity (issues #69, #70): a routed message looks identical whether it arrived directly or via alias fan-out — `$RECIPIENT` resolves to whatever the sender wrote in `to` (the alias name for fanned messages, the agent name for direct ones). The recipient knows it came via the list; not who else got it. Mailing-list semantics.
+Strict opacity (issues #69, #70) still holds: a routed message looks identical whether it arrived directly or via alias fan-out — `$RECIPIENT` resolves to whatever the sender wrote in `to` (the alias name for fanned messages, the agent name for direct ones). Mailing-list semantics.
 
 ### Schema
 
 ```json
 {
   "description": "...",
-  "invokePrompt":  ["claude", "...", "--continue", "-p", "$MESSAGE"],
-  "invokeMessage": ["claude", "...", "--continue", "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"],
-  "invokeClear":   ["claude", "-p", "Conversation cleared. New conversation starts now."]
+  "invoke": ["claude", "...", "--continue", "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"]
 }
 ```
 
 Argv elements run through six substitutions:
-- `$SENDER` → sender's canonical name (empty for senderless prompts).
+- `$SENDER` → sender's canonical name (always non-empty — every message has a force-stamped agent `from`).
 - `$RECIPIENT` → what the sender wrote in `to` (alias name for fanned messages, agent name for direct ones).
 - `$MESSAGE` → the message body (`content`, with any `FILE: <path>` lines appended).
 - `$TIMESTAMP` → ISO 8601 UTC timestamp the message was queued (e.g. `2026-04-28T14:30:00.123456Z`). Useful when you want a stable machine-readable time.
 - `$AGE` → human-readable age relative to now (e.g. `5 minutes ago`). Computed at wake time, so a long backlog gets accurate values per message. Pick this OR `$TIMESTAMP` per definition based on which the LLM will read more naturally.
 - `$A8S_DIR` → `apps/a8s/` itself, so definitions can point at bundled scripts (`default.json` uses this for `dummy-cli`).
 
-`$TIMESTAMP` and `$AGE` are empty for `invokeClear` and for any message without a `date` field.
+`$TIMESTAMP` and `$AGE` are empty for any message without a `date` field (defensive — every `_write_outbox` stamps one).
 
 Override per-agent with `a8s define <name> <path>` — point at any JSON. The file isn't moved or copied; the registry stores the path.
 

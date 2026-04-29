@@ -128,8 +128,8 @@ Key invariants:
 | `apps/a8s/a8s.py` | thin entry shim (~30 lines) | `cli.main` invocation only |
 | `apps/a8s/core.py` | paths, logging, helpers, `Participant`, mutable `PRINT_LOCK`, path constants (`SCRIPT_DIR`, `DEFINITIONS_DIR`, `ENTRYPOINT`) | leaf module — no a8s imports |
 | `apps/a8s/registry.py` | `~/.a8s/a8s.json` I/O, `resolve_name` (alias resolution with diamond/cycle detection), `sender_from_cwd`, `_scan_for_markers` | depends on `core` |
-| `apps/a8s/mailbox.py` | `route_outboxes` (two-phase: ingest → process), `ensure_mailboxes`, `_queue_prompt`, `_queue_clear_sentinel`, `_split_content_and_files`, `_write_outbox`. Per-message `.retry` sidecars live in `pending/` and drive backoff retries via `BACKOFF_SCHEDULE`. | depends on `core`, `registry`, `ulid` |
-| `apps/a8s/definitions.py` | `select_verb`, `build_command`, `_expand_argv` (`$SENDER`/`$RECIPIENT`/`$MESSAGE`/`$A8S_DIR`), `load_definition`, `_autodiscover_definition` | depends on `core`, `registry` |
+| `apps/a8s/mailbox.py` | `route_outboxes` (two-phase: ingest → process), `ensure_mailboxes`, `_split_content_and_files`, `_write_outbox`. Per-message `.retry` sidecars live in `pending/` and drive backoff retries via `BACKOFF_SCHEDULE`. | depends on `core`, `registry`, `ulid` |
+| `apps/a8s/definitions.py` | `build_command(definition, msg)` (single `invoke` field, no verb dispatch), `_expand_argv` (`$SENDER`/`$RECIPIENT`/`$MESSAGE`/`$TIMESTAMP`/`$AGE`/`$A8S_DIR`), `load_definition`, `_autodiscover_definition` | depends on `core`, `registry` |
 | `apps/a8s/ulid.py` | `new()` / `parse()` / `is_ulid()` — pure-stdlib Crockford-base32 ULIDs. Mailbox messages are named `<ulid>.json` and carry the same id in the body's `id` field for receive-side dedup. | leaf module |
 | `apps/a8s/network.py` | `~/.a8s/network.json` IO, `load_remotes` (forwards every key past `transport`/`broker`/`topic` to the transport as `**opts` — each transport handles its own option vocabulary), `make_publish_remotes` (warn-and-continue per-remote publish), `receive_envelope` (decode → ULID dedup → registry filter → atomic inbox write), `start_remotes` / `stop_remotes`. Transport modules imported lazily. | depends on `core`, `registry`, `transports`, `ulid` |
 | `apps/a8s/transports/__init__.py` | `Transport` ABC + `TransportError`. The publish/subscribe/start/stop contract every remote transport implements. | leaf module |
@@ -147,9 +147,15 @@ Key invariants:
   `$AGE`, `$A8S_DIR`) expands via `definitions._expand_argv`. `$TIMESTAMP`
   is the ISO date the message was queued; `$AGE` is the human-readable
   delta from now (computed each wake, so backlogs get accurate per-message
-  ages). `invokeClear` always gets empty strings for the message-shaped
-  vars. Don't introduce more placeholders without checking they make
-  sense across all three `invoke*` verbs.
+  ages). There is one wake verb — `invoke` — and `build_command(definition,
+  msg)` always reads it. No verb dispatch table.
+- **One-verb model: only `tell`.** Every routed message has a force-stamped
+  agent `from` (no senderless `prompt` channel) and goes through the same
+  `invoke` argv on the recipient. There is no `clear` sentinel — operators
+  reset agent sessions by killing the handler / wiping session files
+  manually. The reason is security: with no senderless cross-cluster channel
+  a compromised agent can't spoof its way out of a sandbox via MQTT, which
+  was the motivation for landing this restriction.
 - **`core.PRINT_LOCK` is the cross-module log lock.** It's `None` at module
   load and only set when `daemon.attached_loop` starts. Threading is intentional:
   multi-agent handlers may interleave wake events. If you write a new code path
@@ -223,9 +229,7 @@ stop <name>                  SIGTERM the handler (graceful; alias dedupes by PID
 kill <name>                  etiquette-then-force: SIGTERM, grace, 2nd SIGTERM, SIGKILL
 exit                         SIGTERM every running handler
 ls                           list only running agents + their handler PIDs
-prompt <name> <message>      senderless supervisor message (raw delivery)
-tell <name> <message>        routed message (sender = agent enclosing CWD)
-clear <name>                 queue CLEAR sentinel (write-time + read-time inbox wipe)
+tell <name> <message>        routed message (sender = agent enclosing CWD; no senderless channel exists)
 logs <name>... [--tail N] [-f]   merge-sorted per-agent logs
 remote                                  list all configured remotes
 remote <name>                           show one remote's spec (passwords masked)
@@ -263,25 +267,21 @@ install                      install canonical skills
                               read-modify-writes — to ~/.a8s/agents/<NAME>/pending/
 ```
 
-### The three invoke verbs
+### The single invoke verb
 
-`select_verb(msg)` picks one based on the message's shape:
+Every wake reads `definition["invoke"]` — one argv per definition. There is
+no verb dispatch, no `select_verb`, and no special-case branches: `prompt`
+and `clear` are gone. Every message is a `tell` with a force-stamped
+`from`, so the same argv shape (`$SENDER tells $RECIPIENT ($AGE):
+$MESSAGE`) covers every wake.
 
-| Verb | Trigger | Argv vars typically used |
-|---|---|---|
-| `invokePrompt` | `from` is empty (queued by `a8s prompt`) | `$MESSAGE` (and optionally `$AGE`/`$TIMESTAMP`) |
-| `invokeMessage` | `from` set | `$SENDER`, `$RECIPIENT`, `$AGE` or `$TIMESTAMP`, `$MESSAGE` |
-| `invokeClear` | `clear: true` field set | none — argv is literal |
+Strict opacity (#69, #70) still holds: a direct tell and an alias-fanned
+tell produce identical shapes; `$RECIPIENT` preserves whatever the sender
+wrote (alias name for fanned, agent name for direct).
 
-There's no separate alias verb. Strict opacity (#69, #70) makes a direct
-tell and an alias-fanned tell indistinguishable in shape; `$RECIPIENT`
-preserves whatever the sender wrote (alias name for fanned, agent name for
-direct) — mailing-list semantics.
-
-`build_command(definition, msg, verb)` reads the matching `invoke*` argv
-and substitutes `$SENDER` / `$RECIPIENT` / `$MESSAGE` (content + any
-`FILE:` lines) / `$A8S_DIR`. There is no `$PROMPT` and no separate
-`promptMessage` template — argv interpolation does the whole job.
+`build_command(definition, msg)` substitutes `$SENDER` / `$RECIPIENT` /
+`$MESSAGE` (content + any `FILE:` lines) / `$TIMESTAMP` / `$AGE` /
+`$A8S_DIR`.
 
 ### Definition fallback
 
@@ -382,8 +382,19 @@ The locked-design refactor (#52) is closed. The following are open:
   pick `tell` vs `says` consistently; the dual API confused agents. Now
   group sends use `tell <alias>` and the system fans out.
 - **The `fresh` flag** (`~/.cache/a8s/fresh.json`) — phase 5 retired it
-  along with the `consume_fresh` mechanism. Replaced with the explicit
-  CLEAR sentinel that `a8s clear` queues into the inbox.
+  along with the `consume_fresh` mechanism. Briefly replaced by the
+  explicit CLEAR sentinel via `a8s clear`; that command was itself retired
+  later when the messaging surface collapsed to `tell`-only. Operators
+  reset agent sessions manually now (kill the handler, delete the agent's
+  session files, etc).
+- **`a8s prompt` / `a8s clear`** — both were senderless supervisor
+  commands. Removed when the messaging surface collapsed to `tell`-only:
+  the senderless cross-cluster path (`_publish_supervisor_to_remotes` →
+  `publish_once_to_remotes`) was the security hole — a compromised agent
+  could potentially spoof prompts via the broker. With every routed
+  message having a force-stamped agent `from`, that attack surface is
+  gone. Don't reintroduce a senderless channel without thinking through
+  what it lets a sandboxed agent do over the network.
 - **`--unrestricted` global flag** — phase 5 retired. Users wanting the
   dangerous mode create a custom definition file and `a8s define <name>
   <path>`. Don't add the flag back; the definition system subsumes it.

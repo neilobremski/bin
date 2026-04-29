@@ -38,7 +38,7 @@ from daemon import (
     attached_loop,
     release,
 )
-from mailbox import _queue_clear_sentinel, _queue_prompt, ensure_mailboxes
+from mailbox import _write_outbox, ensure_mailboxes
 from registry import save_aliases, save_registry
 
 
@@ -288,32 +288,14 @@ def _read_log(name: str) -> str:
     return agent_log_path(name).read_text() if agent_log_path(name).is_file() else ""
 
 
-class TestWakeOnceVerbs:
-    """Verify each verb produces the right argv via the mock CLI subprocess.
-    Asserts on lines the mock CLI echoes into the per-agent log."""
+class TestWakeOnce:
+    """End-to-end wake_once exercise via the mock CLI. With the single-`invoke`
+    verb every wake produces the same argv shape — the wake line surfaces
+    `$SENDER`/`$RECIPIENT`/`$TIMESTAMP`/`$AGE`/`$MESSAGE` for both direct
+    sends and alias fan-out. Asserts on lines the mock CLI echoes into the
+    per-agent log."""
 
-    def test_prompt_verb_argv(self, mock_agent):
-        _queue_prompt(mock_agent, "show capabilities")
-        rc = attached_loop(["MOCK"], 0.1, single_pass=True)
-        assert rc == 0
-        log = _read_log("MOCK")
-        # mock-cli echoes each argv element prefixed with "MOCK-CLI:"
-        assert "MOCK> MOCK-CLI: verb=prompt" in log
-        # Senderless prompt: $SENDER is empty, $RECIPIENT is the agent's own
-        # name, $MESSAGE is the raw content. $TIMESTAMP / $AGE are populated
-        # from msg["date"]; assert the surrounding structure rather than the
-        # exact dynamic values.
-        assert "FROM:|TO:MOCK|TS:" in log
-        assert "|MSG:show capabilities" in log
-        assert "AGE:0 seconds ago" in log or "AGE:1 seconds ago" in log
-        # The full argv is logged before invocation so operators can see the
-        # real prompt that was sent to the wake subprocess.
-        assert "[MOCK] exec: " in log
-        assert "verb=prompt" in log
-        assert "MSG:show capabilities" in log
-
-    def test_message_verb_argv_via_routing(self, fake_home, tmp_path, fixtures_dir):
-        # Two agents, both using mock.json.
+    def test_routed_message(self, fake_home, tmp_path, fixtures_dir):
         for n in ("A", "B"):
             (tmp_path / n).mkdir()
         save_registry({
@@ -324,23 +306,21 @@ class TestWakeOnceVerbs:
         b = Participant("B", tmp_path / "b")
         ensure_mailboxes(a)
         ensure_mailboxes(b)
-        from mailbox import _write_outbox
         _write_outbox("A", a.root, "B", "design review", [])
 
         rc = attached_loop(["A", "B"], 0.1, single_pass=True)
         assert rc == 0
         log_b = _read_log("B")
-        # invokeMessage interpolates $SENDER, $RECIPIENT, $TIMESTAMP, $AGE,
-        # $MESSAGE directly.
-        assert "MOCK-CLI: verb=message" in log_b
+        # The argv was logged via shlex.join before invocation so operators
+        # can see the actual prompt that reached the wake subprocess.
+        assert "[B] exec: " in log_b
         assert "FROM:A|TO:B|TS:" in log_b
         assert "|MSG:design review" in log_b
+        assert "AGE:0 seconds ago" in log_b or "AGE:1 seconds ago" in log_b
 
-    def test_alias_routed_message_uses_message_verb(self, fake_home, tmp_path, fixtures_dir):
-        # Strict opacity (#69, #70): alias-routed messages dispatch to
-        # invokeMessage just like direct ones. The only difference visible to
-        # the recipient is that $RECIPIENT resolves to the alias name.
-        from mailbox import _write_outbox
+    def test_alias_routed_message(self, fake_home, tmp_path, fixtures_dir):
+        # Strict opacity (#69, #70): alias-routed messages produce the same
+        # shape as direct ones — only `$RECIPIENT` differs (alias name).
         agents = {}
         for n in ("A", "B", "C"):
             d = tmp_path / n; d.mkdir()
@@ -356,39 +336,12 @@ class TestWakeOnceVerbs:
         _write_outbox("A", agents["A"].root, "devs", "all-hands", [])
         rc = attached_loop(["A", "B", "C"], 0.1, single_pass=True)
         assert rc == 0
-        log_b = _read_log("B")
-        # No "messageAlias" verb, no others_count leak — just the regular
-        # message verb with $RECIPIENT preserving the alias name.
-        assert "MOCK-CLI: verb=message" in log_b
-        assert "FROM:A|TO:devs|TS:" in log_b
-        assert "|MSG:all-hands" in log_b
-        assert "OTHERS:" not in log_b
-        assert "ALIAS:" not in log_b
-        # C sees the same shape — both recipients are indistinguishable.
-        log_c = _read_log("C")
-        assert "FROM:A|TO:devs|TS:" in log_c
-        assert "|MSG:all-hands" in log_c
-
-    def test_clear_verb_via_sentinel(self, mock_agent):
-        # Pre-queue a normal prompt + then a clear; the clear should wipe
-        # the prompt and only invokeClear should fire.
-        _queue_prompt(mock_agent, "stale")
-        _queue_clear_sentinel(mock_agent)
-        rc = attached_loop(["MOCK"], 0.1, single_pass=True)
-        assert rc == 0
-        log = _read_log("MOCK")
-        # invokeClear ran (with no prompt arg, just verb=clear).
-        assert "MOCK-CLI: verb=clear" in log
-        # The stale prompt was NOT processed (its content shouldn't appear
-        # as a wake line).
-        assert "MOCK> MOCK-CLI: stale" not in log
-        # Stale prompt landed in trash (read-time wipe). With ULID filenames
-        # the messages are identified by their JSON body, not their name.
-        import json as _json
-        trashed_bodies = [
-            _json.loads(f.read_text()) for f in trash_dir("MOCK").iterdir()
-        ]
-        assert any(b.get("content") == "stale" for b in trashed_bodies)
+        for n in ("B", "C"):
+            log = _read_log(n)
+            assert f"FROM:A|TO:devs|TS:" in log
+            assert "|MSG:all-hands" in log
+            assert "OTHERS:" not in log
+            assert "ALIAS:" not in log
 
 
 class TestAttachedLoopLifecycle:

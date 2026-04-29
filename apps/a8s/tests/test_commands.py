@@ -13,9 +13,7 @@ import pytest
 from commands import (
     cmd_add,
     cmd_alias,
-    cmd_clear,
     cmd_kill,
-    cmd_prompt,
     cmd_remote,
     cmd_remove,
     cmd_tell,
@@ -408,69 +406,3 @@ class TestCmdTellRemoteRecipient:
         assert msg["content"] == "hi from sender"
 
 
-class TestCmdPromptRemoteRecipient:
-    """`a8s prompt <name> <msg>` to an unknown-locally name with remotes
-    configured publishes synchronously instead of erroring. We stub the
-    publish path so no broker is required."""
-
-    def test_unknown_recipient_with_no_remotes_rejected(self, fake_home, capsys):
-        rc = cmd_prompt(["GHOST", "hello"])
-        assert rc == 1
-        assert "no agent or alias named" in capsys.readouterr().err
-
-    def test_unknown_recipient_with_remotes_publishes(self, fake_home, monkeypatch, capsys):
-        save_network_config({"remotes": {"hub": {"transport": "mqtt", "broker": "mqtt://x", "topic": "t"}}})
-        captured: list[dict] = []
-
-        def fake_publish_once(msg):
-            captured.append(msg)
-            return ["hub"], []
-
-        # Patch the symbol resolved inside commands.py at import time.
-        monkeypatch.setattr("commands.publish_once_to_remotes", fake_publish_once)
-        rc = cmd_prompt(["GHOST", "/reset"])
-        assert rc == 0
-        assert len(captured) == 1
-        env = captured[0]
-        assert env["from"] == ""  # senderless → invokePrompt on the receiver
-        assert env["to"] == "GHOST"
-        assert env["content"] == "/reset"
-        assert env.get("clear") is None  # not a clear sentinel
-
-    def test_publish_failure_returns_error(self, fake_home, monkeypatch, capsys):
-        save_network_config({"remotes": {"hub": {"transport": "mqtt", "broker": "mqtt://x", "topic": "t"}}})
-        monkeypatch.setattr("commands.publish_once_to_remotes", lambda msg: ([], ["hub"]))
-        rc = cmd_prompt(["GHOST", "/reset"])
-        assert rc == 1
-        assert "failed to publish" in capsys.readouterr().err
-
-
-class TestCmdClearRemoteRecipient:
-    def test_unknown_recipient_with_no_remotes_rejected(self, fake_home, capsys):
-        rc = cmd_clear(["GHOST"])
-        assert rc == 1
-        assert "no agent or alias named" in capsys.readouterr().err
-
-    def test_unknown_recipient_with_remotes_publishes_clear_sentinel(self, fake_home, monkeypatch):
-        save_network_config({"remotes": {"hub": {"transport": "mqtt", "broker": "mqtt://x", "topic": "t"}}})
-        captured: list[dict] = []
-
-        def fake_publish_once(msg):
-            captured.append(msg)
-            return ["hub"], []
-
-        monkeypatch.setattr("commands.publish_once_to_remotes", fake_publish_once)
-        rc = cmd_clear(["GHOST"])
-        assert rc == 0
-        assert len(captured) == 1
-        env = captured[0]
-        assert env["from"] == ""
-        assert env["to"] == "GHOST"
-        assert env.get("clear") is True  # the sentinel marker
-
-    def test_publish_failure_returns_error(self, fake_home, monkeypatch, capsys):
-        save_network_config({"remotes": {"hub": {"transport": "mqtt", "broker": "mqtt://x", "topic": "t"}}})
-        monkeypatch.setattr("commands.publish_once_to_remotes", lambda msg: ([], ["hub"]))
-        rc = cmd_clear(["GHOST"])
-        assert rc == 1
-        assert "failed to publish" in capsys.readouterr().err
