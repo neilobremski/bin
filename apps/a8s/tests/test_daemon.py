@@ -36,6 +36,7 @@ from daemon import (
     _write_kill_request,
     acquire,
     attached_loop,
+    maybe_run_idle,
     release,
 )
 from mailbox import _write_outbox, ensure_mailboxes
@@ -493,3 +494,149 @@ class TestAttachedLoopKillRequest:
         assert "shared" in _read_log("B")
         assert not pid_path("A").is_file()
         assert not pid_path("B").is_file()
+
+
+# ---------- idle invoke ----------
+
+def _write_idle_def(path: Path, fixtures_dir: Path, timeout: int) -> None:
+    """Write a definition that wakes via mock-cli on tells AND has an
+    idle.invoke that prints a distinguishable string. The idle command's
+    argv echoes 'IDLE-FIRED-FOR:$RECIPIENT' so we can grep the per-agent
+    log to assert it ran."""
+    path.write_text(json.dumps({
+        "invoke": [
+            f"{fixtures_dir}/mock-cli",
+            "FROM:$SENDER|TO:$RECIPIENT|TS:$TIMESTAMP|AGE:$AGE|MSG:$MESSAGE",
+        ],
+        "idle": {
+            "timeout": timeout,
+            "invoke": [
+                f"{fixtures_dir}/mock-cli",
+                "IDLE-FIRED-FOR:$RECIPIENT",
+            ],
+        },
+    }))
+
+
+class TestMaybeRunIdle:
+    """`maybe_run_idle` is the per-iteration check `attached_loop` calls
+    for each handled agent after draining the inbox. It reads
+    `last-active`, computes elapsed, and fires `idle.invoke` iff the
+    agent has been quiet long enough."""
+
+    def test_returns_false_when_no_idle_config(self, fake_home, tmp_path, fixtures_dir):
+        d = tmp_path / "X"; d.mkdir()
+        save_registry({"X": {"root": str(d), "definition": str(fixtures_dir / "mock.json")}})
+        ensure_mailboxes(Participant("X", d))
+        # mock.json has no `idle` block.
+        assert maybe_run_idle(Participant("X", d)) is False
+
+    def test_initializes_last_active_when_missing(self, fake_home, tmp_path, fixtures_dir):
+        from core import last_active_path, read_last_active
+        d = tmp_path / "X"; d.mkdir()
+        defp = tmp_path / "idle.json"
+        _write_idle_def(defp, fixtures_dir, timeout=60)
+        save_registry({"X": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("X", d))
+        # No last-active file yet — first call seeds it and does NOT fire.
+        assert not last_active_path("X").is_file()
+        fired = maybe_run_idle(Participant("X", d))
+        assert fired is False
+        assert read_last_active("X") is not None
+
+    def test_skips_when_not_yet_idle_long_enough(self, fake_home, tmp_path, fixtures_dir):
+        from core import touch_last_active
+        from datetime import datetime, timezone, timedelta
+        d = tmp_path / "X"; d.mkdir()
+        defp = tmp_path / "idle.json"
+        _write_idle_def(defp, fixtures_dir, timeout=300)
+        save_registry({"X": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("X", d))
+        # Last active 10 seconds ago; timeout is 300.
+        touch_last_active("X", datetime.now(timezone.utc) - timedelta(seconds=10))
+        assert maybe_run_idle(Participant("X", d)) is False
+
+    def test_fires_when_elapsed_exceeds_timeout(self, fake_home, tmp_path, fixtures_dir):
+        from core import touch_last_active, read_last_active
+        from datetime import datetime, timezone, timedelta
+        d = tmp_path / "X"; d.mkdir()
+        defp = tmp_path / "idle.json"
+        _write_idle_def(defp, fixtures_dir, timeout=1)
+        save_registry({"X": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("X", d))
+        before = datetime.now(timezone.utc)
+        touch_last_active("X", before - timedelta(seconds=60))
+        fired = maybe_run_idle(Participant("X", d))
+        assert fired is True
+        # Log must show the idle invoke ran.
+        log = _read_log("X")
+        assert "idle exec:" in log
+        assert "IDLE-FIRED-FOR:X" in log
+        # last-active was refreshed to ~now after the run.
+        got = read_last_active("X")
+        assert got is not None
+        assert got >= before
+
+    def test_zero_timeout_disables_idle(self, fake_home, tmp_path, fixtures_dir):
+        d = tmp_path / "X"; d.mkdir()
+        defp = tmp_path / "idle.json"
+        _write_idle_def(defp, fixtures_dir, timeout=0)
+        save_registry({"X": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("X", d))
+        # Even with no last-active, timeout<=0 means idle is off.
+        assert maybe_run_idle(Participant("X", d)) is False
+
+
+class TestAttachedLoopIdleIntegration:
+    """End-to-end: attached_loop's iteration must call maybe_run_idle for
+    every handled agent after the inbox drain. With single_pass=True we
+    can prep last-active to look "stale" and verify the idle invoke fires
+    on the very first iteration."""
+
+    def test_idle_fires_after_drain(self, fake_home, tmp_path, fixtures_dir):
+        from core import touch_last_active
+        from datetime import datetime, timezone, timedelta
+        d = tmp_path / "X"; d.mkdir()
+        defp = tmp_path / "idle.json"
+        _write_idle_def(defp, fixtures_dir, timeout=1)
+        save_registry({"X": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("X", d))
+        # Stale last-active so idle should fire this pass.
+        touch_last_active("X", datetime.now(timezone.utc) - timedelta(seconds=60))
+
+        rc = attached_loop(["X"], 0.1, single_pass=True)
+        assert rc == 0
+        log = _read_log("X")
+        assert "idle exec:" in log
+        assert "IDLE-FIRED-FOR:X" in log
+
+    def test_wake_refreshes_last_active_so_idle_doesnt_fire(self, fake_home, tmp_path, fixtures_dir):
+        # If a real wake happened this iteration, last-active was just
+        # touched at wake_once time — idle should NOT fire.
+        d = tmp_path / "X"; d.mkdir()
+        defp = tmp_path / "idle.json"
+        _write_idle_def(defp, fixtures_dir, timeout=1)
+        save_registry({"X": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("X", d))
+        # Drop a self-tell so there's an inbox message to drain. We can't
+        # tell ourselves through routing (sender exclusion), so write the
+        # routed message directly into the inbox.
+        from ulid import new as new_ulid
+        msg_id = new_ulid()
+        (inbox_dir("X") / f"{msg_id}.json").write_text(json.dumps({
+            "id": msg_id,
+            "date": "2026-04-29T12:00:00Z",
+            "from": "Y",
+            "to": "X",
+            "content": "wake-test",
+            "files": [],
+        }))
+
+        rc = attached_loop(["X"], 0.1, single_pass=True)
+        assert rc == 0
+        log = _read_log("X")
+        # Wake fired (mock-cli received the message).
+        assert "MSG:wake-test" in log
+        # Idle did NOT fire — wake_once just touched last-active.
+        assert "idle exec:" not in log
+        assert "IDLE-FIRED-FOR" not in log

@@ -234,6 +234,44 @@ class TestRouteOutboxes:
         # Routing forces from = sender's actual name, regardless of the JSON.
         assert delivered["from"] == "A"
 
+    def test_local_routing_appends_seen_ids(self, two_agents):
+        """When local routing commits, the message ULID enters the seen-ids
+        ring. Without this a remote round-trip — we publish to MQTT, the
+        broker pushes back to our own subscriber — would deliver the same
+        envelope a second time, and the handler would wake on it twice
+        (the bug seen in PR #85's live test where the connector emailed
+        every routed message twice)."""
+        from network import seen_id_contains
+        a, b = two_agents
+        path = _write_outbox("A", a.root, "B", "dedup-test", [])
+        msg_id = json.loads(path.read_text())["id"]
+        assert not seen_id_contains(msg_id)
+        route_outboxes([a, b], all_agents=[a, b])
+        assert seen_id_contains(msg_id), (
+            "Local routing must claim the ULID so an MQTT round-trip is deduped"
+        )
+
+    def test_local_route_then_receive_envelope_is_no_op(self, two_agents):
+        """End-to-end repro of the round-trip duplicate: local routing
+        delivers, then the same envelope arrives via the remote subscriber
+        (`receive_envelope`). The receive must dedupe — no second inbox
+        file."""
+        from network import receive_envelope
+        a, b = two_agents
+        path = _write_outbox("A", a.root, "B", "loopback", [])
+        envelope_bytes = path.read_text().encode("utf-8")
+        route_outboxes([a, b], all_agents=[a, b])
+        # Simulate MQTT round-trip: drain the inbox first, mimicking the
+        # local handler's wake (so the inbox-file-already-exists short-circuit
+        # in receive_envelope can't be the one catching the dup).
+        inbox_b = inbox_dir("B")
+        for f in list(inbox_b.iterdir()):
+            f.unlink()
+        receive_envelope(envelope_bytes, [a, b])
+        assert list(inbox_b.iterdir()) == [], (
+            "Round-trip must be deduped via seen-ids, not delivered again"
+        )
+
 
 class TestAtomicFanout:
     """Issue #67 — `route_outboxes` stages routed copies under each recipient's

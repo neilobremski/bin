@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time as _time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import core
@@ -38,10 +39,17 @@ from core import (
     kill_request_path,
     out_agent,
     pid_path,
+    read_last_active,
+    touch_last_active,
     trash_dir,
     unique_path,
 )
-from definitions import build_command, load_definition
+from definitions import (
+    build_command,
+    build_idle_command,
+    idle_timeout_seconds,
+    load_definition,
+)
 from mailbox import ensure_mailboxes, next_inbox_message, route_outboxes
 from network import (
     load_remotes,
@@ -99,6 +107,10 @@ def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
 
 
 def wake_once(p: Participant, msg_path: Path) -> None:
+    # Mark activity before any work — covers the parse-error / load-error
+    # exits below too. Without this, a bad inbox file in the only handled
+    # agent could let an idle invoke fire on the same iteration.
+    touch_last_active(p.name)
     try:
         with msg_path.open("r", encoding="utf-8") as f:
             msg = json.load(f)
@@ -122,6 +134,46 @@ def wake_once(p: Participant, msg_path: Path) -> None:
     cmd = build_command(definition, msg)
     out_agent(p.name, f"[{p.name}] exec: {shlex.join(cmd)}")
     run_with_prefix(p.name, cmd, p.root)
+    # And again after the wake returns — a long-running LLM call shouldn't
+    # leave last-active stuck at the pre-wake timestamp.
+    touch_last_active(p.name)
+
+
+def maybe_run_idle(p: Participant) -> bool:
+    """If the agent has `definition.idle.invoke` configured AND has been
+    idle for at least `definition.idle.timeout` seconds, run the configured
+    argv via `run_with_prefix` and refresh `last-active`. Returns True iff
+    an idle invoke fired this call. Errors loading the definition are
+    logged and swallowed — idle never crashes the loop."""
+    try:
+        definition = load_definition(p.name)
+    except (FileNotFoundError, RuntimeError):
+        return False
+    timeout = idle_timeout_seconds(definition)
+    if timeout is None:
+        return False
+    cmd = build_idle_command(definition, p.name)
+    if cmd is None:
+        return False
+    last = read_last_active(p.name)
+    if last is None:
+        # No prior activity recorded — initialize and let the next iteration
+        # start the clock fresh.
+        touch_last_active(p.name)
+        return False
+    elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+    if elapsed < timeout:
+        return False
+    out_agent(
+        p.name,
+        f"[{p.name}] idle {int(elapsed)}s ≥ {int(timeout)}s — firing idle invoke",
+    )
+    out_agent(p.name, f"[{p.name}] idle exec: {shlex.join(cmd)}")
+    try:
+        run_with_prefix(p.name, cmd, p.root)
+    finally:
+        touch_last_active(p.name)
+    return True
 
 
 # ---------- per-agent attachment ----------
@@ -503,6 +555,17 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                         if msg is None:
                             break
                         wake_once(p, msg)
+                # Idle invoke: per-agent, only after the inbox has drained.
+                # Skipped while a wake is in flight automatically — the
+                # drain loop above is the only thing that calls
+                # `run_with_prefix`, so reaching this point means the
+                # agent is genuinely between wakes for this iteration.
+                if not _STOP_EVENT.is_set():
+                    for p in handled:
+                        try:
+                            maybe_run_idle(p)
+                        except Exception as e:
+                            out_agent(p.name, f"[{p.name}] idle check error: {e}")
             except Exception as e:
                 out_agent(label, f"[a8s] {label}: iteration error: {e}")
             if single_pass:

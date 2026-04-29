@@ -131,6 +131,47 @@ def kill_request_path(name: str) -> Path:
     return agent_dir(name) / "kill-request"
 
 
+def last_active_path(name: str) -> Path:
+    """Per-agent last-activity timestamp. Single-line ISO-8601 UTC string,
+    updated at the start of every wake and at the end of every idle-invoke
+    run. `attached_loop` reads it to decide whether the agent has been idle
+    long enough to fire `definition.idle.invoke`. Persists across handler
+    restarts so an idle that was about to fire still fires after a restart."""
+    return agent_dir(name) / "last-active"
+
+
+def read_last_active(name: str) -> datetime | None:
+    """Returns the parsed timestamp, or None if the file is missing /
+    unreadable / unparseable. None signals "no prior activity recorded";
+    callers typically fall back to "now" and write the file."""
+    p = last_active_path(name)
+    if not p.is_file():
+        return None
+    try:
+        s = p.read_text().strip()
+    except OSError:
+        return None
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def touch_last_active(name: str, when: datetime | None = None) -> None:
+    """Write `when` (or now) into the agent's last-active file. Best-effort
+    — disk failures don't propagate (a missed write means the next idle
+    check might fire one cycle late)."""
+    ts = (when or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z")
+    p = last_active_path(name)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(ts)
+    except OSError:
+        pass
+
+
 def pending_dir(name: str) -> Path:
     """Ingested-but-not-yet-fully-routed messages. `route_outboxes` atomically
     moves each new file from `<root>/.outbox/` into here on every pass before

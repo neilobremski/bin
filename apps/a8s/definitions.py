@@ -160,6 +160,41 @@ def build_command(definition: dict, msg: dict) -> list[str]:
     return _expand_argv(list(argv), sender, recipient, body, date_str, age)
 
 
+def build_idle_command(definition: dict, agent_name: str) -> list[str] | None:
+    """Pick the `idle.invoke` argv from `definition` and expand the same
+    interpolation variables `build_command` does. Returns None if the agent
+    has no idle config, or if its `invoke` argv is missing/empty.
+
+    Idle invocations have no incoming message, so $SENDER, $MESSAGE,
+    $TIMESTAMP, and $AGE expand to empty strings. $RECIPIENT is set to the
+    agent's own name so a definition like `["claude", "--continue", "-p",
+    "$RECIPIENT idle wake"]` reads naturally."""
+    idle = definition.get("idle")
+    if not isinstance(idle, dict):
+        return None
+    argv = idle.get("invoke")
+    if not argv:
+        return None
+    return _expand_argv(list(argv), "", agent_name, "", "", "")
+
+
+def idle_timeout_seconds(definition: dict) -> float | None:
+    """Returns `definition.idle.timeout` as a positive float, or None if
+    not configured / not a positive number. Loose typing tolerated:
+    `"60"` strings parse the same as `60`."""
+    idle = definition.get("idle")
+    if not isinstance(idle, dict):
+        return None
+    raw = idle.get("timeout")
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
 def _autodiscover_definition(root: Path) -> tuple[str, str]:
     """Look for marker files (CLAUDE.md/GEMINI.md/CODEX.md) directly in `root`
     and pick the matching built-in definition. Always returns a usable path:

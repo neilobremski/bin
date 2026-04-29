@@ -1,6 +1,7 @@
 """Tests for core helpers added for the remote-routing PR (issue #63)."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core import (
@@ -9,11 +10,14 @@ from core import (
     MAX_SEEN_IDS,
     _a8s_dir,
     agent_dir,
+    last_active_path,
     network_config_path,
     pending_dir,
+    read_last_active,
     registry_path,
     retry_sidecar_path,
     seen_ids_path,
+    touch_last_active,
 )
 
 
@@ -86,3 +90,32 @@ class TestA8sHomeOverride:
         sandbox = tmp_path / "sandbox-a8s"
         monkeypatch.setenv("A8S_HOME", str(sandbox))
         assert agent_dir("claude") == sandbox / "agents" / "claude"
+
+
+class TestLastActive:
+    def test_path_under_agent_dir(self, fake_home):
+        assert last_active_path("claude") == agent_dir("claude") / "last-active"
+
+    def test_read_returns_none_when_missing(self, fake_home):
+        assert read_last_active("claude") is None
+
+    def test_touch_then_read_round_trip(self, fake_home):
+        agent_dir("claude").mkdir(parents=True, exist_ok=True)
+        ts = datetime(2026, 4, 29, 12, 0, 0, tzinfo=timezone.utc)
+        touch_last_active("claude", ts)
+        assert read_last_active("claude") == ts
+
+    def test_touch_writes_now_by_default(self, fake_home):
+        agent_dir("claude").mkdir(parents=True, exist_ok=True)
+        before = datetime.now(timezone.utc)
+        touch_last_active("claude")
+        after = datetime.now(timezone.utc)
+        got = read_last_active("claude")
+        assert got is not None
+        assert before <= got <= after
+
+    def test_read_handles_unparseable_content(self, fake_home):
+        d = agent_dir("claude")
+        d.mkdir(parents=True, exist_ok=True)
+        last_active_path("claude").write_text("not-a-date")
+        assert read_last_active("claude") is None

@@ -180,7 +180,8 @@ Strict opacity (issues #69, #70) still holds: a routed message looks identical w
 ```json
 {
   "description": "...",
-  "invoke": ["claude", "...", "--continue", "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"]
+  "invoke": ["claude", "...", "--continue", "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"],
+  "idle":   { "timeout": 1800, "invoke": ["claude", "-p", "summarize the day's tells"] }
 }
 ```
 
@@ -195,6 +196,18 @@ Argv elements run through six substitutions:
 `$TIMESTAMP` and `$AGE` are empty for any message without a `date` field (defensive — every `_write_outbox` stamps one).
 
 Override per-agent with `a8s define <name> <path>` — point at any JSON. The file isn't moved or copied; the registry stores the path.
+
+### Idle invoke (optional)
+
+A definition's `idle` block fires `idle.invoke` when the agent has gone `idle.timeout` seconds without any wake activity. Update mechanics:
+
+- `~/.a8s/agents/<NAME>/last-active` (ISO timestamp) is touched at every wake start, every wake end, and at the end of every idle invoke.
+- After draining the inbox each iteration, `attached_loop` checks each handled agent: if `now - last_active >= timeout`, run `idle.invoke` via the same `run_with_prefix` machinery that real wakes use.
+- A wake in flight blocks idle naturally — the loop is single-threaded for its handled agents and the inbox drain happens before the idle check.
+- `timeout: 0` (or negative / non-numeric) disables idle.
+- Argv expansion: `$SENDER`/`$MESSAGE`/`$TIMESTAMP`/`$AGE` are empty (no incoming message); `$RECIPIENT` is the agent's own name; `$A8S_DIR` resolves as usual.
+
+This subsumes the retired `clear` use-case: define an idle invoke that runs whatever your CLI needs to reset session state (e.g. `claude -p "/clear"`).
 
 ### Recipient transparency
 
@@ -220,6 +233,8 @@ The state root is `$HOME/.a8s` by default; set `A8S_HOME` to relocate it. This i
         │                     attempts + per-remote success
         ├── trash/             processed messages
         ├── log.txt            per-agent log (wakes, routing, subprocess output)
+        ├── last-active        ISO timestamp; touched at wake start/end and
+        │                     after every idle invoke (gates `idle.invoke`)
         └── pid                handler attachment
 
 <agent-root>/

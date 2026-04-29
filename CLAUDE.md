@@ -227,6 +227,16 @@ in the message envelope.
   → 24h). After `MAX_ATTEMPTS` failures the message moves to trash with a
   "discarded after backoff exhausted" log. Don't introduce per-pass
   unconditional retries — they generate excess log noise and broker traffic.
+- **Local routing claims the ULID in `seen-ids`.** When `_process_pending`
+  commits a local delivery, it appends the message's ULID to the
+  cluster-wide ring at `~/.a8s/seen-ids` — same ring the receive path
+  consults. Without this, our own MQTT round-trip (we publish to the
+  broker; the broker pushes back to our subscriber) would write the
+  envelope a second time once the local handler has trashed the first
+  copy from the inbox. The bug surfaced in #85's live test as a
+  connector emailing every routed message twice (`<ulid>.json` and
+  `<ulid>.1.json` both landed in trash). One append per envelope, after
+  the staged batch commits.
 
 ### Surface
 
@@ -282,12 +292,48 @@ default) is in effect.
         │                     attempts and per-remote success
         ├── trash/             processed / discarded messages
         ├── log.txt            agent-scoped log
+        ├── last-active        ISO timestamp; touched at wake start/end and
+        │                     after every idle invoke. `attached_loop` reads
+        │                     it to gate `definition.idle.invoke` firing.
         └── pid                handler attachment (one or more agents may share a PID)
 
 <agent-root>/
 └── .outbox/                  agent writes here; a8s renames out — never
                               read-modify-writes — to ~/.a8s/agents/<NAME>/pending/
 ```
+
+### Idle invoke
+
+Definitions can opt into a periodic-while-quiet wake via:
+
+```json
+{
+  "invoke":  ["claude", "..."],
+  "idle":    { "timeout": 1800, "invoke": ["claude", "-p", "summarize the day"] }
+}
+```
+
+Semantics:
+
+- The handler tracks per-agent `last-active` (ISO timestamp at
+  `~/.a8s/agents/<NAME>/last-active`).
+- `wake_once` touches it at start and end of every real wake, so a
+  long-running LLM call doesn't leave it stale.
+- After draining the inbox each iteration, `attached_loop` calls
+  `maybe_run_idle(p)`. If `now - last_active >= idle.timeout`, it runs
+  `idle.invoke` via the same `run_with_prefix` path as a real wake, then
+  refreshes `last-active`.
+- A wake in flight blocks idle naturally — `attached_loop` is
+  single-threaded for its handled agents, and the inbox drain happens
+  before the idle check.
+- `timeout: 0` (or negative / non-numeric) disables idle.
+- Argv expansion: `$SENDER`/`$MESSAGE`/`$TIMESTAMP`/`$AGE` are empty
+  (no incoming message); `$RECIPIENT` is the agent's own name;
+  `$A8S_DIR` works as usual.
+
+Idle subsumes the retired `clear` use-case: write a definition whose
+idle invoke runs `claude -p "/clear" --new-session` (or whatever your
+chosen tool needs to reset session state).
 
 ### The single invoke verb
 
