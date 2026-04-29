@@ -7,9 +7,11 @@ from core import (
     BACKOFF_SCHEDULE,
     MAX_ATTEMPTS,
     MAX_SEEN_IDS,
+    _a8s_dir,
     agent_dir,
     network_config_path,
     pending_dir,
+    registry_path,
     retry_sidecar_path,
     seen_ids_path,
 )
@@ -63,3 +65,24 @@ class TestSeenIdsCap:
         # 26-char ULID + newline = 27 bytes per row; 10k rows ≈ 270 KiB.
         # Sanity: not zero, not absurd.
         assert 1000 <= MAX_SEEN_IDS <= 1_000_000
+
+
+class TestA8sHomeOverride:
+    def test_default_under_home(self, fake_home):
+        assert _a8s_dir() == fake_home / ".a8s"
+
+    def test_env_var_overrides(self, fake_home, tmp_path, monkeypatch):
+        sandbox = tmp_path / "sandbox-a8s"
+        monkeypatch.setenv("A8S_HOME", str(sandbox))
+        assert _a8s_dir() == sandbox
+        assert sandbox.is_dir()
+
+    def test_registry_path_honors_override(self, fake_home, tmp_path, monkeypatch):
+        sandbox = tmp_path / "sandbox-a8s"
+        monkeypatch.setenv("A8S_HOME", str(sandbox))
+        assert registry_path() == sandbox / "a8s.json"
+
+    def test_agent_dir_honors_override(self, fake_home, tmp_path, monkeypatch):
+        sandbox = tmp_path / "sandbox-a8s"
+        monkeypatch.setenv("A8S_HOME", str(sandbox))
+        assert agent_dir("claude") == sandbox / "agents" / "claude"

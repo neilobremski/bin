@@ -27,6 +27,8 @@ def fake_home(tmp_path, monkeypatch):
     # Some platforms also honor USERPROFILE / HOMEPATH. Set HOME and clear
     # the others to be safe.
     monkeypatch.delenv("USERPROFILE", raising=False)
+    # Don't let a globally-set A8S_HOME leak into tests.
+    monkeypatch.delenv("A8S_HOME", raising=False)
 
     import core
     # Make sure no prior test left a Lock attached.

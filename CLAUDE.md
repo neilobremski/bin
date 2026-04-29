@@ -244,8 +244,13 @@ install                      install canonical skills
 
 ### State on disk
 
+The state directory is `$HOME/.a8s` by default and can be relocated with the
+`A8S_HOME` env var — useful for sandboxed test runs that mustn't touch the
+real configuration. All paths below are relative to whichever `A8S_HOME` (or
+default) is in effect.
+
 ```
-~/.a8s/
+~/.a8s/                       (or wherever A8S_HOME points)
 ├── a8s.json                  registry: { agents: {...}, aliases: {...} }
 ├── network.json              configured remotes (absent → local-only)
 ├── seen-ids                  cluster-wide ULID ring (receive-side dedup)
