@@ -1,0 +1,10 @@
+{
+  "description": "Gmail connector: routes tell/<name> to a configured email recipient.",
+  "invoke": [
+    "python3",
+    "$A8S_DIR/connectors/gmail/gmail_connector.py",
+    "--to", "REPLACE-WITH-RECIPIENT-EMAIL",
+    "--subject", "$SENDER",
+    "--body", "$MESSAGE"
+  ]
+}

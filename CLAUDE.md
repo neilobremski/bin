@@ -137,6 +137,23 @@ Key invariants:
 | `apps/a8s/daemon.py` | `acquire`/`release` (pid files), `attached_loop` (also spawns subscriber threads via `start_remotes` and stops them on detach), signal handling (`_make_signal_handler`, `_kill_wake_subprocess_group`), `run_with_prefix`, `wake_once`. Mutable globals `_STOP_EVENT`/`_SIGNAL_COUNT`/`_CURRENT_WAKE_PROC` live here. Sets `core.PRINT_LOCK`. | depends on everything above |
 | `apps/a8s/commands.py` | every `cmd_*`, including `cmd_remote add/remove/ls`, `_install_skill_*` for Claude/Gemini/Codex, `_expand_to_agents` | depends on everything above |
 | `apps/a8s/cli.py` | `COMMANDS` table (the source of truth for help text), `dispatch`, `main` | depends on `commands` only |
+| `apps/a8s/connectors/gmail/` | First non-agent participant. `gmail_connector.py` (outbound; one-shot per a8s wake — POSTs `gmail.send` to GAS Bridge with `subject=$SENDER`, `body=$MESSAGE`). `gmail_cron.py` (inbound; cron-driven — polls bridge for unread, strips `Re:`/`Fwd:` repeats, `registry.resolve_name`s the bare token, shells `tell <participant> <body>` from the connector's registered root so a8s force-stamps `from`). Strict-opacity invariant: other agents never know they're talking to Gmail. | stdlib only; reads registry via the parent package |
+
+### Connectors
+
+A connector is just an a8s agent whose `definition.invoke` runs a script
+instead of an LLM CLI. The participant name in the registry is whatever
+the operator chose (`a8s add neil ~/bin/apps/a8s/connectors/gmail
+~/.neil-gmail.json`); other agents `tell neil "..."` without any
+awareness that the recipient is a Gmail-backed human, a script, or
+another LLM agent. **Recipient opacity is non-negotiable for connectors
+too** — there is no email-shaped wire format on the a8s side. The
+connector is the only thing that knows about its bridge format
+(subject=$SENDER, body=$MESSAGE for the Gmail one). The reverse path is
+independent of the wake handler: a separate cron script reads the
+bridge inbox and routes back into a8s as ordinary `tell` calls,
+force-stamped via cwd. Don't introduce per-connector special-case fields
+in the message envelope.
 
 ### Hard constraints when refactoring
 
