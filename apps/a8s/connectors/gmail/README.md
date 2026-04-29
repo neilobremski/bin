@@ -2,9 +2,7 @@
 
 The first non-agent participant in a8s. A connector is just an a8s agent
 whose definition's `invoke` runs a script instead of an LLM CLI. This one
-bridges a8s and a human's email inbox via the [GAS Bridge][1].
-
-[1]: https://github.com/neilco/gas
+bridges a8s and a human's email inbox via the [GAS Bridge](https://github.com/neilobremski/gas).
 
 ## Strict opacity
 
