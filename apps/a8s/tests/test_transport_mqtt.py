@@ -124,6 +124,64 @@ def test_unreachable_broker_publish_raises():
         t.stop()
 
 
+def test_on_disconnect_clears_ready_event(mqtt_broker):
+    """The disconnect callback must clear the readiness event so a
+    subsequent `publish` knows to wait for the next CONNACK."""
+    t = MqttTransport(
+        remote_id="t",
+        broker=mqtt_broker,
+        topic="a8s/test-disconnect-event",
+        client_id="a8s-test-disconnect-event",
+    )
+    t.start(lambda _b: None)
+    try:
+        assert t._connected.is_set(), "should be connected after start()"
+        # Invoke the callback directly — the v2 signature is
+        # (client, userdata, disconnect_flags, reason_code, properties).
+        t._on_disconnect(t._client, None, None, 0, None)
+        assert not t._connected.is_set()
+    finally:
+        t.stop()
+
+
+def test_publish_waits_for_reconnect_before_raising(mqtt_broker):
+    """When `is_connected()` returns False (transient blip / NAT timeout
+    / mid-reconnect), `publish` must wait up to `connect_timeout_s` for
+    paho's background loop to come back. Without the wait we'd surface a
+    `broker not connected` warning at the routing layer for every blip;
+    with it, only durable disconnects cause the warn-and-retry."""
+    t = MqttTransport(
+        remote_id="t",
+        broker=mqtt_broker,
+        topic="a8s/test-wait-reconnect",
+        client_id="a8s-test-wait-reconnect",
+        connect_timeout_s=0.5,
+    )
+    t.start(lambda _b: None)
+    try:
+        # Simulate a disconnected state without actually disconnecting paho's
+        # socket: clear the event and force is_connected() to lie. This is the
+        # tightest reproduction — we want to verify the wait happens.
+        t._connected.clear()
+        original_is_connected = t._client.is_connected
+        t._client.is_connected = lambda: False  # type: ignore[method-assign]
+        try:
+            start_time = time.monotonic()
+            with pytest.raises(TransportError, match="broker not connected"):
+                t.publish(b"x")
+            elapsed = time.monotonic() - start_time
+            # publish should have waited the full connect_timeout_s before
+            # giving up. Allow a little slack on the lower bound.
+            assert elapsed >= 0.4, (
+                f"publish returned in {elapsed:.3f}s — should have waited "
+                f"~{t._connect_timeout_s}s for the readiness event"
+            )
+        finally:
+            t._client.is_connected = original_is_connected  # type: ignore[method-assign]
+    finally:
+        t.stop()
+
+
 def test_persistent_session_replays_on_reconnect(mqtt_broker):
     """The whole point of clean_session=False + QoS 1: an offline subscriber
     catches up when it reconnects under the same client_id. We simulate by

@@ -221,6 +221,14 @@ in the message envelope.
   `clean_session=False` + QoS 1, with a stable hash-derived `client_id`. The
   broker holds messages for an offline subscriber until reconnect — that's
   how a Cloud-Shell-style listener catches up after coming online.
+- **`publish` waits for the readiness event before raising.** `_on_connect`
+  sets `self._connected`; `_on_disconnect` clears it. When `publish()`
+  finds `is_connected()` False, it `wait()`s up to `connect_timeout_s` for
+  the next CONNACK before raising `broker not connected`. Without this,
+  every NAT timeout / brief broker flap surfaced as a routing-layer warning
+  with backoff, even though paho's loop reconnects within ~1s. Don't drop
+  the disconnect handler — without it the readiness event would stay set
+  forever and the `wait()` would be a no-op on a flap.
 - **Per-message backoff retry.** When a remote publish fails, the
   `<file>.json.retry` sidecar tracks attempts and `next_attempt`. The
   schedule is `BACKOFF_SCHEDULE` (30s → 1m → 2m → 5m → 15m → 30m → 1h → 6h
