@@ -131,6 +131,12 @@ class MqttTransport(Transport):
             client.subscribe(self._topic, qos=1)
             self._connected.set()
 
+    def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
+        # Clear the readiness event so `publish()` can wait for the next
+        # CONNACK before declaring failure. paho's loop auto-reconnects in
+        # the background while `loop_start()` is running.
+        self._connected.clear()
+
     def _on_message_cb(self, client, userdata, msg):
         cb = self._on_message
         if cb is not None:
@@ -147,6 +153,7 @@ class MqttTransport(Transport):
             raise TransportError(f"{self._remote_id}: already started")
         self._on_message = on_message
         self._client.on_connect = self._on_connect
+        self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message_cb
         try:
             self._client.connect_async(self._host, self._port, keepalive=self._keepalive)
@@ -177,6 +184,12 @@ class MqttTransport(Transport):
     def publish(self, envelope: bytes) -> None:
         if not self._started:
             raise TransportError(f"{self._remote_id}: publish before start")
+        if not self._client.is_connected():
+            # Transient blip — paho's background loop auto-reconnects.
+            # Wait briefly for the next CONNACK before declaring failure
+            # so a normal NAT-timeout / broker-flap doesn't trigger a
+            # warn-and-backoff at the routing layer.
+            self._connected.wait(timeout=self._connect_timeout_s)
         if not self._client.is_connected():
             raise TransportError(f"{self._remote_id}: broker not connected")
         info = self._client.publish(self._topic, payload=envelope, qos=1)
