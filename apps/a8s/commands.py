@@ -707,6 +707,35 @@ def cmd_ls() -> int:
 
 # ---------- messaging commands ----------
 
+def _join_tell_args(rest: list[str]) -> str:
+    """Concatenate the message-body argv into a single string suitable for
+    `_split_content_and_files`.
+
+    Plain shell usage stays untouched: `tell alice hello world` joins with
+    spaces. But when an argv element starts with `FILE:` — which is what
+    happens when an LLM forgets to fold the FILE: line into the same
+    quoted string — promote it to its own line. `_split_content_and_files`
+    only recognizes trailing FILE: lines (newline-delimited), so without
+    this lift the FILE: tag would silently inline into the body and the
+    attachment would be dropped.
+
+    Examples:
+      ['hello', 'world']                         -> 'hello world'
+      ['msg', 'FILE: ./x']                       -> 'msg\\nFILE: ./x'
+      ['FILE: ./x']                              -> 'FILE: ./x'
+      ['msg', 'FILE: ./a', 'FILE: ./b']          -> 'msg\\nFILE: ./a\\nFILE: ./b'
+    """
+    parts: list[str] = []
+    for arg in rest:
+        if arg.lstrip().startswith("FILE:"):
+            parts.append("\n" + arg.lstrip())
+        else:
+            if parts:
+                parts.append(" ")
+            parts.append(arg)
+    return "".join(parts).strip()
+
+
 def cmd_tell(args: list[str]) -> int:
     """`a8s tell <name> <msg>` — write a single outbox message; `name` may be
     an agent or alias. Fan-out to alias members happens at routing time and
@@ -716,7 +745,7 @@ def cmd_tell(args: list[str]) -> int:
         print("usage: tell <name> <message>", file=sys.stderr)
         return 2
     target_query, *rest = args
-    content, files = _split_content_and_files(" ".join(rest))
+    content, files = _split_content_and_files(_join_tell_args(rest))
 
     sender = sender_from_cwd()
     if sender is None:

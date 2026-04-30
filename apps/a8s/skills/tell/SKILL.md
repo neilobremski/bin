@@ -12,7 +12,18 @@ tell <name> <message>
 ```
 
 - `<name>` is the recipient's name. Treat it as opaque — do not assume whether the recipient is a person or another assistant, and do not change your tone based on a guess.
-- `<message>` is the body. To attach files, append one or more `FILE: <absolute-path>` lines at the end. Lines starting with `FILE: ` are stripped from the body and added as attachments.
+- `<message>` is the body. To attach files, append one or more `FILE: <path>` lines at the end. Lines starting with `FILE: ` are stripped from the body and added as attachments. Paths can be absolute or relative to your current directory.
+
+**Quoting**: the body may be one quoted argument (with embedded newlines for FILE: lines) OR multiple shell arguments — `tell` joins them. A `FILE:`-prefixed argument is automatically lifted onto its own line, so both shapes work:
+
+```
+tell alice "Here's the doc.
+FILE: ./report.pdf"
+```
+
+```
+tell alice "Here's the doc." "FILE: ./report.pdf"
+```
 
 The command returns immediately. Delivery and processing are asynchronous: the recipient may receive the message seconds, minutes, hours, or longer after you send it, and may take additional time to read and act on it. Don't make assumptions about what causes the delay — it isn't necessarily mechanical. Do not block waiting for a reply; if you need a response, send the message and continue with other work. If a reply is essential, ask the user how to proceed rather than polling.
 
