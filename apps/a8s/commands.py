@@ -139,6 +139,16 @@ def _install_skill_copilot(skill_dir: Path) -> str:
     return "  copilot: skill install delegated to per-agent .github/copilot-instructions.md (no user-scope skill mechanism)"
 
 
+def _install_skill_opencode(skill_dir: Path) -> str:
+    """OpenCode auto-loads `AGENTS.md` plus `.claude/CLAUDE.md` and
+    `.claude/skills/` per project, but lacks a user-scope skill registry.
+    Per-agent `tell` instructions live directly in each agent's
+    `AGENTS.md` (the a8s marker — see `tests/agents/opencode-agent/`)."""
+    if shutil.which("opencode") is None:
+        return "  opencode: not on PATH; skipping"
+    return "  opencode: skill install delegated to per-agent AGENTS.md (no user-scope skill mechanism)"
+
+
 # ---------- registry management commands ----------
 
 def cmd_add(args: list[str]) -> int:
@@ -376,6 +386,7 @@ def cmd_install() -> int:
         print(_install_skill_gemini(skill_dir))
         print(_install_skill_codex(skill_dir))
         print(_install_skill_copilot(skill_dir))
+        print(_install_skill_opencode(skill_dir))
     return 0
 
 

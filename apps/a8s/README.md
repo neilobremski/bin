@@ -168,11 +168,12 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `gemini.json` | Gemini CLI with `--yolo` (Policy Engine doesn't apply in headless mode; tracked upstream) + `--resume latest` |
 | `codex.json` | Codex CLI with `--full-auto` workspace-write sandbox + `resume --last` |
 | `copilot.json` | GitHub Copilot CLI with `--allow-all-tools` (required for non-interactive `-p` mode) + `--continue`. Marker is `.github/copilot-instructions.md` (Copilot's native repo-instructions location). |
+| `opencode.json` | [OpenCode](https://opencode.ai/) — BYO model. `opencode run --continue --dangerously-skip-permissions`. Operator picks the provider/model in each agent's own `opencode.json` (e.g. `{"model": "ollama/gpt-oss:20b"}`), not in the a8s definition. |
 | `default.json` | Fallback — runs `dummy-cli` and prints "no real CLI configured" |
 
 ### Marker files & auto-discovery
 
-`a8s discover <path>` and `a8s add <name> <dir>` (without an explicit definition) figure out which CLI an agent uses by scanning for one of these **kind-specific** marker files at the agent's root:
+`a8s discover <path>` and `a8s add <name> <dir>` (without an explicit definition) figure out which CLI an agent uses by scanning for one of these marker files at the agent's root, in order:
 
 | Marker | Kind | Where the CLI itself looks |
 |---|---|---|
@@ -180,10 +181,11 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `GEMINI.md` | gemini | [Gemini CLI context files](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/configuration.md) |
 | `CODEX.md` | codex | [Codex CLI configuration](https://github.com/openai/codex) |
 | `.github/copilot-instructions.md` | copilot | [Copilot CLI repository custom instructions](https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions) — the same file Copilot itself auto-loads |
+| `AGENTS.md` (fallback) | opencode | [The agents.md standard](https://agents.md/) — tool-agnostic instructions stewarded by the [Agentic AI Foundation](https://agentic.foundation/) under the Linux Foundation |
 
-a8s deliberately keys on **kind-specific** locations so a single scan can answer "which CLI is this agent?". For Copilot we use its native repo-instructions location (`.github/copilot-instructions.md`) rather than inventing a `COPILOT.md` — that way one file serves both a8s discovery and Copilot's own persona loading.
+The first four are **kind-specific** locations — for the tools that have a distinct native instruction file, a8s uses that location directly. For Copilot we use its repo-instructions location (`.github/copilot-instructions.md`) rather than inventing a `COPILOT.md` — same file serves both a8s discovery and Copilot's own persona loading.
 
-Don't confuse these with [AGENTS.md](https://agents.md/) — that's a separate, **tool-agnostic** convention now adopted by 20+ tools (OpenAI Codex, Google Gemini CLI, GitHub Copilot, Cursor, Aider, Zed, Warp, JetBrains Junie, …) and stewarded by the [Agentic AI Foundation](https://agentic.foundation/) under the Linux Foundation. Because AGENTS.md is intentionally tool-agnostic ("one AGENTS.md works across many agents"), it cannot disambiguate which CLI to invoke, so a8s does not treat it as a marker. Operators are welcome to keep an `AGENTS.md` alongside the kind-specific marker — the kind-specific file tells a8s which CLI to invoke; AGENTS.md is whatever shared content you want every agent in the dir to see.
+[AGENTS.md](https://agents.md/) is **tool-agnostic** and shared by 20+ tools (OpenAI Codex, Google Gemini CLI, GitHub Copilot, Cursor, Aider, Zed, Warp, JetBrains Junie, OpenCode, …). Because it can't disambiguate which CLI to invoke, a8s only resolves it as a marker when **no kind-specific marker is present** — and it falls through to **OpenCode**, which is BYO-model (the operator picks the provider in each agent's own `opencode.json`). A directory with `CLAUDE.md` + `AGENTS.md` resolves to `claude`; a directory with only `AGENTS.md` resolves to `opencode`.
 
 ### The single verb
 

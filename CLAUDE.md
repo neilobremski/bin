@@ -433,6 +433,21 @@ and echoes the prompt). Wakes never crash on missing config.
   consumers. (We deliberately did NOT invent a `COPILOT.md` marker:
   using Copilot's native location avoids the symlink-or-duplicate dance
   the other markers would otherwise require.)
+- **OpenCode** — BYO-model coding CLI (https://opencode.ai/). Non-interactive
+  is the `opencode run "<message>"` *subcommand*, not a `-p` flag.
+  `--continue` resumes the most recent session;
+  `--dangerously-skip-permissions` is required for headless tool use. The
+  model is **not** baked into the a8s definition — operators pick the
+  provider/model in each agent's own `opencode.json`
+  (`{"model": "ollama/gpt-oss:20b"}`, `{"model": "anthropic/claude-sonnet-4-6"}`,
+  etc.). OpenCode's CLI priority is `-m` flag > `opencode.json` > last-used
+  > default, so adding `-m` to the shared definition would clobber per-agent
+  config — we deliberately don't. `AGENTS.md` is OpenCode's native
+  instruction file and is also the a8s **fallback marker**: a directory
+  with only `AGENTS.md` resolves to `opencode`; a kind-specific marker
+  (CLAUDE/GEMINI/CODEX/`.github/copilot-instructions.md`) wins when both
+  are present. No user-scope skill mechanism, so `tell` instructions live
+  inline in each agent's `AGENTS.md`.
 
 ### SKILL.md YAML — quoted scalars only
 
@@ -477,6 +492,8 @@ The locked-design refactor (#52) is closed. The following are open:
 | #63 | partially landed | Transparent multi-cluster routing. MQTT transport (paho-mqtt impl) + layered remotes + per-message backoff + ULID dedup are in. Still open: mini-MQTT pure-stdlib fallback (auto-activates when paho isn't importable), HTTPS long-poll transport, peer-to-peer TCP transport, app-level envelope encryption (per-network PSK). |
 | #90 | landed | Cross-cluster `FILE:` payloads via pluggable storage services (`a8s storage`/`unstorage`). TempFile.org first impl (pure-stdlib HTTP). Per-file × per-service success cached in the retry sidecar; receive side downloads into recipient's `.files/`. App-level encryption / per-message symmetric keys (originally scoped under #62) deferred. |
 | #72 | open question | Design discussion surfaced by the review panel: mailbox file format. (#67's atomic fan-out and #63's ULID + ingest-to-pending split partially address this; revisit before mini-MQTT lands.) |
+| #93 | open | Grok via `superagent-ai/grok-cli` as a 5th tool kind. Open question: marker file (grok-cli reads `AGENTS.md` like OpenCode, so a8s needs a different discovery hint — recommendation in the issue is `GROK.md`). |
+| #94 | landed | OpenCode as BYO-model tool kind + `AGENTS.md` as fallback marker resolving to `opencode`. Specific markers (CLAUDE/GEMINI/CODEX/`.github/copilot-instructions.md`) still win when both are present. Model lives in each agent's own `opencode.json` (not in the shared a8s definition). |
 
 ### What I tried that didn't work (concrete)
 
