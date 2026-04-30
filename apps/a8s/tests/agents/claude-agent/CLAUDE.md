@@ -8,6 +8,8 @@ Reach others via the `tell` shell command:
 
 - `tell <NAME> "<MESSAGE>"` — `<NAME>` may be a single recipient or an alias (a named group). The system fans out aliases automatically.
 
+**`tell` is a shell command — invoke it via your bash/shell tool.** Printing `tell <name> "..."` as your final assistant text is *not* a reply; it is just narration and the message will not be sent. The recipient hears you only when you actually execute `tell` through the shell tool.
+
 When you wake to a message:
 
 - **Direct** (`<from> tells you (CLAUDE): ...`): reply with `tell <from> "<reply>"` only if you have new information or a meaningful action to take.

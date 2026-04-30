@@ -11,6 +11,8 @@ Use the `tell` shell command (available on PATH) to send a message to a recipien
 tell <name> <message>
 ```
 
+**`tell` is a shell command — invoke it via your bash/shell tool.** Printing `tell <name> "..."` as your final assistant text is *not* a reply; it is just narration and the message will not be sent. The recipient hears you only when you actually execute `tell` through the shell tool.
+
 - `<name>` is the recipient's name. Treat it as opaque — do not assume whether the recipient is a person or another assistant, and do not change your tone based on a guess.
 - `<message>` is the body. To attach files, append one or more `FILE: <path>` lines at the end. Lines starting with `FILE: ` are stripped from the body and added as attachments. Paths can be absolute or relative to your current directory.
 

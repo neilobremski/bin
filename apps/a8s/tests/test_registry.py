@@ -284,3 +284,21 @@ class TestScanForMarkers:
         found = _scan_for_markers(tmp_path)
         # Only one entry per directory (the break in _scan_for_markers).
         assert len(found) == 1
+
+    def test_finds_agents_md_as_opencode_fallback(self, tmp_path):
+        d = tmp_path / "agent1"; d.mkdir()
+        (d / "AGENTS.md").write_text("# O: opencode helper\n")
+        found = _scan_for_markers(tmp_path)
+        assert len(found) == 1
+        name, kind, dirpath = found[0]
+        assert name == "O"
+        assert kind == "opencode"
+        assert dirpath == d.resolve()
+
+    def test_specific_marker_wins_over_agents_md(self, tmp_path):
+        d = tmp_path / "agent1"; d.mkdir()
+        (d / "CLAUDE.md").write_text("# A: x\n")
+        (d / "AGENTS.md").write_text("# B: y\n")
+        found = _scan_for_markers(tmp_path)
+        assert len(found) == 1
+        assert found[0][1] == "claude"
