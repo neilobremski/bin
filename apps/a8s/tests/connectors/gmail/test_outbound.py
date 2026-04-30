@@ -1,6 +1,7 @@
 """Outbound-side tests for gmail_connector — mock urlopen, assert POST shape."""
 from __future__ import annotations
 
+import base64
 import io
 import json
 import sys
@@ -95,6 +96,45 @@ def test_send_bridge_error_response(monkeypatch, capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert "missing 'to'" in err
+
+
+def test_send_extracts_file_lines_as_bridge_attachments(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("GAS_BRIDGE_URL", "https://example/exec")
+    monkeypatch.setenv("GAS_BRIDGE_KEY", "TESTKEY")
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / "primes.py"
+    src.write_bytes(b"print(2)\n")
+    captured: list = []
+    fake = _fake_urlopen(captured, {"status": "sent"})
+    body = "Here you go.\nFILE: ./primes.py"
+    with patch.object(gmail_connector.urllib.request, "urlopen", fake):
+        rc = gmail_connector.send("rcpt@example.com", "GERRY", body)
+    assert rc == 0
+    payload = captured[0]["body"]
+    assert payload["body"] == "Here you go."  # FILE: line stripped from body
+    # Bridge schema: a.name, a.data, a.mimeType — NOT filename/content_base64.
+    # Mismatch produces a "newBlob on object Utilities" error in GAS.
+    assert payload["attachments"] == [{
+        "name": "primes.py",
+        "data": base64.b64encode(b"print(2)\n").decode("ascii"),
+        "mimeType": "text/x-python",
+    }]
+
+
+def test_send_unreadable_file_logs_and_continues(monkeypatch, capsys):
+    monkeypatch.setenv("GAS_BRIDGE_URL", "https://example/exec")
+    monkeypatch.setenv("GAS_BRIDGE_KEY", "TESTKEY")
+    captured: list = []
+    fake = _fake_urlopen(captured, {"status": "sent"})
+    body = "Cover note.\nFILE: ./does-not-exist.bin"
+    with patch.object(gmail_connector.urllib.request, "urlopen", fake):
+        rc = gmail_connector.send("rcpt@example.com", "S", body)
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "failed to read attachment" in err
+    payload = captured[0]["body"]
+    assert "attachments" not in payload  # nothing successfully read
+    assert payload["body"] == "Cover note."
 
 
 def test_main_argparse(monkeypatch):
