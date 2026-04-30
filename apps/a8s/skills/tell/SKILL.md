@@ -13,6 +13,8 @@ tell <name> <message>
 
 **`tell` is a shell command — invoke it via your bash/shell tool.** Printing `tell <name> "..."` as your final assistant text is *not* a reply; it is just narration and the message will not be sent. The recipient hears you only when you actually execute `tell` through the shell tool.
 
+**Run from inside an agent's directory tree.** `tell` walks up from CWD to find the first `.outbox/` directory and drops the message JSON there. If no `.outbox/` exists in CWD or any parent, the command errors with `tell: no .outbox/ found in CWD or any parent`.
+
 - `<name>` is the recipient's name. Treat it as opaque — do not assume whether the recipient is a person or another assistant, and do not change your tone based on a guess.
 - `<message>` is the body. To attach files, append one or more `FILE: <path>` lines at the end. Lines starting with `FILE: ` are stripped from the body and added as attachments. Paths can be absolute or relative to your current directory.
 
@@ -42,5 +44,5 @@ tell w heads up — running the migration tonight
 
 ## Failures
 
-- **"current directory is not inside any registered participant"** — `tell` could not determine who the message is from. Report this to the user and stop; do not try to work around it.
-- **"no participant named or aliased X"** — recipient is unknown. Report it; do not invent or guess names.
+- **"tell: no .outbox/ found in CWD or any parent"** — you ran `tell` outside any agent's directory tree. Report this to the user and stop; do not try to work around it (e.g. don't `cd` somewhere unusual to make the error go away).
+- **The recipient name is not validated.** `tell` accepts any `<name>` and the routing layer decides what to do with it. If the name is unknown to the router and no remote clusters are configured, the message is logged + trashed silently. Use names you actually know.

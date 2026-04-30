@@ -543,11 +543,30 @@ The locked-design refactor (#52) is closed. The following are open:
 
 ### Top-level scripts: `tell`
 
-`~/bin/tell` is the polyglot shim that agents use to send messages. It
-execs into `apps/a8s/a8s.py tell ...`. There used to be a `says` polyglot
-too; it's gone. If you're considering re-adding any "broadcast" command,
-read phase-4's PR description (#58) first — the consensus was that aliases
-subsume it and the dual-verb API confuses LLMs.
+`~/bin/tell` is a **self-contained polyglot** — bash + PowerShell wrapper
+around an inline Python script (stdlib only, no a8s imports). It walks up
+from CWD to find the first `.outbox/` directory, builds a JSON envelope
+({`id`, `date`, `to`, `content`, `files`}), and atomic-writes it. The
+router (`mailbox.py:_process_pending`) force-overwrites `from` based on
+which agent owns the enclosing root, so the simpler client doesn't
+compromise identity — the filesystem is the unforgeable identity, the
+sender field is advisory.
+
+The container scenario this enables: mount only `~/bin/tell` (one file)
+plus a `.outbox/` dir into a slim Python container; the agent inside can
+emit a8s messages without the `apps/a8s/` package being present. Earlier
+versions execed into the full a8s python package, requiring the whole
+~2200-LOC tree to ride along.
+
+Don't reintroduce a8s-package imports in the polyglot. The single Python
+script lives between `# >>>PY` and `# <<<PY` markers; both bash and
+PowerShell halves extract that block (awk in bash, regex in PS) and pipe
+it to `python3 -`. One source of truth.
+
+There used to be a `says` polyglot too; it's gone. If you're considering
+re-adding any "broadcast" command, read phase-4's PR description (#58)
+first — the consensus was that aliases subsume it and the dual-verb API
+confuses LLMs.
 
 ### When using subagents (Agent tool) for review
 

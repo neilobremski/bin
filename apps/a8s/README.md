@@ -77,8 +77,9 @@ a8s ls
 #   CLAUDE  PID 12345  /Users/me/projects/code-review
 #   GEMINI  PID 12345  /Users/me/projects/research
 
-# Send messages. From anywhere, you can `a8s tell` directly.
-# From inside an agent's own root, the agent can use the `tell` skill.
+# Send messages. `tell` writes a JSON file to the nearest enclosing
+# `.outbox/` directory (the agent root, walking up from CWD), so you
+# must `cd` into one of your agents first.
 cd ~/projects/code-review
 tell GEMINI "look at lines 40-80 of foo.py"
 tell devs   "stand-up at 3pm"
@@ -124,7 +125,8 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 ### Messaging
 | | |
 |---|---|
-| `a8s tell <name> <msg>` | Routed message. `<name>` may be an agent or alias (fans out at routing time). Sender = agent enclosing CWD; `tell` from outside any agent root errors. There is no senderless channel — every message has a force-stamped agent `from`. |
+| `a8s tell <name> <msg>` | Routed message. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose `.outbox/` encloses CWD (walks up); errors if no `.outbox/` is found. There is no senderless channel — every message has a force-stamped agent `from` (the router stamps it from the outbox's owning agent, regardless of what the client wrote). |
+| `tell <name> <msg>` (top-level shim, [`~/bin/tell`](/Users/neilo/bin/tell)) | Same end result, but **self-contained** — pure-stdlib Python with zero a8s imports. Walks up CWD to find any `.outbox/`, drops a JSON envelope. Mount this single file into a container alongside any dir containing `.outbox/` and it just works. The router still force-stamps `from`, so identity isn't compromised by the simpler client. |
 | `a8s logs <name>... [--tail N] [-f]` | Read per-agent log files; merge-sort by ISO timestamp across multiple agents. `-f` follows. |
 
 ### Skills
