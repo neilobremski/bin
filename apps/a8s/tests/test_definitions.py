@@ -220,6 +220,12 @@ class TestAutodiscoverDefinition:
         path, note = _autodiscover_definition(tmp_path)
         assert path == str(default_definition_path("codex"))
 
+    def test_copilot_marker(self, tmp_path):
+        (tmp_path / "COPILOT.md").write_text("# CP\n")
+        path, note = _autodiscover_definition(tmp_path)
+        assert path == str(default_definition_path("copilot"))
+        assert "auto-detected via COPILOT.md" in note
+
 
 # ---------- load_definition ----------
 

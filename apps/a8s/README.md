@@ -167,6 +167,7 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `claude.json` | Claude Code with `--permission-mode dontAsk` allowlist + `--continue` |
 | `gemini.json` | Gemini CLI with `--yolo` (Policy Engine doesn't apply in headless mode; tracked upstream) + `--resume latest` |
 | `codex.json` | Codex CLI with `--full-auto` workspace-write sandbox + `resume --last` |
+| `copilot.json` | GitHub Copilot CLI with `--allow-all-tools` (required for non-interactive `-p` mode) + `--continue`. Marker file is `COPILOT.md`. |
 | `default.json` | Fallback — runs `dummy-cli` and prints "no real CLI configured" |
 
 ### The single verb

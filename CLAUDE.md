@@ -421,6 +421,22 @@ and echoes the prompt). Wakes never crash on missing config.
   for continuity. `--skip-git-repo-check` to allow running outside a git
   repo. `stdin=subprocess.DEVNULL` is REQUIRED — codex hangs otherwise
   (learned the hard way; see `daemon.run_with_prefix`).
+- **GitHub Copilot CLI** — `--allow-all-tools` is REQUIRED for
+  non-interactive `-p` mode (the docs say it explicitly; granular
+  `--allow-tool=shell(tell:*)` should also work, but the default ships
+  with the bypass for parity with codex/gemini). `--continue` for
+  conversation continuity. **No user-scope skill mechanism** — `copilot
+  plugin install` only takes git sources and `--plugin-dir` is per-session.
+  Until that gap closes, `tell` instructions live directly in each
+  Copilot agent's `COPILOT.md` (the install step prints a notice rather
+  than linking anything). Marker file is `COPILOT.md`. **Copilot doesn't
+  auto-load `COPILOT.md`**; it loads `AGENTS.md` and
+  `.github/copilot-instructions.md`. The reference fixture
+  (`tests/agents/copilot-agent/`) ships a symlink at
+  `.github/copilot-instructions.md → ../COPILOT.md` so the persona
+  surfaces automatically; operators registering a new Copilot agent
+  should do the same (a `ln -s ../COPILOT.md
+  .github/copilot-instructions.md` from the agent's root).
 
 ### SKILL.md YAML — quoted scalars only
 
@@ -461,7 +477,7 @@ The locked-design refactor (#52) is closed. The following are open:
 
 | # | State | Topic |
 |---|---|---|
-| #39 | open enhancement | Copilot CLI as 4th tool kind. Trivial after the refactor: write `copilot.json`, add `COPILOT.md` → `copilot` to `core.MARKER_FILES`. |
+| #39 | landed | Copilot CLI as 4th tool kind. `COPILOT.md` marker, `definitions/copilot.json` with `--allow-all-tools --continue -p`. No user-scope skill install (Copilot has no `copilot skills link <local-dir>` analog) — `tell` instructions live in each agent's COPILOT.md. |
 | #63 | partially landed | Transparent multi-cluster routing. MQTT transport (paho-mqtt impl) + layered remotes + per-message backoff + ULID dedup are in. Still open: mini-MQTT pure-stdlib fallback (auto-activates when paho isn't importable), HTTPS long-poll transport, peer-to-peer TCP transport, app-level envelope encryption (per-network PSK). |
 | #90 | landed | Cross-cluster `FILE:` payloads via pluggable storage services (`a8s storage`/`unstorage`). TempFile.org first impl (pure-stdlib HTTP). Per-file × per-service success cached in the retry sidecar; receive side downloads into recipient's `.files/`. App-level encryption / per-message symmetric keys (originally scoped under #62) deferred. |
 | #72 | open question | Design discussion surfaced by the review panel: mailbox file format. (#67's atomic fan-out and #63's ULID + ingest-to-pending split partially address this; revisit before mini-MQTT lands.) |

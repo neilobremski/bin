@@ -25,6 +25,7 @@ MARKER_FILES = {
     "CLAUDE.md": "claude",
     "GEMINI.md": "gemini",
     "CODEX.md": "codex",
+    "COPILOT.md": "copilot",
 }
 
 NAME_RE = re.compile(r"[A-Za-z0-9]+")
