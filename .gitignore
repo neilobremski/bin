@@ -15,6 +15,7 @@ __pycache__/
 .claude/scheduled_tasks.lock
 
 # A8S
+**/.files/
 **/.inbox/
 **/.outbox/
 **/.trash/

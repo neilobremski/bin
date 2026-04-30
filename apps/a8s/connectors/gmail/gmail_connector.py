@@ -11,11 +11,14 @@ POSTs `gmail.send` to the GAS Bridge configured via `GAS_BRIDGE_URL` /
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import mimetypes
 import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 
 TIMEOUT_S = 30
@@ -47,13 +50,37 @@ def send(to: str, subject: str, body: str) -> int:
         )
         return 2
 
+    attachments = []
+    body_lines = []
+    for line in body.splitlines():
+        if line.startswith("FILE: "):
+            path = line[len("FILE: "):].strip()
+            try:
+                p = Path(path)
+                data = p.read_bytes()
+                mime, _ = mimetypes.guess_type(p.name)
+                attachments.append({
+                    "name": p.name,
+                    "data": base64.b64encode(data).decode("ascii"),
+                    "mimeType": mime or "application/octet-stream",
+                })
+            except OSError as e:
+                print(f"gmail-connector: failed to read attachment {path}: {e}", file=sys.stderr)
+        else:
+            body_lines.append(line)
+
+    clean_body = "\n".join(body_lines)
+
     payload = {
         "action": "gmail.send",
         "key": key,
         "to": to,
         "subject": subject,
-        "body": body,
+        "body": clean_body,
     }
+
+    if attachments:
+        payload["attachments"] = attachments
     try:
         result = _bridge_post(url, payload)
     except urllib.error.HTTPError as e:
