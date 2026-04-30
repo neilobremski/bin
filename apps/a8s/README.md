@@ -170,6 +170,21 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `copilot.json` | GitHub Copilot CLI with `--allow-all-tools` (required for non-interactive `-p` mode) + `--continue`. Marker file is `COPILOT.md`. |
 | `default.json` | Fallback — runs `dummy-cli` and prints "no real CLI configured" |
 
+### Marker files & auto-discovery
+
+`a8s discover <path>` and `a8s add <name> <dir>` (without an explicit definition) figure out which CLI an agent uses by scanning for one of these **kind-specific** marker files at the agent's root:
+
+| Marker | Kind | What the CLI itself reads |
+|---|---|---|
+| `CLAUDE.md` | claude | [Claude Code memory](https://docs.claude.com/en/docs/claude-code/memory) |
+| `GEMINI.md` | gemini | [Gemini CLI context files](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/configuration.md) |
+| `CODEX.md` | codex | [Codex CLI configuration](https://github.com/openai/codex) |
+| `COPILOT.md` | copilot | (a8s-only; Copilot loads `AGENTS.md` and `.github/copilot-instructions.md` instead — see below) |
+
+a8s deliberately uses **kind-specific** filenames so a single scan can answer "which CLI is this agent?". Don't confuse these with [AGENTS.md](https://agents.md/) — that's a separate, **tool-agnostic** convention now adopted by 20+ tools (OpenAI Codex, Google Gemini CLI, GitHub Copilot, Cursor, Aider, Zed, Warp, JetBrains Junie, …) and stewarded by the [Agentic AI Foundation](https://agentic.foundation/) under the Linux Foundation. Because AGENTS.md is intentionally tool-agnostic ("one AGENTS.md works across many agents"), it cannot disambiguate which CLI to invoke, so a8s does not treat it as a marker.
+
+The two coexist nicely: write a kind-specific marker for a8s discovery, and an `AGENTS.md` (or whatever the CLI auto-loads) for the persona itself. The reference Copilot fixture at `tests/agents/copilot-agent/` demonstrates this — it ships `COPILOT.md` (the a8s marker) plus a `.github/copilot-instructions.md → ../COPILOT.md` symlink so Copilot itself sees the same persona.
+
 ### The single verb
 
 Every wake reads `definition["invoke"]` — one argv per definition. There is no verb dispatch and no special-case branches: `prompt` and `clear` are gone. Every message is a `tell` with a force-stamped agent `from`, so the same argv shape covers every wake.
