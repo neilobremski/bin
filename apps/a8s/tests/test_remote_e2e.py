@@ -253,7 +253,11 @@ def test_remote_round_trip_with_file_via_storage(tmp_path, mqtt_broker, monkeypa
             assert len(local_files) == 1
             assert local_files[0].name == "report.txt"
             assert local_files[0].read_text() == "hello from cluster A\n"
-            assert body["files"][0]["path"] == str(local_files[0])
+            # Path is CWD-relative — the agent's wake subprocess runs with
+            # cwd=target_root, so `./.files/report.txt` resolves whether
+            # target_root is /tmp/clusterB/target on the host or remapped
+            # to /workspace inside a container.
+            assert body["files"][0]["path"] == "./.files/report.txt"
         finally:
             stop_remotes(rx_remotes)
     finally:

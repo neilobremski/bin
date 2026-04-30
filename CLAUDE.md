@@ -240,6 +240,18 @@ in the message envelope.
   next service" (so a multi-service install can route mixed URLs).
   Real failures raise `StorageError`. Don't add per-service start/stop
   unless a future backend genuinely needs a connection pool.
+- **Recipient-CWD-relative `FILE:` paths.** The routed envelope's
+  `files[i].path` is always written as `./.files/<filename>` — never
+  the absolute host path. The wake subprocess runs with
+  `cwd=recipient.root`, so the agent finds the file under whatever
+  prefix its container has mapped that directory to (e.g. host
+  `/home/me/agents/clover/.files/x` mapped to in-container
+  `/home/me/.files/x`). Both the local-copy path
+  (`_transfer_file_to_recipient`) and the cross-cluster download path
+  (`_download_files_to_recipient`) emit through the
+  `_recipient_relative_path` helper. Don't reintroduce
+  `str(absolute_dest)` — it works locally but breaks any agent whose
+  root is bind-mounted at a different path.
 - **Persistent sessions.** The MQTT transport is configured with
   `clean_session=False` + QoS 1, with a stable hash-derived `client_id`. The
   broker holds messages for an offline subscriber until reconnect — that's

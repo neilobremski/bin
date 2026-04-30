@@ -94,6 +94,18 @@ def ensure_mailboxes(p: Participant) -> None:
     files_dir(p.root).mkdir(parents=True, exist_ok=True)
 
 
+def _recipient_relative_path(files_dir_path: Path, dest: Path) -> str:
+    """Build the path string surfaced into the recipient's `$MESSAGE` as
+    `FILE: <path>`. The wake subprocess runs with `cwd=recipient.root`, so
+    a CWD-relative path resolves correctly even when the agent runs in a
+    container that maps its root to a different host prefix. We never
+    serialize the absolute host path into the routed envelope.
+
+    Returned form: `./.files/<filename>` (POSIX separators, explicit `./`).
+    """
+    return f"./{files_dir_path.name}/{dest.name}"
+
+
 def _transfer_file_to_recipient(
     sender_name: str,
     sender_root: Path,
@@ -156,7 +168,11 @@ def _transfer_file_to_recipient(
     except OSError as e:
         out_agent(sender_name, f"FILE: copy failed {src_resolved} -> {dest}: {e}")
         return None
-    return {"filename": dest.name, "path": str(dest)}
+    # Recipient-CWD-relative path (e.g. "./.files/report.txt"). The agent's
+    # wake subprocess runs with cwd=recipient.root; an absolute host path
+    # wouldn't resolve inside a container that has the agent's directory
+    # mapped to a different prefix.
+    return {"filename": dest.name, "path": _recipient_relative_path(dest_dir, dest)}
 
 
 def _build_routed_message(
@@ -455,7 +471,7 @@ def _download_files_to_recipient(
             if delivered:
                 break
         if delivered:
-            new_files.append({"filename": dest.name, "path": str(dest)})
+            new_files.append({"filename": dest.name, "path": _recipient_relative_path(dest_dir, dest)})
         else:
             out_agent(
                 recipient.name,

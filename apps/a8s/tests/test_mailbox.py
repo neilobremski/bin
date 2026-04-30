@@ -366,7 +366,10 @@ class TestFileTransfer:
         # Routed message's path points at B's local copy.
         delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
         assert len(delivered["files"]) == 1
-        assert delivered["files"][0]["path"] == str(b_files[0])
+        # Path is CWD-relative-to-recipient-root, not an absolute host path —
+        # so an agent running in a container with its dir mapped under a
+        # different prefix still finds the file via $MESSAGE's `FILE:` line.
+        assert delivered["files"][0]["path"] == "./.files/report.txt"
         assert delivered["files"][0]["filename"] == "report.txt"
 
     def test_alias_fanout_copies_to_each_recipient(self, fake_home, tmp_path):
@@ -887,7 +890,9 @@ class TestStorageDownload:
         assert files[0].read_bytes() == b"the-payload"
         # The inbox-written envelope has the local-path shape.
         inbox_msg = json.loads(next(inbox_dir("B").iterdir()).read_text())
-        assert inbox_msg["files"] == [{"filename": "doc.txt", "path": str(files[0])}]
+        # Same CWD-relative shape as the local-routing case — the receiver's
+        # agent doesn't see an absolute host path either.
+        assert inbox_msg["files"] == [{"filename": "doc.txt", "path": "./.files/doc.txt"}]
 
     def test_all_urls_unsupported_drops_file_keeps_message(self, fake_home, tmp_path):
         from network import receive_envelope
