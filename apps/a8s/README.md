@@ -306,6 +306,52 @@ python3 -m pytest apps/a8s/tests/
 
 Tests are isolated via a `fake_home` fixture that monkey-patches `HOME` to a tmp dir, so they never touch the real `~/.a8s/`. The daemon tests run real subprocesses against `tests/fixtures/mock-cli` (a deterministic bash script that echoes its argv) so wake_once's argv expansion and routing fan-out can be asserted on the per-agent log.
 
+## Troubleshooting
+
+### My agent created files locally but nothing arrived at the recipient
+
+**Symptom:** The agent's own root has the files it produced (e.g. `fib.py`, `fib.txt`), but the recipient's `.files/` is empty and the recipient's inbox has no new message. The agent's log shows the model **emitted the `tell` command as plain text** in its final output instead of invoking it via its bash/shell tool — typical line: `opencode> tell <name> "..." FILE: ./...` with no `$` shell-tool prefix.
+
+**Why it happens:** A tool-selection failure in the underlying model. The model conflates *"responding to the user"* (final assistant text) with *"running the tell shell command"*. Smaller and weaker local models hit this often; instruction-tuned frontier models almost never do.
+
+**Fixes, in order of preference:**
+
+1. **Strengthen the persona file.** Add a line to the agent's marker file (`AGENTS.md` / `CLAUDE.md` / etc.): *"`tell` is a shell command — invoke it via your bash/shell tool. Never print the command as text; that is not a reply, it is just narration."*
+2. **Be explicit in the message.** When you suspect a model will fall back to text, append: *"Use your bash tool to actually execute the command — do not just print it as text."*
+3. **Use a stronger model.** For OpenCode + Ollama, models with explicit tool-use training (e.g. Qwen3-Coder, GPT-OSS 20B+) compose tool calls more reliably than general-purpose chat models at the same parameter count.
+
+### Ollama silently truncates context to 2k tokens
+
+Ollama's default `num_ctx` is **2048**. Anything past that is dropped without warning, which means a long persona file plus message history can quietly lose your instructions. For agentic workflows, set `OLLAMA_CONTEXT_LENGTH=16384` (or more) in the environment Ollama runs under, or pull a model with a `Modelfile` that bumps `PARAMETER num_ctx`.
+
+### `opencode models <provider>` says "Provider not found: ollama"
+
+OpenCode's built-in providers don't include Ollama. Register it once in `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local)",
+      "options": { "baseURL": "http://localhost:11434/v1" },
+      "models": { "gpt-oss:20b": { "name": "gpt-oss 20B" } }
+    }
+  }
+}
+```
+
+Per-agent `opencode.json` then just picks the model: `{"model": "ollama/gpt-oss:20b"}`. The provider registration is shared infrastructure; the model selection is per-agent.
+
+### A wake hangs forever with no output
+
+The most common causes:
+
+- **Codex without `stdin=DEVNULL`.** Codex CLI hangs reading stdin in headless mode. a8s already passes `stdin=subprocess.DEVNULL` for every wake (`daemon.run_with_prefix`), so this only bites if you're running the underlying CLI manually.
+- **Headless permission denial.** Gemini without `--yolo`, Claude without `--permission-mode dontAsk`, Copilot without `--allow-all-tools`, OpenCode without `--dangerously-skip-permissions` — all silently deny tool calls in non-interactive mode and the wake stalls. The bundled `definitions/<kind>.json` files include the required flag for each kind; only worry if you write a custom definition.
+- **Ollama model still loading.** A cold-start of a 20B model can take 10–30s before any output. `ps aux | grep ollama` should show a `runner` process consuming RAM proportional to the model size.
+
 ## Roadmap
 
 Pre-v1 — the surface still moves. Tracked threads:
