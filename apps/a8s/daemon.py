@@ -53,6 +53,7 @@ from definitions import (
 from mailbox import ensure_mailboxes, next_inbox_message, route_outboxes
 from network import (
     load_remotes,
+    load_services,
     make_publish_remotes,
     start_remotes,
     stop_remotes,
@@ -498,7 +499,12 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     # remote. The receive callback always asks the registry for the current
     # participant list so agents added after startup become routable without
     # restarting the daemon.
-    started_remotes = start_remotes(load_remotes(), participants_from_registry)
+    # Storage services (#90) — stateless, no start/stop. Loaded once per
+    # daemon lifetime and shared between routing-side uploads and the
+    # receive callback's downloads. An empty list keeps the path
+    # local-files-only (pre-#90 behavior).
+    services = load_services()
+    started_remotes = start_remotes(load_remotes(), participants_from_registry, services=services)
     publish_remotes = make_publish_remotes(started_remotes) if started_remotes else None
     configured_remote_ids = [r.id for r in started_remotes]
     try:
@@ -548,6 +554,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                     all_agents=all_agents,
                     publish_remotes=publish_remotes,
                     configured_remote_ids=configured_remote_ids,
+                    services=services,
                 )
                 for p in handled:
                     while not _STOP_EVENT.is_set():

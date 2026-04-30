@@ -41,6 +41,7 @@ from core import (
     seen_ids_path,
 )
 from registry import resolve_name
+from services import StorageService
 from transports import OnMessage, Transport, TransportError
 from ulid import is_ulid
 
@@ -56,18 +57,21 @@ _SEEN_IDS_LOCK = threading.Lock()
 def load_network_config() -> dict:
     p = network_config_path()
     if not p.is_file():
-        return {"remotes": {}}
+        return {"remotes": {}, "services": {}}
     try:
         with p.open("r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
         out(f"WARN: ~/.a8s/network.json malformed ({e}); treating as empty")
-        return {"remotes": {}}
+        return {"remotes": {}, "services": {}}
     if not isinstance(data, dict):
-        return {"remotes": {}}
+        return {"remotes": {}, "services": {}}
     data.setdefault("remotes", {})
     if not isinstance(data["remotes"], dict):
         data["remotes"] = {}
+    data.setdefault("services", {})
+    if not isinstance(data["services"], dict):
+        data["services"] = {}
     return data
 
 
@@ -125,6 +129,79 @@ def configured_remote_ids() -> list[str]:
     routing pass to know which remotes to wait on without paying the cost
     of building the full Transport instances."""
     return list(load_network_config()["remotes"].keys())
+
+
+# ---------- storage services (#90) ----------
+
+# Top-level keys in a network.json `services` entry that the dispatcher
+# consumes itself before forwarding the rest to the StorageService constructor.
+_RESERVED_SERVICE_SPEC_KEYS = {"service", "url"}
+
+
+def _build_service(name: str, spec: dict) -> StorageService:
+    """Instantiate one StorageService from a network.json `services` entry.
+
+    The persisted `service` field is the canonical kind name (e.g.
+    `tempfile_org`). The dispatcher imports each known service class
+    lazily so the import graph stays empty for installs without storage
+    configured. Any keys past `service` and `url` are forwarded as
+    `**opts`; each service class handles its own option vocabulary
+    and rejects unknowns at construction time."""
+    kind = (spec.get("service") or "").strip().lower()
+    url = spec.get("url")
+    if not url:
+        raise ValueError(f"storage {name!r}: every service requires `url`")
+    opts = {k: v for k, v in spec.items() if k not in _RESERVED_SERVICE_SPEC_KEYS}
+    if kind == "tempfile_org":
+        # Lazy import — keeps the storage modules out of the import graph
+        # for users without storage configured.
+        from services.tempfile_org import TempFileOrgService
+
+        return TempFileOrgService(name, url=url, **opts)
+    raise ValueError(f"storage {name!r}: unsupported service kind {kind!r}")
+
+
+def load_services() -> list[StorageService]:
+    """Return StorageService instances for every entry in
+    `network.json`'s `services` map. Failures (bad config, missing
+    module) are logged and skipped — never block a8s startup."""
+    cfg = load_network_config()
+    out_list: list[StorageService] = []
+    for name, spec in cfg["services"].items():
+        if not isinstance(spec, dict):
+            out(f"WARN: storage {name!r} config is not an object; skipping")
+            continue
+        try:
+            out_list.append(_build_service(name, spec))
+        except Exception as e:
+            out(f"WARN: storage {name!r} skipped: {e}")
+    return out_list
+
+
+def configured_service_ids() -> list[str]:
+    """Just the ordered list of service IDs from network.json. Used by the
+    routing pass to know which services need uploads before remote publish
+    can finalize."""
+    return list(load_network_config()["services"].keys())
+
+
+def detect_service_kind(url: str) -> str | None:
+    """Find the canonical service kind for an operator-typed URL by asking
+    each known StorageService subclass `supports_config_url`. Returns the
+    canonical kind string (e.g. `tempfile_org`) or None if no service
+    accepted the URL. Used by the `a8s storage` CLI to persist the right
+    `service` field at config-write time."""
+    # Lazy imports keep the storage modules out of the import graph for
+    # installs without storage configured.
+    from services.tempfile_org import TempFileOrgService
+
+    for kind, cls in (("tempfile_org", TempFileOrgService),):
+        try:
+            if cls.supports_config_url(url):
+                return kind
+        except Exception:
+            continue
+    return None
 
 
 # ---------- seen-ids ring ----------
@@ -212,12 +289,22 @@ def make_publish_remotes(remotes: list[Transport]) -> Callable:
 
 # ---------- receive ----------
 
-def receive_envelope(envelope: bytes, all_agents: list[Participant]) -> None:
+def receive_envelope(
+    envelope: bytes,
+    all_agents: list[Participant],
+    services: list[StorageService] | None = None,
+) -> None:
     """Decode an incoming envelope, dedupe, filter against the local
     registry, and atomically write into each matched local recipient's
     inbox. Drops silently if the recipient isn't ours, the envelope is
     malformed, or the ULID has been seen before — nothing should crash the
-    subscriber thread."""
+    subscriber thread.
+
+    `services`: configured storage services (#90). When set and the
+    envelope's `files[i].storage` URLs point at a service we know, the
+    helper downloads each file into the recipient's `<root>/.files/` and
+    rewrites the entry to local `{filename, path}` shape. None / empty
+    falls back to the v1 limitation (strip files; log warning)."""
     try:
         msg = json.loads(envelope)
         if not isinstance(msg, dict):
@@ -252,19 +339,30 @@ def receive_envelope(envelope: bytes, all_agents: list[Participant]) -> None:
             recipients.append(rp)
     if not recipients:
         return  # alias resolved to nothing locally
-    # v1 limitation: file payloads stay local-only — the FILE: paths point
-    # at the sender's filesystem and would just produce errors on the
-    # recipient side. Strip them before writing if any arrived via remote.
-    if msg.get("files"):
+    # File payloads (#90): when storage services are configured, download
+    # each file's bytes into the recipient's `.files/` and rewrite the
+    # envelope entry to local-path shape. Without storage services
+    # configured, fall back to the v1 limitation (strip + warn).
+    raw_files = msg.get("files") or []
+    files_have_storage = any((isinstance(e, dict) and e.get("storage")) for e in raw_files)
+    if raw_files and (not services or not files_have_storage):
         out(f"WARN: stripped FILE: payloads from incoming envelope id={msg_id}")
         msg = dict(msg)
         msg["files"] = []
     sender_label = msg.get("from") or "?"
     preview = _preview(msg.get("content", ""))
     for recipient in recipients:
+        # Per-recipient download: each recipient has its own `.files/`, so
+        # the bytes land in the right place even on alias fan-out. Imported
+        # lazily — `mailbox` imports `network`, so a top-level import here
+        # would form an import cycle.
+        msg_for_recipient = msg
+        if services and files_have_storage:
+            from mailbox import _download_files_to_recipient
+
+            msg_for_recipient = _download_files_to_recipient(msg, recipient, services)
         # ensure_mailboxes lives in mailbox.py; importing it here would form
-        # a cycle (mailbox imports from registry; network imports from
-        # mailbox would be fine but is unnecessary). Just create dirs.
+        # a cycle. Just create dirs.
         inbox_dir(recipient.name).mkdir(parents=True, exist_ok=True)
         inbox_tmp_dir(recipient.name).mkdir(parents=True, exist_ok=True)
         final = inbox_dir(recipient.name) / f"{msg_id}.json"
@@ -273,7 +371,7 @@ def receive_envelope(envelope: bytes, all_agents: list[Participant]) -> None:
         staging = inbox_tmp_dir(recipient.name) / f"{msg_id}.json"
         try:
             with staging.open("w", encoding="utf-8") as f:
-                json.dump(msg, f, indent=2)
+                json.dump(msg_for_recipient, f, indent=2)
             os.replace(str(staging), str(final))
         except OSError as e:
             out_agent(recipient.name, f"WARN failed to write incoming envelope id={msg_id}: {e}")
@@ -284,14 +382,17 @@ def receive_envelope(envelope: bytes, all_agents: list[Participant]) -> None:
 
 def make_receive_callback(
     get_participants: Callable[[], list[Participant]],
+    services: list[StorageService] | None = None,
 ) -> OnMessage:
     """Wrap `receive_envelope` so the subscriber thread always passes the
     CURRENT participant list — agents added via `a8s add` after the
-    subscriber started are picked up without restarting the loop."""
+    subscriber started are picked up without restarting the loop. Storage
+    services (#90) are passed in once at startup; the receive helper uses
+    them to download cross-cluster `FILE:` payloads."""
 
     def callback(envelope: bytes) -> None:
         try:
-            receive_envelope(envelope, get_participants())
+            receive_envelope(envelope, get_participants(), services=services)
         except Exception as e:
             out(f"WARN: receive_envelope raised: {e}")
 
@@ -303,12 +404,18 @@ def make_receive_callback(
 def start_remotes(
     remotes: list[Transport],
     get_participants: Callable[[], list[Participant]],
+    services: list[StorageService] | None = None,
 ) -> list[Transport]:
     """Start every remote's subscriber loop. A failure to start one remote
     logs a warning and continues with the others — no remote is allowed to
-    block a8s startup. Returns the list of successfully-started remotes."""
+    block a8s startup. Returns the list of successfully-started remotes.
+
+    `services` is passed through to the receive callback so cross-cluster
+    `FILE:` payloads (#90) can be downloaded into each recipient's
+    `.files/` as envelopes arrive. None / empty preserves pre-#90
+    behavior (incoming files are stripped + warned)."""
     started: list[Transport] = []
-    cb = make_receive_callback(get_participants)
+    cb = make_receive_callback(get_participants, services=services)
     for r in remotes:
         try:
             r.start(cb)

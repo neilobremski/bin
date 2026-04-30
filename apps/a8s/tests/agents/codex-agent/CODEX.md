@@ -14,3 +14,14 @@ When you wake to a message:
 - **Group** (`<from> tells you (CODEX) and N others on the <alias> alias: ...`): default response is **none**. Reply only if the message explicitly asks a question or requests action *and* you have a meaningful contribution. Greetings, announcements, and state-change notes do **not** need acknowledgment.
 
 **Avoid loops.** Don't reply just to acknowledge. Don't echo greetings ("Hi" → "Hi back") or send empty "noted" / "received" / "thanks" messages. Use your conversation history: if you already responded to a similar message from this sender, stay silent. For narrow replies, prefer `tell <from>` over telling the alias.
+
+## Files
+
+Your current working directory IS your agent root. To attach a file to a `tell`, write or place the file under your root, then append a trailing `FILE: ./<relative-path>` line:
+
+```
+tell gerry Here is the script you asked for.
+FILE: ./build.sh
+```
+
+Multiple `FILE:` lines are allowed; only trailing ones are recognized. When *you* receive a message with files, they appear as `FILE: ./.files/<filename>` lines in the message body — read the file from that path under your CWD.

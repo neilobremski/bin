@@ -22,9 +22,11 @@ from commands import (
     cmd_start,
     cmd_step,
     cmd_stop,
+    cmd_storage,
     cmd_tell,
     cmd_unalias,
     cmd_unremote,
+    cmd_unstorage,
 )
 
 
@@ -48,6 +50,8 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
     ("remote",   "[<name> [<broker> <topic> [--<k> <v> ...]]]", "List, show, or set a cross-machine remote."),
     ("unremote", "<name>",                    "Remove a configured remote."),
+    ("storage",  "[<name> [<url> [--<k> <v> ...]]]",            "List, show, or set a cross-cluster file storage service."),
+    ("unstorage","<name>",                    "Remove a configured storage service."),
     ("install",  "",                          "Install the `tell` skill into supported tools."),
 ]
 
@@ -107,6 +111,10 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_remote(args)
     if cmd == "unremote":
         return cmd_unremote(args)
+    if cmd == "storage":
+        return cmd_storage(args)
+    if cmd == "unstorage":
+        return cmd_unstorage(args)
     raise ValueError(f"unknown command: {cmd!r}")
 
 

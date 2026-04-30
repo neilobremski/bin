@@ -66,6 +66,7 @@ from core import (
 )
 from network import seen_id_append
 from registry import resolve_name
+from services import StorageError, StorageService
 from ulid import new as new_ulid
 
 # A function that publishes one routed-and-from-stamped message envelope to
@@ -91,6 +92,18 @@ def ensure_mailboxes(p: Participant) -> None:
         d.mkdir(parents=True, exist_ok=True)
     outbox_dir(p.root).mkdir(parents=True, exist_ok=True)
     files_dir(p.root).mkdir(parents=True, exist_ok=True)
+
+
+def _recipient_relative_path(files_dir_path: Path, dest: Path) -> str:
+    """Build the path string surfaced into the recipient's `$MESSAGE` as
+    `FILE: <path>`. The wake subprocess runs with `cwd=recipient.root`, so
+    a CWD-relative path resolves correctly even when the agent runs in a
+    container that maps its root to a different host prefix. We never
+    serialize the absolute host path into the routed envelope.
+
+    Returned form: `./.files/<filename>` (POSIX separators, explicit `./`).
+    """
+    return f"./{files_dir_path.name}/{dest.name}"
 
 
 def _transfer_file_to_recipient(
@@ -155,7 +168,11 @@ def _transfer_file_to_recipient(
     except OSError as e:
         out_agent(sender_name, f"FILE: copy failed {src_resolved} -> {dest}: {e}")
         return None
-    return {"filename": dest.name, "path": str(dest)}
+    # Recipient-CWD-relative path (e.g. "./.files/report.txt"). The agent's
+    # wake subprocess runs with cwd=recipient.root; an absolute host path
+    # wouldn't resolve inside a container that has the agent's directory
+    # mapped to a different prefix.
+    return {"filename": dest.name, "path": _recipient_relative_path(dest_dir, dest)}
 
 
 def _build_routed_message(
@@ -242,6 +259,7 @@ def _load_or_init_sidecar(pending_file: Path) -> dict:
                 data.setdefault("next_attempt", "")
                 data.setdefault("succeeded_remotes", [])
                 data.setdefault("local_delivered", False)
+                data.setdefault("uploaded", {})
                 return data
         except (OSError, json.JSONDecodeError):
             pass  # corrupt sidecar — start fresh
@@ -250,6 +268,10 @@ def _load_or_init_sidecar(pending_file: Path) -> dict:
         "next_attempt": "",
         "succeeded_remotes": [],
         "local_delivered": False,
+        # Per-file × per-service upload cache for cross-cluster `FILE:`
+        # payloads. Shape: {"<filename>": {"<service_id>": "<download_url>"}}.
+        # A backoff retry only re-uploads to services still missing.
+        "uploaded": {},
     }
 
 
@@ -293,11 +315,178 @@ def _schedule_retry(pending_file: Path, sidecar: dict, sender: Participant) -> N
     _save_sidecar(pending_file, sidecar)
 
 
+def _resolve_file_source(sender_root: Path, entry: dict) -> Path | None:
+    """Validate and resolve a `FILE:` entry's source path, returning a
+    sandbox-safe absolute path or None if the path can't be used. Same
+    validation rules as `_transfer_file_to_recipient` (exists, regular file,
+    inside sender_root, under MAX_FILE_BYTES) — factored out so the upload
+    path can reuse the defenses without copying bytes."""
+    src_path = Path(entry.get("path") or "").expanduser()
+    sender_root_resolved = sender_root.resolve()
+    try:
+        if src_path.is_absolute():
+            src_resolved = src_path.resolve()
+        else:
+            src_resolved = (sender_root_resolved / src_path).resolve()
+    except (OSError, RuntimeError):
+        return None
+    try:
+        src_resolved.relative_to(sender_root_resolved)
+    except ValueError:
+        return None
+    if not src_resolved.is_file():
+        return None
+    try:
+        size = src_resolved.stat().st_size
+    except OSError:
+        return None
+    if size > MAX_FILE_BYTES:
+        return None
+    return src_resolved
+
+
+def _upload_files_for_remote(
+    msg: dict,
+    sender_name: str,
+    sender_root: Path,
+    services: list[StorageService],
+    sidecar: dict,
+) -> bool:
+    """Upload every file in `msg["files"]` to every configured storage
+    service that hasn't yet accepted it. Caches results in
+    `sidecar["uploaded"][filename][service_id] = url` so a backoff retry
+    only re-uploads to services still missing.
+
+    Side-effects:
+      - Mutates `sidecar["uploaded"]` with each successful upload.
+      - On full success (every file × every service covered), rewrites
+        `msg["files"]` in-place to the wire shape:
+        `[{"filename": ..., "storage": [url1, url2, ...]}]` (drops `path`).
+
+    Returns True if every file is now covered by every configured service
+    (caller proceeds to publish). Returns False if any upload failed
+    (caller schedules retry; msg["files"] stays in its on-disk shape)."""
+    files = msg.get("files") or []
+    if not files or not services:
+        return True  # no work to do
+
+    uploaded: dict = sidecar.setdefault("uploaded", {})
+    all_done = True
+    for entry in files:
+        filename = entry.get("filename") or ""
+        if not filename:
+            continue  # malformed entry — skip silently
+        per_file = uploaded.setdefault(filename, {})
+        # We need the source path each pass — even on retry. The sender's
+        # outbox bytes still live at the original location until the message
+        # finalizes (we don't move them).
+        src = _resolve_file_source(sender_root, entry)
+        if src is None and any(s.id not in per_file for s in services):
+            # Source unreadable / oversized / outside-root and at least one
+            # service still needs it. Treat as upload failure for those
+            # services so the message retries (the file may have appeared
+            # mid-pass, etc.). If every service already has its URL, we're
+            # fine even with the source gone.
+            out_agent(
+                sender_name,
+                f"FILE: cannot read source for upload (filename={filename!r}); will retry",
+            )
+            all_done = False
+            continue
+        for service in services:
+            if service.id in per_file:
+                continue
+            try:
+                url = service.store(src)  # type: ignore[arg-type]
+            except StorageError as e:
+                out_agent(
+                    sender_name,
+                    f"WARN storage {service.id} upload failed for {filename!r} (attempt {sidecar['attempts'] + 1}): {e}",
+                )
+                all_done = False
+                continue
+            except Exception as e:
+                out_agent(
+                    sender_name,
+                    f"WARN storage {service.id} upload raised for {filename!r} (attempt {sidecar['attempts'] + 1}): {e}",
+                )
+                all_done = False
+                continue
+            per_file[service.id] = url
+
+    if not all_done:
+        return False
+
+    # Every file is covered by every service — rewrite to the wire shape.
+    new_files: list[dict] = []
+    for entry in files:
+        filename = entry.get("filename") or ""
+        urls = list(uploaded.get(filename, {}).values())
+        new_files.append({"filename": filename, "storage": urls})
+    msg["files"] = new_files
+    return True
+
+
+def _download_files_to_recipient(
+    msg: dict,
+    recipient: Participant,
+    services: list[StorageService],
+) -> dict:
+    """Pull `msg["files"][i]["storage"]` URLs into the recipient's
+    `<root>/.files/`. Returns a NEW dict with `files` rewritten to
+    recipient-local shape `{filename, path}`. Files that no configured
+    service can download are dropped + logged on the recipient's per-agent
+    log; the message is delivered with the surviving files (matches local
+    delivery's "rejected file dropped, message survives" semantics).
+
+    Multiple `storage` URLs per file are tried in order until one service
+    successfully downloads — equivalent uploads from the sender's POV, so
+    first wins. Mismatched URLs (no configured service accepts) just fall
+    through; only an actual `StorageError` from a matched service counts
+    as failure for that URL."""
+    out_msg = dict(msg)
+    src_files = msg.get("files") or []
+    new_files: list[dict] = []
+    dest_dir = files_dir(recipient.root)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for entry in src_files:
+        filename = entry.get("filename") or ""
+        urls = entry.get("storage") or []
+        if not filename or not urls:
+            continue  # malformed wire entry; drop
+        dest = unique_path(dest_dir / filename)
+        delivered = False
+        for url in urls:
+            for service in services:
+                try:
+                    if service.retrieve(url, dest):
+                        delivered = True
+                        break
+                except StorageError as e:
+                    out_agent(
+                        recipient.name,
+                        f"WARN storage {service.id} download failed for {filename!r}: {e}",
+                    )
+                    # Real failure on a matched URL — try next URL/service.
+            if delivered:
+                break
+        if delivered:
+            new_files.append({"filename": dest.name, "path": _recipient_relative_path(dest_dir, dest)})
+        else:
+            out_agent(
+                recipient.name,
+                f"WARN no configured storage service could download {filename!r} (urls={urls})",
+            )
+    out_msg["files"] = new_files
+    return out_msg
+
+
 def _process_pending(
     sender: Participant,
     by_name: dict[str, Participant],
     publish_remotes: Optional[PublishRemotes],
     configured_remote_ids: list[str],
+    services: Optional[list[StorageService]] = None,
 ) -> int:
     """Phase 2: iterate `~/.a8s/agents/<sender>/pending/`, deliver each
     pending file locally and/or publish to not-yet-succeeded remotes. The
@@ -417,20 +606,37 @@ def _process_pending(
                     # Nothing to deliver locally; mark done so we don't loop.
                     out_agent(sender.name, f"{recipient_name!r} has no local recipients (excluding self)")
                     sidecar["local_delivered"] = True
-        # ----- REMOTE ROUTING (placeholder hook; chunk 7 wires up) -----
+        # ----- REMOTE ROUTING -----
         has_files = bool(msg.get("files"))
-        if publish_remotes is not None and configured_remote_ids and not has_files:
-            sidecar["succeeded_remotes"] = publish_remotes(
-                msg, sender.name, list(sidecar["succeeded_remotes"]), sidecar["attempts"]
-            )
-        elif has_files and configured_remote_ids:
-            # v1 limitation (#62 deferred): file payloads stay local-only —
-            # the sender's path doesn't exist on the receiving cluster.
-            # Treat all configured remotes as "done" so the message finalizes
-            # after local delivery instead of looping on retries.
-            if sidecar["attempts"] == 0:
-                out_agent(sender.name, f"FILE: payloads in {f.name} not published to remotes (v1)")
-            sidecar["succeeded_remotes"] = list(configured_remote_ids)
+        if publish_remotes is not None and configured_remote_ids:
+            services_list = services or []
+            if has_files and not services_list:
+                # No storage services configured — file payloads can't make
+                # the trip. Mark all remotes "succeeded" so the message
+                # finalizes after local delivery instead of looping on
+                # retries (#62 v1 fallback: local-only with files when no
+                # services, full pipeline when services are configured).
+                if sidecar["attempts"] == 0:
+                    out_agent(sender.name, f"FILE: payloads in {f.name} not published to remotes (no storage configured)")
+                sidecar["succeeded_remotes"] = list(configured_remote_ids)
+            else:
+                # Upload any files first (per-file × per-service cache lives
+                # in the sidecar). On full success the in-memory msg gets
+                # rewritten to the wire shape; on partial failure we fall
+                # through to schedule a retry without publishing this pass.
+                publish_msg = dict(msg)
+                upload_ok = True
+                if has_files:
+                    publish_msg["files"] = list(msg.get("files") or [])
+                    upload_ok = _upload_files_for_remote(
+                        publish_msg, sender.name, sender.root, services_list, sidecar,
+                    )
+                if upload_ok:
+                    sidecar["succeeded_remotes"] = publish_remotes(
+                        publish_msg, sender.name, list(sidecar["succeeded_remotes"]), sidecar["attempts"]
+                    )
+                # else: leave succeeded_remotes alone; backoff retry will
+                # finish the uploads and try the publish next pass.
         # ----- OUTCOME -----
         remaining_remotes = [
             rid for rid in configured_remote_ids
@@ -467,6 +673,7 @@ def route_outboxes(
     all_agents: list[Participant] | None = None,
     publish_remotes: Optional[PublishRemotes] = None,
     configured_remote_ids: Optional[list[str]] = None,
+    services: Optional[list[StorageService]] = None,
 ) -> int:
     """Two-phase routing pass:
 
@@ -481,7 +688,12 @@ def route_outboxes(
     `publish_remotes` and `configured_remote_ids` are the daemon-wired
     hooks for cross-cluster routing; both default to None / [] so an
     install with no remotes configured behaves identically to pre-#63
-    except for the on-disk location of in-flight messages."""
+    except for the on-disk location of in-flight messages.
+
+    `services` is the storage-service hook (#90) for cross-cluster `FILE:`
+    payloads. When set and a message has files, each service uploads its
+    bytes and the wire envelope carries `files[i].storage = [...]`. None /
+    empty falls back to the v1 limitation (files local-only, remote skip)."""
     if all_agents is None:
         all_agents = senders
     by_name = {p.name.lower(): p for p in all_agents}
@@ -490,7 +702,9 @@ def route_outboxes(
     _ingest_outboxes(senders)
     routed = 0
     for sender in senders:
-        routed += _process_pending(sender, by_name, publish_remotes, configured_remote_ids)
+        routed += _process_pending(
+            sender, by_name, publish_remotes, configured_remote_ids, services,
+        )
     return routed
 
 

@@ -49,6 +49,7 @@ from mailbox import (
 )
 from network import (
     configured_remote_ids,
+    detect_service_kind,
     load_network_config,
     save_network_config,
 )
@@ -706,6 +707,35 @@ def cmd_ls() -> int:
 
 # ---------- messaging commands ----------
 
+def _join_tell_args(rest: list[str]) -> str:
+    """Concatenate the message-body argv into a single string suitable for
+    `_split_content_and_files`.
+
+    Plain shell usage stays untouched: `tell alice hello world` joins with
+    spaces. But when an argv element starts with `FILE:` — which is what
+    happens when an LLM forgets to fold the FILE: line into the same
+    quoted string — promote it to its own line. `_split_content_and_files`
+    only recognizes trailing FILE: lines (newline-delimited), so without
+    this lift the FILE: tag would silently inline into the body and the
+    attachment would be dropped.
+
+    Examples:
+      ['hello', 'world']                         -> 'hello world'
+      ['msg', 'FILE: ./x']                       -> 'msg\\nFILE: ./x'
+      ['FILE: ./x']                              -> 'FILE: ./x'
+      ['msg', 'FILE: ./a', 'FILE: ./b']          -> 'msg\\nFILE: ./a\\nFILE: ./b'
+    """
+    parts: list[str] = []
+    for arg in rest:
+        if arg.lstrip().startswith("FILE:"):
+            parts.append("\n" + arg.lstrip())
+        else:
+            if parts:
+                parts.append(" ")
+            parts.append(arg)
+    return "".join(parts).strip()
+
+
 def cmd_tell(args: list[str]) -> int:
     """`a8s tell <name> <msg>` — write a single outbox message; `name` may be
     an agent or alias. Fan-out to alias members happens at routing time and
@@ -715,7 +745,7 @@ def cmd_tell(args: list[str]) -> int:
         print("usage: tell <name> <message>", file=sys.stderr)
         return 2
     target_query, *rest = args
-    content, files = _split_content_and_files(" ".join(rest))
+    content, files = _split_content_and_files(_join_tell_args(rest))
 
     sender = sender_from_cwd()
     if sender is None:
@@ -1009,4 +1039,132 @@ def cmd_unremote(args: list[str]) -> int:
     del cfg["remotes"][name]
     save_network_config(cfg)
     print(f"removed remote {name}")
+    return 0
+
+
+# ---------- storage services (issue #90) ----------
+
+
+def _storage_usage() -> int:
+    print(
+        "usage: a8s storage                                          # list all\n"
+        "       a8s storage <name>                                   # show one\n"
+        "       a8s storage <name> <url> [--<k> <v> ...]             # add or overwrite\n"
+        "       a8s unstorage <name>                                 # remove\n"
+        "\n"
+        "The service kind is auto-dispatched from the URL host. Any --<opt> <value>\n"
+        "pair past the URL is passed verbatim to the service (e.g. --expiry_hours\n"
+        "for tempfile.org). Unknown options are rejected by the service at load time.",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def _format_storage_summary(spec: dict) -> str:
+    kind = spec.get("service", "?")
+    url = spec.get("url", "?")
+    extras = " ".join(
+        f"--{k}=***" if k in _SECRET_KEYS else f"--{k}={v}"
+        for k, v in spec.items()
+        if k not in {"service", "url"}
+    )
+    line = f"{kind} {url}"
+    if extras:
+        line += f" {extras}"
+    return line
+
+
+def cmd_storage(args: list[str]) -> int:
+    """`a8s storage` — manage cross-cluster file services declared in
+    `~/.a8s/network.json` (services map).
+
+    Forms (mirror `a8s remote`):
+      a8s storage                                 list all
+      a8s storage <name>                          show one
+      a8s storage <name> <url> [--<k> <v> ...]    add or overwrite
+      a8s unstorage <name>                        remove (see `cmd_unstorage`)
+    """
+    if len(args) == 0:
+        return _cmd_storage_list()
+    if len(args) == 1:
+        return _cmd_storage_show(args[0])
+    if len(args) >= 2:
+        return _cmd_storage_set(args[0], args[1], args[2:])
+    return _storage_usage()
+
+
+def _cmd_storage_list() -> int:
+    cfg = load_network_config()
+    services = cfg.get("services", {})
+    if not services:
+        print("(no storage services configured)")
+        return 0
+    name_w = max(len(n) for n in services)
+    for name, spec in services.items():
+        print(f"  {name.ljust(name_w)}  {_format_storage_summary(spec)}")
+    return 0
+
+
+def _cmd_storage_show(name: str) -> int:
+    cfg = load_network_config()
+    if name not in cfg["services"]:
+        print(f"no storage named {name!r}", file=sys.stderr)
+        return 1
+    print(f"{name}: {_format_storage_summary(cfg['services'][name])}")
+    return 0
+
+
+def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
+    if not _REMOTE_NAME_RE.match(name):
+        print(f"storage name must be alphanumeric (with -, _, .): {name!r}", file=sys.stderr)
+        return 2
+    extras: dict = {}
+    i = 0
+    while i < len(opt_tokens):
+        tok = opt_tokens[i]
+        if not tok.startswith("--") or len(tok) <= 2:
+            print(f"expected --<opt> <value> pair, got: {tok!r}", file=sys.stderr)
+            return _storage_usage()
+        key = tok[2:]
+        i += 1
+        if i >= len(opt_tokens):
+            print(f"missing value for {tok}", file=sys.stderr)
+            return _storage_usage()
+        if key in extras:
+            print(f"duplicate option: {tok}", file=sys.stderr)
+            return _storage_usage()
+        extras[key] = opt_tokens[i]
+        i += 1
+    kind = detect_service_kind(url)
+    if kind is None:
+        print(
+            f"no storage service matches URL {url!r} (known kinds: tempfile_org)",
+            file=sys.stderr,
+        )
+        return 2
+    cfg = load_network_config()
+    overwriting = name in cfg["services"]
+    spec: dict = {"service": kind, "url": url, **extras}
+    cfg["services"][name] = spec
+    save_network_config(cfg)
+    verb = "updated" if overwriting else "added"
+    print(f"{verb} storage {name} ({_format_storage_summary(spec)})")
+    return 0
+
+
+def cmd_unstorage(args: list[str]) -> int:
+    """`a8s unstorage <name>` — remove a configured storage service. Mirrors
+    `unremote`'s shape so the surface stays uniform across configurable
+    cross-cluster primitives."""
+    if len(args) != 1:
+        print("usage: a8s unstorage <name>", file=sys.stderr)
+        return 2
+    name = args[0]
+    cfg = load_network_config()
+    if name not in cfg["services"]:
+        print(f"no storage named {name!r}", file=sys.stderr)
+        return 1
+    del cfg["services"][name]
+    save_network_config(cfg)
+    print(f"removed storage {name}")
     return 0
