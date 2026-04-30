@@ -221,10 +221,14 @@ class TestAutodiscoverDefinition:
         assert path == str(default_definition_path("codex"))
 
     def test_copilot_marker(self, tmp_path):
-        (tmp_path / "COPILOT.md").write_text("# CP\n")
+        # Copilot's marker is its native repo-instructions location, not an
+        # invented `COPILOT.md` — see core.MARKER_FILES for rationale.
+        gh = tmp_path / ".github"
+        gh.mkdir()
+        (gh / "copilot-instructions.md").write_text("# CP\n")
         path, note = _autodiscover_definition(tmp_path)
         assert path == str(default_definition_path("copilot"))
-        assert "auto-detected via COPILOT.md" in note
+        assert "auto-detected via .github/copilot-instructions.md" in note
 
 
 # ---------- load_definition ----------

@@ -131,11 +131,12 @@ def _install_skill_copilot(skill_dir: Path) -> str:
     """Copilot CLI has no `copilot skills link <local-dir>` analog of the
     other tools — `copilot plugin install` only accepts git sources, and
     `--plugin-dir` is per-session. Until a stable user-scope mechanism
-    exists, the `tell` instructions are documented directly in each
-    Copilot agent's `COPILOT.md` (see `tests/agents/copilot-agent/`)."""
+    exists, the `tell` instructions live directly in each Copilot agent's
+    `.github/copilot-instructions.md` (which is also the a8s marker AND
+    the file Copilot itself auto-loads — see `tests/agents/copilot-agent/`)."""
     if shutil.which("copilot") is None:
         return "  copilot: not on PATH; skipping"
-    return "  copilot: skill install delegated to per-agent COPILOT.md (no user-scope skill mechanism)"
+    return "  copilot: skill install delegated to per-agent .github/copilot-instructions.md (no user-scope skill mechanism)"
 
 
 # ---------- registry management commands ----------
