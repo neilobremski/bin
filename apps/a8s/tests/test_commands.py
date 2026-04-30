@@ -16,9 +16,11 @@ from commands import (
     cmd_kill,
     cmd_remote,
     cmd_remove,
+    cmd_storage,
     cmd_tell,
     cmd_unalias,
     cmd_unremote,
+    cmd_unstorage,
 )
 from core import Participant, agent_dir, kill_request_path, outbox_dir, pid_path
 from mailbox import ensure_mailboxes
@@ -404,5 +406,110 @@ class TestCmdTellRemoteRecipient:
         msg = _json.loads(outbox_files[0].read_text())
         assert msg["to"] == "GHOST"
         assert msg["content"] == "hi from sender"
+
+
+# ---------- storage services (issue #90) ----------
+
+
+class TestCmdStorage:
+    """Mirrors `TestCmdRemote`. Same surface shape, configured under
+    `network.json`'s `services` map instead of `remotes`."""
+
+    def test_list_empty(self, fake_home, capsys):
+        rc = cmd_storage([])
+        assert rc == 0
+        assert "no storage services configured" in capsys.readouterr().out
+
+    def test_set_then_list(self, fake_home, capsys):
+        rc = cmd_storage(["tempfile", "https://tempfile.org"])
+        assert rc == 0
+        cfg = load_network_config()
+        assert cfg["services"]["tempfile"]["service"] == "tempfile_org"
+        assert cfg["services"]["tempfile"]["url"] == "https://tempfile.org"
+        capsys.readouterr()
+        cmd_storage([])
+        out = capsys.readouterr().out
+        assert "tempfile" in out
+        assert "tempfile_org" in out
+
+    def test_show_one(self, fake_home, capsys):
+        cmd_storage(["tempfile", "https://tempfile.org"])
+        capsys.readouterr()
+        rc = cmd_storage(["tempfile"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "tempfile: " in out
+        assert "https://tempfile.org" in out
+
+    def test_show_unknown(self, fake_home, capsys):
+        rc = cmd_storage(["nope"])
+        assert rc == 1
+        assert "no storage named" in capsys.readouterr().err
+
+    def test_set_overwrites_existing(self, fake_home, capsys):
+        cmd_storage(["tempfile", "https://tempfile.org", "--expiry_hours", "6"])
+        capsys.readouterr()
+        rc = cmd_storage(["tempfile", "https://tempfile.org", "--expiry_hours", "24"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "updated storage tempfile" in out
+        spec = load_network_config()["services"]["tempfile"]
+        assert spec["expiry_hours"] == "24"
+
+    def test_set_passes_arbitrary_options_to_spec(self, fake_home):
+        rc = cmd_storage([
+            "tempfile", "https://tempfile.org",
+            "--expiry_hours", "48", "--timeout_s", "60",
+        ])
+        assert rc == 0
+        spec = load_network_config()["services"]["tempfile"]
+        assert spec["expiry_hours"] == "48"
+        assert spec["timeout_s"] == "60"
+
+    def test_set_rejects_unknown_url(self, fake_home, capsys):
+        rc = cmd_storage(["weird", "https://example.com"])
+        assert rc == 2
+        assert "no storage service matches URL" in capsys.readouterr().err
+
+    def test_set_rejects_dangling_option(self, fake_home, capsys):
+        rc = cmd_storage(["tempfile", "https://tempfile.org", "--expiry_hours"])
+        assert rc == 2
+        assert "missing value" in capsys.readouterr().err
+
+    def test_set_rejects_bare_value(self, fake_home, capsys):
+        rc = cmd_storage(["tempfile", "https://tempfile.org", "12"])
+        assert rc == 2
+        assert "expected --<opt>" in capsys.readouterr().err
+
+    def test_set_rejects_duplicate_option(self, fake_home, capsys):
+        rc = cmd_storage([
+            "tempfile", "https://tempfile.org",
+            "--expiry_hours", "6", "--expiry_hours", "24",
+        ])
+        assert rc == 2
+        assert "duplicate option" in capsys.readouterr().err
+
+    def test_set_invalid_name(self, fake_home, capsys):
+        rc = cmd_storage(["with space", "https://tempfile.org"])
+        assert rc == 2
+        assert "must be alphanumeric" in capsys.readouterr().err
+
+
+class TestCmdUnstorage:
+    def test_remove(self, fake_home):
+        cmd_storage(["tempfile", "https://tempfile.org"])
+        rc = cmd_unstorage(["tempfile"])
+        assert rc == 0
+        assert "tempfile" not in load_network_config()["services"]
+
+    def test_unknown(self, fake_home, capsys):
+        rc = cmd_unstorage(["nope"])
+        assert rc == 1
+        assert "no storage named" in capsys.readouterr().err
+
+    def test_usage(self, fake_home, capsys):
+        rc = cmd_unstorage([])
+        assert rc == 2
+        assert "usage:" in capsys.readouterr().err
 
 

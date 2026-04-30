@@ -672,3 +672,261 @@ class TestRemotePublishHook:
         assert called == []  # publish hook not invoked
         assert list(pending_dir("A").iterdir()) == []  # finalized
         assert len(list(inbox_dir("B").iterdir())) == 1  # local delivery happened
+
+
+# ---------- storage services (#90) ----------
+
+
+class _StubStorage:
+    """Test double for `StorageService`. Records uploads, returns deterministic
+    URLs; can be configured to fail a fixed number of times before succeeding,
+    or to refuse downloads of foreign URLs to mirror the real dispatch logic."""
+
+    def __init__(self, name: str, *, fail_n: int = 0):
+        self._id = name
+        self._counter = 0
+        self._fail_n = fail_n
+        self.uploads: list[Path] = []
+        self.downloads: list[str] = []
+        self.bytes_for: dict[str, bytes] = {}
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    @classmethod
+    def supports_config_url(cls, url: str) -> bool:
+        return True
+
+    def store(self, src: Path) -> str:
+        if self._fail_n > 0:
+            self._fail_n -= 1
+            from services import StorageError
+
+            raise StorageError(f"{self._id}: simulated failure")
+        self._counter += 1
+        url = f"stub://{self._id}/{self._counter}"
+        self.uploads.append(src)
+        self.bytes_for[url] = src.read_bytes()
+        return url
+
+    def retrieve(self, url: str, dest: Path) -> bool:
+        if not url.startswith(f"stub://{self._id}/"):
+            return False
+        self.downloads.append(url)
+        if url not in self.bytes_for:
+            from services import StorageError
+
+            raise StorageError(f"{self._id}: missing {url}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(self.bytes_for[url])
+        return True
+
+
+class TestStorageUpload:
+    """`_upload_files_for_remote` and the rerouted `_process_pending` branch."""
+
+    def test_upload_to_single_service_publishes_with_storage_urls(self, two_agents):
+        a, b = two_agents
+        payload = a.root / "doc.txt"
+        payload.write_text("payload bytes")
+        published: list[dict] = []
+
+        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+            published.append(msg)
+            return list(succeeded_so_far) + ["hub"]
+
+        s = _StubStorage("svc")
+        _write_outbox("A", a.root, "GHOST", "see attached", [
+            {"filename": "doc.txt", "path": str(payload)},
+        ])
+        route_outboxes(
+            [a, b],
+            all_agents=[a, b],
+            publish_remotes=stub_publish,
+            configured_remote_ids=["hub"],
+            services=[s],
+        )
+        # Upload happened exactly once.
+        assert len(s.uploads) == 1
+        # Publish hook saw the rewritten wire shape.
+        assert len(published) == 1
+        files = published[0]["files"]
+        assert len(files) == 1
+        assert files[0]["filename"] == "doc.txt"
+        assert files[0]["storage"] == [f"stub://svc/1"]
+        # `path` is dropped on the wire.
+        assert "path" not in files[0]
+        # Message finalized — no pending leftovers.
+        assert list(pending_dir("A").iterdir()) == []
+
+    def test_upload_cached_in_sidecar_on_failure(self, two_agents):
+        # When ONE of two services fails on the first pass, the success on
+        # the other is cached in the sidecar so the retry doesn't re-upload
+        # to it. The publish hook is NOT called this pass (uploads
+        # incomplete).
+        a, b = two_agents
+        payload = a.root / "doc.txt"
+        payload.write_text("payload bytes")
+        published: list[dict] = []
+
+        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+            published.append(msg)
+            return list(succeeded_so_far) + ["hub"]
+
+        good = _StubStorage("good")
+        flaky = _StubStorage("flaky", fail_n=1)
+        _write_outbox("A", a.root, "GHOST", "see attached", [
+            {"filename": "doc.txt", "path": str(payload)},
+        ])
+        route_outboxes(
+            [a, b],
+            all_agents=[a, b],
+            publish_remotes=stub_publish,
+            configured_remote_ids=["hub"],
+            services=[good, flaky],
+        )
+        # First pass: good succeeded, flaky failed → no publish, sidecar
+        # written.
+        assert len(good.uploads) == 1
+        assert len(flaky.uploads) == 0
+        assert published == []
+        # Sidecar has the good service cached.
+        pending_files = [f for f in pending_dir("A").iterdir()
+                         if f.name.endswith(".json") and not f.name.endswith(".retry")]
+        sidecar = json.loads(retry_sidecar_path(pending_files[0]).read_text())
+        assert sidecar["uploaded"]["doc.txt"]["good"].startswith("stub://good/")
+        assert "flaky" not in sidecar["uploaded"]["doc.txt"]
+        # Force the next-attempt clock open and route again.
+        sidecar["next_attempt"] = ""
+        retry_sidecar_path(pending_files[0]).write_text(json.dumps(sidecar))
+        route_outboxes(
+            [a, b],
+            all_agents=[a, b],
+            publish_remotes=stub_publish,
+            configured_remote_ids=["hub"],
+            services=[good, flaky],
+        )
+        # Second pass: good was NOT re-uploaded; flaky succeeded; publish
+        # was called.
+        assert len(good.uploads) == 1  # unchanged
+        assert len(flaky.uploads) == 1
+        assert len(published) == 1
+        # Wire entry has both URLs.
+        urls = published[0]["files"][0]["storage"]
+        assert any(u.startswith("stub://good/") for u in urls)
+        assert any(u.startswith("stub://flaky/") for u in urls)
+
+    def test_no_services_keeps_v1_skip(self, two_agents):
+        # Already covered by `test_file_payloads_skip_remote_publish`, but
+        # this version asserts the v1 fallback log explicitly hits when
+        # services list is empty (vs unset).
+        a, b = two_agents
+        payload = a.root / "doc.txt"
+        payload.write_text("x")
+        published = []
+
+        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+            published.append(msg)
+            return list(succeeded_so_far) + ["hub"]
+
+        _write_outbox("A", a.root, "B", "see attached", [
+            {"filename": "doc.txt", "path": str(payload)},
+        ])
+        route_outboxes(
+            [a, b],
+            all_agents=[a, b],
+            publish_remotes=stub_publish,
+            configured_remote_ids=["hub"],
+            services=[],
+        )
+        assert published == []  # remote skipped — no storage configured
+        # Local delivery still works.
+        assert len(list(inbox_dir("B").iterdir())) == 1
+
+
+class TestStorageDownload:
+    """`_download_files_to_recipient` — exercised via `network.receive_envelope`
+    so the test covers the whole receive-side path that an MQTT subscriber
+    would drive."""
+
+    def test_falls_through_to_second_url(self, fake_home, tmp_path):
+        from network import receive_envelope
+        from registry import save_registry
+        from ulid import new as new_ulid
+
+        b_root = tmp_path / "B"; b_root.mkdir()
+        save_registry({"B": {"root": str(b_root)}})
+        b = Participant("B", b_root)
+
+        # Two services: one only handles its own URLs, one handles the second.
+        s_first = _StubStorage("first")
+        s_second = _StubStorage("second")
+        # Pre-populate `second`'s store with a synthetic URL+bytes (as if
+        # the sender had uploaded there).
+        s_second.bytes_for["stub://second/42"] = b"the-payload"
+
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id,
+            "from": "REMOTE_X",
+            "to": "B",
+            "content": "see attached",
+            "files": [{
+                "filename": "doc.txt",
+                # First URL belongs to NO configured service (foreign host).
+                # Second URL belongs to `s_second`.
+                "storage": ["stub://other/99", "stub://second/42"],
+            }],
+        }).encode()
+        receive_envelope(envelope, [b], services=[s_first, s_second])
+        # File materialized into B's .files/.
+        files = list(files_dir(b_root).iterdir())
+        assert len(files) == 1
+        assert files[0].name == "doc.txt"
+        assert files[0].read_bytes() == b"the-payload"
+        # The inbox-written envelope has the local-path shape.
+        inbox_msg = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert inbox_msg["files"] == [{"filename": "doc.txt", "path": str(files[0])}]
+
+    def test_all_urls_unsupported_drops_file_keeps_message(self, fake_home, tmp_path):
+        from network import receive_envelope
+        from registry import save_registry
+        from ulid import new as new_ulid
+
+        b_root = tmp_path / "B"; b_root.mkdir()
+        save_registry({"B": {"root": str(b_root)}})
+        b = Participant("B", b_root)
+
+        s = _StubStorage("only-one")  # doesn't recognize stub://other/ URLs
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "X", "to": "B",
+            "content": "see attached",
+            "files": [{"filename": "doc.txt", "storage": ["stub://other/99"]}],
+        }).encode()
+        receive_envelope(envelope, [b], services=[s])
+        # Message delivered, files dropped.
+        body = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert body["files"] == []
+        assert body["content"] == "see attached"
+
+    def test_no_services_strips_files(self, fake_home, tmp_path):
+        from network import receive_envelope
+        from registry import save_registry
+        from ulid import new as new_ulid
+
+        b_root = tmp_path / "B"; b_root.mkdir()
+        save_registry({"B": {"root": str(b_root)}})
+        b = Participant("B", b_root)
+
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "X", "to": "B",
+            "content": "see attached",
+            "files": [{"filename": "doc.txt", "storage": ["stub://x/1"]}],
+        }).encode()
+        # No `services` argument → falls back to v1 behavior.
+        receive_envelope(envelope, [b])
+        body = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert body["files"] == []

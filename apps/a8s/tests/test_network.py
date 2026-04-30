@@ -76,7 +76,7 @@ class StubTransport(Transport):
 class TestNetworkConfig:
     def test_absent_file_returns_empty(self, fake_home):
         cfg = load_network_config()
-        assert cfg == {"remotes": {}}
+        assert cfg == {"remotes": {}, "services": {}}
 
     def test_round_trip(self, fake_home):
         save_network_config({"remotes": {"hub": {"transport": "mqtt", "broker": "mqtt://x", "topic": "t"}}})
@@ -88,7 +88,7 @@ class TestNetworkConfig:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("not json {")
         cfg = load_network_config()
-        assert cfg == {"remotes": {}}
+        assert cfg == {"remotes": {}, "services": {}}
 
     def test_configured_remote_ids_order_preserved(self, fake_home):
         save_network_config({"remotes": {"a": {}, "z": {}, "m": {}}})

@@ -131,9 +131,11 @@ Key invariants:
 | `apps/a8s/mailbox.py` | `route_outboxes` (two-phase: ingest → process), `ensure_mailboxes`, `_split_content_and_files`, `_write_outbox`. Per-message `.retry` sidecars live in `pending/` and drive backoff retries via `BACKOFF_SCHEDULE`. | depends on `core`, `registry`, `ulid` |
 | `apps/a8s/definitions.py` | `build_command(definition, msg)` (single `invoke` field, no verb dispatch), `_expand_argv` (`$SENDER`/`$RECIPIENT`/`$MESSAGE`/`$TIMESTAMP`/`$AGE`/`$A8S_DIR`), `load_definition`, `_autodiscover_definition` | depends on `core`, `registry` |
 | `apps/a8s/ulid.py` | `new()` / `parse()` / `is_ulid()` — pure-stdlib Crockford-base32 ULIDs. Mailbox messages are named `<ulid>.json` and carry the same id in the body's `id` field for receive-side dedup. | leaf module |
-| `apps/a8s/network.py` | `~/.a8s/network.json` IO, `load_remotes` (forwards every key past `transport`/`broker`/`topic` to the transport as `**opts` — each transport handles its own option vocabulary), `make_publish_remotes` (warn-and-continue per-remote publish), `receive_envelope` (decode → ULID dedup → registry filter → atomic inbox write), `start_remotes` / `stop_remotes`. Transport modules imported lazily. | depends on `core`, `registry`, `transports`, `ulid` |
+| `apps/a8s/network.py` | `~/.a8s/network.json` IO (top-level `remotes` and `services` maps), `load_remotes` and `load_services` (each forwards keys past the dispatcher's reserved set as `**opts` — each transport/service handles its own option vocabulary), `_build_transport` / `_build_service` / `detect_service_kind`, `make_publish_remotes` (warn-and-continue per-remote publish), `receive_envelope` (decode → ULID dedup → registry filter → cross-cluster file download via configured services → atomic inbox write), `start_remotes` / `stop_remotes`. Transport and service modules imported lazily. | depends on `core`, `registry`, `transports`, `services`, `ulid` |
 | `apps/a8s/transports/__init__.py` | `Transport` ABC + `TransportError`. The publish/subscribe/start/stop contract every remote transport implements. | leaf module |
 | `apps/a8s/transports/mqtt.py` | `MqttTransport` — MQTT 3.1.1 with `clean_session=False`, QoS 1, hash-derived stable `client_id` so the broker recognizes the same persistent session across restarts. Today's implementation is paho-mqtt; mini-MQTT pure-stdlib fallback lands as a follow-up and the user-facing config kind stays `mqtt`. The constructor takes a `**opts` bag, aliases `user`/`pass` → `username`/`password`, and rejects unknown keys so a typo in `network.json` fails loud. | depends on `transports`, `paho-mqtt` (soft) |
+| `apps/a8s/services/__init__.py` | `StorageService` ABC + `StorageError`. The `store(src) -> url` / `retrieve(url, dest) -> bool` contract every cross-cluster file backend implements. Stateless — no start/stop. **"Service" disambiguates from "transport"**: messaging plugins are transports (MQTT, etc.), file plugins are services (TempFile.org, etc.). | leaf module |
+| `apps/a8s/services/tempfile_org.py` | `TempFileOrgService` — pure-stdlib `urllib`. POSTs `multipart/form-data` to `/api/upload/local`, GETs `<url>download` for retrieval. 100 MB per-file ceiling (the existing 50 MiB `MAX_FILE_BYTES` keeps us comfortably under). Constructor opts: `expiry_hours` (1, 6, 24, or 48; default 24), `timeout_s` (default 30). | depends on `services`, stdlib only |
 | `apps/a8s/daemon.py` | `acquire`/`release` (pid files), `attached_loop` (also spawns subscriber threads via `start_remotes` and stops them on detach), signal handling (`_make_signal_handler`, `_kill_wake_subprocess_group`), `run_with_prefix`, `wake_once`. Mutable globals `_STOP_EVENT`/`_SIGNAL_COUNT`/`_CURRENT_WAKE_PROC` live here. Sets `core.PRINT_LOCK`. | depends on everything above |
 | `apps/a8s/commands.py` | every `cmd_*`, including `cmd_remote add/remove/ls`, `_install_skill_*` for Claude/Gemini/Codex, `_expand_to_agents` | depends on everything above |
 | `apps/a8s/cli.py` | `COMMANDS` table (the source of truth for help text), `dispatch`, `main` | depends on `commands` only |
@@ -211,12 +213,33 @@ in the message envelope.
   Senders publish to all configured remotes; receivers dedupe by ULID. A
   message to an unknown-locally recipient publishes to all remotes (each
   receiving cluster decides locally whether to deliver based on its own
-  registry). File payloads (`FILE:`) are local-only in v1 —
-  `route_outboxes` marks all configured remotes as "succeeded" for
-  messages with files so they finalize after local delivery instead of
-  looping retries. Note: a8s only routes *messages* across remotes —
-  state queries like `a8s logs`, `a8s ls`, `a8s agents` are strictly
-  local. There is no cross-cluster state query path by design.
+  registry). Note: a8s only routes *messages* across remotes — state
+  queries like `a8s logs`, `a8s ls`, `a8s agents` are strictly local.
+  There is no cross-cluster state query path by design.
+- **Cross-cluster `FILE:` payloads ride storage services (#90).**
+  Configured under `network.json`'s `services` map — separate from the
+  `remotes` (messaging) map. When a sender's `_process_pending` finds a
+  message has files AND services are configured, it uploads each file to
+  every configured service and rewrites the wire envelope's `files[i]`
+  to `{"filename": ..., "storage": [url1, url2, ...]}` (dropping
+  `path` — sender-local). The receiver's `receive_envelope` iterates
+  the URLs × configured services until one accepts the download into
+  `<recipient>/.files/`. Per-file × per-service success is cached in
+  the `<f>.json.retry` sidecar's `uploaded` field so backoff retries
+  don't re-upload to services that already accepted. With NO services
+  configured, files stay local-only — `route_outboxes` marks all
+  remotes as "succeeded" for messages with files so they finalize on
+  local delivery alone. The receive side strips storage-bearing files
+  with a warning if the recipient cluster has no matching service.
+- **Storage services are stateless.** No start/stop lifecycle. One
+  instance per `~/.a8s/network.json` `services` entry, shared between
+  the sender's upload path and the receive callback's download path.
+  Services dispatch via `supports_config_url(url)` (class method) at
+  config-load time and via host match at retrieve time —
+  `retrieve()` returning False means "this URL isn't mine, try the
+  next service" (so a multi-service install can route mixed URLs).
+  Real failures raise `StorageError`. Don't add per-service start/stop
+  unless a future backend genuinely needs a connection pool.
 - **Persistent sessions.** The MQTT transport is configured with
   `clean_session=False` + QoS 1, with a stable hash-derived `client_id`. The
   broker holds messages for an offline subscriber until reconnect — that's
@@ -270,8 +293,10 @@ remote                                  list all configured remotes
 remote <name>                           show one remote's spec (passwords masked)
 remote <name> <broker> <topic> [--<k> <v> ...]   register or overwrite (extras forwarded to transport)
 unremote <name>                          forget a remote
-remote remove <name>         forget a remote
-remote ls                    list configured remotes
+storage                                 list all configured storage services
+storage <name>                          show one service's spec
+storage <name> <url> [--<k> <v> ...]    register or overwrite (kind auto-dispatched from URL; extras forwarded to service)
+unstorage <name>                        forget a storage service
 install                      install canonical skills
 ```
 
@@ -425,8 +450,8 @@ The locked-design refactor (#52) is closed. The following are open:
 | # | State | Topic |
 |---|---|---|
 | #39 | open enhancement | Copilot CLI as 4th tool kind. Trivial after the refactor: write `copilot.json`, add `COPILOT.md` → `copilot` to `core.MARKER_FILES`. |
-| #63 | partially landed | Transparent multi-cluster routing. MQTT transport (paho-mqtt impl) + layered remotes + per-message backoff + ULID dedup are in. Still open: mini-MQTT pure-stdlib fallback (auto-activates when paho isn't importable), HTTPS long-poll transport, peer-to-peer TCP transport, app-level envelope encryption (per-network PSK), cross-cluster `FILE:` payloads (rides #62). |
-| #62 | open enhancement | Cross-cluster file payload host (TempFile.org-style ephemeral storage with signed URLs and per-message symmetric keys). v1 strips `files` from incoming envelopes and skips remote publish for outgoing messages with files. |
+| #63 | partially landed | Transparent multi-cluster routing. MQTT transport (paho-mqtt impl) + layered remotes + per-message backoff + ULID dedup are in. Still open: mini-MQTT pure-stdlib fallback (auto-activates when paho isn't importable), HTTPS long-poll transport, peer-to-peer TCP transport, app-level envelope encryption (per-network PSK). |
+| #90 | landed | Cross-cluster `FILE:` payloads via pluggable storage services (`a8s storage`/`unstorage`). TempFile.org first impl (pure-stdlib HTTP). Per-file × per-service success cached in the retry sidecar; receive side downloads into recipient's `.files/`. App-level encryption / per-message symmetric keys (originally scoped under #62) deferred. |
 | #72 | open question | Design discussion surfaced by the review panel: mailbox file format. (#67's atomic fan-out and #63's ULID + ingest-to-pending split partially address this; revisit before mini-MQTT lands.) |
 
 ### What I tried that didn't work (concrete)
