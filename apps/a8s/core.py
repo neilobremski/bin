@@ -25,6 +25,11 @@ MARKER_FILES = {
     "CLAUDE.md": "claude",
     "GEMINI.md": "gemini",
     "CODEX.md": "codex",
+    # Copilot's native repo-instructions location. Operators with a
+    # repo-wide `copilot-instructions.md` who don't intend the dir to be
+    # an a8s agent should expect `a8s discover` to surface it as a
+    # candidate — `discover` is read-only and only suggests, never adds.
+    ".github/copilot-instructions.md": "copilot",
 }
 
 NAME_RE = re.compile(r"[A-Za-z0-9]+")

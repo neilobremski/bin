@@ -167,7 +167,23 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `claude.json` | Claude Code with `--permission-mode dontAsk` allowlist + `--continue` |
 | `gemini.json` | Gemini CLI with `--yolo` (Policy Engine doesn't apply in headless mode; tracked upstream) + `--resume latest` |
 | `codex.json` | Codex CLI with `--full-auto` workspace-write sandbox + `resume --last` |
+| `copilot.json` | GitHub Copilot CLI with `--allow-all-tools` (required for non-interactive `-p` mode) + `--continue`. Marker is `.github/copilot-instructions.md` (Copilot's native repo-instructions location). |
 | `default.json` | Fallback — runs `dummy-cli` and prints "no real CLI configured" |
+
+### Marker files & auto-discovery
+
+`a8s discover <path>` and `a8s add <name> <dir>` (without an explicit definition) figure out which CLI an agent uses by scanning for one of these **kind-specific** marker files at the agent's root:
+
+| Marker | Kind | Where the CLI itself looks |
+|---|---|---|
+| `CLAUDE.md` | claude | [Claude Code memory](https://docs.claude.com/en/docs/claude-code/memory) |
+| `GEMINI.md` | gemini | [Gemini CLI context files](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/configuration.md) |
+| `CODEX.md` | codex | [Codex CLI configuration](https://github.com/openai/codex) |
+| `.github/copilot-instructions.md` | copilot | [Copilot CLI repository custom instructions](https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions) — the same file Copilot itself auto-loads |
+
+a8s deliberately keys on **kind-specific** locations so a single scan can answer "which CLI is this agent?". For Copilot we use its native repo-instructions location (`.github/copilot-instructions.md`) rather than inventing a `COPILOT.md` — that way one file serves both a8s discovery and Copilot's own persona loading.
+
+Don't confuse these with [AGENTS.md](https://agents.md/) — that's a separate, **tool-agnostic** convention now adopted by 20+ tools (OpenAI Codex, Google Gemini CLI, GitHub Copilot, Cursor, Aider, Zed, Warp, JetBrains Junie, …) and stewarded by the [Agentic AI Foundation](https://agentic.foundation/) under the Linux Foundation. Because AGENTS.md is intentionally tool-agnostic ("one AGENTS.md works across many agents"), it cannot disambiguate which CLI to invoke, so a8s does not treat it as a marker. Operators are welcome to keep an `AGENTS.md` alongside the kind-specific marker — the kind-specific file tells a8s which CLI to invoke; AGENTS.md is whatever shared content you want every agent in the dir to see.
 
 ### The single verb
 
