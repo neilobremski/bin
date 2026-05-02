@@ -38,7 +38,7 @@ MARKER_FILES = {
     "AGENTS.md": "opencode",
 }
 
-NAME_RE = re.compile(r"[A-Za-z0-9]+")
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 # File-transfer cap for FILE: payloads. Larger sources are dropped at routing
 # time with a log line; agents needing larger payloads should use a side-
@@ -89,7 +89,9 @@ def canonical_name(name: str) -> str:
     where `claude` and `Claude` produced two separate agent dirs."""
     s = (name or "").strip().lower()
     if not s or not NAME_RE.fullmatch(s):
-        raise ValueError(f"name must be alphanumeric: {name!r}")
+        raise ValueError(
+            f"name must be alphanumeric (with -, _) and start with a letter or digit: {name!r}"
+        )
     return s
 
 
