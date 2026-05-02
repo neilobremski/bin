@@ -36,7 +36,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("agents",   "",                          "List registered agents."),
     ("discover", "<path>",                    "Scan a path for agents and suggest `add` commands."),
     ("define",   "<name> [<path>]",           "Show or set an agent's command definition."),
-    ("alias",    "[<alias> <member>]",        "Group agents under an alias name."),
+    ("alias",    "[<name> [<member>]]",       "Group agents under an alias name; show one with `<name>`."),
     ("unalias",  "<alias> [<member>]",        "Remove a member from an alias, or the whole alias."),
     ("aliases",  "",                          "List aliases and their members."),
     ("start",    "<name>",                    "Run an agent in the background."),
