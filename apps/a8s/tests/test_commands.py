@@ -66,7 +66,7 @@ class TestCmdAddCanonicalization:
         assert agent_dir("claude") == agent_dir("CLAUDE".lower())
 
     def test_invalid_name_rejected(self, agent_root, capsys):
-        rc = cmd_add(["foo-bar", str(agent_root)])
+        rc = cmd_add(["foo bar", str(agent_root)])
         assert rc == 2
         err = capsys.readouterr().err
         assert "alphanumeric" in err
@@ -122,7 +122,7 @@ class TestCmdRemove:
         assert "no agent" in capsys.readouterr().err
 
     def test_invalid_name_rejected(self, fake_home, capsys):
-        rc = cmd_remove(["foo-bar"])
+        rc = cmd_remove(["foo bar"])
         assert rc == 2
         assert "alphanumeric" in capsys.readouterr().err
 

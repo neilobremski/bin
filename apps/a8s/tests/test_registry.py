@@ -52,14 +52,21 @@ class TestCanonicalName:
         with pytest.raises(ValueError):
             canonical_name("   ")
 
-    def test_hyphen_rejected(self):
-        # NAME_RE is [A-Za-z0-9]+ — no separators allowed.
-        with pytest.raises(ValueError):
-            canonical_name("foo-bar")
+    def test_hyphen_accepted(self):
+        assert canonical_name("knobert-android") == "knobert-android"
+
+    def test_underscore_accepted(self):
+        assert canonical_name("foo_bar") == "foo_bar"
 
     def test_space_rejected(self):
         with pytest.raises(ValueError):
             canonical_name("foo bar")
+
+    def test_leading_separator_rejected(self):
+        with pytest.raises(ValueError):
+            canonical_name("-foo")
+        with pytest.raises(ValueError):
+            canonical_name("_foo")
 
 
 # ---------- low-level I/O ----------
