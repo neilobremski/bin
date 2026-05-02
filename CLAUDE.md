@@ -289,7 +289,9 @@ remove <name>                unregister an agent; wipes its mailbox dir and prun
 agents                       list all registered
 discover <path>              read-only scan; suggests add+define commands
 define <name> [<path>]       show or set definition
-alias <alias> <member>       add to alias (creates if new); cycles rejected
+alias                                   list all aliases
+alias <name>                            show one alias's members
+alias <alias> <member>                  add to alias (creates if new); cycles rejected
 unalias <alias> [<member>]   remove member or whole alias
 aliases                      list aliases + resolved members
 start <name>                 detached background handler (alias = ONE process for N agents)

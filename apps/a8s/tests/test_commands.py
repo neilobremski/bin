@@ -115,6 +115,53 @@ class TestCmdAliasCanonicalization:
         assert "unknown member" in err
 
 
+class TestCmdAliasShowOne:
+    def test_show_one_alias_lists_members(self, fake_home, tmp_path, agent_root, capsys):
+        cmd_add(["claude", str(agent_root)])
+        other = tmp_path / "g"; other.mkdir()
+        cmd_add(["gemini", str(other)])
+        cmd_alias(["devs", "claude"])
+        cmd_alias(["devs", "gemini"])
+        capsys.readouterr()
+        rc = cmd_alias(["devs"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "devs:" in out
+        assert "claude" in out
+        assert "gemini" in out
+
+    def test_show_one_alias_with_dashed_name(self, fake_home, agent_root, capsys):
+        cmd_add(["claude", str(agent_root)])
+        cmd_alias(["bin-test", "claude"])
+        capsys.readouterr()
+        rc = cmd_alias(["bin-test"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "bin-test:" in out
+        assert "claude" in out
+
+    def test_show_one_alias_case_insensitive(self, fake_home, agent_root, capsys):
+        cmd_add(["claude", str(agent_root)])
+        cmd_alias(["devs", "claude"])
+        capsys.readouterr()
+        rc = cmd_alias(["DEVS"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "devs:" in out
+
+    def test_show_unknown_alias_errors(self, fake_home, capsys):
+        rc = cmd_alias(["nobody"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "no alias" in err
+
+    def test_show_invalid_name_errors(self, fake_home, capsys):
+        rc = cmd_alias(["bad name with spaces"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "alphanumeric" in err
+
+
 class TestCmdRemove:
     def test_unknown_agent_rejected(self, fake_home, capsys):
         rc = cmd_remove(["nobody"])

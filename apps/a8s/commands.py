@@ -393,16 +393,25 @@ def cmd_install() -> int:
 # ---------- alias commands ----------
 
 def cmd_alias(args: list[str]) -> int:
-    """`a8s alias <alias> <member>` — add member to alias, creating the alias
-    if new. Members may be agent names OR existing alias names (nesting OK,
-    cycles rejected at resolve time). The alias name must not collide with
-    an existing agent name. Both alias name and member are canonicalized
-    (lowercase) so `a8s alias Devs CLAUDE` and `a8s alias devs claude` are
-    the same operation (issue #65)."""
+    """`a8s alias` — manage aliases.
+
+    Forms (mirror `a8s remote` / `a8s storage`):
+      a8s alias                      list all
+      a8s alias <name>               show one alias's members
+      a8s alias <alias> <member>     add or create
+
+    Names are canonicalized (lowercase) so `a8s alias Devs CLAUDE` and
+    `a8s alias devs claude` are the same operation (issue #65). Members
+    may be agent names OR existing alias names (nesting OK, cycles
+    rejected at resolve time). The alias name must not collide with an
+    existing agent name."""
     if len(args) == 0:
         return cmd_aliases()
+    if len(args) == 1:
+        return _cmd_alias_show(args[0])
     if len(args) != 2:
         print("usage: a8s alias <alias> <member>     # add or create", file=sys.stderr)
+        print("       a8s alias <name>               # show one", file=sys.stderr)
         print("       a8s alias                      # list", file=sys.stderr)
         return 2
     raw_alias, raw_member = args
@@ -500,6 +509,33 @@ def cmd_unalias(args: list[str]) -> int:
         aliases[canonical] = new_members
     save_aliases(aliases)
     print(f"{canonical} -= {member}")
+    return 0
+
+
+def _cmd_alias_show(name: str) -> int:
+    """`a8s alias <name>` — show one alias's members. Mirrors `remote <name>`
+    and `storage <name>`."""
+    try:
+        target = canonical_name(name)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    aliases = load_aliases()
+    canonical: str | None = None
+    for k in aliases:
+        if k.lower() == target:
+            canonical = k
+            break
+    if canonical is None:
+        print(f"no alias named {name!r}", file=sys.stderr)
+        return 1
+    members = aliases[canonical]
+    try:
+        _, resolved = resolve_name(canonical)
+        tail = "" if len(members) == len(resolved) else f"  → {len(resolved)} agents"
+    except (KeyError, ValueError) as e:
+        tail = f"  [{e}]"
+    print(f"{canonical}: [{', '.join(members)}]{tail}")
     return 0
 
 
