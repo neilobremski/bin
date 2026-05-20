@@ -110,7 +110,13 @@ def status():
     """Human-readable status report."""
     providers = detect_providers()
     cfg = load_config()
+    home = _k7e_home()
     lines = ["k7e status:", ""]
+
+    lines.append(f"  Home: {home}")
+    if not home.exists():
+        lines.append("    → Not initialized. Run any k7e command to create.")
+    lines.append("")
 
     # Configured LLM
     llm = get("llm", "auto")

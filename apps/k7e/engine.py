@@ -66,12 +66,42 @@ def init():
 
 
 def next_id():
-    existing = sorted(NODES_DIR.glob("KG-*.md"))
-    if not existing:
-        return "KG-00001"
-    last = existing[-1].stem
-    num = int(last.split("-")[1])
-    return f"KG-{num + 1:05d}"
+    """Generate next K7E-BBB-NNNNN ID. Sequential across all buckets."""
+    highest = 0
+    for bucket_dir in sorted(NODES_DIR.iterdir()):
+        if not bucket_dir.is_dir():
+            continue
+        for f in bucket_dir.glob("K7E-*.md"):
+            parts = f.stem.split("-")
+            if len(parts) == 3:
+                try:
+                    num = int(parts[1]) * 100000 + int(parts[2])
+                    highest = max(highest, num)
+                except ValueError:
+                    pass
+    total = highest + 1
+    bucket = total // 100000
+    seq = total % 100000
+    return f"K7E-{bucket:03d}-{seq:05d}"
+
+
+def _node_path(node_id):
+    """Resolve node ID to file path: nodes/BBB/K7E-BBB-NNNNN.md"""
+    parts = node_id.split("-")
+    if len(parts) == 3:
+        bucket = parts[1]
+    else:
+        bucket = "000"
+    return NODES_DIR / bucket / f"{node_id}.md"
+
+
+def _all_node_files():
+    """Iterate all node files across all buckets."""
+    for bucket_dir in sorted(NODES_DIR.iterdir()):
+        if not bucket_dir.is_dir():
+            continue
+        for f in sorted(bucket_dir.glob("K7E-*.md")):
+            yield f
 
 
 def plant(title, content, tags=None, aliases=None):
@@ -81,17 +111,6 @@ def plant(title, content, tags=None, aliases=None):
 
     node_id = next_id()
     now = time.strftime("%Y-%m-%d")
-
-    frontmatter = {
-        "id": node_id,
-        "title": title,
-        "aliases": aliases,
-        "status": "active",
-        "confidence": 0.5,
-        "verification_count": 0,
-        "last_tended": now,
-        "tags": tags,
-    }
 
     body = f"""---
 id: {node_id}
@@ -116,7 +135,8 @@ tags: [{', '.join(tags)}]
 * {now}: Initial entry.
 """
 
-    node_path = NODES_DIR / f"{node_id}.md"
+    node_path = _node_path(node_id)
+    node_path.parent.mkdir(parents=True, exist_ok=True)
     node_path.write_text(body, encoding="utf-8")
 
     _index_node(node_id, title, aliases, tags, content, now)
@@ -126,7 +146,7 @@ tags: [{', '.join(tags)}]
 
 
 def tend(node_id, section, content):
-    node_path = NODES_DIR / f"{node_id}.md"
+    node_path = _node_path(node_id)
     if not node_path.exists():
         raise FileNotFoundError(f"Node {node_id} not found")
 
@@ -193,7 +213,7 @@ def search(query, limit=5, json_output=False):
 
 
 def get(node_id):
-    node_path = NODES_DIR / f"{node_id}.md"
+    node_path = _node_path(node_id)
     if not node_path.exists():
         raise FileNotFoundError(f"Node {node_id} not found")
     return node_path.read_text(encoding="utf-8")
@@ -208,7 +228,7 @@ def reindex(embeddings=False):
         conn.execute("DELETE FROM embeddings")
     conn.commit()
 
-    for path in sorted(NODES_DIR.glob("KG-*.md")):
+    for path in _all_node_files():
         text = path.read_text(encoding="utf-8")
         meta = _parse_frontmatter(text)
         body = _extract_body(text)
@@ -270,7 +290,7 @@ def rebuild_mocs():
     init()
     mocs = {}
 
-    for path in sorted(NODES_DIR.glob("KG-*.md")):
+    for path in _all_node_files():
         text = path.read_text(encoding="utf-8")
         meta = _parse_frontmatter(text)
         node_id = meta.get("id", path.stem)
