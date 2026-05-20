@@ -338,7 +338,7 @@ def stats():
     return {
         "total_nodes": total_nodes,
         "total_mocs": len(list(MOCS_DIR.glob("*.md"))),
-        "total_assets": len([f for f in ASSETS_DIR.glob("*.*") if f.name != ".gitkeep"]),
+        "total_assets": len([f for f in ASSETS_DIR.rglob("*.*") if f.name != ".gitkeep"]),
         "avg_confidence": round(avg_conf, 2),
         "top_tags": sorted(tag_freq.items(), key=lambda x: -x[1])[:10],
     }
@@ -353,8 +353,6 @@ def store_asset(source_path):
     if not source.exists():
         raise FileNotFoundError(f"Asset source not found: {source_path}")
 
-    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-
     # Hash the file content
     h = hashlib.sha256()
     with open(source, "rb") as f:
@@ -363,12 +361,16 @@ def store_asset(source_path):
     content_hash = h.hexdigest()[:12]
     ext = source.suffix.lower()
     asset_name = f"{content_hash}{ext}"
-    dest = ASSETS_DIR / asset_name
+    # Bucket by first 2 chars of hash (256 buckets, same as git objects)
+    bucket = content_hash[:2]
+    bucket_dir = ASSETS_DIR / bucket
+    bucket_dir.mkdir(parents=True, exist_ok=True)
+    dest = bucket_dir / asset_name
 
     if not dest.exists():
         shutil.copy2(source, dest)
 
-    return f"assets/{asset_name}"
+    return f"assets/{bucket}/{asset_name}"
 
 
 # --- Embedding ---
