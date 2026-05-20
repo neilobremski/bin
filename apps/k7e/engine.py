@@ -237,8 +237,11 @@ def search(query, limit=5, json_output=False):
     fused = _rrf_fuse([bm25_results, meta_results, embed_results], limit)
     conn.close()
 
-    # Filter out noise: require minimum score threshold
-    min_score = 1.0 / (RRF_K + limit * 2)
+    # Filter out noise: require minimum RRF score.
+    # rank-0 in one track = 1/(60+1) ≈ 0.0164
+    # rank-0 in two tracks = 2/(60+1) ≈ 0.0328
+    # We accept rank-0 single-track hits (0.0164) but reject lower.
+    min_score = 1.0 / (RRF_K + 1) - 0.001  # ~0.0154
     fused = [r for r in fused if r["score"] >= min_score]
 
     if json_output:
@@ -742,8 +745,8 @@ def _search_metadata(conn, query, limit):
     ).fetchall()
     scored = []
     for r in rows:
-        text = f"{r[1]} {r[2]} {r[3]}".lower()
-        hits = sum(1 for t in terms if t in text)
+        text_words = set(re.findall(r"\b\w+\b", f"{r[1]} {r[2]} {r[3]}".lower()))
+        hits = sum(1 for t in terms if t in text_words)
         ratio = hits / len(terms)
         if ratio >= 0.4:
             scored.append((r[0], r[1], ratio))
