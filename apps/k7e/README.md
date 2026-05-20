@@ -51,10 +51,37 @@ tags: [browser, playwright]
 ## History
 ```
 
+## Configuration
+
+```bash
+k7e status                  # show what's available + recommendations
+k7e config llm gemini       # set consolidation LLM (gemini|claude|codex|ollama|auto)
+k7e config embed_model nomic-embed-text
+k7e config ollama_url http://localhost:11434
+```
+
+Config stored in `$K7E_HOME/config.json`. Env vars override: `K7E_LLM`, `EMBED_MODEL`, `OLLAMA_URL`.
+
+## Capabilities
+
+| Feature | Backend | Required? |
+|---------|---------|-----------|
+| Keyword search (BM25) | SQLite FTS5 | Always available |
+| Semantic search | ollama embeddings | Optional — `ollama pull nomic-embed-text` |
+| Consolidation (LLM) | gemini/claude/codex/ollama | Optional — pattern extraction without |
+
+`k7e status` tells you exactly what's active and what to install for full capability.
+
 ## Dependencies
 
 Required: Python 3.10+, sqlite3 (bundled).
-Optional: ollama + nomic-embed-text (for semantic search track).
+
+Optional:
+- **ollama** — local embeddings + fallback LLM (`curl -fsSL https://ollama.com/install.sh | sh`)
+- **LLM CLI** — one of: gemini, claude, codex (for consolidation)
+
+On slim machines (e.g., Hetzner CX22) without GPU: use a cloud LLM CLI for consolidation
+and skip local embeddings (FTS5-only mode is still effective).
 
 ## Integration
 

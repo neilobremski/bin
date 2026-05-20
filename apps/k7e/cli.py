@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 
+import config
 from engine import (
     init,
     get,
@@ -34,6 +35,8 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("stats",       "[--json]",                        "Show knowledge store statistics."),
     ("check",       "[--fix]",                         "Audit structural integrity."),
     ("list",        "[--status] [--tag]",              "List entries with optional filters."),
+    ("status",      "",                                "Show system capabilities and recommendations."),
+    ("config",      "<key> [value]",                   "Get or set configuration (llm, embeddings, etc)."),
 ]
 
 
@@ -98,6 +101,14 @@ def main(argv=None):
     p.add_argument("--status", default=None)
     p.add_argument("--tag", default=None)
     p.add_argument("--json", action="store_true")
+
+    # status
+    sub.add_parser("status", help="System capabilities and recommendations")
+
+    # config
+    p = sub.add_parser("config", help="Get or set configuration")
+    p.add_argument("key", help="Config key (llm, embeddings, embed_model, ollama_url)")
+    p.add_argument("value", nargs="?", default=None, help="Value to set (omit to read)")
 
     args = parser.parse_args(argv)
 
@@ -188,6 +199,22 @@ def main(argv=None):
         else:
             for n in nodes:
                 print(f"  {n['id']}  {n['title']}  [{n['status']}]  conf:{n['confidence']}")
+
+    elif args.command == "status":
+        print(config.status())
+
+    elif args.command == "config":
+        if args.value is None:
+            val = config.get(args.key)
+            if val is not None:
+                print(val)
+            else:
+                print(f"{args.key}: not set")
+        else:
+            cfg = config.load_config()
+            cfg[args.key] = args.value
+            config.save_config(cfg)
+            print(f"{args.key} = {args.value}")
 
     return 0
 

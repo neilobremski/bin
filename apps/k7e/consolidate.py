@@ -98,6 +98,8 @@ def _llm_extract(text):
     if len(text) < 100:
         return []
 
+    import config
+
     prompt = (
         "Extract actionable knowledge from this text. Return JSON array of objects "
         "with 'title' (short descriptive), 'content' (the factual/procedural knowledge), "
@@ -106,13 +108,12 @@ def _llm_extract(text):
         "If nothing extractable, return []. Text:\n\n" + text[:3000]
     )
 
-    # Try gemini CLI first
-    gemini_bin = shutil.which("gemini")
-    if gemini_bin:
+    # Try configured CLI (gemini, claude, codex — auto-detected if not set)
+    cmd = config.resolve_llm_command(prompt)
+    if cmd:
         try:
             result = subprocess.run(
-                [gemini_bin, "--yolo", "-p", prompt, "-o", "text"],
-                capture_output=True, text=True, timeout=60,
+                cmd, capture_output=True, text=True, timeout=60,
                 cwd=os.getcwd(),
             )
             if result.returncode == 0:
@@ -120,14 +121,16 @@ def _llm_extract(text):
         except (subprocess.TimeoutExpired, OSError):
             pass
 
-    # Try ollama
+    # Fallback: ollama HTTP API
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+    model = config.get("llm_model", "qwen3.5:latest")
     try:
-        model = os.environ.get("INGEST_MODEL", "qwen3.5:latest")
         data = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
-        url = f"{garden.OLLAMA_URL}/api/generate"
-        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-        import urllib.request
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=data, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
             response = json.loads(resp.read())
             return _parse_llm_response(response.get("response", ""))
     except Exception:

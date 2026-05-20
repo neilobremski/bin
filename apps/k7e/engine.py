@@ -34,8 +34,18 @@ MOCS_DIR = None
 ASSETS_DIR = None
 INDEX_DB = None
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
+def _ollama_url():
+    return os.environ.get("OLLAMA_URL") or _load_config_val("ollama_url", "http://localhost:11434")
+
+def _embed_model():
+    return os.environ.get("EMBED_MODEL") or _load_config_val("embed_model", "nomic-embed-text")
+
+def _load_config_val(key, default):
+    try:
+        import config
+        return config.get(key, default)
+    except ImportError:
+        return default
 
 RRF_K = 60
 
@@ -228,7 +238,7 @@ def reindex(embeddings=False):
                 conn.execute(
                     "INSERT OR REPLACE INTO embeddings (node_id, vector, model, updated_at) "
                     "VALUES (?, ?, ?, ?)",
-                    (node_id, _pack_vector(vec), EMBED_MODEL, now)
+                    (node_id, _pack_vector(vec), _embed_model(), now)
                 )
 
     conn.commit()
@@ -345,9 +355,9 @@ def store_asset(source_path):
 
 def embed_text(text):
     try:
-        data = json.dumps({"model": EMBED_MODEL, "input": text}).encode()
+        data = json.dumps({"model": _embed_model(), "input": text}).encode()
         req = urllib.request.Request(
-            f"{OLLAMA_URL}/api/embed",
+            f"{_ollama_url()}/api/embed",
             data=data,
             headers={"Content-Type": "application/json"},
         )
@@ -433,7 +443,7 @@ def _index_node(node_id, title, aliases, tags, content, now):
         conn.execute(
             "INSERT OR REPLACE INTO embeddings (node_id, vector, model, updated_at) "
             "VALUES (?, ?, ?, ?)",
-            (node_id, _pack_vector(vec), EMBED_MODEL, now)
+            (node_id, _pack_vector(vec), _embed_model(), now)
         )
 
     conn.commit()
