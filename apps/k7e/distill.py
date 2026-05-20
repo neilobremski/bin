@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-import engine as garden
+import engine
 
 
 def distill(paths, dry_run=False):
@@ -30,7 +30,7 @@ def distill(paths, dry_run=False):
             files = [p]
         for f in files:
             candidates = extract_from_file(f)
-            new_knowledge = diff_against_garden(candidates)
+            new_knowledge = diff_against_store(candidates)
             if dry_run:
                 for item in new_knowledge:
                     results.append({"action": "would_store", "title": item["title"], "source": str(f)})
@@ -38,10 +38,10 @@ def distill(paths, dry_run=False):
                 for item in new_knowledge:
                     if item.get("_append_to"):
                         # Append to existing node instead of creating new
-                        garden.append_entry(item["_append_to"], "Edge Cases", item["content"])
+                        engine.append_entry(item["_append_to"], "Edge Cases", item["content"])
                         results.append({"action": "appended", "id": item["_append_to"], "title": item["title"], "source": str(f)})
                     else:
-                        node_id = garden.store_entry(
+                        node_id = engine.store_entry(
                             title=item["title"],
                             content=item["content"],
                             tags=item.get("tags", []),
@@ -59,39 +59,58 @@ def extract_from_file(path):
     return candidates
 
 
-def diff_against_garden(candidates):
+def diff_against_store(candidates):
     new = []
     for candidate in candidates:
-        # Search by title + content prefix for better dedup
-        search_query = candidate["title"] + " " + candidate["content"][:100]
-        results = garden.search(search_query, limit=3)
+        # Two-stage dedup: broad search, then content overlap check
+        # Stage 1: search by content keywords (not title — titles often differ)
+        content_terms = " ".join(
+            w for w in candidate["content"].split()[:20]
+            if len(w) > 3
+        )
+        search_query = content_terms or candidate["title"]
+        results = engine.search(search_query, limit=5)
+
         if not results:
             new.append(candidate)
             continue
-        top = results[0]
-        if top["score"] < 0.025:
-            new.append(candidate)
-            continue
 
-        # Match found — check if candidate adds new information
-        try:
-            existing_text = garden.get(top["id"])
-        except FileNotFoundError:
-            new.append(candidate)
-            continue
-
-        # Extract key terms from candidate content (words >= 4 chars, non-stopwords)
+        # Stage 2: check content overlap against top results
         candidate_terms = set(
             w.lower() for w in re.findall(r"\b\w{4,}\b", candidate["content"])
         )
-        existing_lower = existing_text.lower()
-        novel_terms = [t for t in candidate_terms if t not in existing_lower]
-
-        if len(novel_terms) > len(candidate_terms) * 0.3:
-            # More than 30% novel terms — append to existing node
-            candidate["_append_to"] = top["id"]
+        if not candidate_terms:
             new.append(candidate)
-        # else: existing node already covers it, skip
+            continue
+
+        best_overlap = 0.0
+        best_match_id = None
+        for result in results:
+            try:
+                existing_text = engine.get(result["id"])
+            except FileNotFoundError:
+                continue
+            existing_terms = set(
+                w.lower() for w in re.findall(r"\b\w{4,}\b", existing_text)
+            )
+            if not existing_terms:
+                continue
+            overlap = len(candidate_terms & existing_terms) / len(candidate_terms)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_match_id = result["id"]
+
+        if best_overlap >= 0.6:
+            # Existing node covers 60%+ of candidate's content
+            novel_terms = [t for t in candidate_terms if t not in engine.get(best_match_id).lower()]
+            if len(novel_terms) > len(candidate_terms) * 0.3:
+                # >30% novel — append the new bits
+                candidate["_append_to"] = best_match_id
+                new.append(candidate)
+            # else: fully covered, skip
+        else:
+            # No sufficient overlap — genuinely new
+            new.append(candidate)
 
     return new
 

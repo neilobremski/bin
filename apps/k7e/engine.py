@@ -366,7 +366,7 @@ def rebuild_mocs():
 
 
 def stats():
-    """Return garden statistics."""
+    """Return store statistics."""
     init()
     conn = _connect()
     total_nodes = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]

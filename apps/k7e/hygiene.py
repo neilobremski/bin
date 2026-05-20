@@ -4,15 +4,15 @@ import re
 import time
 from pathlib import Path
 
-import engine as garden
+import engine
 
 
 def run_audit(fix=False):
-    """Audit garden for structural issues. Returns list of issues found."""
-    garden.init()
-    nodes = list(garden._all_node_files())
-    mocs = list(garden.MOCS_DIR.glob("*.md"))
-    assets = [f for f in garden.ASSETS_DIR.rglob("*.*") if f.name != ".gitkeep"]
+    """Audit store for structural issues. Returns list of issues found."""
+    engine.init()
+    nodes = list(engine._all_node_files())
+    mocs = list(engine.MOCS_DIR.glob("*.md"))
+    assets = [f for f in engine.ASSETS_DIR.rglob("*.*") if f.name != ".gitkeep"]
 
     node_ids = {n.stem for n in nodes}
     tag_to_nodes = {}
@@ -21,7 +21,7 @@ def run_audit(fix=False):
 
     for node_path in nodes:
         text = node_path.read_text(encoding="utf-8")
-        meta = garden._parse_frontmatter(text)
+        meta = engine._parse_frontmatter(text)
         node_id = node_path.stem
 
         required = ["id", "title", "status", "last_tended", "tags"]
@@ -48,10 +48,10 @@ def run_audit(fix=False):
             issues.append(f"[Tag: {tag}] No MOC file exists")
             if fix:
                 first_node_id = tag_to_nodes[tag][0]
-                first_node_path = garden._node_path(first_node_id)
-                garden._update_mocs(
+                first_node_path = engine._node_path(first_node_id)
+                engine._update_mocs(
                     first_node_id,
-                    garden._parse_frontmatter(
+                    engine._parse_frontmatter(
                         first_node_path.read_text(encoding="utf-8")
                     ).get("title", ""),
                     [tag]
