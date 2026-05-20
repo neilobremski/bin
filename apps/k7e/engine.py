@@ -18,6 +18,7 @@ import re
 import shutil
 import sqlite3
 import struct
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -50,13 +51,24 @@ def _load_config_val(key, default):
 RRF_K = 60
 
 
+def reset(home=None):
+    """Reset store paths. For testing or multi-store usage."""
+    global NODES_DIR, MOCS_DIR, ASSETS_DIR, INDEX_DB
+    h = Path(home) if home else _k7e_home()
+    NODES_DIR = h / "nodes"
+    MOCS_DIR = h / "mocs"
+    ASSETS_DIR = h / "assets"
+    INDEX_DB = h / ".index.db"
+
+
 def init():
     global NODES_DIR, MOCS_DIR, ASSETS_DIR, INDEX_DB
-    home = _k7e_home()
-    NODES_DIR = home / "nodes"
-    MOCS_DIR = home / "mocs"
-    ASSETS_DIR = home / "assets"
-    INDEX_DB = home / ".index.db"
+    if NODES_DIR is None:
+        home = _k7e_home()
+        NODES_DIR = home / "nodes"
+        MOCS_DIR = home / "mocs"
+        ASSETS_DIR = home / "assets"
+        INDEX_DB = home / ".index.db"
     NODES_DIR.mkdir(parents=True, exist_ok=True)
     MOCS_DIR.mkdir(parents=True, exist_ok=True)
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
@@ -66,20 +78,42 @@ def init():
 
 
 def next_id():
-    """Generate next K7E-BBB-NNNNN ID. Sequential across all buckets."""
-    highest = 0
-    for bucket_dir in sorted(NODES_DIR.iterdir()):
-        if not bucket_dir.is_dir():
-            continue
-        for f in bucket_dir.glob("K7E-*.md"):
-            parts = f.stem.split("-")
-            if len(parts) == 3:
-                try:
-                    num = int(parts[1]) * 100000 + int(parts[2])
-                    highest = max(highest, num)
-                except ValueError:
-                    pass
-    total = highest + 1
+    """Generate next K7E-BBB-NNNNN ID. Sequential across all buckets.
+    Uses a counter in the sqlite meta table for O(1) performance.
+    Falls back to filesystem scan once to initialize if counter is missing."""
+    conn = _connect()
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
+    )
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = 'next_id_counter'"
+    ).fetchone()
+
+    if row is not None:
+        total = int(row[0]) + 1
+    else:
+        # Initialize from filesystem scan (one-time fallback)
+        highest = 0
+        for bucket_dir in sorted(NODES_DIR.iterdir()):
+            if not bucket_dir.is_dir():
+                continue
+            for f in bucket_dir.glob("K7E-*.md"):
+                parts = f.stem.split("-")
+                if len(parts) == 3:
+                    try:
+                        num = int(parts[1]) * 100000 + int(parts[2])
+                        highest = max(highest, num)
+                    except ValueError:
+                        pass
+        total = highest + 1
+
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('next_id_counter', ?)",
+        (str(total),)
+    )
+    conn.commit()
+    conn.close()
+
     bucket = total // 100000
     seq = total % 100000
     return f"K7E-{bucket:03d}-{seq:05d}"
@@ -224,6 +258,7 @@ def reindex(embeddings=False):
     conn = _connect()
     conn.execute("DELETE FROM nodes")
     conn.execute("DELETE FROM nodes_fts")
+    conn.execute("DELETE FROM pending_embeddings")
     if embeddings:
         conn.execute("DELETE FROM embeddings")
     conn.commit()
@@ -260,9 +295,19 @@ def reindex(embeddings=False):
                     "VALUES (?, ?, ?, ?)",
                     (node_id, _pack_vector(vec), _embed_model(), now)
                 )
+            else:
+                # Queue for later if embedding service unavailable
+                conn.execute(
+                    "INSERT OR REPLACE INTO pending_embeddings (node_id, queued_at) VALUES (?, ?)",
+                    (node_id, now)
+                )
 
     conn.commit()
     conn.close()
+
+    # Process any pending embeddings queued during reindex
+    if embeddings:
+        process_pending_embeddings()
 
 
 def list_nodes(status=None, tag=None):
@@ -342,6 +387,129 @@ def stats():
         "avg_confidence": round(avg_conf, 2),
         "top_tags": sorted(tag_freq.items(), key=lambda x: -x[1])[:10],
     }
+
+
+# --- Compile (knowledge compounding) ---
+
+def compile_tag(tag, dry_run=False):
+    """Synthesize all active entries for a tag into a single reference page.
+
+    Requires 3+ active nodes with the given tag. Uses configured LLM to
+    produce a compiled overview. Source nodes are NOT modified or deleted.
+    Returns the new compiled node ID, or None if dry_run.
+    """
+    import config
+    import subprocess
+
+    init()
+    nodes = list_nodes(tag=tag, status="active")
+    if len(nodes) < 3:
+        print(f"Need 3+ active nodes with tag '{tag}', found {len(nodes)}.", file=sys.stderr)
+        return None
+
+    # Gather content from source nodes
+    entries = []
+    for n in nodes:
+        try:
+            text = get(n["id"])
+            body = _extract_body(text)
+            entries.append({"id": n["id"], "title": n["title"], "content": body.strip()})
+        except FileNotFoundError:
+            continue
+
+    if len(entries) < 3:
+        print(f"Need 3+ readable nodes with tag '{tag}', found {len(entries)}.", file=sys.stderr)
+        return None
+
+    # Build prompt
+    entry_texts = "\n\n---\n\n".join(
+        f"[Entry {e['id']}] {e['title']}\n{e['content']}" for e in entries
+    )
+    prompt = (
+        f"Synthesize these {len(entries)} knowledge entries about '{tag}' into a single "
+        f"authoritative reference. Include sections: Overview, Procedures, Gotchas, "
+        f"Open Questions. Preserve specific technical details (commands, flags, ports). "
+        f"Cite source entry IDs.\n\n{entry_texts}"
+    )
+
+    if dry_run:
+        print(f"Would compile {len(entries)} entries for tag '{tag}':")
+        for e in entries:
+            print(f"  {e['id']}  {e['title']}")
+        return None
+
+    # Call LLM
+    cmd = config.resolve_llm_command(prompt)
+    compiled_content = None
+
+    if cmd:
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120,
+                cwd=os.getcwd(),
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                compiled_content = result.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    # Fallback: ollama HTTP API
+    if not compiled_content:
+        ollama_url = config.get("ollama_url", "http://localhost:11434")
+        model = config.get("llm_model", "qwen3.5:latest")
+        try:
+            data = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
+            req = urllib.request.Request(
+                f"{ollama_url}/api/generate",
+                data=data, headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                response = json.loads(resp.read())
+                compiled_content = response.get("response", "").strip()
+        except Exception:
+            pass
+
+    if not compiled_content:
+        print("Error: No LLM available to compile entries. Configure with: k7e config llm <provider>", file=sys.stderr)
+        return None
+
+    # Store as a new compiled node
+    source_ids = [e["id"] for e in entries]
+    content_with_sources = (
+        f"{compiled_content}\n\n"
+        f"## Sources\n"
+        + "\n".join(f"* [[{sid}]]" for sid in source_ids)
+    )
+
+    tags_list = [tag, "compiled"]
+    node_id = next_id()
+    now = time.strftime("%Y-%m-%d")
+
+    body = f"""---
+id: {node_id}
+title: {tag} — Compiled Reference
+aliases: []
+status: compiled
+confidence: 0.8
+verification_count: 0
+last_tended: {now}
+tags: [{', '.join(tags_list)}]
+---
+
+{content_with_sources}
+
+## History
+* {now}: Compiled from {len(entries)} entries.
+"""
+
+    node_path = _node_path(node_id)
+    node_path.parent.mkdir(parents=True, exist_ok=True)
+    node_path.write_text(body, encoding="utf-8")
+
+    _index_node(node_id, f"{tag} — Compiled Reference", [], tags_list, content_with_sources, now)
+    _update_mocs(node_id, f"{tag} — Compiled Reference", tags_list)
+
+    return node_id
 
 
 # --- Assets ---
@@ -431,6 +599,16 @@ CREATE TABLE IF NOT EXISTS embeddings (
     model TEXT,
     updated_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pending_embeddings (
+    node_id TEXT PRIMARY KEY,
+    queued_at TEXT
+);
 """
 
 
@@ -460,16 +638,63 @@ def _index_node(node_id, title, aliases, tags, content, now):
          " ".join(tags) if isinstance(tags, list) else tags, content)
     )
 
-    vec = embed_text(f"{title} {content[:500]}")
-    if vec:
-        conn.execute(
-            "INSERT OR REPLACE INTO embeddings (node_id, vector, model, updated_at) "
-            "VALUES (?, ?, ?, ?)",
-            (node_id, _pack_vector(vec), _embed_model(), now)
-        )
+    # Queue embedding for async processing instead of blocking
+    conn.execute(
+        "INSERT OR REPLACE INTO pending_embeddings (node_id, queued_at) VALUES (?, ?)",
+        (node_id, now)
+    )
 
     conn.commit()
     conn.close()
+
+
+def process_pending_embeddings():
+    """Process queued embeddings. Returns count of embeddings generated."""
+    init()
+    conn = _connect()
+    pending = conn.execute(
+        "SELECT node_id, queued_at FROM pending_embeddings"
+    ).fetchall()
+
+    if not pending:
+        conn.close()
+        return 0
+
+    processed = 0
+    for node_id, _queued_at in pending:
+        row = conn.execute(
+            "SELECT title FROM nodes WHERE id = ?", (node_id,)
+        ).fetchone()
+        if not row:
+            # Node was deleted; remove from queue
+            conn.execute("DELETE FROM pending_embeddings WHERE node_id = ?", (node_id,))
+            continue
+
+        title = row[0]
+        # Read content from FTS table
+        fts_row = conn.execute(
+            "SELECT content FROM nodes_fts WHERE rowid = (SELECT rowid FROM nodes WHERE id = ?)",
+            (node_id,)
+        ).fetchone()
+        content = fts_row[0] if fts_row else ""
+
+        vec = embed_text(f"{title} {content[:500]}")
+        if vec:
+            now = time.strftime("%Y-%m-%d")
+            conn.execute(
+                "INSERT OR REPLACE INTO embeddings (node_id, vector, model, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (node_id, _pack_vector(vec), _embed_model(), now)
+            )
+            conn.execute("DELETE FROM pending_embeddings WHERE node_id = ?", (node_id,))
+            processed += 1
+        else:
+            # Embedding service unavailable; leave in queue for retry
+            break
+
+    conn.commit()
+    conn.close()
+    return processed
 
 
 _STOPWORDS = {"a", "an", "the", "is", "are", "was", "were", "be", "been", "being",

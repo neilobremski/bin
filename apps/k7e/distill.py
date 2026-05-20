@@ -36,12 +36,17 @@ def distill(paths, dry_run=False):
                     results.append({"action": "would_store", "title": item["title"], "source": str(f)})
             else:
                 for item in new_knowledge:
-                    node_id = garden.store_entry(
-                        title=item["title"],
-                        content=item["content"],
-                        tags=item.get("tags", []),
-                    )
-                    results.append({"action": "stored", "id": node_id, "title": item["title"], "source": str(f)})
+                    if item.get("_append_to"):
+                        # Append to existing node instead of creating new
+                        garden.append_entry(item["_append_to"], "Edge Cases", item["content"])
+                        results.append({"action": "appended", "id": item["_append_to"], "title": item["title"], "source": str(f)})
+                    else:
+                        node_id = garden.store_entry(
+                            title=item["title"],
+                            content=item["content"],
+                            tags=item.get("tags", []),
+                        )
+                        results.append({"action": "stored", "id": node_id, "title": item["title"], "source": str(f)})
     return results
 
 
@@ -57,14 +62,61 @@ def extract_from_file(path):
 def diff_against_garden(candidates):
     new = []
     for candidate in candidates:
-        results = garden.search(candidate["title"], limit=3)
+        # Search by title + content prefix for better dedup
+        search_query = candidate["title"] + " " + candidate["content"][:100]
+        results = garden.search(search_query, limit=3)
         if not results:
             new.append(candidate)
             continue
         top = results[0]
-        if top["score"] < 0.02:
+        if top["score"] < 0.025:
             new.append(candidate)
+            continue
+
+        # Match found — check if candidate adds new information
+        try:
+            existing_text = garden.get(top["id"])
+        except FileNotFoundError:
+            new.append(candidate)
+            continue
+
+        # Extract key terms from candidate content (words >= 4 chars, non-stopwords)
+        candidate_terms = set(
+            w.lower() for w in re.findall(r"\b\w{4,}\b", candidate["content"])
+        )
+        existing_lower = existing_text.lower()
+        novel_terms = [t for t in candidate_terms if t not in existing_lower]
+
+        if len(novel_terms) > len(candidate_terms) * 0.3:
+            # More than 30% novel terms — append to existing node
+            candidate["_append_to"] = top["id"]
+            new.append(candidate)
+        # else: existing node already covers it, skip
+
     return new
+
+
+def _chunk_text(text, size=3000, overlap=200):
+    """Split text into overlapping chunks for processing."""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + size
+        chunks.append(text[start:end])
+        start = end - overlap
+    return chunks
+
+
+def _dedup_candidates(candidates):
+    """Deduplicate candidates by title similarity (lowercase first 40 chars)."""
+    seen = set()
+    deduped = []
+    for c in candidates:
+        key = c["title"].lower()[:40]
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c)
+    return deduped
 
 
 def _pattern_extract(text):
@@ -100,14 +152,29 @@ def _llm_extract(text):
 
     import config
 
-    prompt = (
-        "Extract actionable knowledge from this text. Return JSON array of objects "
-        "with 'title' (short descriptive), 'content' (the factual/procedural knowledge), "
-        "and 'tags' (list of topic keywords). Only extract verified facts, procedures, "
-        "corrections, or preferences — not opinions, greetings, or planning. "
-        "If nothing extractable, return []. Text:\n\n" + text[:3000]
-    )
+    # Chunk the input and extract from each chunk independently
+    chunks = _chunk_text(text, size=3000, overlap=200)
+    all_candidates = []
 
+    for chunk in chunks:
+        prompt = (
+            "Extract actionable knowledge from this text. Return JSON array of objects "
+            "with 'title' (short descriptive), 'content' (the factual/procedural knowledge), "
+            "and 'tags' (list of topic keywords). Only extract verified facts, procedures, "
+            "corrections, or preferences — not opinions, greetings, or planning. "
+            "If nothing extractable, return []. Text:\n\n" + chunk
+        )
+
+        candidates = _run_llm_prompt(prompt, config)
+        if candidates:
+            all_candidates.extend(candidates)
+
+    # Deduplicate across chunks
+    return _dedup_candidates(all_candidates)
+
+
+def _run_llm_prompt(prompt, config):
+    """Run a single LLM prompt and return parsed candidates."""
     # Try configured CLI (gemini, claude, codex — auto-detected if not set)
     cmd = config.resolve_llm_command(prompt)
     if cmd:

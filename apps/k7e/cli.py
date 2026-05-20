@@ -18,23 +18,27 @@ from engine import (
     stats,
     store_asset,
     append_entry,
+    compile_tag,
+    process_pending_embeddings,
 )
 from distill import distill
 from hygiene import run_audit
 
 
 COMMANDS: list[tuple[str, str, str]] = [
-    ("search",      "<query> [--limit N] [--json]",    "Hybrid search (BM25 + semantic + metadata)."),
+    ("search",      "<query> [--limit N] [--json] [--ids]", "Hybrid search (BM25 + semantic + metadata)."),
     ("get",         "<id>",                            "Read a full knowledge entry."),
     ("store",       "<title> [--tags] [--aliases]",    "Create a new entry (content from stdin or --content)."),
     ("append",        "<id> --section <name>",           "Append to an existing entry's section."),
     ("asset",       "<file>",                          "Store binary (content-addressed, deduped). Prints path."),
+    ("compile",     "<tag> [--dry-run]",               "Synthesize entries for a tag into a reference page."),
     ("distill", "<file|dir> [--dry-run]",          "Extract knowledge from raw experience files."),
     ("reindex",     "[--embeddings]",                  "Rebuild search index from files."),
+    ("embed-pending", "",                              "Process queued embeddings."),
     ("rebuild-mocs", "",                               "Rebuild all Maps of Content from entry tags."),
     ("stats",       "[--json]",                        "Show knowledge store statistics."),
     ("check",       "[--fix]",                         "Audit structural integrity."),
-    ("list",        "[--status] [--tag]",              "List entries with optional filters."),
+    ("list",        "[--status] [--tag] [--ids]",      "List entries with optional filters."),
     ("status",      "",                                "Show system capabilities and recommendations."),
     ("config",      "<key> [value]",                   "Get or set configuration (llm, embeddings, etc)."),
 ]
@@ -54,6 +58,7 @@ def main(argv=None):
     p.add_argument("query", help="Search query")
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--json", action="store_true")
+    p.add_argument("--ids", action="store_true", help="Output IDs only, one per line")
 
     # get
     p = sub.add_parser("get", help="Read entry")
@@ -81,9 +86,17 @@ def main(argv=None):
     p.add_argument("paths", nargs="+", help="Files or directories")
     p.add_argument("--dry-run", action="store_true")
 
+    # compile
+    p = sub.add_parser("compile", help="Synthesize entries for a tag into a reference page")
+    p.add_argument("tag", help="Tag to compile")
+    p.add_argument("--dry-run", action="store_true")
+
     # reindex
     p = sub.add_parser("reindex", help="Rebuild index")
     p.add_argument("--embeddings", action="store_true")
+
+    # embed-pending
+    sub.add_parser("embed-pending", help="Process queued embeddings")
 
     # rebuild-mocs
     sub.add_parser("rebuild-mocs", help="Rebuild MOCs from tags")
@@ -101,6 +114,7 @@ def main(argv=None):
     p.add_argument("--status", default=None)
     p.add_argument("--tag", default=None)
     p.add_argument("--json", action="store_true")
+    p.add_argument("--ids", action="store_true", help="Output IDs only, one per line")
 
     # status
     sub.add_parser("status", help="System capabilities and recommendations")
@@ -120,7 +134,10 @@ def main(argv=None):
 
     if args.command == "search":
         results = search(args.query, limit=args.limit)
-        if args.json:
+        if args.ids:
+            for r in results:
+                print(r['id'])
+        elif args.json:
             print(json.dumps(results, indent=2))
         elif not results:
             print("No results.")
@@ -165,9 +182,18 @@ def main(argv=None):
         if not results:
             print("No new knowledge extracted.")
 
+    elif args.command == "compile":
+        node_id = compile_tag(args.tag, dry_run=args.dry_run)
+        if node_id:
+            print(f"Compiled {node_id}: {args.tag} — Compiled Reference")
+
     elif args.command == "reindex":
         reindex(embeddings=args.embeddings)
         print("Reindex complete.")
+
+    elif args.command == "embed-pending":
+        count = process_pending_embeddings()
+        print(f"Processed {count} pending embedding(s).")
 
     elif args.command == "rebuild-mocs":
         rebuild_mocs()
@@ -194,7 +220,10 @@ def main(argv=None):
 
     elif args.command == "list":
         nodes = list_nodes(status=args.status, tag=args.tag)
-        if args.json:
+        if args.ids:
+            for n in nodes:
+                print(n['id'])
+        elif args.json:
             print(json.dumps(nodes, indent=2))
         else:
             for n in nodes:

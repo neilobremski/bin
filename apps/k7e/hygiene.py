@@ -10,9 +10,9 @@ import engine as garden
 def run_audit(fix=False):
     """Audit garden for structural issues. Returns list of issues found."""
     garden.init()
-    nodes = list(garden.NODES_DIR.glob("KG-*.md"))
+    nodes = list(garden._all_node_files())
     mocs = list(garden.MOCS_DIR.glob("*.md"))
-    assets = [f for f in garden.ASSETS_DIR.glob("*.*") if f.name != ".gitkeep"]
+    assets = [f for f in garden.ASSETS_DIR.rglob("*.*") if f.name != ".gitkeep"]
 
     node_ids = {n.stem for n in nodes}
     tag_to_nodes = {}
@@ -35,11 +35,11 @@ def run_audit(fix=False):
         for tag in tags:
             tag_to_nodes.setdefault(tag, []).append(node_id)
 
-        for link in re.findall(r"\[\[(KG-\d+)\]\]", text):
+        for link in re.findall(r"\[\[(K7E-\d{3}-\d{5})\]\]", text):
             if link not in node_ids:
                 issues.append(f"[{node_id}] Dead link to [[{link}]]")
 
-        for ref in re.findall(r"assets/([a-f0-9]+\.[a-z0-9]+)", text):
+        for ref in re.findall(r"assets/([a-f0-9]{2}/[a-f0-9]+\.[a-z0-9]+)", text):
             referenced_assets.add(ref)
 
     moc_tags = {m.stem for m in mocs}
@@ -47,17 +47,21 @@ def run_audit(fix=False):
         if tag not in moc_tags:
             issues.append(f"[Tag: {tag}] No MOC file exists")
             if fix:
+                first_node_id = tag_to_nodes[tag][0]
+                first_node_path = garden._node_path(first_node_id)
                 garden._update_mocs(
-                    tag_to_nodes[tag][0],
+                    first_node_id,
                     garden._parse_frontmatter(
-                        (garden.NODES_DIR / f"{tag_to_nodes[tag][0]}.md").read_text(encoding="utf-8")
+                        first_node_path.read_text(encoding="utf-8")
                     ).get("title", ""),
                     [tag]
                 )
 
     for asset in assets:
-        if asset.name not in referenced_assets:
-            issues.append(f"[Asset: {asset.name}] Unreferenced")
+        # Build relative path: bucket/filename
+        rel = f"{asset.parent.name}/{asset.name}"
+        if rel not in referenced_assets:
+            issues.append(f"[Asset: {rel}] Unreferenced")
             if fix:
                 asset.unlink()
 
