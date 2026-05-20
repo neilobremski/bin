@@ -8,7 +8,7 @@ Standalone knowledge accumulation engine. Flat markdown files + hybrid search.
 k7e store "Chrome Remote Debugging" --tags browser,playwright <<< "Use --remote-debugging-port=9222"
 k7e search "chrome debugging"
 k7e get KG-00001
-k7e tend KG-00001 --section "Edge Cases" <<< "Port 9222 conflicts with other tools"
+k7e append KG-00001 --section "Edge Cases" <<< "Port 9222 conflicts with other tools"
 k7e asset screenshot.png
 k7e distill journal/today.md
 k7e reindex --embeddings

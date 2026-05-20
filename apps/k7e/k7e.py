@@ -14,7 +14,7 @@ Surface (CLI):
   search <query>              hybrid search (BM25 + semantic + metadata)
   get <id>                    read a full entry
   store <title> [--tags]      create a new knowledge entry
-  tend <id> --section <name>  append to existing entry
+  append <id> --section <name>  append to existing entry
   asset <file>                store binary (content-addressed, deduped)
   distill <file|dir>      extract knowledge from raw experience
   reindex [--embeddings]      rebuild index from files

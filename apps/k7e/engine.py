@@ -1,4 +1,4 @@
-"""k7e engine — store, search, tend, reindex, assets.
+"""k7e engine — store, search, append, reindex, assets.
 
 Flat markdown files are source of truth. SQLite FTS5 + optional embeddings
 are derived indexes, rebuildable from files via reindex().
@@ -104,7 +104,7 @@ def _all_node_files():
             yield f
 
 
-def plant(title, content, tags=None, aliases=None):
+def store_entry(title, content, tags=None, aliases=None):
     tags = tags or []
     aliases = aliases or []
     init()
@@ -145,7 +145,7 @@ tags: [{', '.join(tags)}]
     return node_id
 
 
-def tend(node_id, section, content):
+def append_entry(node_id, section, content):
     node_path = _node_path(node_id)
     if not node_path.exists():
         raise FileNotFoundError(f"Node {node_id} not found")

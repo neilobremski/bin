@@ -33,15 +33,15 @@ def distill(paths, dry_run=False):
             new_knowledge = diff_against_garden(candidates)
             if dry_run:
                 for item in new_knowledge:
-                    results.append({"action": "would_plant", "title": item["title"], "source": str(f)})
+                    results.append({"action": "would_store", "title": item["title"], "source": str(f)})
             else:
                 for item in new_knowledge:
-                    node_id = garden.plant(
+                    node_id = garden.store_entry(
                         title=item["title"],
                         content=item["content"],
                         tags=item.get("tags", []),
                     )
-                    results.append({"action": "planted", "id": node_id, "title": item["title"], "source": str(f)})
+                    results.append({"action": "stored", "id": node_id, "title": item["title"], "source": str(f)})
     return results
 
 

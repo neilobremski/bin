@@ -11,13 +11,13 @@ from engine import (
     init,
     get,
     list_nodes,
-    plant,
+    store_entry,
     rebuild_mocs,
     reindex,
     search,
     stats,
     store_asset,
-    tend,
+    append_entry,
 )
 from distill import distill
 from hygiene import run_audit
@@ -27,7 +27,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("search",      "<query> [--limit N] [--json]",    "Hybrid search (BM25 + semantic + metadata)."),
     ("get",         "<id>",                            "Read a full knowledge entry."),
     ("store",       "<title> [--tags] [--aliases]",    "Create a new entry (content from stdin or --content)."),
-    ("tend",        "<id> --section <name>",           "Append to an existing entry's section."),
+    ("append",        "<id> --section <name>",           "Append to an existing entry's section."),
     ("asset",       "<file>",                          "Store binary (content-addressed, deduped). Prints path."),
     ("distill", "<file|dir> [--dry-run]",          "Extract knowledge from raw experience files."),
     ("reindex",     "[--embeddings]",                  "Rebuild search index from files."),
@@ -67,7 +67,7 @@ def main(argv=None):
     p.add_argument("--content", default=None, help="Content (or pipe via stdin)")
 
     # tend
-    p = sub.add_parser("tend", help="Append to entry")
+    p = sub.add_parser("append", help="Append to entry")
     p.add_argument("id", help="Entry ID")
     p.add_argument("--section", default="Edge Cases", help="Section to append to")
     p.add_argument("--content", default=None, help="Content (or pipe via stdin)")
@@ -139,13 +139,13 @@ def main(argv=None):
         content = args.content or sys.stdin.read()
         tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
         aliases = [a.strip() for a in args.aliases.split(",") if a.strip()] if args.aliases else []
-        entry_id = plant(args.title, content, tags=tags, aliases=aliases)
+        entry_id = store_entry(args.title, content, tags=tags, aliases=aliases)
         print(f"Stored {entry_id}: {args.title}")
 
-    elif args.command == "tend":
+    elif args.command == "append":
         content = args.content or sys.stdin.read()
-        tend(args.id, args.section, content)
-        print(f"Tended {args.id} [{args.section}]")
+        append_entry(args.id, args.section, content)
+        print(f"Appended to {args.id} [{args.section}]")
 
     elif args.command == "asset":
         try:
