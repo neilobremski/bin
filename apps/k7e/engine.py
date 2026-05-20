@@ -138,22 +138,33 @@ def _all_node_files():
             yield f
 
 
-def store_entry(title, content, tags=None, aliases=None):
-    """Store a new knowledge entry. No dedup — caller is responsible.
-    For dedup-aware ingestion, use distill."""
+def store_entry(title, content, tags=None, aliases=None, importance=5):
+    """Store a new knowledge entry. Deduplicates by content hash at storage layer.
+    For semantic dedup-aware ingestion, use distill."""
     tags = tags or []
     aliases = aliases or []
     init()
 
+    # Content-hash dedup: check for exact duplicate before writing
+    content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
+    conn = _connect()
+    existing = conn.execute(
+        "SELECT id FROM nodes WHERE content_hash = ?", (content_hash,)
+    ).fetchone()
+    conn.close()
+    if existing:
+        return existing[0]
+
     node_id = next_id()
     now = time.strftime("%Y-%m-%d")
+    confidence = round(importance / 10, 1)
 
     body = f"""---
 id: {node_id}
 title: {title}
 aliases: [{', '.join(aliases)}]
 status: active
-confidence: 0.5
+confidence: {confidence}
 verification_count: 0
 last_updated: {now}
 tags: [{', '.join(tags)}]
@@ -175,7 +186,7 @@ tags: [{', '.join(tags)}]
     node_path.parent.mkdir(parents=True, exist_ok=True)
     node_path.write_text(body, encoding="utf-8")
 
-    _index_node(node_id, title, aliases, tags, content, now)
+    _index_node(node_id, title, aliases, tags, content, now, content_hash=content_hash, confidence=confidence)
     _update_mocs(node_id, title, tags)
 
     return node_id
@@ -228,6 +239,22 @@ def append_entry(node_id, section, content):
     return node_id
 
 
+def supersede(old_id, new_id):
+    """Mark old_id as superseded by new_id."""
+    node_path = _node_path(old_id)
+    if not node_path.exists():
+        return
+    text = node_path.read_text(encoding="utf-8")
+    text = re.sub(r"status: active", "status: superseded", text)
+    text = re.sub(r"(tags: \[.*?\])", r"\1\nsuperseded_by: " + new_id, text)
+    node_path.write_text(text, encoding="utf-8")
+    # Update index
+    conn = _connect()
+    conn.execute("UPDATE nodes SET status = 'superseded', superseded_by = ? WHERE id = ?", (new_id, old_id))
+    conn.commit()
+    conn.close()
+
+
 def search(query, limit=5, json_output=False):
     init()
     conn = _connect()
@@ -245,6 +272,16 @@ def search(query, limit=5, json_output=False):
     # We accept rank-0 single-track hits (0.0164) but reject lower.
     min_score = 1.0 / (RRF_K + 1) - 0.001  # ~0.0154
     fused = [r for r in fused if r["score"] >= min_score]
+
+    # Apply confidence as a tiebreaker boost
+    if fused:
+        conn2 = _connect()
+        for r in fused:
+            conf_row = conn2.execute("SELECT confidence FROM nodes WHERE id = ?", (r["id"],)).fetchone()
+            if conf_row and conf_row[0]:
+                r["score"] = round(r["score"] * (0.7 + 0.3 * conf_row[0]), 4)
+        conn2.close()
+        fused.sort(key=lambda x: -x["score"])
 
     if json_output:
         return fused
@@ -277,14 +314,15 @@ def reindex(embeddings=False):
         aliases = meta.get("aliases", [])
         tags = meta.get("tags", [])
         now = meta.get("last_updated", time.strftime("%Y-%m-%d"))
+        content_hash = hashlib.sha256(body.encode()).hexdigest()[:16]
 
         conn.execute(
             "INSERT OR REPLACE INTO nodes (id, title, aliases, status, confidence, "
-            "verification_count, last_updated, tags, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "verification_count, last_updated, tags, created_at, updated_at, content_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (node_id, title, ", ".join(aliases), meta.get("status", "active"),
              meta.get("confidence", 0.5), meta.get("verification_count", 0),
-             now, ", ".join(tags), now, now)
+             now, ", ".join(tags), now, now, content_hash)
         )
         conn.execute(
             "INSERT INTO nodes_fts (rowid, title, aliases, tags, content) "
@@ -590,7 +628,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     last_updated TEXT,
     tags TEXT DEFAULT '',
     created_at TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    content_hash TEXT DEFAULT '',
+    superseded_by TEXT DEFAULT ''
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
@@ -627,16 +667,16 @@ def _connect():
     return conn
 
 
-def _index_node(node_id, title, aliases, tags, content, now):
+def _index_node(node_id, title, aliases, tags, content, now, content_hash=None, confidence=0.5):
     conn = _connect()
     alias_str = ", ".join(aliases) if isinstance(aliases, list) else aliases
     tag_str = ", ".join(tags) if isinstance(tags, list) else tags
 
     conn.execute(
         "INSERT OR REPLACE INTO nodes (id, title, aliases, status, confidence, "
-        "verification_count, last_updated, tags, created_at, updated_at) "
-        "VALUES (?, ?, ?, 'active', 0.5, 0, ?, ?, ?, ?)",
-        (node_id, title, alias_str, now, tag_str, now, now)
+        "verification_count, last_updated, tags, created_at, updated_at, content_hash) "
+        "VALUES (?, ?, ?, 'active', ?, 0, ?, ?, ?, ?, ?)",
+        (node_id, title, alias_str, confidence, now, tag_str, now, now, content_hash)
     )
 
     conn.execute("DELETE FROM nodes_fts WHERE rowid = (SELECT rowid FROM nodes WHERE id = ?)", (node_id,))
@@ -732,7 +772,7 @@ def _search_bm25(conn, query, limit):
             rows = conn.execute(
                 "SELECT nodes.id, nodes.title, bm25(nodes_fts) as score "
                 "FROM nodes_fts JOIN nodes ON nodes_fts.rowid = nodes.rowid "
-                "WHERE nodes_fts MATCH ? ORDER BY score LIMIT ?",
+                "WHERE nodes_fts MATCH ? AND nodes.status = 'active' ORDER BY score LIMIT ?",
                 (q, limit)
             ).fetchall()
             if rows:

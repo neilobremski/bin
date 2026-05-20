@@ -19,6 +19,41 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import engine
 
+MIN_CONTENT_LENGTH = 20
+REJECT_PATTERNS = [
+    r"^(ok|okay|sure|yes|no|got it|thanks|thank you|hi|hello|hey)\.?$",
+    r"^.{0,10}$",  # anything under 10 chars
+]
+
+
+def _should_reject(text):
+    """Reject trivial content that isn't worth storing."""
+    text = text.strip()
+    if len(text) < MIN_CONTENT_LENGTH:
+        return True
+    for pattern in REJECT_PATTERNS:
+        if re.match(pattern, text, re.IGNORECASE):
+            return True
+    return False
+
+
+def _score_importance(title, content):
+    """Score 1-10 based on content patterns. Higher = more operationally important."""
+    score = 5  # default
+    text = (title + " " + content).lower()
+    # Boost patterns
+    if any(w in text for w in ["error", "fix", "bug", "crash", "failure"]):
+        score += 2
+    if any(w in text for w in ["security", "credential", "secret", "auth"]):
+        score += 2
+    if any(w in text for w in ["never", "always", "must", "critical"]):
+        score += 1
+    if any(w in text for w in ["prefer", "suggestion", "might", "could"]):
+        score -= 1
+    if any(w in text for w in ["til", "today i learned", "interesting"]):
+        score -= 1
+    return max(1, min(10, score))
+
 
 def distill(paths, dry_run=False):
     results = []
@@ -30,13 +65,25 @@ def distill(paths, dry_run=False):
             files = [p]
         for f in files:
             candidates = extract_from_file(f)
+            candidates = [c for c in candidates if not _should_reject(c["content"])]
             new_knowledge = diff_against_store(candidates)
             if dry_run:
                 for item in new_knowledge:
                     results.append({"action": "would_store", "title": item["title"], "source": str(f)})
             else:
                 for item in new_knowledge:
-                    if item.get("_append_to"):
+                    importance = _score_importance(item["title"], item["content"])
+                    if item.get("_supersedes"):
+                        # Almost identical — store new and supersede old
+                        node_id = engine.store_entry(
+                            title=item["title"],
+                            content=item["content"],
+                            tags=item.get("tags", []),
+                            importance=importance,
+                        )
+                        engine.supersede(item["_supersedes"], node_id)
+                        results.append({"action": "superseded", "id": node_id, "old_id": item["_supersedes"], "title": item["title"], "source": str(f)})
+                    elif item.get("_append_to"):
                         # Append to existing node instead of creating new
                         engine.append_entry(item["_append_to"], "Edge Cases", item["content"])
                         results.append({"action": "appended", "id": item["_append_to"], "title": item["title"], "source": str(f)})
@@ -45,6 +92,7 @@ def distill(paths, dry_run=False):
                             title=item["title"],
                             content=item["content"],
                             tags=item.get("tags", []),
+                            importance=importance,
                         )
                         results.append({"action": "stored", "id": node_id, "title": item["title"], "source": str(f)})
     return results
@@ -100,7 +148,11 @@ def diff_against_store(candidates):
                 best_overlap = overlap
                 best_match_id = result["id"]
 
-        if best_overlap >= 0.6:
+        if best_overlap >= 0.85:
+            # Almost identical — supersede the old entry
+            candidate["_supersedes"] = best_match_id
+            new.append(candidate)
+        elif best_overlap >= 0.6:
             # Existing node covers 60%+ of candidate's content
             novel_terms = [t for t in candidate_terms if t not in engine.get(best_match_id).lower()]
             if len(novel_terms) > len(candidate_terms) * 0.3:
