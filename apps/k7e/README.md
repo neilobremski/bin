@@ -7,8 +7,8 @@ Standalone knowledge accumulation engine. Flat markdown files + hybrid search.
 ```bash
 k7e store "Chrome Remote Debugging" --tags browser,playwright <<< "Use --remote-debugging-port=9222"
 k7e search "chrome debugging"
-k7e get KG-00001
-k7e append KG-00001 --section "Edge Cases" <<< "Port 9222 conflicts with other tools"
+k7e get K7E-000-00001
+k7e append K7E-000-00001 --section "Edge Cases" <<< "Port 9222 conflicts with other tools"
 k7e asset screenshot.png
 k7e distill journal/today.md
 k7e reindex --embeddings
@@ -33,13 +33,13 @@ Files are truth. Index is cache. `k7e reindex` rebuilds from scratch.
 
 ```markdown
 ---
-id: KG-00001
+id: K7E-000-00001
 title: Chrome Remote Debugging
 aliases: [chrome-remote-debug]
 status: active
 confidence: 0.5
 verification_count: 0
-last_tended: 2026-05-20
+last_updated: 2026-05-20
 tags: [browser, playwright]
 ---
 

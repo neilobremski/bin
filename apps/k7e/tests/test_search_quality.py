@@ -32,7 +32,7 @@ class TestRecall:
         assert engine.search("record replay macro")[0]["title"] == "Vim Macros"
 
     def test_false_negative_rate(self, store):
-        """Plant 20 facts with unique content, query each. Zero misses."""
+        """Store 20 facts with unique content, query each. Zero misses."""
         facts = [(f"Fact-{i}", f"UniqueContent-{i}-Marker-{i*13}", [f"t{i%5}"]) for i in range(20)]
         ids = [engine.store_entry(t, c, tags=tg) for t, c, tg in facts]
         misses = []

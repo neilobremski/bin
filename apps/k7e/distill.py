@@ -1,7 +1,7 @@
 """k7e distillation — extract knowledge from raw experience.
 
 Scans raw files (journals, transcripts, command output). Extracts knowledge
-candidates. Diffs against existing store. Plants genuine deltas.
+candidates. Diffs against existing store. Stores genuine deltas.
 
 Uses ollama or gemini CLI for LLM extraction. Falls back to pattern-based
 extraction if neither is available.

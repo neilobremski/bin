@@ -71,7 +71,7 @@ def main(argv=None):
     p.add_argument("--aliases", default="", help="Comma-separated aliases")
     p.add_argument("--content", default=None, help="Content (or pipe via stdin)")
 
-    # tend
+    # append
     p = sub.add_parser("append", help="Append to entry")
     p.add_argument("id", help="Entry ID")
     p.add_argument("--section", default="Edge Cases", help="Section to append to")

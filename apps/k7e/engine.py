@@ -153,7 +153,7 @@ aliases: [{', '.join(aliases)}]
 status: active
 confidence: 0.5
 verification_count: 0
-last_tended: {now}
+last_updated: {now}
 tags: [{', '.join(tags)}]
 ---
 
@@ -204,8 +204,8 @@ def append_entry(node_id, section, content):
     else:
         text = text.rstrip() + f"\n\n{section_header}\n* {content.strip()}\n"
 
-    # Update last_tended in frontmatter
-    text = re.sub(r"last_tended: .+", f"last_tended: {now}", text)
+    # Update last_updated in frontmatter
+    text = re.sub(r"last_updated: .+", f"last_updated: {now}", text)
 
     # Bump verification_count
     match = re.search(r"verification_count: (\d+)", text)
@@ -271,11 +271,11 @@ def reindex(embeddings=False):
         title = meta.get("title", "")
         aliases = meta.get("aliases", [])
         tags = meta.get("tags", [])
-        now = meta.get("last_tended", time.strftime("%Y-%m-%d"))
+        now = meta.get("last_updated", time.strftime("%Y-%m-%d"))
 
         conn.execute(
             "INSERT OR REPLACE INTO nodes (id, title, aliases, status, confidence, "
-            "verification_count, last_tended, tags, created_at, updated_at) "
+            "verification_count, last_updated, tags, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (node_id, title, ", ".join(aliases), meta.get("status", "active"),
              meta.get("confidence", 0.5), meta.get("verification_count", 0),
@@ -324,7 +324,7 @@ def list_nodes(status=None, tag=None):
         params.append(f"%{tag}%")
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY last_tended DESC"
+    query += " ORDER BY last_updated DESC"
     rows = conn.execute(query, params).fetchall()
     conn.close()
     return [{"id": r[0], "title": r[1], "status": r[2], "confidence": r[3], "tags": r[4]} for r in rows]
@@ -492,7 +492,7 @@ aliases: []
 status: compiled
 confidence: 0.8
 verification_count: 0
-last_tended: {now}
+last_updated: {now}
 tags: [{', '.join(tags_list)}]
 ---
 
@@ -582,7 +582,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     status TEXT DEFAULT 'active',
     confidence REAL DEFAULT 0.5,
     verification_count INTEGER DEFAULT 0,
-    last_tended TEXT,
+    last_updated TEXT,
     tags TEXT DEFAULT '',
     created_at TEXT,
     updated_at TEXT
@@ -625,7 +625,7 @@ def _index_node(node_id, title, aliases, tags, content, now):
 
     conn.execute(
         "INSERT OR REPLACE INTO nodes (id, title, aliases, status, confidence, "
-        "verification_count, last_tended, tags, created_at, updated_at) "
+        "verification_count, last_updated, tags, created_at, updated_at) "
         "VALUES (?, ?, ?, 'active', 0.5, 0, ?, ?, ?, ?)",
         (node_id, title, alias_str, now, tag_str, now, now)
     )

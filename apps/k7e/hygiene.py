@@ -1,4 +1,4 @@
-"""Garden hygiene auditor — checks structural integrity of knowledge nodes."""
+"""Store hygiene auditor — checks structural integrity of knowledge nodes."""
 
 import re
 import time
@@ -24,7 +24,7 @@ def run_audit(fix=False):
         meta = engine._parse_frontmatter(text)
         node_id = node_path.stem
 
-        required = ["id", "title", "status", "last_tended", "tags"]
+        required = ["id", "title", "status", "last_updated", "tags"]
         missing = [f for f in required if f not in meta]
         if missing:
             issues.append(f"[{node_id}] Missing fields: {', '.join(missing)}")
