@@ -19,7 +19,7 @@ from engine import (
     store_asset,
     tend,
 )
-from consolidate import consolidate
+from distill import distill
 from hygiene import run_audit
 
 
@@ -29,7 +29,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("store",       "<title> [--tags] [--aliases]",    "Create a new entry (content from stdin or --content)."),
     ("tend",        "<id> --section <name>",           "Append to an existing entry's section."),
     ("asset",       "<file>",                          "Store binary (content-addressed, deduped). Prints path."),
-    ("consolidate", "<file|dir> [--dry-run]",          "Extract knowledge from raw experience files."),
+    ("distill", "<file|dir> [--dry-run]",          "Extract knowledge from raw experience files."),
     ("reindex",     "[--embeddings]",                  "Rebuild search index from files."),
     ("rebuild-mocs", "",                               "Rebuild all Maps of Content from entry tags."),
     ("stats",       "[--json]",                        "Show knowledge store statistics."),
@@ -76,8 +76,8 @@ def main(argv=None):
     p = sub.add_parser("asset", help="Store binary file")
     p.add_argument("file", help="Path to file")
 
-    # consolidate
-    p = sub.add_parser("consolidate", help="Extract knowledge from files")
+    # distill
+    p = sub.add_parser("distill", help="Extract knowledge from files")
     p.add_argument("paths", nargs="+", help="Files or directories")
     p.add_argument("--dry-run", action="store_true")
 
@@ -155,8 +155,8 @@ def main(argv=None):
             print(str(e), file=sys.stderr)
             return 1
 
-    elif args.command == "consolidate":
-        results = consolidate(args.paths, dry_run=args.dry_run)
+    elif args.command == "distill":
+        results = distill(args.paths, dry_run=args.dry_run)
         for r in results:
             action = r["action"]
             title = r["title"]

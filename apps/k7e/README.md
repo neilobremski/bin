@@ -10,7 +10,7 @@ k7e search "chrome debugging"
 k7e get KG-00001
 k7e tend KG-00001 --section "Edge Cases" <<< "Port 9222 conflicts with other tools"
 k7e asset screenshot.png
-k7e consolidate journal/today.md
+k7e distill journal/today.md
 k7e reindex --embeddings
 k7e stats
 k7e check --fix
@@ -55,7 +55,7 @@ tags: [browser, playwright]
 
 ```bash
 k7e status                  # show what's available + recommendations
-k7e config llm gemini       # set consolidation LLM (gemini|claude|codex|ollama|auto)
+k7e config llm gemini       # set distillation LLM (gemini|claude|codex|ollama|auto)
 k7e config embed_model nomic-embed-text
 k7e config ollama_url http://localhost:11434
 ```
@@ -78,9 +78,9 @@ Required: Python 3.10+, sqlite3 (bundled).
 
 Optional:
 - **ollama** — local embeddings + fallback LLM (`curl -fsSL https://ollama.com/install.sh | sh`)
-- **LLM CLI** — one of: gemini, claude, codex (for consolidation)
+- **LLM CLI** — one of: gemini, claude, codex (for distillation)
 
-On slim machines (e.g., Hetzner CX22) without GPU: use a cloud LLM CLI for consolidation
+On slim machines (e.g., Hetzner CX22) without GPU: use a cloud LLM CLI for distillation
 and skip local embeddings (FTS5-only mode is still effective).
 
 ## Integration

@@ -1,4 +1,4 @@
-"""k7e consolidation — extract knowledge from raw experience.
+"""k7e distillation — extract knowledge from raw experience.
 
 Scans raw files (journals, transcripts, command output). Extracts knowledge
 candidates. Diffs against existing store. Plants genuine deltas.
@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import engine as garden
 
 
-def consolidate(paths, dry_run=False):
+def distill(paths, dry_run=False):
     results = []
     for path in paths:
         p = Path(path)

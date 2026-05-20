@@ -6,7 +6,7 @@ Atomic markdown entries, content-addressed assets, Maps of Content.
 This file is the script entry point; functionality lives in sibling modules:
 
   engine.py       store, search, get, reindex, assets, MOCs
-  consolidate.py  raw experience → knowledge extraction (LLM-powered)
+  distill.py  raw experience → knowledge extraction (LLM-powered)
   hygiene.py      structural audit
   cli.py          COMMANDS table, dispatch, main
 
@@ -16,7 +16,7 @@ Surface (CLI):
   store <title> [--tags]      create a new knowledge entry
   tend <id> --section <name>  append to existing entry
   asset <file>                store binary (content-addressed, deduped)
-  consolidate <file|dir>      extract knowledge from raw experience
+  distill <file|dir>      extract knowledge from raw experience
   reindex [--embeddings]      rebuild index from files
   stats                       diagnostics
   check [--fix]               structural integrity audit

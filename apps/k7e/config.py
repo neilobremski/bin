@@ -5,7 +5,7 @@ Falls back to env vars, then sensible defaults.
 
 Config format:
 {
-  "llm": "gemini",                    # CLI for consolidation: gemini|claude|ollama|codex
+  "llm": "gemini",                    # CLI for distillation: gemini|claude|ollama|codex
   "llm_model": null,                  # model override (for ollama)
   "embeddings": "ollama",             # embedding backend: ollama|none
   "embed_model": "nomic-embed-text",  # model for embeddings
@@ -114,14 +114,14 @@ def status():
 
     # Configured LLM
     llm = get("llm", "auto")
-    lines.append(f"  Consolidation LLM: {llm}")
+    lines.append(f"  Distillation LLM: {llm}")
     if llm == "auto":
         for name in KNOWN_LLMS:
             if providers.get(f"llm:{name}", {}).get("available"):
                 lines.append(f"    → auto-detected: {name}")
                 break
         else:
-            lines.append("    → NONE detected (consolidation will use pattern-only extraction)")
+            lines.append("    → NONE detected (distill will use pattern-only extraction)")
 
     # Embeddings
     embed_cfg = get("embeddings", "ollama")
@@ -149,7 +149,7 @@ def status():
     lines.append("")
     missing = []
     if not any(providers.get(f"llm:{n}", {}).get("available") for n in KNOWN_LLMS):
-        missing.append("Install an LLM CLI (gemini, claude, or ollama) for consolidation")
+        missing.append("Install an LLM CLI (gemini, claude, or ollama) for distillation")
     if not embed_status.get("has_embed_model"):
         missing.append(f"Run `ollama pull {get('embed_model', 'nomic-embed-text')}` for semantic search")
     if missing:
@@ -163,7 +163,7 @@ def status():
 
 
 def resolve_llm_command(prompt):
-    """Return the command list to run for LLM consolidation, or None."""
+    """Return the command list to run for LLM distillation, or None."""
     llm = get("llm", "auto")
 
     if llm == "auto":
@@ -175,7 +175,7 @@ def resolve_llm_command(prompt):
             return None
 
     if llm == "ollama":
-        return None  # handled via HTTP API in consolidate.py
+        return None  # handled via HTTP API in distill.py
 
     info = KNOWN_LLMS.get(llm)
     if not info or not shutil.which(info["bin"]):
