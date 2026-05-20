@@ -1,0 +1,569 @@
+"""k7e engine — store, search, tend, reindex, assets.
+
+Flat markdown files are source of truth. SQLite FTS5 + optional embeddings
+are derived indexes, rebuildable from files via reindex().
+
+Binary assets stored content-addressed (SHA256 hash + extension).
+Same content = same hash = one file.
+
+Zero non-stdlib dependencies. Embeddings use ollama HTTP API (urllib).
+Configurable root via K7E_HOME env var (defaults to ~/.k7e).
+"""
+
+import hashlib
+import json
+import math
+import os
+import re
+import shutil
+import sqlite3
+import struct
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+def _k7e_home():
+    override = os.environ.get("K7E_HOME")
+    return Path(override) if override else Path.home() / ".k7e"
+
+
+NODES_DIR = None
+MOCS_DIR = None
+ASSETS_DIR = None
+INDEX_DB = None
+
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
+
+RRF_K = 60
+
+
+def init():
+    global NODES_DIR, MOCS_DIR, ASSETS_DIR, INDEX_DB
+    home = _k7e_home()
+    NODES_DIR = home / "nodes"
+    MOCS_DIR = home / "mocs"
+    ASSETS_DIR = home / "assets"
+    INDEX_DB = home / ".index.db"
+    NODES_DIR.mkdir(parents=True, exist_ok=True)
+    MOCS_DIR.mkdir(parents=True, exist_ok=True)
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    conn = _connect()
+    conn.executescript(_SCHEMA)
+    conn.close()
+
+
+def next_id():
+    existing = sorted(NODES_DIR.glob("KG-*.md"))
+    if not existing:
+        return "KG-00001"
+    last = existing[-1].stem
+    num = int(last.split("-")[1])
+    return f"KG-{num + 1:05d}"
+
+
+def plant(title, content, tags=None, aliases=None):
+    tags = tags or []
+    aliases = aliases or []
+    init()
+
+    node_id = next_id()
+    now = time.strftime("%Y-%m-%d")
+
+    frontmatter = {
+        "id": node_id,
+        "title": title,
+        "aliases": aliases,
+        "status": "active",
+        "confidence": 0.5,
+        "verification_count": 0,
+        "last_tended": now,
+        "tags": tags,
+    }
+
+    body = f"""---
+id: {node_id}
+title: {title}
+aliases: [{', '.join(aliases)}]
+status: active
+confidence: 0.5
+verification_count: 0
+last_tended: {now}
+tags: [{', '.join(tags)}]
+---
+
+## Verified Protocol
+
+{content.strip()}
+
+## Edge Cases
+
+## False Paths
+
+## History
+* {now}: Initial entry.
+"""
+
+    node_path = NODES_DIR / f"{node_id}.md"
+    node_path.write_text(body, encoding="utf-8")
+
+    _index_node(node_id, title, aliases, tags, content, now)
+    _update_mocs(node_id, title, tags)
+
+    return node_id
+
+
+def tend(node_id, section, content):
+    node_path = NODES_DIR / f"{node_id}.md"
+    if not node_path.exists():
+        raise FileNotFoundError(f"Node {node_id} not found")
+
+    text = node_path.read_text(encoding="utf-8")
+    now = time.strftime("%Y-%m-%d")
+
+    section_header = f"## {section}"
+    if section_header in text:
+        parts = text.split(section_header)
+        before = parts[0]
+        after = parts[1]
+        next_section = re.search(r"\n## ", after)
+        if next_section:
+            section_body = after[:next_section.start()]
+            remainder = after[next_section.start():]
+        else:
+            section_body = after
+            remainder = ""
+        section_body = section_body.rstrip() + f"\n* {content.strip()}\n"
+        text = before + section_header + section_body + remainder
+    else:
+        text = text.rstrip() + f"\n\n{section_header}\n* {content.strip()}\n"
+
+    # Update last_tended in frontmatter
+    text = re.sub(r"last_tended: .+", f"last_tended: {now}", text)
+
+    # Bump verification_count
+    match = re.search(r"verification_count: (\d+)", text)
+    if match:
+        count = int(match.group(1)) + 1
+        text = re.sub(r"verification_count: \d+", f"verification_count: {count}", text)
+
+    node_path.write_text(text, encoding="utf-8")
+
+    meta = _parse_frontmatter(text)
+    full_content = _extract_body(text)
+    _index_node(
+        node_id, meta.get("title", ""),
+        meta.get("aliases", []), meta.get("tags", []),
+        full_content, now
+    )
+
+    return node_id
+
+
+def search(query, limit=5, json_output=False):
+    init()
+    conn = _connect()
+
+    bm25_results = _search_bm25(conn, query, limit * 3)
+    meta_results = _search_metadata(conn, query, limit * 3)
+    embed_results = _search_embeddings(conn, query, limit * 3)
+
+    fused = _rrf_fuse([bm25_results, meta_results, embed_results], limit)
+    conn.close()
+
+    # Filter out noise: require minimum score threshold
+    min_score = 1.0 / (RRF_K + limit * 2)
+    fused = [r for r in fused if r["score"] >= min_score]
+
+    if json_output:
+        return fused
+    return fused
+
+
+def get(node_id):
+    node_path = NODES_DIR / f"{node_id}.md"
+    if not node_path.exists():
+        raise FileNotFoundError(f"Node {node_id} not found")
+    return node_path.read_text(encoding="utf-8")
+
+
+def reindex(embeddings=False):
+    init()
+    conn = _connect()
+    conn.execute("DELETE FROM nodes")
+    conn.execute("DELETE FROM nodes_fts")
+    if embeddings:
+        conn.execute("DELETE FROM embeddings")
+    conn.commit()
+
+    for path in sorted(NODES_DIR.glob("KG-*.md")):
+        text = path.read_text(encoding="utf-8")
+        meta = _parse_frontmatter(text)
+        body = _extract_body(text)
+        node_id = meta.get("id", path.stem)
+        title = meta.get("title", "")
+        aliases = meta.get("aliases", [])
+        tags = meta.get("tags", [])
+        now = meta.get("last_tended", time.strftime("%Y-%m-%d"))
+
+        conn.execute(
+            "INSERT OR REPLACE INTO nodes (id, title, aliases, status, confidence, "
+            "verification_count, last_tended, tags, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (node_id, title, ", ".join(aliases), meta.get("status", "active"),
+             meta.get("confidence", 0.5), meta.get("verification_count", 0),
+             now, ", ".join(tags), now, now)
+        )
+        conn.execute(
+            "INSERT INTO nodes_fts (rowid, title, aliases, tags, content) "
+            "VALUES ((SELECT rowid FROM nodes WHERE id = ?), ?, ?, ?, ?)",
+            (node_id, title, " ".join(aliases), " ".join(tags), body)
+        )
+
+        if embeddings:
+            vec = embed_text(f"{title} {body[:500]}")
+            if vec:
+                conn.execute(
+                    "INSERT OR REPLACE INTO embeddings (node_id, vector, model, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (node_id, _pack_vector(vec), EMBED_MODEL, now)
+                )
+
+    conn.commit()
+    conn.close()
+
+
+def list_nodes(status=None, tag=None):
+    init()
+    conn = _connect()
+    query = "SELECT id, title, status, confidence, tags FROM nodes"
+    conditions = []
+    params = []
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    if tag:
+        conditions.append("tags LIKE ?")
+        params.append(f"%{tag}%")
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY last_tended DESC"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [{"id": r[0], "title": r[1], "status": r[2], "confidence": r[3], "tags": r[4]} for r in rows]
+
+
+def rebuild_mocs():
+    """Rebuild all MOC files from node tags. Destructive — replaces existing MOCs."""
+    init()
+    mocs = {}
+
+    for path in sorted(NODES_DIR.glob("KG-*.md")):
+        text = path.read_text(encoding="utf-8")
+        meta = _parse_frontmatter(text)
+        node_id = meta.get("id", path.stem)
+        title = meta.get("title", "Unknown")
+        status = meta.get("status", "active")
+        tags = meta.get("tags", [])
+        for tag in tags:
+            mocs.setdefault(tag, []).append((node_id, title, status))
+
+    for path in MOCS_DIR.glob("*.md"):
+        path.unlink()
+
+    for tag, nodes in sorted(mocs.items()):
+        active = [(nid, t) for nid, t, s in nodes if s == "active"]
+        other = [(nid, t, s) for nid, t, s in nodes if s != "active"]
+        content = f"# {tag}\n\n"
+        if active:
+            content += "## Active\n"
+            for nid, title in active:
+                content += f"* [[{nid}]] — {title}\n"
+            content += "\n"
+        if other:
+            content += "## Archived\n"
+            for nid, title, status in other:
+                content += f"* [[{nid}]] — {title} ({status})\n"
+            content += "\n"
+        (MOCS_DIR / f"{tag}.md").write_text(content, encoding="utf-8")
+
+
+def stats():
+    """Return garden statistics."""
+    init()
+    conn = _connect()
+    total_nodes = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    avg_conf = conn.execute("SELECT AVG(confidence) FROM nodes").fetchone()[0] or 0.0
+    all_tags = conn.execute("SELECT tags FROM nodes").fetchall()
+    conn.close()
+
+    tag_freq = {}
+    for row in all_tags:
+        if row[0]:
+            for t in (t.strip() for t in row[0].split(",") if t.strip()):
+                tag_freq[t] = tag_freq.get(t, 0) + 1
+
+    return {
+        "total_nodes": total_nodes,
+        "total_mocs": len(list(MOCS_DIR.glob("*.md"))),
+        "total_assets": len([f for f in ASSETS_DIR.glob("*.*") if f.name != ".gitkeep"]),
+        "avg_confidence": round(avg_conf, 2),
+        "top_tags": sorted(tag_freq.items(), key=lambda x: -x[1])[:10],
+    }
+
+
+# --- Assets ---
+
+def store_asset(source_path):
+    """Content-addressed asset storage. Returns relative path for markdown embedding.
+    Same file content = same hash = one copy. Safe to call multiple times."""
+    source = Path(source_path)
+    if not source.exists():
+        raise FileNotFoundError(f"Asset source not found: {source_path}")
+
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Hash the file content
+    h = hashlib.sha256()
+    with open(source, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    content_hash = h.hexdigest()[:12]
+    ext = source.suffix.lower()
+    asset_name = f"{content_hash}{ext}"
+    dest = ASSETS_DIR / asset_name
+
+    if not dest.exists():
+        shutil.copy2(source, dest)
+
+    return f"assets/{asset_name}"
+
+
+# --- Embedding ---
+
+def embed_text(text):
+    try:
+        data = json.dumps({"model": EMBED_MODEL, "input": text}).encode()
+        req = urllib.request.Request(
+            f"{OLLAMA_URL}/api/embed",
+            data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+            embeddings = result.get("embeddings", [])
+            if embeddings:
+                return embeddings[0]
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
+def cosine_similarity(a, b):
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+# --- Internal ---
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS nodes (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    aliases TEXT DEFAULT '',
+    status TEXT DEFAULT 'active',
+    confidence REAL DEFAULT 0.5,
+    verification_count INTEGER DEFAULT 0,
+    last_tended TEXT,
+    tags TEXT DEFAULT '',
+    created_at TEXT,
+    updated_at TEXT
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+    title, aliases, tags, content,
+    tokenize='porter unicode61'
+);
+
+CREATE TABLE IF NOT EXISTS embeddings (
+    node_id TEXT PRIMARY KEY,
+    vector BLOB,
+    model TEXT,
+    updated_at TEXT
+);
+"""
+
+
+def _connect():
+    conn = sqlite3.connect(str(INDEX_DB))
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def _index_node(node_id, title, aliases, tags, content, now):
+    conn = _connect()
+    alias_str = ", ".join(aliases) if isinstance(aliases, list) else aliases
+    tag_str = ", ".join(tags) if isinstance(tags, list) else tags
+
+    conn.execute(
+        "INSERT OR REPLACE INTO nodes (id, title, aliases, status, confidence, "
+        "verification_count, last_tended, tags, created_at, updated_at) "
+        "VALUES (?, ?, ?, 'active', 0.5, 0, ?, ?, ?, ?)",
+        (node_id, title, alias_str, now, tag_str, now, now)
+    )
+
+    conn.execute("DELETE FROM nodes_fts WHERE rowid = (SELECT rowid FROM nodes WHERE id = ?)", (node_id,))
+    conn.execute(
+        "INSERT INTO nodes_fts (rowid, title, aliases, tags, content) "
+        "VALUES ((SELECT rowid FROM nodes WHERE id = ?), ?, ?, ?, ?)",
+        (node_id, title, " ".join(aliases) if isinstance(aliases, list) else aliases,
+         " ".join(tags) if isinstance(tags, list) else tags, content)
+    )
+
+    vec = embed_text(f"{title} {content[:500]}")
+    if vec:
+        conn.execute(
+            "INSERT OR REPLACE INTO embeddings (node_id, vector, model, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (node_id, _pack_vector(vec), EMBED_MODEL, now)
+        )
+
+    conn.commit()
+    conn.close()
+
+
+_STOPWORDS = {"a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+              "have", "has", "had", "do", "does", "did", "will", "would", "could",
+              "should", "may", "might", "shall", "can", "need", "dare", "to", "of",
+              "in", "for", "on", "with", "at", "by", "from", "as", "into", "about",
+              "like", "through", "after", "over", "between", "out", "against", "during",
+              "without", "before", "under", "around", "among", "it", "its", "this",
+              "that", "these", "those", "i", "me", "my", "we", "our", "you", "your",
+              "he", "him", "his", "she", "her", "they", "them", "their", "what", "which",
+              "who", "when", "where", "why", "how", "not", "no", "nor", "and", "but",
+              "or", "so", "if", "then", "than", "too", "very", "just"}
+
+
+def _search_bm25(conn, query, limit):
+    expanded = query.replace("-", " ").replace("_", " ")
+    queries_to_try = [query, expanded]
+
+    # OR fallback with stopwords removed
+    meaningful = [w for w in expanded.split() if w.lower() not in _STOPWORDS and len(w) > 1]
+    if meaningful:
+        queries_to_try.append(" OR ".join(meaningful))
+
+    for q in queries_to_try:
+        try:
+            rows = conn.execute(
+                "SELECT nodes.id, nodes.title, bm25(nodes_fts) as score "
+                "FROM nodes_fts JOIN nodes ON nodes_fts.rowid = nodes.rowid "
+                "WHERE nodes_fts MATCH ? ORDER BY score LIMIT ?",
+                (q, limit)
+            ).fetchall()
+            if rows:
+                return [(r[0], r[1], -r[2]) for r in rows]
+        except sqlite3.OperationalError:
+            continue
+    return []
+
+
+def _search_metadata(conn, query, limit):
+    terms = [t for t in query.lower().split() if len(t) > 2]
+    if not terms:
+        return []
+    rows = conn.execute(
+        "SELECT id, title, tags, aliases FROM nodes WHERE status = 'active'"
+    ).fetchall()
+    scored = []
+    for r in rows:
+        text = f"{r[1]} {r[2]} {r[3]}".lower()
+        hits = sum(1 for t in terms if t in text)
+        ratio = hits / len(terms)
+        if ratio >= 0.4:
+            scored.append((r[0], r[1], ratio))
+    scored.sort(key=lambda x: -x[2])
+    return scored[:limit]
+
+
+def _search_embeddings(conn, query, limit):
+    query_vec = embed_text(query)
+    if not query_vec:
+        return []
+    rows = conn.execute("SELECT node_id, vector FROM embeddings").fetchall()
+    scored = []
+    for node_id, vec_blob in rows:
+        node_vec = _unpack_vector(vec_blob)
+        sim = cosine_similarity(query_vec, node_vec)
+        if sim > 0.3:
+            title_row = conn.execute("SELECT title FROM nodes WHERE id = ?", (node_id,)).fetchone()
+            title = title_row[0] if title_row else ""
+            scored.append((node_id, title, sim))
+    scored.sort(key=lambda x: -x[2])
+    return scored[:limit]
+
+
+def _rrf_fuse(result_lists, limit):
+    scores = {}
+    titles = {}
+    for results in result_lists:
+        for rank, (node_id, title, _score) in enumerate(results):
+            scores[node_id] = scores.get(node_id, 0) + 1.0 / (RRF_K + rank + 1)
+            titles[node_id] = title
+    ranked = sorted(scores.items(), key=lambda x: -x[1])[:limit]
+    return [{"id": nid, "title": titles[nid], "score": round(score, 4)} for nid, score in ranked]
+
+
+def _update_mocs(node_id, title, tags):
+    for tag in tags:
+        moc_path = MOCS_DIR / f"{tag}.md"
+        entry = f"* [[{node_id}]] — {title}\n"
+        if moc_path.exists():
+            content = moc_path.read_text(encoding="utf-8")
+            if node_id not in content:
+                content = content.rstrip() + "\n" + entry
+                moc_path.write_text(content, encoding="utf-8")
+        else:
+            moc_path.write_text(f"# {tag}\n\n## Active\n{entry}", encoding="utf-8")
+
+
+def _parse_frontmatter(text):
+    match = re.match(r"^---\n(.+?)\n---", text, re.DOTALL)
+    if not match:
+        return {}
+    meta = {}
+    for line in match.group(1).splitlines():
+        if ":" in line:
+            key, val = line.split(":", 1)
+            key = key.strip()
+            val = val.strip()
+            if val.startswith("[") and val.endswith("]"):
+                val = [v.strip() for v in val[1:-1].split(",") if v.strip()]
+            elif val.replace(".", "").isdigit():
+                val = float(val) if "." in val else int(val)
+            meta[key] = val
+    return meta
+
+
+def _extract_body(text):
+    match = re.match(r"^---\n.+?\n---\n?", text, re.DOTALL)
+    if match:
+        return text[match.end():]
+    return text
+
+
+def _pack_vector(vec):
+    return struct.pack(f"{len(vec)}f", *vec)
+
+
+def _unpack_vector(blob):
+    n = len(blob) // 4
+    return list(struct.unpack(f"{n}f", blob))
