@@ -1,4 +1,0 @@
-#!/bin/bash
-# Hippocampus organ entry point — called by spark.
-cd "$(dirname "$0")"
-exec python3 src/hippocampus.py
