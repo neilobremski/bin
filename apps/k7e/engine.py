@@ -139,6 +139,8 @@ def _all_node_files():
 
 
 def store_entry(title, content, tags=None, aliases=None):
+    """Store a new knowledge entry. No dedup — caller is responsible.
+    For dedup-aware ingestion, use distill."""
     tags = tags or []
     aliases = aliases or []
     init()
@@ -612,7 +614,11 @@ CREATE TABLE IF NOT EXISTS pending_embeddings (
     node_id TEXT PRIMARY KEY,
     queued_at TEXT
 );
+
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1');
 """
+
+_EMBED_SCAN_LIMIT = 10000
 
 
 def _connect():
@@ -757,6 +763,9 @@ def _search_metadata(conn, query, limit):
 def _search_embeddings(conn, query, limit):
     query_vec = embed_text(query)
     if not query_vec:
+        return []
+    count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+    if count > _EMBED_SCAN_LIMIT:
         return []
     rows = conn.execute("SELECT node_id, vector FROM embeddings").fetchall()
     scored = []
