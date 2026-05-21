@@ -25,7 +25,9 @@ Deploy a three-persona team: **Developer**, **Tester**, **Critic**. Each role ha
 
 | Team | Domain | Developer | Tester | Critic |
 |------|--------|-----------|--------|--------|
-| `/k7e-team` | Python/SQLite knowledge engine | Willison | Chase | Karpathy |
+| `/python-team` | Python (general) | Łukasz | Raymond | Beazley |
+| `/react-team` | React/TypeScript | Sebastian | Kent | Dan |
+| `/k7e-team` | K7E (Python/SQLite) | Willison | Chase | Karpathy |
 | `/android-team` | Android/Kotlin | Wharton | Alcérreca | Haase |
 
 ## Workflow
@@ -45,8 +47,10 @@ Deploy a three-persona team: **Developer**, **Tester**, **Critic**. Each role ha
 ## Team Selection
 
 Pick the team based on the codebase:
-- Working in `apps/k7e/` or Python/SQLite → `/k7e-team`
+- Working in `apps/k7e/` → `/k7e-team`
 - Working in `~/repos/a8s-android/` or Kotlin → `/android-team`
+- React/TypeScript frontend code → `/react-team`
+- General Python (a8s, scripts, CLI tools) → `/python-team`
 - If ambiguous, ask.
 
 ## Implementation
