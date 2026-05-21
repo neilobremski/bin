@@ -74,6 +74,7 @@ def init():
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     conn = _connect()
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     conn.close()
 
 
@@ -659,6 +660,16 @@ INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1');
 """
 
 _EMBED_SCAN_LIMIT = 10000
+
+
+def _migrate(conn):
+    """Add columns that may be missing from older databases."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(nodes)").fetchall()}
+    if "content_hash" not in cols:
+        conn.execute("ALTER TABLE nodes ADD COLUMN content_hash TEXT DEFAULT ''")
+    if "superseded_by" not in cols:
+        conn.execute("ALTER TABLE nodes ADD COLUMN superseded_by TEXT DEFAULT ''")
+    conn.commit()
 
 
 def _connect():

@@ -1,18 +1,22 @@
-# CLAUDE.md — onboarding for Claude Code (and humans) working in `~/bin/`
+# CLAUDE.md
 
-This file captures conventions, decisions, and gotchas accumulated across the
-development of this repo. Read it before making changes. Update it when you
-learn something a future contributor would have wanted to know.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Repo shape
 
-`~/bin/` is a personal utilities repo plus one substantive sub-project (`apps/a8s/`).
+`~/bin/` is a personal utilities repo plus two substantive sub-projects.
 
 - **Top level** — small single-file CLIs (`tell`, `aztail`, `speak`, `ltx-video`,
   `h`, `NMP.py`, `py-json-tool`, etc.). Each is independently usable. `install.sh`
   adds the dir to `$PATH` and links docs/skills.
-- **`apps/a8s/`** — Agent Infinity System. Multi-module Python project, ~2200
-  LOC across 8 modules, full pytest suite. The bulk of recent work.
+- **`apps/a8s/`** — Agent Infinity System. Filesystem-based message router
+  letting independent CLI agents (Claude, Gemini, Codex, scripts) talk to each
+  other via `tell`. See [`apps/a8s/README.md`](apps/a8s/README.md) for concept
+  and usage, [`apps/a8s/DEVELOPMENT.md`](apps/a8s/DEVELOPMENT.md) for hard
+  constraints and historical decisions.
+- **`apps/k7e/`** — Knowledge accumulation engine. Flat markdown files +
+  SQLite FTS5 + optional ollama embeddings. Zero non-stdlib deps for core.
+  See [`apps/k7e/README.md`](apps/k7e/README.md) for usage and architecture.
 - **`docs/`** — markdown for each top-level command + symlinks for skill install.
 - **`venv/`** — local Python virtualenv (gitignored). Pytest is installed there.
   Run `python3 -m pytest ...` from anywhere; it picks up `venv` automatically
@@ -49,18 +53,6 @@ change goes through a PR. The user squash-merges fast. After a squash, rebase
 follow-up work onto fresh `main` rather than stacking — squash hashes don't
 match the original branch's commits and stacking causes conflicts.
 
-Recovering from "PR conflicts after the previous PR squash-merged":
-
-```bash
-git checkout main && git pull --ff-only
-git branch -D <stale-branch> 2>&1 || true   # if it was already merged via squash
-git checkout -b <branch>-rebased main
-git cherry-pick <last-good-commit-from-stale-branch>
-git push --force-with-lease origin <branch>
-```
-
-Then update the PR's branch on the GitHub side.
-
 ### Pre-v1 / scorch-the-earth (a8s only)
 
 `a8s` is explicitly pre-v1. **Do not write migration code.** When the schema
@@ -68,26 +60,20 @@ changes, the user wipes `~/.a8s/` and re-derives state via `a8s discover` +
 `a8s add`. This applies to registry shape, mailbox layout, definition schema,
 and on-disk pid/log paths. The contract changes only when the user declares v1.
 
-Ask before adding any "if old field, infer new field" fallback. The right
-answer is almost always "drop the old, error on it." This is a stated user
-preference, not a hunch — see the merged history of phases 2 / 3a / 3b / 4 / 5.
-
 ### Commit style
 
 - Commits prefixed `feat(a8s)` / `fix(a8s)` / `refactor(a8s)` / `test(a8s)` /
   `docs(a8s)` per Conventional Commits. The `(a8s)` scope appears for a8s
   changes; smaller top-level scripts use `feat(<script>)` etc.
 - Body explains the *why* and the design decision, not just the mechanical
-  *what*. The locked-design discussion in #52 was preserved across phases by
-  including the decision rationale in commit bodies.
+  *what*.
 - Co-author trailer for AI-assisted work:
-  `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`
+  `Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>`
 
 ### Code style
 
 - Default to no comments. Names should explain what; comments are only for
-  *why* something non-obvious is done. The user explicitly dislikes
-  comment-noise.
+  *why* something non-obvious is done.
 - Avoid emojis in source unless asked.
 - Don't add abstractions that aren't being used today. Three similar lines is
   fine; abstract on the fourth.
@@ -95,524 +81,38 @@ preference, not a hunch — see the merged history of phases 2 / 3a / 3b / 4 / 5
   guarantees; validate at boundaries (CLI input, external APIs, filesystem).
 - Don't add backwards-compat hacks. See pre-v1 above.
 
-## a8s sub-project
-
-### What it is
-
-Filesystem-based message router that lets independent CLI sessions
-(Claude Code, Gemini CLI, Codex CLI, future humans/scripts) talk to each
-other as a team. The README in `apps/a8s/README.md` is the design overview;
-read it first.
-
-Key invariants:
-
-- **Recipient opacity (strict, mailing-list style)** — sender doesn't know
-  whether the recipient is a Claude session, a script, or a human; recipient
-  doesn't know who else got the message. A direct tell and an alias-fanned
-  tell produce identical message shapes — only `to` differs (alias vs agent
-  name). Never re-introduce `alias` / `others_count` fields or a separate
-  alias verb. (Settled in issues #69 / #70.)
-- **Members don't know about a8s** — drop in any project unchanged.
-  An agent just sees a `tell` shell command and wakes to messages.
-- **The filesystem is the IPC, the outbox location is the unforgeable identity.**
-  Routing force-overwrites the `from` field to the enclosing agent — agents
-  cannot spoof. Don't bypass this.
-- **One agent, one handler at a time. One handler can serve many agents.**
-  pid file at `~/.a8s/agents/<NAME>/pid` is the attachment; multiple agents
-  can point at the same PID (multi-agent handler via alias).
-
-### Module map
-
-| File | What's in it | Entry points other modules import |
-|---|---|---|
-| `apps/a8s/a8s.py` | thin entry shim (~30 lines) | `cli.main` invocation only |
-| `apps/a8s/core.py` | paths, logging, helpers, `Participant`, mutable `PRINT_LOCK`, path constants (`SCRIPT_DIR`, `DEFINITIONS_DIR`, `ENTRYPOINT`) | leaf module — no a8s imports |
-| `apps/a8s/registry.py` | `~/.a8s/a8s.json` I/O, `resolve_name` (alias resolution with diamond/cycle detection), `sender_from_cwd`, `_scan_for_markers` | depends on `core` |
-| `apps/a8s/mailbox.py` | `route_outboxes` (two-phase: ingest → process), `ensure_mailboxes`, `_split_content_and_files`, `_write_outbox`. Per-message `.retry` sidecars live in `pending/` and drive backoff retries via `BACKOFF_SCHEDULE`. | depends on `core`, `registry`, `ulid` |
-| `apps/a8s/definitions.py` | `build_command(definition, msg)` (single `invoke` field, no verb dispatch), `_expand_argv` (`$SENDER`/`$RECIPIENT`/`$MESSAGE`/`$TIMESTAMP`/`$AGE`/`$A8S_DIR`), `load_definition`, `_autodiscover_definition` | depends on `core`, `registry` |
-| `apps/a8s/ulid.py` | `new()` / `parse()` / `is_ulid()` — pure-stdlib Crockford-base32 ULIDs. Mailbox messages are named `<ulid>.json` and carry the same id in the body's `id` field for receive-side dedup. | leaf module |
-| `apps/a8s/network.py` | `~/.a8s/network.json` IO (top-level `remotes` and `services` maps), `load_remotes` and `load_services` (each forwards keys past the dispatcher's reserved set as `**opts` — each transport/service handles its own option vocabulary), `_build_transport` / `_build_service` / `detect_service_kind`, `make_publish_remotes` (warn-and-continue per-remote publish), `receive_envelope` (decode → ULID dedup → registry filter → cross-cluster file download via configured services → atomic inbox write), `start_remotes` / `stop_remotes`. Transport and service modules imported lazily. | depends on `core`, `registry`, `transports`, `services`, `ulid` |
-| `apps/a8s/transports/__init__.py` | `Transport` ABC + `TransportError`. The publish/subscribe/start/stop contract every remote transport implements. | leaf module |
-| `apps/a8s/transports/mqtt.py` | `MqttTransport` — MQTT 3.1.1 with `clean_session=False`, QoS 1, hash-derived stable `client_id` so the broker recognizes the same persistent session across restarts. Today's implementation is paho-mqtt; mini-MQTT pure-stdlib fallback lands as a follow-up and the user-facing config kind stays `mqtt`. The constructor takes a `**opts` bag, aliases `user`/`pass` → `username`/`password`, and rejects unknown keys so a typo in `network.json` fails loud. | depends on `transports`, `paho-mqtt` (soft) |
-| `apps/a8s/services/__init__.py` | `StorageService` ABC + `StorageError`. The `store(src) -> url` / `retrieve(url, dest) -> bool` contract every cross-cluster file backend implements. Stateless — no start/stop. **"Service" disambiguates from "transport"**: messaging plugins are transports (MQTT, etc.), file plugins are services (TempFile.org, etc.). | leaf module |
-| `apps/a8s/services/tempfile_org.py` | `TempFileOrgService` — pure-stdlib `urllib`. POSTs `multipart/form-data` to `/api/upload/local`, GETs `<url>download` for retrieval. 100 MB per-file ceiling (the existing 50 MiB `MAX_FILE_BYTES` keeps us comfortably under). Constructor opts: `expiry_hours` (1, 6, 24, or 48; default 24), `timeout_s` (default 30). | depends on `services`, stdlib only |
-| `apps/a8s/daemon.py` | `acquire`/`release` (pid files), `attached_loop` (also spawns subscriber threads via `start_remotes` and stops them on detach), signal handling (`_make_signal_handler`, `_kill_wake_subprocess_group`), `run_with_prefix`, `wake_once`. Mutable globals `_STOP_EVENT`/`_SIGNAL_COUNT`/`_CURRENT_WAKE_PROC` live here. Sets `core.PRINT_LOCK`. | depends on everything above |
-| `apps/a8s/commands.py` | every `cmd_*`, including `cmd_remote add/remove/ls`, `_install_skill_*` for Claude/Gemini/Codex, `_expand_to_agents` | depends on everything above |
-| `apps/a8s/cli.py` | `COMMANDS` table (the source of truth for help text), `dispatch`, `main` | depends on `commands` only |
-| `apps/a8s/connectors/gmail/` | First non-agent participant. `gmail_connector.py` (outbound; one-shot per a8s wake — POSTs `gmail.send` to GAS Bridge with `subject=$SENDER`, `body=$MESSAGE`). `gmail_cron.py` (inbound; cron-driven — polls bridge for unread, strips `Re:`/`Fwd:` repeats, `registry.resolve_name`s the bare token, shells `tell <participant> <body>` from the connector's registered root so a8s force-stamps `from`). Strict-opacity invariant: other agents never know they're talking to Gmail. | stdlib only; reads registry via the parent package |
-
-### Connectors
-
-A connector is just an a8s agent whose `definition.invoke` runs a script
-instead of an LLM CLI. The participant name in the registry is whatever
-the operator chose (`a8s add neil ~/bin/apps/a8s/connectors/gmail
-~/.neil-gmail.json`); other agents `tell neil "..."` without any
-awareness that the recipient is a Gmail-backed human, a script, or
-another LLM agent. **Recipient opacity is non-negotiable for connectors
-too** — there is no email-shaped wire format on the a8s side. The
-connector is the only thing that knows about its bridge format
-(subject=$SENDER, body=$MESSAGE for the Gmail one). The reverse path is
-independent of the wake handler: a separate cron script reads the
-bridge inbox and routes back into a8s as ordinary `tell` calls,
-force-stamped via cwd. Don't introduce per-connector special-case fields
-in the message envelope.
-
-### Hard constraints when refactoring
-
-- **`cmd_start` re-execs via `core.ENTRYPOINT`**, not `__file__`. After the
-  modular split, `__file__` inside `commands.py` resolves to the wrong path.
-  `core.ENTRYPOINT = SCRIPT_DIR / "a8s.py"` is the canonical re-exec target.
-- **Argv interpolation** (`$SENDER`, `$RECIPIENT`, `$MESSAGE`, `$TIMESTAMP`,
-  `$AGE`, `$A8S_DIR`) expands via `definitions._expand_argv`. `$TIMESTAMP`
-  is the ISO date the message was queued; `$AGE` is the human-readable
-  delta from now (computed each wake, so backlogs get accurate per-message
-  ages). There is one wake verb — `invoke` — and `build_command(definition,
-  msg)` always reads it. No verb dispatch table.
-- **One-verb model: only `tell`.** Every routed message has a force-stamped
-  agent `from` (no senderless `prompt` channel) and goes through the same
-  `invoke` argv on the recipient. There is no `clear` sentinel — operators
-  reset agent sessions by killing the handler / wiping session files
-  manually. The reason is security: with no senderless cross-cluster channel
-  a compromised agent can't spoof its way out of a sandbox via MQTT, which
-  was the motivation for landing this restriction.
-- **`core.PRINT_LOCK` is the cross-module log lock.** It's `None` at module
-  load and only set when `daemon.attached_loop` starts. Threading is intentional:
-  multi-agent handlers may interleave wake events. If you write a new code path
-  that calls `core.out_agent` from a new thread, make sure attached_loop is
-  the one running.
-- **`run_with_prefix` uses `start_new_session=True`** so SIGKILL targets the
-  whole subprocess group (claude/gemini/codex CLI plus any helpers it spawned).
-  Don't drop this — it's the only way the second-signal kill path works.
-- **Per-agent take-over via detach-request (no orphans).** When `acquire`
-  hits a live conflict, it writes `~/.a8s/agents/<NAME>/detach-request` with
-  its pid and polls. The holder's `attached_loop` checks for that file at
-  the top of each iteration and releases just that one agent — its sibling
-  attachments stay running. Don't reintroduce process-level SIGTERM-and-wait
-  in `acquire`: that's what created the orphan-collateral bug. The 60s
-  `DETACH_TIMEOUT_S` is the only fallback if the holder is mid-wake on a
-  slow LLM call; `a8s kill` breaks the deadlock.
-- **Per-agent kill via kill-request + SIGUSR1.** `cmd_kill` writes
-  `~/.a8s/agents/<NAME>/kill-request` and SIGUSR1s the holder. The handler's
-  `_on_kill_signal` checks the kill-request for `_CURRENT_WAKE_NAME` (the
-  agent being woken right now); if present, it kills the wake subprocess
-  group so `run_with_prefix.wait()` returns immediately. The actual release
-  of the agent happens at the next iteration top via the kill-request check
-  — same shape as detach-request, but logs as "killed by" and takes
-  precedence. Whole-process SIGTERM is the last-resort escalation only
-  when the holder doesn't honor the request within 10s.
-- **Agent-directory invariant — `.outbox/` is one-way.** a8s never reads a
-  file in `<root>/.outbox/` for read-modify-write, never writes a sidecar
-  there. `route_outboxes` phase 1 atomically renames every new outbox file
-  into `~/.a8s/agents/<sender>/pending/<ulid>.json`; phase 2 parses, routes,
-  retries, and trashes from there. Cross-fs fallback uses `shutil.copy2 +
-  unlink`; ULID-keyed receive-side dedup tolerates the rare interruption
-  window. Don't reintroduce in-place outbox writes (sidecars, `from`
-  rewrites on disk, etc.) — the agent's directory belongs to the agent.
-- **Remote routing is layered + a8s-opaque.** `network.py` knows the
-  publish/subscribe contract; transports under `transports/` implement it.
-  Senders publish to all configured remotes; receivers dedupe by ULID. A
-  message to an unknown-locally recipient publishes to all remotes (each
-  receiving cluster decides locally whether to deliver based on its own
-  registry). Note: a8s only routes *messages* across remotes — state
-  queries like `a8s logs`, `a8s ls`, `a8s agents` are strictly local.
-  There is no cross-cluster state query path by design.
-- **Cross-cluster `FILE:` payloads ride storage services (#90).**
-  Configured under `network.json`'s `services` map — separate from the
-  `remotes` (messaging) map. When a sender's `_process_pending` finds a
-  message has files AND services are configured, it uploads each file to
-  every configured service and rewrites the wire envelope's `files[i]`
-  to `{"filename": ..., "storage": [url1, url2, ...]}` (dropping
-  `path` — sender-local). The receiver's `receive_envelope` iterates
-  the URLs × configured services until one accepts the download into
-  `<recipient>/.files/`. Per-file × per-service success is cached in
-  the `<f>.json.retry` sidecar's `uploaded` field so backoff retries
-  don't re-upload to services that already accepted. With NO services
-  configured, files stay local-only — `route_outboxes` marks all
-  remotes as "succeeded" for messages with files so they finalize on
-  local delivery alone. The receive side strips storage-bearing files
-  with a warning if the recipient cluster has no matching service.
-- **Storage services are stateless.** No start/stop lifecycle. One
-  instance per `~/.a8s/network.json` `services` entry, shared between
-  the sender's upload path and the receive callback's download path.
-  Services dispatch via `supports_config_url(url)` (class method) at
-  config-load time and via host match at retrieve time —
-  `retrieve()` returning False means "this URL isn't mine, try the
-  next service" (so a multi-service install can route mixed URLs).
-  Real failures raise `StorageError`. Don't add per-service start/stop
-  unless a future backend genuinely needs a connection pool.
-- **Recipient-CWD-relative `FILE:` paths.** The routed envelope's
-  `files[i].path` is always written as `./.files/<filename>` — never
-  the absolute host path. The wake subprocess runs with
-  `cwd=recipient.root`, so the agent finds the file under whatever
-  prefix its container has mapped that directory to (e.g. host
-  `/home/me/agents/clover/.files/x` mapped to in-container
-  `/home/me/.files/x`). Both the local-copy path
-  (`_transfer_file_to_recipient`) and the cross-cluster download path
-  (`_download_files_to_recipient`) emit through the
-  `_recipient_relative_path` helper. Don't reintroduce
-  `str(absolute_dest)` — it works locally but breaks any agent whose
-  root is bind-mounted at a different path.
-- **Persistent sessions.** The MQTT transport is configured with
-  `clean_session=False` + QoS 1, with a stable hash-derived `client_id`. The
-  broker holds messages for an offline subscriber until reconnect — that's
-  how a Cloud-Shell-style listener catches up after coming online.
-- **`publish` waits for the readiness event before raising.** `_on_connect`
-  sets `self._connected`; `_on_disconnect` clears it. When `publish()`
-  finds `is_connected()` False, it `wait()`s up to `connect_timeout_s` for
-  the next CONNACK before raising `broker not connected`. Without this,
-  every NAT timeout / brief broker flap surfaced as a routing-layer warning
-  with backoff, even though paho's loop reconnects within ~1s. Don't drop
-  the disconnect handler — without it the readiness event would stay set
-  forever and the `wait()` would be a no-op on a flap.
-- **Per-message backoff retry.** When a remote publish fails, the
-  `<file>.json.retry` sidecar tracks attempts and `next_attempt`. The
-  schedule is `BACKOFF_SCHEDULE` (30s → 1m → 2m → 5m → 15m → 30m → 1h → 6h
-  → 24h). After `MAX_ATTEMPTS` failures the message moves to trash with a
-  "discarded after backoff exhausted" log. Don't introduce per-pass
-  unconditional retries — they generate excess log noise and broker traffic.
-- **Local routing claims the ULID in `seen-ids`.** When `_process_pending`
-  commits a local delivery, it appends the message's ULID to the
-  cluster-wide ring at `~/.a8s/seen-ids` — same ring the receive path
-  consults. Without this, our own MQTT round-trip (we publish to the
-  broker; the broker pushes back to our subscriber) would write the
-  envelope a second time once the local handler has trashed the first
-  copy from the inbox. The bug surfaced in #85's live test as a
-  connector emailing every routed message twice (`<ulid>.json` and
-  `<ulid>.1.json` both landed in trash). One append per envelope, after
-  the staged batch commits.
-
-### Surface
-
-```
-add <name> <dir> [<def>]    register an agent (auto-detects definition from marker)
-remove <name>                unregister an agent; wipes its mailbox dir and prunes aliases. Refuses if a handler is running.
-agents                       list all registered
-discover <path>              read-only scan; suggests add+define commands
-define <name> [<path>]       show or set definition
-alias                                   list all aliases
-alias <name>                            show one alias's members
-alias <alias> <member>                  add to alias (creates if new); cycles rejected
-unalias <alias> [<member>]   remove member or whole alias
-aliases                      list aliases + resolved members
-start <name>                 detached background handler (alias = ONE process for N agents)
-run <name>                   foreground handler
-step <name>                  attach, one route+drain pass, release
-stop <name>                  SIGTERM the handler (graceful; alias dedupes by PID)
-kill <name>                  etiquette-then-force: SIGTERM, grace, 2nd SIGTERM, SIGKILL
-exit                         SIGTERM every running handler
-ls                           list only running agents + their handler PIDs
-tell <name> <message>        routed message (sender = agent enclosing CWD; no senderless channel exists)
-logs <name>... [--tail N] [-f]   merge-sorted per-agent logs
-remote                                  list all configured remotes
-remote <name>                           show one remote's spec (passwords masked)
-remote <name> <broker> <topic> [--<k> <v> ...]   register or overwrite (extras forwarded to transport)
-unremote <name>                          forget a remote
-storage                                 list all configured storage services
-storage <name>                          show one service's spec
-storage <name> <url> [--<k> <v> ...]    register or overwrite (kind auto-dispatched from URL; extras forwarded to service)
-unstorage <name>                        forget a storage service
-install                      install canonical skills
-```
-
-`a8s` no-args prints help. There is no auto-discovery of agents from CWD.
-
-### State on disk
-
-The state directory is `$HOME/.a8s` by default and can be relocated with the
-`A8S_HOME` env var — useful for sandboxed test runs that mustn't touch the
-real configuration. All paths below are relative to whichever `A8S_HOME` (or
-default) is in effect.
-
-```
-~/.a8s/                       (or wherever A8S_HOME points)
-├── a8s.json                  registry: { agents: {...}, aliases: {...} }
-├── network.json              configured remotes (absent → local-only)
-├── seen-ids                  cluster-wide ULID ring (receive-side dedup)
-├── log.txt                   process-scoped supervisor log
-└── agents/
-    └── <NAME>/
-        ├── inbox/            JSON messages waiting for wake_once
-        ├── inbox.tmp/        atomic-stage dir for fan-out
-        ├── pending/          messages a8s has ingested out of <root>/.outbox/
-        │                     awaiting full delivery; <ulid>.json plus
-        │                     optional <ulid>.json.retry sidecar tracking
-        │                     attempts and per-remote success
-        ├── trash/             processed / discarded messages
-        ├── log.txt            agent-scoped log
-        ├── last-active        ISO timestamp; touched at wake start/end and
-        │                     after every idle invoke. `attached_loop` reads
-        │                     it to gate `definition.idle.invoke` firing.
-        └── pid                handler attachment (one or more agents may share a PID)
-
-<agent-root>/
-└── .outbox/                  agent writes here; a8s renames out — never
-                              read-modify-writes — to ~/.a8s/agents/<NAME>/pending/
-```
-
-### Idle invoke
-
-Definitions can opt into a periodic-while-quiet wake via:
-
-```json
-{
-  "invoke":  ["claude", "..."],
-  "idle":    { "timeout": 1800, "invoke": ["claude", "-p", "summarize the day"] }
-}
-```
-
-Semantics:
-
-- The handler tracks per-agent `last-active` (ISO timestamp at
-  `~/.a8s/agents/<NAME>/last-active`).
-- `wake_once` touches it at start and end of every real wake, so a
-  long-running LLM call doesn't leave it stale.
-- After draining the inbox each iteration, `attached_loop` calls
-  `maybe_run_idle(p)`. If `now - last_active >= idle.timeout`, it runs
-  `idle.invoke` via the same `run_with_prefix` path as a real wake, then
-  refreshes `last-active`.
-- A wake in flight blocks idle naturally — `attached_loop` is
-  single-threaded for its handled agents, and the inbox drain happens
-  before the idle check.
-- `timeout: 0` (or negative / non-numeric) disables idle.
-- Argv expansion: `$SENDER`/`$MESSAGE`/`$TIMESTAMP`/`$AGE` are empty
-  (no incoming message); `$RECIPIENT` is the agent's own name;
-  `$A8S_DIR` works as usual.
-
-Idle subsumes the retired `clear` use-case: write a definition whose
-idle invoke runs `claude -p "/clear" --new-session` (or whatever your
-chosen tool needs to reset session state).
-
-### The single invoke verb
-
-Every wake reads `definition["invoke"]` — one argv per definition. There is
-no verb dispatch, no `select_verb`, and no special-case branches: `prompt`
-and `clear` are gone. Every message is a `tell` with a force-stamped
-`from`, so the same argv shape (`$SENDER tells $RECIPIENT ($AGE):
-$MESSAGE`) covers every wake.
-
-Strict opacity (#69, #70) still holds: a direct tell and an alias-fanned
-tell produce identical shapes; `$RECIPIENT` preserves whatever the sender
-wrote (alias name for fanned, agent name for direct).
-
-`build_command(definition, msg)` substitutes `$SENDER` / `$RECIPIENT` /
-`$MESSAGE` (content + any `FILE:` lines) / `$TIMESTAMP` / `$AGE` /
-`$A8S_DIR`.
-
-### Definition fallback
-
-Every agent always has a definition. If the registry has no `definition` field,
-`load_definition` falls back to `apps/a8s/definitions/default.json`, which
-runs `apps/a8s/dummy-cli` (a bash script that prints "no real CLI configured"
-and echoes the prompt). Wakes never crash on missing config.
-
-`a8s add` auto-detects:
-- single marker file in dir → matching `<kind>.json`
-- multiple/no markers → `default.json` with a note in the output
-
-### Per-tool quirks
-
-- **Claude Code** — granular permissions via `--permission-mode dontAsk`
-  + `--allowedTools "Bash(tell:*) Read Edit Write ..."`. `--continue` for
-  conversation continuity. `--dangerously-skip-permissions` for unrestricted
-  (no longer baked into a8s; create a custom definition if you want it).
-- **Gemini CLI** — `--yolo` is REQUIRED in headless mode. The Policy Engine
-  TOML files at `~/.gemini/policies/*.toml` don't apply to non-interactive
-  `-p` mode (tracked upstream as `google-gemini/gemini-cli#20469`). Don't
-  remove `--yolo` until that issue is resolved.
-- **Codex CLI** — `--full-auto` for workspace-write sandbox. `resume --last`
-  for continuity. `--skip-git-repo-check` to allow running outside a git
-  repo. `stdin=subprocess.DEVNULL` is REQUIRED — codex hangs otherwise
-  (learned the hard way; see `daemon.run_with_prefix`).
-- **GitHub Copilot CLI** — `--allow-all-tools` is REQUIRED for
-  non-interactive `-p` mode (the docs say it explicitly; granular
-  `--allow-tool=shell(tell:*)` should also work, but the default ships
-  with the bypass for parity with codex/gemini). `--continue` for
-  conversation continuity. **No user-scope skill mechanism** — `copilot
-  plugin install` only takes git sources and `--plugin-dir` is per-session.
-  Until that gap closes, `tell` instructions live directly in each
-  Copilot agent's `.github/copilot-instructions.md`, which is also the
-  a8s marker AND the file Copilot itself auto-loads — one file, three
-  consumers. (We deliberately did NOT invent a `COPILOT.md` marker:
-  using Copilot's native location avoids the symlink-or-duplicate dance
-  the other markers would otherwise require.)
-- **OpenCode** — BYO-model coding CLI (https://opencode.ai/). Non-interactive
-  is the `opencode run "<message>"` *subcommand*, not a `-p` flag.
-  `--continue` resumes the most recent session;
-  `--dangerously-skip-permissions` is required for headless tool use. The
-  model is **not** baked into the a8s definition — operators pick the
-  provider/model in each agent's own `opencode.json`
-  (`{"model": "ollama/gpt-oss:20b"}`, `{"model": "anthropic/claude-sonnet-4-6"}`,
-  etc.). OpenCode's CLI priority is `-m` flag > `opencode.json` > last-used
-  > default, so adding `-m` to the shared definition would clobber per-agent
-  config — we deliberately don't. `AGENTS.md` is OpenCode's native
-  instruction file and is also the a8s **fallback marker**: a directory
-  with only `AGENTS.md` resolves to `opencode`; a kind-specific marker
-  (CLAUDE/GEMINI/CODEX/`.github/copilot-instructions.md`) wins when both
-  are present. No user-scope skill mechanism, so `tell` instructions live
-  inline in each agent's `AGENTS.md`.
-
 ### SKILL.md YAML — quoted scalars only
 
 Codex's YAML parser is strict and fails silently on unquoted descriptions
 containing colons or `FILE:` lines. Always quote `name:` and `description:`
-in skill frontmatter. Tested with `apps/a8s/skills/tell/SKILL.md` — unquoted
-values silently dropped the skill on codex.
+in skill frontmatter.
 
-### Testing
-
-```bash
-python3 -m pytest apps/a8s/tests/
-```
-
-~230 tests, runs in <3s. Remote-routing tests against a real `mosquitto`
-broker (spawned on a free port) skip cleanly when mosquitto or paho-mqtt
-isn't installed; install via `pip install -r apps/a8s/tests/requirements.txt`.
-Test scaffold:
-
-- `apps/a8s/tests/conftest.py` — adds `apps/a8s/` to sys.path, provides
-  `fake_home` fixture that monkey-patches `HOME` to a tmp dir so tests
-  never touch the real `~/.a8s/`. Resets `core.PRINT_LOCK` between tests.
-- `apps/a8s/tests/fixtures/mock-cli` — deterministic bash echo script for
-  end-to-end daemon tests. Each argv element printed on its own line with
-  `MOCK-CLI:` prefix; tests grep the per-agent log to assert what the wake
-  subprocess actually received.
-- `apps/a8s/tests/fixtures/mock.json` — definition that routes all three
-  verbs through `mock-cli` with a deterministic argv template
-  `FROM:$SENDER|TO:$RECIPIENT|MSG:$MESSAGE` so log assertions are stable.
-
-When you change behavior in `core` / `registry` / `mailbox` / `definitions` /
-`daemon`, add or modify the corresponding `test_*.py`. The pytest suite is
-fast enough to be the first feedback loop.
-
-## Active design threads
-
-The locked-design refactor (#52) is closed. The following are open:
-
-| # | State | Topic |
-|---|---|---|
-| #39 | landed | Copilot CLI as 4th tool kind. Marker is `.github/copilot-instructions.md` (Copilot's native location — same file serves a8s discovery and Copilot's own persona loading). `definitions/copilot.json` with `--allow-all-tools --continue -p`. No user-scope skill install (Copilot has no `copilot skills link <local-dir>` analog) — `tell` instructions live in each agent's `.github/copilot-instructions.md`. |
-| #63 | partially landed | Transparent multi-cluster routing. MQTT transport (paho-mqtt impl) + layered remotes + per-message backoff + ULID dedup are in. Still open: mini-MQTT pure-stdlib fallback (auto-activates when paho isn't importable), HTTPS long-poll transport, peer-to-peer TCP transport, app-level envelope encryption (per-network PSK). |
-| #90 | landed | Cross-cluster `FILE:` payloads via pluggable storage services (`a8s storage`/`unstorage`). TempFile.org first impl (pure-stdlib HTTP). Per-file × per-service success cached in the retry sidecar; receive side downloads into recipient's `.files/`. App-level encryption / per-message symmetric keys (originally scoped under #62) deferred. |
-| #72 | open question | Design discussion surfaced by the review panel: mailbox file format. (#67's atomic fan-out and #63's ULID + ingest-to-pending split partially address this; revisit before mini-MQTT lands.) |
-| #93 | open | Grok via `superagent-ai/grok-cli` as a 5th tool kind. Open question: marker file (grok-cli reads `AGENTS.md` like OpenCode, so a8s needs a different discovery hint — recommendation in the issue is `GROK.md`). |
-| #94 | landed | OpenCode as BYO-model tool kind + `AGENTS.md` as fallback marker resolving to `opencode`. Specific markers (CLAUDE/GEMINI/CODEX/`.github/copilot-instructions.md`) still win when both are present. Model lives in each agent's own `opencode.json` (not in the shared a8s definition). |
-
-### What I tried that didn't work (concrete)
-
-- **Synchronous `a8s prompt`** — initial implementation woke the agent
-  directly; raced with the loop. Fixed in #45 by queueing into the inbox
-  with empty `from` and letting the normal drain pass handle it.
-- **Auto-discovery on every `step`** — early phase 2 still walked the
-  filesystem each iteration; performance was fine but the model leaked
-  (an agent dir mid-creation got picked up incomplete). Replaced with
-  registry-only iteration in phase 2.
-- **Mailboxes inside agent dirs (`<root>/.inbox/`, `<root>/.trash/`)** —
-  initial layout. Gemini agents would `ls` their own directory and surface
-  the inbox to the model. Moved to `~/.a8s/agents/<NAME>/{inbox,trash}/`
-  in phase 3a. Outbox stayed at `<root>/.outbox/` because codex's
-  `--full-auto` sandbox can only write inside the workspace.
-- **Single `--continue` argv path** — initial Claude wake used
-  `claude --resume <session-id> -p "..."` which requires explicit IDs.
-  Switched to `--continue` (resumes most recent). Don't try to use
-  `--resume` without a session ID; it errors on parse.
-- **Headless tool-use without auto-approval** — Gemini and Claude both
-  silently deny tools in headless `-p` mode without explicit flags. Symptom:
-  the wake hangs indefinitely or returns empty. `--yolo` (gemini),
-  `--permission-mode dontAsk --allowedTools "..."` (claude) are required.
-- **`a8s loop` as a singleton** — earlier design had one daemon process
-  scanning all agents. Replaced in phase 3b with per-agent (or per-alias)
-  handlers. The singleton had no path to remote (#63).
-- **The `says` broadcast verb** — phase 4 retired it. LLMs struggled to
-  pick `tell` vs `says` consistently; the dual API confused agents. Now
-  group sends use `tell <alias>` and the system fans out.
-- **The `fresh` flag** (`~/.cache/a8s/fresh.json`) — phase 5 retired it
-  along with the `consume_fresh` mechanism. Briefly replaced by the
-  explicit CLEAR sentinel via `a8s clear`; that command was itself retired
-  later when the messaging surface collapsed to `tell`-only. Operators
-  reset agent sessions manually now (kill the handler, delete the agent's
-  session files, etc).
-- **`a8s prompt` / `a8s clear`** — both were senderless supervisor
-  commands. Removed when the messaging surface collapsed to `tell`-only:
-  the senderless cross-cluster path (`_publish_supervisor_to_remotes` →
-  `publish_once_to_remotes`) was the security hole — a compromised agent
-  could potentially spoof prompts via the broker. With every routed
-  message having a force-stamped agent `from`, that attack surface is
-  gone. Don't reintroduce a senderless channel without thinking through
-  what it lets a sandboxed agent do over the network.
-- **`--unrestricted` global flag** — phase 5 retired. Users wanting the
-  dangerous mode create a custom definition file and `a8s define <name>
-  <path>`. Don't add the flag back; the definition system subsumes it.
-
-### Top-level scripts: `tell`
+## Top-level scripts: `tell`
 
 `~/bin/tell` is a **self-contained polyglot** — bash + PowerShell wrapper
 around an inline Python script (stdlib only, no a8s imports). It walks up
 from CWD to find the first `.outbox/` directory, builds a JSON envelope
 ({`id`, `date`, `to`, `content`, `files`}), and atomic-writes it. The
 router (`mailbox.py:_process_pending`) force-overwrites `from` based on
-which agent owns the enclosing root, so the simpler client doesn't
-compromise identity — the filesystem is the unforgeable identity, the
-sender field is advisory.
-
-The container scenario this enables: mount only `~/bin/tell` (one file)
-plus a `.outbox/` dir into a slim Python container; the agent inside can
-emit a8s messages without the `apps/a8s/` package being present. Earlier
-versions execed into the full a8s python package, requiring the whole
-~2200-LOC tree to ride along.
+which agent owns the enclosing root — the filesystem is the unforgeable
+identity.
 
 Don't reintroduce a8s-package imports in the polyglot. The single Python
 script lives between `# >>>PY` and `# <<<PY` markers; both bash and
-PowerShell halves extract that block (awk in bash, regex in PS) and pipe
-it to `python3 -`. One source of truth.
+PowerShell halves extract that block and pipe it to `python3 -`.
 
-There used to be a `says` polyglot too; it's gone. If you're considering
-re-adding any "broadcast" command, read phase-4's PR description (#58)
-first — the consensus was that aliases subsume it and the dual-verb API
-confuses LLMs.
-
-### When using subagents (Agent tool) for review
-
-The "review panel" exercise (5 simulated reviewers — Carmack, Spolsky, Pike,
-Armstrong, DJB) was high-signal. To repeat it for future design decisions:
-
-1. Pick reviewers whose published work directly maps to the design space.
-   For a8s the picks were: low-level pragmatism (Carmack), DX/surface (Spolsky),
-   namespace abstractions (Pike), distributed messaging (Armstrong), filesystem
-   security (DJB). Avoid overlap.
-2. Per-reviewer prompts: anchor in their published positions, not caricature.
-   Specify exact files to read, focus areas to prioritize, length cap (~500
-   words). Different reviewers get different focus areas to avoid redundant
-   feedback.
-3. Synthesize convergent findings (multiple reviewers same diagnosis = strong
-   signal) separately from unique findings (one reviewer's specific catch
-   = often a real bug). DJB's case-collision and pid race were unique and
-   real.
-
-The synthesis from this exercise lives in issues #65–72.
-
-## Common operations cheat-sheet
+## Common operations
 
 ```bash
+# a8s tests (~378 tests)
+python3 -m pytest apps/a8s/tests/
+
+# k7e tests (~69 tests)
+cd apps/k7e && tests/run
+
 # Start fresh after a schema change (pre-v1 scorch-the-earth)
 rm -rf ~/.a8s/agents/ ~/.a8s/a8s.json
 a8s discover apps/a8s/tests/agents
-# (paste the suggested add commands)
-
-# Run the test suite
-python3 -m pytest apps/a8s/tests/
-
-# Smoke-test wake without burning real LLM tokens — stub run_with_prefix
-python3 -c "
-import sys; sys.path.insert(0, 'apps/a8s')
-import daemon
-captured = []
-daemon.run_with_prefix = lambda n, c, w: captured.append(c) or 0
-daemon.attached_loop(['CLAUDE'], 1.0, single_pass=True)
-print(captured)
-"
-
-# Tail the supervisor log (process-scoped events)
-tail -f ~/.a8s/log.txt
 
 # Tail per-agent activity
 a8s logs CLAUDE GEMINI -f
@@ -625,8 +125,3 @@ The user has a private memory system at
 file. Personal preferences, ongoing project state, and feedback rules live
 there. THIS file (`CLAUDE.md`) is the public-checked-in onboarding doc.
 Don't put anything in it that would be inappropriate for a public repo.
-
-The two intersect: anything in private memory that constrains how a8s is
-designed (e.g., "no back-compat shims pre-v1") is duplicated here as a
-project rule, because contributors who don't share the memory still need
-to know it.
