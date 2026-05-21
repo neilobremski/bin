@@ -29,6 +29,7 @@ Deploy a three-persona team: **Developer**, **Tester**, **Critic**. Each role ha
 | `/react-team` | React/TypeScript | Sebastian | Kent | Dan |
 | `/k7e-team` | K7E (Python/SQLite) | Willison | Chase | Karpathy |
 | `/android-team` | Android/Kotlin | Wharton | Alcérreca | Haase |
+| `/gas-team` | Google Apps Script | Crockford | Rauch | Hejlsberg |
 
 ## Workflow
 
@@ -49,6 +50,7 @@ Deploy a three-persona team: **Developer**, **Tester**, **Critic**. Each role ha
 Pick the team based on the codebase:
 - Working in `apps/k7e/` → `/k7e-team`
 - Working in `~/repos/a8s-android/` or Kotlin → `/android-team`
+- Working in `~/repos/gas/` or Google Apps Script → `/gas-team`
 - React/TypeScript frontend code → `/react-team`
 - General Python (a8s, scripts, CLI tools) → `/python-team`
 - If ambiguous, ask.
