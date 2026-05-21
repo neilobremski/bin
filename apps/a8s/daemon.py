@@ -77,7 +77,6 @@ def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
     process in `_CURRENT_WAKE_PROC` and the agent in `_CURRENT_WAKE_NAME` so
     signal handlers can identify which agent's wake is in-flight."""
     global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME
-    prefix = f"{name}> "
     try:
         proc = subprocess.Popen(
             cmd,
@@ -90,17 +89,20 @@ def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
             start_new_session=True,
         )
     except FileNotFoundError:
-        out_agent(name, f"{prefix}command not found: {cmd[0]}")
+        ts = datetime.now().strftime("%H:%M:%S")
+        out_agent(name, f"{name}> [{ts}] command not found: {cmd[0]}")
         return 127
     _CURRENT_WAKE_PROC = proc
     _CURRENT_WAKE_NAME = name
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
-            out_agent(name, prefix + line.rstrip("\n"))
+            ts = datetime.now().strftime("%H:%M:%S")
+            out_agent(name, f"{name}> [{ts}] {line.rstrip(chr(10))}")
         proc.wait()
         if proc.returncode != 0:
-            out_agent(name, f"{prefix}(exit {proc.returncode})")
+            ts = datetime.now().strftime("%H:%M:%S")
+            out_agent(name, f"{name}> [{ts}] (exit {proc.returncode})")
         return proc.returncode
     finally:
         _CURRENT_WAKE_PROC = None
