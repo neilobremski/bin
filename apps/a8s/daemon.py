@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -47,7 +48,9 @@ from core import (
 from definitions import (
     build_command,
     build_idle_command,
+    files_ttl_seconds,
     idle_timeout_seconds,
+    is_file_proxy,
     load_definition,
 )
 from mailbox import ensure_mailboxes, next_inbox_message, route_outboxes
@@ -109,6 +112,21 @@ def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
         _CURRENT_WAKE_NAME = None
 
 
+def _deliver_file_proxy(p: Participant) -> None:
+    """Move ALL inbox files to <root>/.inbox/ for file-proxy agents."""
+    dest = p.root / ".inbox"
+    dest.mkdir(parents=True, exist_ok=True)
+    src = inbox_dir(p.name)
+    if not src.is_dir():
+        return
+    for f in sorted(src.iterdir()):
+        if not (f.is_file() and f.name.endswith(".json")):
+            continue
+        target = dest / f.name
+        shutil.move(str(f), str(target))
+        out_agent(p.name, f"[{p.name}] proxy: delivered {f.name}")
+
+
 def wake_once(p: Participant, msg_path: Path) -> None:
     # Mark activity before any work — covers the parse-error / load-error
     # exits below too. Without this, a bad inbox file in the only handled
@@ -131,6 +149,11 @@ def wake_once(p: Participant, msg_path: Path) -> None:
         msg_path.rename(bad)
         return
 
+    if is_file_proxy(definition):
+        _deliver_file_proxy(p)
+        touch_last_active(p.name)
+        return
+
     trashed = unique_path(trash_dir(p.name) / msg_path.name)
     msg_path.rename(trashed)
     out_agent(p.name, f"[{p.name}] waking from {trashed.name}: {_preview(msg.get('content', ''))}")
@@ -140,6 +163,27 @@ def wake_once(p: Participant, msg_path: Path) -> None:
     # And again after the wake returns — a long-running LLM call shouldn't
     # leave last-active stuck at the pre-wake timestamp.
     touch_last_active(p.name)
+
+
+def _file_proxy_ttl_cleanup(p: Participant, definition: dict) -> None:
+    """Delete files in <root>/.files/ older than files_ttl_hours."""
+    ttl = files_ttl_seconds(definition)
+    files_path = p.root / ".files"
+    if not files_path.is_dir():
+        return
+    cutoff = _time.time() - ttl
+    removed = 0
+    for f in files_path.iterdir():
+        if not f.is_file():
+            continue
+        try:
+            if os.path.getmtime(f) < cutoff:
+                f.unlink()
+                removed += 1
+        except OSError:
+            pass
+    if removed:
+        out_agent(p.name, f"[{p.name}] proxy: TTL cleanup removed {removed} file(s)")
 
 
 def maybe_run_idle(p: Participant) -> bool:
@@ -155,6 +199,20 @@ def maybe_run_idle(p: Participant) -> bool:
     timeout = idle_timeout_seconds(definition)
     if timeout is None:
         return False
+
+    if is_file_proxy(definition):
+        last = read_last_active(p.name)
+        if last is None:
+            touch_last_active(p.name)
+            return False
+        elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+        if elapsed < timeout:
+            return False
+        _deliver_file_proxy(p)
+        _file_proxy_ttl_cleanup(p, definition)
+        touch_last_active(p.name)
+        return True
+
     cmd = build_idle_command(definition, p.name)
     if cmd is None:
         return False

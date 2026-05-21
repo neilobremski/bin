@@ -272,6 +272,44 @@ A connector is just an a8s agent whose `definition.invoke` runs a script instead
 
 Strict recipient opacity holds: other participants `tell <name> ...` with no awareness that the recipient is Gmail-backed, a script, a human, or another LLM agent. The connector is the only thing that knows about its bridge format. See `apps/a8s/connectors/gmail/README.md` for setup.
 
+## File proxy
+
+A file-proxy agent communicates through filesystem sync instead of a CLI invocation. Designed for agents whose root is on a remote mount (rclone, NFS, Google Drive FUSE, etc.) where the "other side" polls for files independently.
+
+### Setup
+
+```bash
+# Create the definition
+cat > file-proxy.json << 'EOF'
+{"proxy": "file", "idle": {"timeout": 30}, "files_ttl_hours": 48}
+EOF
+
+# Register with a mounted root directory
+a8s add my-email /mnt/gdrive/my-email/ file-proxy.json
+```
+
+### How it works
+
+- **On message:** A8S moves inbox JSON files into `<root>/.inbox/` instead of invoking a subprocess. The remote side polls `.inbox/`, processes, deletes.
+- **Outbox:** The remote side writes response envelopes to `<root>/.outbox/`. A8S ingests these on its normal routing pass (no change from regular agents).
+- **Files:** Attachments flow through `<root>/.files/` bidirectionally. A8S cleans up files older than `files_ttl_hours` (default 48) on each idle cycle.
+- **Idle:** The `idle.timeout` controls how often A8S syncs (moves inbox files + runs TTL cleanup). No CLI is invoked.
+
+### Filesystem layout (agent root)
+
+```
+/mnt/gdrive/my-email/
+├── .inbox/     ← a8s writes here; remote side reads + deletes
+├── .outbox/    ← remote side writes here; a8s ingests as normal
+└── .files/     ← bidirectional attachments; TTL cleanup by a8s
+```
+
+### Use cases
+
+- Google Apps Script participants (GAS polls Drive natively)
+- Cross-machine agents without exposed ports
+- Any system that can read/write files but can't run MQTT or hold sockets
+
 ## Source layout
 
 ```
