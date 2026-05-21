@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+STATE_FILE="$SCRIPT_DIR/.temp/reinforce.txt"
+
+usage() {
+    echo "Usage: reinforce [MESSAGE | --clear]" >&2
+    echo "  (no args)   Print current reinforcement (empty if unset)" >&2
+    echo "  MESSAGE     Set the reinforcement message" >&2
+    echo "  --clear     Remove the reinforcement" >&2
+}
+
+case "${1:-}" in
+    "")
+        cat "$STATE_FILE" 2>/dev/null || true
+        ;;
+    --clear)
+        rm -f "$STATE_FILE"
+        rmdir "$SCRIPT_DIR/.temp" 2>/dev/null || true
+        echo "Reinforcement cleared." >&2
+        ;;
+    --help|-h)
+        usage
+        ;;
+    *)
+        mkdir -p "$(dirname "$STATE_FILE")"
+        echo "$*" > "$STATE_FILE"
+        echo "Reinforcement set." >&2
+        ;;
+esac
