@@ -29,6 +29,19 @@ def default_definition_path(kind: str) -> Path:
     return DEFINITIONS_DIR / f"{kind}.json"
 
 
+def is_file_proxy(definition: dict) -> bool:
+    return definition.get("proxy") == "file"
+
+
+def files_ttl_seconds(definition: dict) -> float:
+    hours = definition.get("files_ttl_hours", 48)
+    try:
+        h = float(hours)
+    except (TypeError, ValueError):
+        h = 48.0
+    return max(0.0, h * 3600)
+
+
 def load_definition(name: str) -> dict:
     """Load the JSON definition for `name`. Every agent always has one — if
     the registry lacks an explicit `definition` field, falls back to the
