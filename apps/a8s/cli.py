@@ -12,6 +12,7 @@ from commands import (
     cmd_define,
     cmd_discover,
     cmd_exit,
+    cmd_health,
     cmd_install,
     cmd_kill,
     cmd_logs,
@@ -53,6 +54,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("storage",  "[<name> [<url> [--<k> <v> ...]]]",            "List, show, or set a cross-cluster file storage service."),
     ("unstorage","<name>",                    "Remove a configured storage service."),
     ("install",  "",                          "Install the `tell` skill into supported tools."),
+    ("health",   "",                          "Test connectivity of remotes and storage services."),
 ]
 
 KNOWN_COMMANDS = {name for name, _, _ in COMMANDS}
@@ -115,6 +117,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_storage(args)
     if cmd == "unstorage":
         return cmd_unstorage(args)
+    if cmd == "health":
+        return cmd_health()
     raise ValueError(f"unknown command: {cmd!r}")
 
 
