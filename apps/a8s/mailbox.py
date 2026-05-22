@@ -168,10 +168,7 @@ def _transfer_file_to_recipient(
     except OSError as e:
         out_agent(sender_name, f"FILE: copy failed {src_resolved} -> {dest}: {e}")
         return None
-    # Recipient-CWD-relative path (e.g. "./.files/report.txt"). The agent's
-    # wake subprocess runs with cwd=recipient.root; an absolute host path
-    # wouldn't resolve inside a container that has the agent's directory
-    # mapped to a different prefix.
+    out_agent(sender_name, f"FILE: delivered {src_resolved.name} -> {dest_dir}")
     return {"filename": dest.name, "path": _recipient_relative_path(dest_dir, dest)}
 
 

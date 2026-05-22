@@ -1228,3 +1228,71 @@ def cmd_unstorage(args: list[str]) -> int:
     save_network_config(cfg)
     print(f"removed storage {name}")
     return 0
+
+
+def cmd_health() -> int:
+    """`a8s health` — test connectivity of all configured remotes and storage services."""
+    import tempfile
+    from network import load_remotes, load_services
+
+    errors = 0
+
+    remotes = load_remotes()
+    if not remotes:
+        print("remotes: (none configured)")
+    for t in remotes:
+        name = getattr(t, "name", t.__class__.__name__)
+        try:
+            t.start(lambda *_: None)
+            connected = t.is_connected() if hasattr(t, "is_connected") else True
+            t.stop()
+            if connected:
+                print(f"remote {name}: OK")
+            else:
+                print(f"remote {name}: FAIL (connected but is_connected=False)")
+                errors += 1
+        except Exception as e:
+            print(f"remote {name}: FAIL ({e})")
+            errors += 1
+
+    services = load_services()
+    if not services:
+        print("storage: (none configured)")
+    for svc in services:
+        name = getattr(svc, "name", svc.__class__.__name__)
+        tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w")
+        tmp.write("a8s health check")
+        tmp.close()
+        tmp_path = Path(tmp.name)
+        try:
+            url = svc.store(tmp_path)
+            dl_dir = Path(tempfile.mkdtemp())
+            dl_dest = dl_dir / "health-check.txt"
+            ok = svc.retrieve(url, dl_dest)
+            if ok and dl_dest.is_file() and dl_dest.read_text().strip() == "a8s health check":
+                print(f"storage {name}: OK (upload + download verified)")
+            elif ok:
+                print(f"storage {name}: WARN (download succeeded but content mismatch)")
+                errors += 1
+            else:
+                print(f"storage {name}: FAIL (retrieve returned False)")
+                errors += 1
+            dl_dest.unlink(missing_ok=True)
+            dl_dir.rmdir()
+        except Exception as e:
+            print(f"storage {name}: FAIL ({e})")
+            errors += 1
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    agents = load_registry()
+    print(f"agents: {len(agents)} registered")
+    for name, info in agents.items():
+        root = Path(info.get("root", ""))
+        if not root.is_dir():
+            print(f"  {name}: WARN (root missing: {root})")
+            errors += 1
+        else:
+            print(f"  {name}: OK ({root})")
+
+    return 1 if errors else 0
