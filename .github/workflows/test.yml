@@ -1,0 +1,48 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  a8s:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest apps/a8s/tests/ -x -q
+
+  k7e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest apps/k7e/tests/ -x -q -m "not llm"
+
+  k7e-llm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+      - name: Start ollama and pull model
+        run: |
+          ollama serve &
+          sleep 3
+          ollama pull qwen3:0.6b
+      - run: pip install pytest
+      - run: |
+          export PATH="$PWD:$PATH"
+          k7e config llm ollama
+          k7e config llm_model qwen3:0.6b
+          python -m pytest apps/k7e/tests/ -x -q -m "llm"
