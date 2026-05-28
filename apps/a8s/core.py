@@ -23,7 +23,7 @@ from pathlib import Path
 
 MARKER_FILES = {
     "CLAUDE.md": "claude",
-    "GEMINI.md": "gemini",
+    "GEMINI.md": "agy",
     "CODEX.md": "codex",
     # Copilot's native repo-instructions location. Operators with a
     # repo-wide `copilot-instructions.md` who don't intend the dir to be

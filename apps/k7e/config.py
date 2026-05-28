@@ -66,7 +66,7 @@ def get(key, default=None):
 # --- Provider detection ---
 
 KNOWN_LLMS = {
-    "gemini": {"bin": "gemini", "invoke": ["gemini", "--yolo", "-p", "{prompt}", "-o", "text"]},
+    "agy": {"bin": "agy", "invoke": ["agy", "-p", "{prompt}"]},
     "claude": {"bin": "claude", "invoke": ["claude", "-p", "{prompt}"]},
     "codex": {"bin": "codex", "invoke": ["codex", "--full-auto", "{prompt}"]},
     "ollama": {"bin": "ollama", "invoke": None},  # uses HTTP API
@@ -173,7 +173,7 @@ def resolve_llm_command(prompt):
     llm = get("llm", "auto")
 
     if llm == "auto":
-        for name in ["gemini", "claude", "codex", "ollama"]:
+        for name in ["agy", "claude", "codex", "ollama"]:
             if shutil.which(KNOWN_LLMS[name]["bin"]):
                 llm = name
                 break

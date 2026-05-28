@@ -1,9 +1,0 @@
-{
-  "description": "Gemini CLI default — --yolo because Policy Engine doesn't apply in headless mode (google-gemini/gemini-cli#20469).",
-  "invoke": [
-    "gemini",
-    "--yolo",
-    "--resume", "latest",
-    "--prompt", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
-  ]
-}

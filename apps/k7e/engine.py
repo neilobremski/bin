@@ -490,12 +490,16 @@ def compile_tag(tag, dry_run=False):
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=120,
-                cwd=os.getcwd(),
+                cwd=str(config._k7e_home()),
             )
             if result.returncode == 0 and result.stdout.strip():
                 compiled_content = result.stdout.strip()
-        except (subprocess.TimeoutExpired, OSError):
-            pass
+            elif result.returncode != 0:
+                print(f"  [llm] non-zero exit ({result.returncode})", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            print("  [llm] timed out (120s)", file=sys.stderr)
+        except OSError as e:
+            print(f"  [llm] launch failed: {e}", file=sys.stderr)
 
     # Fallback: ollama HTTP API
     if not compiled_content:

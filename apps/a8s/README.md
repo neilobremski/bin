@@ -167,7 +167,7 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | File | Purpose |
 |---|---|
 | `claude.json` | Claude Code with `--permission-mode dontAsk` allowlist + `--continue` |
-| `gemini.json` | Gemini CLI with `--yolo` (Policy Engine doesn't apply in headless mode; tracked upstream) + `--resume latest` |
+| `agy.json` | Antigravity (agy) with `--sandbox` + `--dangerously-skip-permissions` + `--continue` for headless operation |
 | `codex.json` | Codex CLI with `--full-auto` workspace-write sandbox + `resume --last` |
 | `copilot.json` | GitHub Copilot CLI with `--allow-all-tools` (required for non-interactive `-p` mode) + `--continue`. Marker is `.github/copilot-instructions.md` (Copilot's native repo-instructions location). |
 | `opencode.json` | [OpenCode](https://opencode.ai/) — BYO model. `opencode run --continue --dangerously-skip-permissions`. Operator picks the provider/model in each agent's own `opencode.json` (e.g. `{"model": "ollama/gpt-oss:20b"}`), not in the a8s definition. |
@@ -180,7 +180,7 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | Marker | Kind | Where the CLI itself looks |
 |---|---|---|
 | `CLAUDE.md` | claude | [Claude Code memory](https://docs.claude.com/en/docs/claude-code/memory) |
-| `GEMINI.md` | gemini | [Gemini CLI context files](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/configuration.md) |
+| `GEMINI.md` | agy | [Antigravity (agy) context files](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/configuration.md) |
 | `CODEX.md` | codex | [Codex CLI configuration](https://github.com/openai/codex) |
 | `.github/copilot-instructions.md` | copilot | [Copilot CLI repository custom instructions](https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions) — the same file Copilot itself auto-loads |
 | `AGENTS.md` (fallback) | opencode | [The agents.md standard](https://agents.md/) — tool-agnostic instructions stewarded by the [Agentic AI Foundation](https://agentic.foundation/) under the Linux Foundation |

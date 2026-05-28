@@ -87,27 +87,10 @@ def _install_skill_claude(skill_dir: Path) -> str:
     return f"  claude: linked docs/{target_link.name} -> {rel} (install.sh will sync to ~/.claude/skills/)"
 
 
-def _install_skill_gemini(skill_dir: Path) -> str:
-    if shutil.which("gemini") is None:
-        return "  gemini: not on PATH; skipping"
-    skill_name = skill_dir.name
-    try:
-        listed = subprocess.run(
-            ["gemini", "skills", "list", "--all"],
-            capture_output=True, text=True, timeout=30,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        return f"  gemini: could not list skills ({e}); skipping"
-    if re.search(rf"\b{re.escape(skill_name)}\b", listed.stdout):
-        return f"  gemini: '{skill_name}' already linked"
-    res = subprocess.run(
-        ["gemini", "skills", "link", str(skill_dir), "--scope", "user", "--consent"],
-        capture_output=True, text=True, timeout=60,
-    )
-    if res.returncode != 0:
-        msg = (res.stderr.strip() or res.stdout.strip()).splitlines()[-1] if (res.stderr or res.stdout) else "unknown error"
-        return f"  gemini: link failed ({msg})"
-    return f"  gemini: linked '{skill_name}' at user scope"
+def _install_skill_agy(skill_dir: Path) -> str:
+    if shutil.which("agy") is None:
+        return "  agy: not on PATH; skipping"
+    return "  agy: plugin install not yet supported; skipping"
 
 
 def _install_skill_codex(skill_dir: Path) -> str:
@@ -383,7 +366,7 @@ def cmd_install() -> int:
     for skill_dir in skill_dirs:
         print(f"\n[{skill_dir.name}]")
         print(_install_skill_claude(skill_dir))
-        print(_install_skill_gemini(skill_dir))
+        print(_install_skill_agy(skill_dir))
         print(_install_skill_codex(skill_dir))
         print(_install_skill_copilot(skill_dir))
         print(_install_skill_opencode(skill_dir))
