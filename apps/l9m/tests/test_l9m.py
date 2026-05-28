@@ -49,19 +49,23 @@ class TestCache:
         cache_file = tmp_path / ".cache" / "l9m.env"
         monkeypatch.setattr(l9m, "CACHE_FILE", cache_file)
 
-        l9m._write_cache("qwen3:7b")
-        assert l9m._read_cache() == "qwen3:7b"
+        l9m._write_cache("qwen3:7b", 32768)
+        cache = l9m._read_cache()
+        assert cache["MODEL"] == "qwen3:7b"
+        assert cache["NUM_CTX"] == "32768"
 
     def test_read_missing_file(self, tmp_path, monkeypatch):
         cache_file = tmp_path / "nonexistent" / "l9m.env"
         monkeypatch.setattr(l9m, "CACHE_FILE", cache_file)
-        assert l9m._read_cache() is None
+        assert l9m._read_cache() == {}
 
-    def test_read_ignores_other_lines(self, tmp_path, monkeypatch):
+    def test_read_parses_all_keys(self, tmp_path, monkeypatch):
         cache_file = tmp_path / "l9m.env"
-        cache_file.write_text("# comment\nFOO=bar\nMODEL=mymodel\nEXTRA=stuff\n")
+        cache_file.write_text("MODEL=mymodel\nNUM_CTX=4096\nEXTRA=stuff\n")
         monkeypatch.setattr(l9m, "CACHE_FILE", cache_file)
-        assert l9m._read_cache() == "mymodel"
+        cache = l9m._read_cache()
+        assert cache["MODEL"] == "mymodel"
+        assert cache["NUM_CTX"] == "4096"
 
     def test_write_creates_parent_dirs(self, tmp_path, monkeypatch):
         cache_file = tmp_path / "deep" / "nested" / "l9m.env"
@@ -95,6 +99,53 @@ class TestResolveModel:
         cache_file.write_text("MODEL=cached-model\n")
         monkeypatch.setattr(l9m, "CACHE_FILE", cache_file)
         assert l9m.resolve_model() == "cached-model"
+
+
+# ---------- resolve_context_limit ----------
+
+class TestResolveContextLimit:
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setattr(l9m, "CONTEXT_LIMIT_OVERRIDE", "5000")
+        assert l9m.resolve_context_limit("any-model") == 5000
+
+    def test_invalid_env_falls_through(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(l9m, "CONTEXT_LIMIT_OVERRIDE", "bad")
+        cache_file = tmp_path / "l9m.env"
+        cache_file.write_text("MODEL=test\nNUM_CTX=8192\n")
+        monkeypatch.setattr(l9m, "CACHE_FILE", cache_file)
+        assert l9m.resolve_context_limit("test") == int(8192 * 0.25 * 3)
+
+    def test_cached_num_ctx(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(l9m, "CONTEXT_LIMIT_OVERRIDE", "")
+        cache_file = tmp_path / "l9m.env"
+        cache_file.write_text("MODEL=qwen3:7b\nNUM_CTX=32768\n")
+        monkeypatch.setattr(l9m, "CACHE_FILE", cache_file)
+        expected = int(32768 * 0.25 * 3)
+        assert l9m.resolve_context_limit("qwen3:7b") == expected
+
+    def test_model_mismatch_queries_ollama(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(l9m, "CONTEXT_LIMIT_OVERRIDE", "")
+        cache_file = tmp_path / "l9m.env"
+        cache_file.write_text("MODEL=old-model\nNUM_CTX=4096\n")
+        monkeypatch.setattr(l9m, "CACHE_FILE", cache_file)
+        monkeypatch.setattr(l9m, "_model_num_ctx", lambda m: 16384)
+        expected = int(16384 * 0.25 * 3)
+        assert l9m.resolve_context_limit("new-model") == expected
+
+    def test_fallback_when_no_num_ctx(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(l9m, "CONTEXT_LIMIT_OVERRIDE", "")
+        cache_file = tmp_path / "l9m.env"
+        cache_file.write_text("MODEL=test\n")
+        monkeypatch.setattr(l9m, "CACHE_FILE", cache_file)
+        monkeypatch.setattr(l9m, "_model_num_ctx", lambda m: None)
+        assert l9m.resolve_context_limit("test") == 10000
+
+    def test_context_size_flag(self, monkeypatch, capsys):
+        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setattr(l9m, "resolve_context_limit", lambda m: 24576)
+        assert l9m.main(["--context-size"]) == 0
+        out = capsys.readouterr().out.strip()
+        assert out == "24576"
 
 
 # ---------- assemble_prompt ----------
@@ -157,6 +208,7 @@ class TestMain:
         ctx_dir = tmp_path / "l9m"
         monkeypatch.setattr(l9m, "CONTEXT_DIR", ctx_dir)
         monkeypatch.setattr(l9m, "CONTEXT_FILE", ctx_dir / "context.txt")
+        monkeypatch.setattr(l9m, "resolve_context_limit", lambda m: 10000)
 
     def test_help_returns_zero(self, capsys):
         assert l9m.main(["--help"]) == 0
@@ -279,7 +331,7 @@ class TestRollingContext:
         ctx_dir.mkdir()
         monkeypatch.setattr(l9m, "CONTEXT_DIR", ctx_dir)
         monkeypatch.setattr(l9m, "CONTEXT_FILE", ctx_dir / "context.txt")
-        monkeypatch.setattr(l9m, "CONTEXT_LIMIT", 10000)
+        monkeypatch.setattr(l9m, "resolve_context_limit", lambda m: 10000)
         self.ctx_dir = ctx_dir
         self.ctx_file = ctx_dir / "context.txt"
 
@@ -300,32 +352,28 @@ class TestRollingContext:
         assert ">>> q1" in content
         assert ">>> q2" in content
 
-    def test_rolling_window_trims(self, monkeypatch):
-        monkeypatch.setattr(l9m, "CONTEXT_LIMIT", 50)
-        l9m._append_context("first question", "first answer")
-        l9m._append_context("second question", "second answer")
+    def test_rolling_window_trims(self):
+        l9m._append_context("first question", "first answer", limit=50)
+        l9m._append_context("second question", "second answer", limit=50)
         content = self.ctx_file.read_text()
         assert len(content) <= 50
         assert ">>> second question" in content
         assert ">>> first question" not in content
 
-    def test_trim_at_line_boundary(self, monkeypatch):
-        monkeypatch.setattr(l9m, "CONTEXT_LIMIT", 30)
-        l9m._append_context("aaa", "bbb")
-        l9m._append_context("ccc", "ddd")
+    def test_trim_at_line_boundary(self):
+        l9m._append_context("aaa", "bbb", limit=30)
+        l9m._append_context("ccc", "ddd", limit=30)
         content = self.ctx_file.read_text()
         assert content.startswith(">>>") or content == ""
 
-    def test_no_trim_at_exact_limit(self, monkeypatch):
+    def test_no_trim_at_exact_limit(self):
         entry = ">>> X\nY\n"
-        monkeypatch.setattr(l9m, "CONTEXT_LIMIT", len(entry))
-        l9m._append_context("X", "Y")
+        l9m._append_context("X", "Y", limit=len(entry))
         content = self.ctx_file.read_text()
         assert content == entry
 
-    def test_extremely_small_limit(self, monkeypatch):
-        monkeypatch.setattr(l9m, "CONTEXT_LIMIT", 1)
-        l9m._append_context("hello", "world")
+    def test_extremely_small_limit(self):
+        l9m._append_context("hello", "world", limit=1)
         content = self.ctx_file.read_text()
         assert isinstance(content, str)
 
@@ -442,7 +490,7 @@ class TestChat:
         ctx_dir.mkdir()
         monkeypatch.setattr(l9m, "CONTEXT_DIR", ctx_dir)
         monkeypatch.setattr(l9m, "CONTEXT_FILE", ctx_dir / "context.txt")
-        monkeypatch.setattr(l9m, "CONTEXT_LIMIT", 10000)
+        monkeypatch.setattr(l9m, "resolve_context_limit", lambda m: 10000)
         self.ctx_dir = ctx_dir
         self.ctx_file = ctx_dir / "context.txt"
 

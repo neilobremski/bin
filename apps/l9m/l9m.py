@@ -25,10 +25,9 @@ DEFAULT_MODEL = "qwen3:0.6b"
 
 CONTEXT_DIR = Path(os.environ.get("L9M_CONTEXT_DIR") or str(Path.home() / ".cache" / "l9m"))
 CONTEXT_FILE = CONTEXT_DIR / "context.txt"
-try:
-    CONTEXT_LIMIT = int(os.environ.get("L9M_CONTEXT_LIMIT", "10000"))
-except ValueError:
-    CONTEXT_LIMIT = 10000
+CONTEXT_LIMIT_OVERRIDE = os.environ.get("L9M_CONTEXT_LIMIT", "").strip()
+CHARS_PER_TOKEN = 3
+CONTEXT_FRACTION = 0.25
 
 
 # ---------- model resolution ----------
@@ -81,21 +80,65 @@ def _version_key(name: str) -> tuple:
     return tuple(parts)
 
 
-def _read_cache() -> str | None:
+def _read_cache() -> dict[str, str]:
+    result = {}
     if not CACHE_FILE.exists():
-        return None
+        return result
     try:
         for line in CACHE_FILE.read_text().splitlines():
-            if line.startswith("MODEL="):
-                return line[6:].strip()
+            if "=" in line:
+                key, _, val = line.partition("=")
+                result[key.strip()] = val.strip()
     except OSError:
+        pass
+    return result
+
+
+def _write_cache(model: str, num_ctx: int | None = None) -> None:
+    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"MODEL={model}"]
+    if num_ctx:
+        lines.append(f"NUM_CTX={num_ctx}")
+    CACHE_FILE.write_text("\n".join(lines) + "\n")
+
+
+def _model_num_ctx(model: str) -> int | None:
+    """Query ollama for the model's context window size (in tokens)."""
+    body = json.dumps({"name": model}).encode()
+    req = urllib.request.Request(
+        f"{OLLAMA_URL}/api/show",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        params = data.get("model_info", {})
+        for key, val in params.items():
+            if "context_length" in key:
+                return int(val)
+    except Exception:
         pass
     return None
 
 
-def _write_cache(model: str) -> None:
-    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CACHE_FILE.write_text(f"MODEL={model}\n")
+def resolve_context_limit(model: str) -> int:
+    """Derive rolling context char limit from model's context window."""
+    if CONTEXT_LIMIT_OVERRIDE:
+        try:
+            return int(CONTEXT_LIMIT_OVERRIDE)
+        except ValueError:
+            pass
+
+    cache = _read_cache()
+    if cache.get("MODEL") == model and "NUM_CTX" in cache:
+        num_ctx = int(cache["NUM_CTX"])
+    else:
+        num_ctx = _model_num_ctx(model) or 0
+
+    if num_ctx:
+        return int(num_ctx * CONTEXT_FRACTION * CHARS_PER_TOKEN)
+    return 10000
 
 
 def resolve_model() -> str:
@@ -103,9 +146,9 @@ def resolve_model() -> str:
     if env:
         return env
 
-    cached = _read_cache()
-    if cached:
-        return cached
+    cache = _read_cache()
+    if cache.get("MODEL"):
+        return cache["MODEL"]
 
     if not _ollama_running():
         if not _start_ollama():
@@ -114,7 +157,8 @@ def resolve_model() -> str:
     qwen_models = _installed_qwen_models()
     if qwen_models:
         best = sorted(qwen_models, key=_version_key)[-1]
-        _write_cache(best)
+        num_ctx = _model_num_ctx(best)
+        _write_cache(best, num_ctx)
         return best
 
     print(f"pulling {DEFAULT_MODEL}...", file=sys.stderr)
@@ -122,7 +166,8 @@ def resolve_model() -> str:
         [shutil.which("ollama") or "ollama", "pull", DEFAULT_MODEL],
         stdout=sys.stderr, stderr=sys.stderr,
     )
-    _write_cache(DEFAULT_MODEL)
+    num_ctx = _model_num_ctx(DEFAULT_MODEL)
+    _write_cache(DEFAULT_MODEL, num_ctx)
     return DEFAULT_MODEL
 
 
@@ -237,24 +282,25 @@ def _read_context() -> str:
         return ""
 
 
-def _append_context(prompt: str, response: str) -> None:
+def _append_context(prompt: str, response: str, limit: int = 0) -> None:
+    ctx_limit = limit or 10000
     entry = f">>> {prompt}\n{response}\n"
     existing = _read_context()
     combined = existing + entry
-    if len(combined) > CONTEXT_LIMIT:
-        combined = combined[-CONTEXT_LIMIT:]
+    if len(combined) > ctx_limit:
+        combined = combined[-ctx_limit:]
         nl = combined.find("\n")
         if nl != -1 and nl < len(combined) - 1:
             combined = combined[nl + 1:]
         else:
-            combined = entry[-CONTEXT_LIMIT:]
+            combined = entry[-ctx_limit:]
     CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
     CONTEXT_FILE.write_text(combined, encoding="utf-8")
 
 
 # ---------- chat REPL ----------
 
-def _chat_loop(model: str, response_type: str, instruction: str) -> int:
+def _chat_loop(model: str, response_type: str, instruction: str, context_limit: int = 0) -> int:
     """Interactive REPL. Rolling context accumulates across turns."""
     try:
         import readline  # noqa: F401 — enables line editing in input()
@@ -287,7 +333,7 @@ def _chat_loop(model: str, response_type: str, instruction: str) -> int:
             print(f"error: {e}", file=sys.stderr)
             continue
 
-        _append_context(prompt, output.strip())
+        _append_context(prompt, output.strip(), context_limit)
 
 
 # ---------- main ----------
@@ -312,13 +358,15 @@ options:
   -s, --silent            Suppress stderr
   --chat                  Interactive REPL (CTRL+D or "quit" to exit)
   --model                 Print resolved model and exit
+  --context-size          Print rolling context limit (chars) and exit
 
 rolling context: prompt+response pairs are kept in ~/.cache/l9m/context.txt
-  as a sliding window (default 10k chars). Overridden by -c/--context.
+  as a sliding window. Size is auto-derived from the model's context window
+  (25% * ~3 chars/token). Override with L9M_CONTEXT_LIMIT env var.
 
 env vars:
   L9M_CONTEXT_DIR     Directory for context storage (default: ~/.cache/l9m)
-  L9M_CONTEXT_LIMIT   Max context size in chars (default: 10000)
+  L9M_CONTEXT_LIMIT   Override auto-derived context size (chars)
 
 model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen3:0.6b""")
         return 0
@@ -331,6 +379,7 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
     echo_prompt = False
     silent = False
     show_model = False
+    show_context_size = False
     chat_mode = False
 
     i = 0
@@ -355,6 +404,8 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
             silent = True
         elif arg == "--model":
             show_model = True
+        elif arg == "--context-size":
+            show_context_size = True
         elif arg == "--chat":
             chat_mode = True
         elif not arg.startswith("-") and not arg.startswith(".") and not arg.startswith("/"):
@@ -371,8 +422,14 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
         print(f"error: {e}", file=sys.stderr)
         return 1
 
+    context_limit = resolve_context_limit(model)
+
+    if show_context_size:
+        print(context_limit)
+        return 0
+
     if chat_mode:
-        return _chat_loop(model, response_type, instruction)
+        return _chat_loop(model, response_type, instruction, context_limit)
 
     # stdin handling
     stdin_content = ""
@@ -424,7 +481,7 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
         return 1
 
     if use_rolling_context and prompt and (prompt_flag or not stdin_content):
-        _append_context(prompt, output.strip())
+        _append_context(prompt, output.strip(), context_limit)
 
     return 0
 
