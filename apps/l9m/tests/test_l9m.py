@@ -138,19 +138,26 @@ class TestAssemblePrompt:
         assert result.endswith("question")
         assert "<Memories>" in result
 
-    def test_type_without_instruction_still_plain(self):
-        # If instruction is empty, type alone doesn't trigger framing
+    def test_type_without_instruction_uses_default_framing(self):
         result = l9m.assemble_prompt("hello", "bash", "", "")
-        assert result == "hello"
+        assert "Answer ONLY with the bash command" in result
+        assert "Answer:" in result
 
-    def test_instruction_without_type_still_plain(self):
+    def test_instruction_without_type_uses_instruction(self):
         result = l9m.assemble_prompt("hello", "", "do stuff", "")
-        assert result == "hello"
+        assert "INSTRUCTION: do stuff:" in result
+        assert "<Prompt>hello</Prompt>" in result
 
 
 # ---------- main (argument parsing) ----------
 
 class TestMain:
+    @pytest.fixture(autouse=True)
+    def _isolate_context(self, tmp_path, monkeypatch):
+        ctx_dir = tmp_path / "l9m"
+        monkeypatch.setattr(l9m, "CONTEXT_DIR", ctx_dir)
+        monkeypatch.setattr(l9m, "CONTEXT_FILE", ctx_dir / "context.txt")
+
     def test_help_returns_zero(self, capsys):
         assert l9m.main(["--help"]) == 0
         out = capsys.readouterr().out
@@ -170,7 +177,7 @@ class TestMain:
     def test_context_file_not_found(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
-        monkeypatch.setattr(l9m, "generate", lambda m, p, silent=False: "")
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "")
         monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
         result = l9m.main(["-c", str(tmp_path / "nope.txt"), "-p", "hi"])
         assert result == 2
@@ -180,7 +187,7 @@ class TestMain:
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         captured = {}
 
-        def mock_generate(model, prompt, silent=False):
+        def mock_generate(model, prompt, stream=None):
             captured["prompt"] = prompt
             return ""
 
@@ -195,7 +202,7 @@ class TestMain:
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         captured = {}
 
-        def mock_generate(model, prompt, silent=False):
+        def mock_generate(model, prompt, stream=None):
             captured["prompt"] = prompt
             return ""
 
@@ -209,7 +216,7 @@ class TestMain:
     def test_echo_flag_prints_prompt(self, monkeypatch, capsys):
         monkeypatch.setenv("MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
-        monkeypatch.setattr(l9m, "generate", lambda m, p, silent=False: "")
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "")
         monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
         l9m.main(["-e", "-p", "test prompt"])
         out = capsys.readouterr().out
@@ -220,7 +227,7 @@ class TestMain:
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         captured = {}
 
-        def mock_generate(model, prompt, silent=False):
+        def mock_generate(model, prompt, stream=None):
             captured["prompt"] = prompt
             return ""
 
@@ -261,3 +268,166 @@ class TestInstalledQwenModels:
             raise ConnectionError("no ollama")
         monkeypatch.setattr(l9m.urllib.request, "urlopen", boom)
         assert l9m._installed_qwen_models() == []
+
+
+# ---------- rolling context ----------
+
+class TestRollingContext:
+    @pytest.fixture(autouse=True)
+    def _isolate_context(self, tmp_path, monkeypatch):
+        ctx_dir = tmp_path / "l9m"
+        ctx_dir.mkdir()
+        monkeypatch.setattr(l9m, "CONTEXT_DIR", ctx_dir)
+        monkeypatch.setattr(l9m, "CONTEXT_FILE", ctx_dir / "context.txt")
+        monkeypatch.setattr(l9m, "CONTEXT_LIMIT", 10000)
+        self.ctx_dir = ctx_dir
+        self.ctx_file = ctx_dir / "context.txt"
+
+    def test_read_empty_when_no_file(self):
+        assert l9m._read_context() == ""
+
+    def test_append_creates_file(self):
+        l9m._append_context("hello", "world")
+        assert self.ctx_file.exists()
+        content = self.ctx_file.read_text()
+        assert ">>> hello" in content
+        assert "world" in content
+
+    def test_append_accumulates(self):
+        l9m._append_context("q1", "a1")
+        l9m._append_context("q2", "a2")
+        content = self.ctx_file.read_text()
+        assert ">>> q1" in content
+        assert ">>> q2" in content
+
+    def test_rolling_window_trims(self, monkeypatch):
+        monkeypatch.setattr(l9m, "CONTEXT_LIMIT", 50)
+        l9m._append_context("first question", "first answer")
+        l9m._append_context("second question", "second answer")
+        content = self.ctx_file.read_text()
+        assert len(content) <= 50
+        assert ">>> second question" in content
+        assert ">>> first question" not in content
+
+    def test_trim_at_line_boundary(self, monkeypatch):
+        monkeypatch.setattr(l9m, "CONTEXT_LIMIT", 30)
+        l9m._append_context("aaa", "bbb")
+        l9m._append_context("ccc", "ddd")
+        content = self.ctx_file.read_text()
+        assert content.startswith(">>>") or content == ""
+
+    def test_no_trim_at_exact_limit(self, monkeypatch):
+        entry = ">>> X\nY\n"
+        monkeypatch.setattr(l9m, "CONTEXT_LIMIT", len(entry))
+        l9m._append_context("X", "Y")
+        content = self.ctx_file.read_text()
+        assert content == entry
+
+    def test_extremely_small_limit(self, monkeypatch):
+        monkeypatch.setattr(l9m, "CONTEXT_LIMIT", 1)
+        l9m._append_context("hello", "world")
+        content = self.ctx_file.read_text()
+        assert isinstance(content, str)
+
+    def test_empty_prompt_and_response(self):
+        l9m._append_context("", "")
+        content = self.ctx_file.read_text()
+        assert ">>> \n\n" in content
+
+    def test_multiline_content(self):
+        l9m._append_context("line1\nline2", "resp\nwith\nnewlines")
+        content = self.ctx_file.read_text()
+        assert ">>> line1\nline2" in content
+        assert "resp\nwith\nnewlines" in content
+
+    def test_unicode_roundtrip(self):
+        l9m._append_context("café \U0001f680", "你好世界")
+        content = self.ctx_file.read_text()
+        assert "\U0001f680" in content
+        assert "你好" in content
+
+    def test_read_context_unreadable_file(self, monkeypatch):
+        def raise_perm(*a, **kw):
+            raise PermissionError("denied")
+        self.ctx_file.write_text("data")
+        monkeypatch.setattr(l9m.CONTEXT_FILE.__class__, "read_text", raise_perm)
+        assert l9m._read_context() == ""
+
+    def test_stdin_not_stored_in_context(self, monkeypatch):
+        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "resp")
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {
+            "isatty": lambda self: False,
+            "read": lambda self: "big piped document content",
+        })())
+        l9m.main([])
+        assert not self.ctx_file.exists()
+
+    def test_context_injected_into_prompt(self, monkeypatch):
+        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        # Pre-populate context
+        l9m._append_context("earlier question", "earlier answer")
+
+        captured = {}
+
+        def mock_generate(model, prompt, stream=None):
+            captured["prompt"] = prompt
+            return "response"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
+        l9m.main(["-p", "new question"])
+        assert "earlier question" in captured["prompt"]
+        assert "earlier answer" in captured["prompt"]
+
+    def test_context_file_overrides_rolling(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        # Pre-populate rolling context
+        l9m._append_context("rolling stuff", "rolling response")
+
+        ctx = tmp_path / "explicit.txt"
+        ctx.write_text("explicit context here")
+
+        captured = {}
+
+        def mock_generate(model, prompt, stream=None):
+            captured["prompt"] = prompt
+            return "response"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
+        l9m.main(["-c", str(ctx), "-p", "new question"])
+        assert "explicit context here" in captured["prompt"]
+        assert "rolling stuff" not in captured["prompt"]
+
+    def test_response_appended_after_generation(self, monkeypatch):
+        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+
+        def mock_generate(model, prompt, stream=None):
+            return "generated response"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
+        l9m.main(["-p", "my question"])
+        content = self.ctx_file.read_text()
+        assert ">>> my question" in content
+        assert "generated response" in content
+
+    def test_no_append_when_context_file_used(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+
+        ctx = tmp_path / "explicit.txt"
+        ctx.write_text("stuff")
+
+        def mock_generate(model, prompt, stream=None):
+            return "response"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
+        l9m.main(["-c", str(ctx), "-p", "q"])
+        assert not self.ctx_file.exists()

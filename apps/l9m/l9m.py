@@ -23,6 +23,13 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 CACHE_FILE = Path.home() / ".cache" / "l9m.env"
 DEFAULT_MODEL = "qwen3:0.6b"
 
+CONTEXT_DIR = Path(os.environ.get("L9M_CONTEXT_DIR") or str(Path.home() / ".cache" / "l9m"))
+CONTEXT_FILE = CONTEXT_DIR / "context.txt"
+try:
+    CONTEXT_LIMIT = int(os.environ.get("L9M_CONTEXT_LIMIT", "10000"))
+except ValueError:
+    CONTEXT_LIMIT = 10000
+
 
 # ---------- model resolution ----------
 
@@ -127,7 +134,7 @@ def assemble_prompt(
     instruction: str,
     context: str,
 ) -> str:
-    if response_type and instruction:
+    if response_type:
         prefix, suffix = "", ""
         if response_type == "bash":
             prefix = "Answer ONLY with the bash command, no explanation. "
@@ -142,10 +149,18 @@ def assemble_prompt(
             print(f"invalid type: {response_type}", file=sys.stderr)
             sys.exit(2)
 
+        framing = instruction if instruction else "Answer"
         return (
-            f"INSTRUCTION: {prefix}{instruction}:\n\n"
+            f"INSTRUCTION: {prefix}{framing}:\n\n"
             f"{prompt}\n{context}\n"
-            f"{instruction}: <Prompt>{prompt}</Prompt>{suffix}"
+            f"{framing}: <Prompt>{prompt}</Prompt>{suffix}"
+        )
+
+    if instruction:
+        return (
+            f"INSTRUCTION: {instruction}:\n\n"
+            f"{prompt}\n{context}\n"
+            f"{instruction}: <Prompt>{prompt}</Prompt>"
         )
 
     if context:
@@ -213,6 +228,30 @@ def generate(model: str, prompt: str, stream: object | None = sys.stdout) -> str
     return output
 
 
+# ---------- rolling context ----------
+
+def _read_context() -> str:
+    try:
+        return CONTEXT_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _append_context(prompt: str, response: str) -> None:
+    entry = f">>> {prompt}\n{response}\n"
+    existing = _read_context()
+    combined = existing + entry
+    if len(combined) > CONTEXT_LIMIT:
+        combined = combined[-CONTEXT_LIMIT:]
+        nl = combined.find("\n")
+        if nl != -1 and nl < len(combined) - 1:
+            combined = combined[nl + 1:]
+        else:
+            combined = entry[-CONTEXT_LIMIT:]
+    CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+    CONTEXT_FILE.write_text(combined, encoding="utf-8")
+
+
 # ---------- main ----------
 
 def main(argv: list[str] | None = None) -> int:
@@ -229,10 +268,17 @@ options:
   -p, --prompt <text>     Prompt text
   -t, --type <type>       Response type: bash, bool, list
   -i, --instruction <text> Instruction framing
-  -c, --context <file>    Context from file
+  -c, --context <file>    Context from file (overrides rolling context)
   -e, --echo              Echo assembled prompt before generation
   -s, --silent            Suppress stderr
   --model                 Print resolved model and exit
+
+rolling context: prompt+response pairs are kept in ~/.cache/l9m/context.txt
+  as a sliding window (default 10k chars). Overridden by -c/--context.
+
+env vars:
+  L9M_CONTEXT_DIR     Directory for context storage (default: ~/.cache/l9m)
+  L9M_CONTEXT_LIMIT   Max context size in chars (default: 10000)
 
 model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen3:0.6b""")
         return 0
@@ -295,6 +341,8 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
     else:
         context_payload = ""
 
+    use_rolling_context = not context_file
+
     if context_file:
         path = Path(context_file)
         if not path.is_file():
@@ -305,6 +353,13 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
             context_payload = f"{context_payload}\n{file_content}"
         else:
             context_payload = file_content
+    elif use_rolling_context:
+        rolling = _read_context()
+        if rolling:
+            if context_payload:
+                context_payload = f"{rolling}\n{context_payload}"
+            else:
+                context_payload = rolling
 
     context = f"<Memories>\n{context_payload}\n</Memories>" if context_payload else ""
 
@@ -317,10 +372,14 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
         return 0
 
     try:
-        generate(model, full_prompt)
+        output = generate(model, full_prompt)
     except L9mError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+
+    if use_rolling_context and prompt and (prompt_flag or not stdin_content):
+        _append_context(prompt, output.strip())
+
     return 0
 
 
