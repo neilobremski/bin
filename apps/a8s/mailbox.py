@@ -67,6 +67,7 @@ from core import (
 from network import seen_id_append
 from registry import resolve_name
 from services import StorageError, StorageService
+import txlog
 from ulid import new as new_ulid
 
 # A function that publishes one routed-and-from-stamped message envelope to
@@ -169,6 +170,7 @@ def _transfer_file_to_recipient(
         out_agent(sender_name, f"FILE: copy failed {src_resolved} -> {dest}: {e}")
         return None
     out_agent(sender_name, f"FILE: delivered {src_resolved.name} -> {dest_dir}")
+    txlog.log("FILE_DELIVERED", sender=sender_name, files=[src_resolved.name], detail=str(dest_dir))
     return {"filename": dest.name, "path": _recipient_relative_path(dest_dir, dest)}
 
 
@@ -388,6 +390,7 @@ def _upload_files_for_remote(
                 sender_name,
                 f"FILE: cannot read source for upload (filename={filename!r}); will retry",
             )
+            txlog.log("FILE_UPLOAD_FAILED", msg_id=msg.get("id", ""), sender=sender_name, files=[filename], detail="source unreadable")
             all_done = False
             continue
         for service in services:
@@ -523,6 +526,7 @@ def _process_pending(
         msg["from"] = sender.name
         recipient_name = (msg.get("to") or "").strip()
         preview = _preview(msg.get("content", ""))
+        msg_files = [e.get("filename", "") for e in (msg.get("files") or []) if e.get("filename")]
         if not recipient_name:
             out_agent(sender.name, f"empty 'to' in {f.name}; rejecting")
             _trash_pending(sender, f)
@@ -584,15 +588,18 @@ def _process_pending(
                             local_msg_id = msg.get("id", "")
                             if local_msg_id:
                                 seen_id_append(local_msg_id)
+                            msg_id = msg.get("id", "")
                             if kind == "alias":
                                 out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (alias of {len(recipients)}): {preview}")
                                 for recipient in recipients:
                                     out_agent(recipient.name, f"received from {sender.name} (via {recipient_name} alias): {preview}")
+                                    txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
                                 routed += len(recipients)
                             else:
                                 recipient = recipients[0]
                                 out_agent(sender.name, f"routed: {sender.name} -> {recipient.name}: {preview}")
                                 out_agent(recipient.name, f"received from {sender.name}: {preview}")
+                                txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
                                 routed += 1
                         except OSError as e:
                             out_agent(sender.name, f"commit failed on {f.name}: {e}")
@@ -629,9 +636,13 @@ def _process_pending(
                         publish_msg, sender.name, sender.root, services_list, sidecar,
                     )
                 if upload_ok:
+                    prev_remotes = list(sidecar["succeeded_remotes"])
                     sidecar["succeeded_remotes"] = publish_remotes(
-                        publish_msg, sender.name, list(sidecar["succeeded_remotes"]), sidecar["attempts"]
+                        publish_msg, sender.name, prev_remotes, sidecar["attempts"]
                     )
+                    newly_published = [r for r in sidecar["succeeded_remotes"] if r not in prev_remotes]
+                    for rid in newly_published:
+                        txlog.log("PUBLISHED", msg_id=msg.get("id", ""), sender=sender.name, recipient=recipient_name, remote=rid, files=msg_files if has_files else None, detail=preview)
                 # else: leave succeeded_remotes alone; backoff retry will
                 # finish the uploads and try the publish next pass.
         # ----- OUTCOME -----
@@ -646,6 +657,7 @@ def _process_pending(
         )
         if no_path_at_all:
             out_agent(sender.name, f"unknown recipient {recipient_name!r} in {f.name}; trashing")
+            txlog.log("DROPPED", msg_id=msg.get("id", ""), sender=sender.name, recipient=recipient_name, detail="unknown recipient")
             _trash_pending(sender, f)
             _drop_sidecar(f)
             continue
