@@ -3,10 +3,10 @@
 Uses l9m to generate a bash command from natural language, then executes it.
 The LLM's only output channel is structured: an executable command.
 
-Safety: command is printed, validated as parseable bash, and a brief delay
-gives the user time to CTRL+C before execution.
+Safety: command is printed, validated as parseable bash, then a second LLM
+call evaluates danger (this IS the delay — gives time to read and CTRL+C).
 
-Default behavior: generate → print → validate → delay → execute.
+Default behavior: generate → print → validate → safety check → execute.
 Use -n/--dry-run to print without executing.
 """
 from __future__ import annotations
@@ -31,15 +31,12 @@ def _looks_dangerous(cmd: str, model: str) -> bool:
         f"Is this bash command dangerous or destructive? Could it delete files, "
         f"kill processes, modify system config, or cause data loss?\n\n"
         f"Command: {cmd}",
-        "bool", "", "",
+        "bool", "Evaluate command safety", "",
     )
-    old_stdout = sys.stdout
-    sys.stdout = open(os.devnull, "w")
     try:
-        answer = l9m.generate(model, check_prompt, silent=True)
-    finally:
-        sys.stdout.close()
-        sys.stdout = old_stdout
+        answer = l9m.generate(model, check_prompt, stream=None)
+    except l9m.L9mError:
+        return False
     return answer.strip().upper().startswith("YES")
 
 
@@ -79,17 +76,19 @@ the LLM must produce a program — it doesn't get to speak directly""")
     shell = os.environ.get("SHELL", "/bin/bash")
     instruction = f"I am using {shell}"
 
-    model = l9m.resolve_model()
+    try:
+        model = l9m.resolve_model()
+    except l9m.L9mError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
     full_prompt = l9m.assemble_prompt(prompt, "bash", instruction, "")
 
-    # Capture output (suppress streaming to stdout)
-    old_stdout = sys.stdout
-    sys.stdout = open(os.devnull, "w")
     try:
-        output = l9m.generate(model, full_prompt, silent=True)
-    finally:
-        sys.stdout.close()
-        sys.stdout = old_stdout
+        output = l9m.generate(model, full_prompt, stream=None)
+    except l9m.L9mError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
 
     cmd = output.strip()
     if not cmd:

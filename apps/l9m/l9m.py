@@ -102,8 +102,7 @@ def resolve_model() -> str:
 
     if not _ollama_running():
         if not _start_ollama():
-            print("error: ollama not installed or won't start", file=sys.stderr)
-            sys.exit(1)
+            raise L9mError("ollama not installed or won't start")
 
     qwen_models = _installed_qwen_models()
     if qwen_models:
@@ -157,11 +156,16 @@ def assemble_prompt(
 
 # ---------- ollama streaming ----------
 
-def generate(model: str, prompt: str, silent: bool = False) -> str:
+class L9mError(RuntimeError):
+    pass
+
+
+def generate(model: str, prompt: str, stream: object | None = sys.stdout) -> str:
+    """Generate text from ollama. Streams to `stream` if provided, returns full text.
+    Raises L9mError on failure (never calls sys.exit)."""
     if not _ollama_running():
         if not _start_ollama():
-            print("error: ollama not running", file=sys.stderr)
-            sys.exit(1)
+            raise L9mError("ollama not installed or won't start")
 
     body = json.dumps({
         "model": model,
@@ -187,22 +191,25 @@ def generate(model: str, prompt: str, silent: bool = False) -> str:
                 text = chunk.get("response", "")
                 if text:
                     output_parts.append(text)
-                    sys.stdout.write(text)
-                    sys.stdout.flush()
+                    if stream:
+                        try:
+                            stream.write(text)
+                            stream.flush()
+                        except (BrokenPipeError, OSError):
+                            stream = None
                 if chunk.get("done"):
                     break
     except urllib.error.HTTPError as e:
-        if not silent:
-            print(f"error: ollama returned {e.code}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        if not silent:
-            print(f"error: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise L9mError(f"ollama returned {e.code}") from e
+    except (urllib.error.URLError, OSError) as e:
+        raise L9mError(str(e)) from e
 
     output = "".join(output_parts)
-    if output and not output.endswith("\n"):
-        sys.stdout.write("\n")
+    if stream and output and not output.endswith("\n"):
+        try:
+            stream.write("\n")
+        except (BrokenPipeError, OSError):
+            pass
     return output
 
 
@@ -266,11 +273,14 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
                 prompt = arg
         i += 1
 
-    if show_model:
-        print(resolve_model())
-        return 0
-
-    model = resolve_model()
+    try:
+        if show_model:
+            print(resolve_model())
+            return 0
+        model = resolve_model()
+    except L9mError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
 
     # stdin handling
     stdin_content = ""
@@ -306,7 +316,11 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
     if not full_prompt.strip():
         return 0
 
-    generate(model, full_prompt, silent=silent)
+    try:
+        generate(model, full_prompt)
+    except L9mError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     return 0
 
 
