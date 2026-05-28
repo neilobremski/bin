@@ -1,10 +1,13 @@
 """k7e distillation — extract knowledge from raw experience.
 
-Scans raw files (journals, transcripts, command output). Extracts knowledge
-candidates. Diffs against existing store. Stores genuine deltas.
+Scans raw files (journals, transcripts, command output, images, audio, video).
+Extracts knowledge candidates. Diffs against existing store. Stores genuine deltas.
 
-Uses ollama or gemini CLI for LLM extraction. Falls back to pattern-based
-extraction if neither is available.
+Text files: pattern extraction + LLM extraction.
+Media files: multimodal LLM (describe/transcribe) + asset storage.
+
+Uses agy/claude/codex CLI or ollama for LLM extraction. Falls back to
+pattern-based extraction if neither is available.
 """
 
 import json
@@ -18,6 +21,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import engine
+
+MEDIA_EXTENSIONS = {
+    "image": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg"},
+    "audio": {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".wma"},
+    "video": {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"},
+}
+ALL_MEDIA_EXTENSIONS = set().union(*MEDIA_EXTENSIONS.values())
 
 MIN_CONTENT_LENGTH = 20
 REJECT_PATTERNS = [
@@ -60,7 +70,12 @@ def distill(paths, dry_run=False):
     for path in paths:
         p = Path(path)
         if p.is_dir():
-            files = sorted(p.rglob("*.md"))
+            text_files = sorted(p.rglob("*.md")) + sorted(p.rglob("*.txt"))
+            media_files = [
+                f for f in sorted(p.rglob("*"))
+                if f.suffix.lower() in ALL_MEDIA_EXTENSIONS
+            ]
+            files = text_files + media_files
         else:
             files = [p]
         for f in files:
@@ -73,24 +88,29 @@ def distill(paths, dry_run=False):
             else:
                 for item in new_knowledge:
                     importance = _score_importance(item["title"], item["content"])
+                    # Store asset and embed link for media files
+                    asset_ref = ""
+                    if item.get("_asset_path"):
+                        asset_rel = engine.store_asset(item["_asset_path"])
+                        asset_ref = f"\n\n![{Path(item['_asset_path']).name}]({asset_rel})"
+                    content = item["content"] + asset_ref
+
                     if item.get("_supersedes"):
-                        # Almost identical — store new and supersede old
                         node_id = engine.store_entry(
                             title=item["title"],
-                            content=item["content"],
+                            content=content,
                             tags=item.get("tags", []),
                             importance=importance,
                         )
                         engine.supersede(item["_supersedes"], node_id)
                         results.append({"action": "superseded", "id": node_id, "old_id": item["_supersedes"], "title": item["title"], "source": str(f)})
                     elif item.get("_append_to"):
-                        # Append to existing node instead of creating new
-                        engine.append_entry(item["_append_to"], "Edge Cases", item["content"])
+                        engine.append_entry(item["_append_to"], "Edge Cases", content)
                         results.append({"action": "appended", "id": item["_append_to"], "title": item["title"], "source": str(f)})
                     else:
                         node_id = engine.store_entry(
                             title=item["title"],
-                            content=item["content"],
+                            content=content,
                             tags=item.get("tags", []),
                             importance=importance,
                         )
@@ -98,13 +118,110 @@ def distill(paths, dry_run=False):
     return results
 
 
+def _media_type(path):
+    ext = Path(path).suffix.lower()
+    for kind, exts in MEDIA_EXTENSIONS.items():
+        if ext in exts:
+            return kind
+    return None
+
+
 def extract_from_file(path):
+    if _media_type(path):
+        return _multimodal_extract(path)
     text = Path(path).read_text(encoding="utf-8")
     candidates = _pattern_extract(text)
     llm_candidates = _llm_extract(text)
     if llm_candidates:
         candidates.extend(llm_candidates)
     return candidates
+
+
+def _multimodal_extract(path):
+    """Extract knowledge from media files via multimodal LLM."""
+    import config
+
+    cmd = config.resolve_llm_command("test")
+    if not cmd:
+        print(f"  [distill] no LLM available — cannot process media file {path}", file=sys.stderr)
+        return []
+
+    kind = _media_type(path)
+    abs_path = str(Path(path).resolve())
+
+    if kind == "image":
+        instruction = "Describe this image in detail."
+    elif kind == "audio":
+        instruction = "Transcribe this audio file completely. Include speaker identification if multiple speakers."
+    elif kind == "video":
+        instruction = "Transcribe the audio and describe key visual content of this video."
+    else:
+        return []
+
+    prompt = (
+        f"{instruction} File: {abs_path}\n\n"
+        "Return a JSON object with:\n"
+        '- "title": short descriptive title for this content\n'
+        '- "content": the full transcription or description\n'
+        '- "tags": list of topic keywords\n'
+        "Return ONLY the JSON object, no markdown fencing."
+    )
+
+    real_cmd = config.resolve_llm_command(prompt)
+    if not real_cmd:
+        return []
+
+    try:
+        result = subprocess.run(
+            real_cmd, capture_output=True, text=True, timeout=180,
+            cwd=str(config._k7e_home()),
+        )
+        if result.returncode != 0:
+            print(f"  [llm] non-zero exit ({result.returncode}) for {path}", file=sys.stderr)
+            return []
+        parsed = _parse_multimodal_response(result.stdout, path)
+        if parsed:
+            parsed["_asset_path"] = abs_path
+            parsed["_media_type"] = kind
+            return [parsed]
+    except subprocess.TimeoutExpired:
+        print(f"  [llm] timed out (180s) for {path}", file=sys.stderr)
+    except OSError as e:
+        print(f"  [llm] launch failed: {e}", file=sys.stderr)
+
+    return []
+
+
+def _parse_multimodal_response(text, path):
+    """Parse LLM response for a single media file. Returns one candidate dict or None."""
+    # Try to extract a JSON object
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        # Fallback: use entire response as content, filename as title
+        if len(text.strip()) > 20:
+            return {
+                "title": Path(path).stem.replace("-", " ").replace("_", " "),
+                "content": text.strip(),
+                "tags": [_media_type(path)],
+            }
+        return None
+    try:
+        item = json.loads(match.group())
+        if isinstance(item, dict) and "content" in item:
+            return {
+                "title": item.get("title") or Path(path).stem.replace("-", " ").replace("_", " "),
+                "content": item["content"],
+                "tags": item.get("tags", [_media_type(path)]),
+            }
+    except (json.JSONDecodeError, TypeError):
+        # Fallback: use raw text
+        if len(text.strip()) > 20:
+            return {
+                "title": Path(path).stem.replace("-", " ").replace("_", " "),
+                "content": text.strip(),
+                "tags": [_media_type(path)],
+            }
+    return None
 
 
 def diff_against_store(candidates):
