@@ -98,8 +98,6 @@ the LLM must produce a program — it doesn't get to speak directly""")
         print("error: LLM produced empty output", file=sys.stderr)
         return 1
 
-    l9m._append_context(prompt, cmd, context_limit)
-
     # Always show what's about to run
     is_tty = sys.stderr.isatty()
     if is_tty:
@@ -108,6 +106,7 @@ the LLM must produce a program — it doesn't get to speak directly""")
         print(f"$ {cmd}", file=sys.stderr)
 
     if dry_run:
+        l9m._append_context(prompt, cmd, context_limit)
         print(cmd)
         return 0
 
@@ -136,7 +135,28 @@ the LLM must produce a program — it doesn't get to speak directly""")
                 print("aborted", file=sys.stderr)
                 return 130
 
-    return subprocess.call([shell, "-c", cmd])
+    proc = subprocess.run(
+        [shell, "-c", cmd],
+        capture_output=True, text=True,
+    )
+
+    if proc.stdout:
+        sys.stdout.write(proc.stdout)
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+
+    output_lines = []
+    for line in (proc.stdout or "").splitlines():
+        output_lines.append(f"STDOUT: {line}")
+    for line in (proc.stderr or "").splitlines():
+        output_lines.append(f"STDERR: {line}")
+    if output_lines:
+        result_text = cmd + "\n" + "\n".join(output_lines)
+    else:
+        result_text = cmd
+    l9m._append_context(prompt, result_text, context_limit)
+
+    return proc.returncode
 
 
 if __name__ == "__main__":
