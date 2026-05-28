@@ -357,6 +357,7 @@ options:
   -e, --echo              Echo assembled prompt before generation
   -s, --silent            Suppress stderr
   --chat                  Interactive REPL (CTRL+D or "quit" to exit)
+  --clear                 Clear rolling context and exit
   --model                 Print resolved model and exit
   --context-size          Print rolling context limit (chars) and exit
 
@@ -380,6 +381,7 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
     silent = False
     show_model = False
     show_context_size = False
+    clear_context = False
     chat_mode = False
 
     i = 0
@@ -406,12 +408,21 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
             show_model = True
         elif arg == "--context-size":
             show_context_size = True
+        elif arg == "--clear":
+            clear_context = True
         elif arg == "--chat":
             chat_mode = True
         elif not arg.startswith("-") and not arg.startswith(".") and not arg.startswith("/"):
             if not prompt:
                 prompt = arg
         i += 1
+
+    if clear_context:
+        try:
+            CONTEXT_FILE.unlink()
+        except OSError:
+            pass
+        return 0
 
     try:
         if show_model:

@@ -147,6 +147,19 @@ class TestResolveContextLimit:
         out = capsys.readouterr().out.strip()
         assert out == "24576"
 
+    def test_clear_flag_removes_context(self, tmp_path, monkeypatch):
+        ctx_dir = tmp_path / "l9m"
+        ctx_dir.mkdir()
+        ctx_file = ctx_dir / "context.txt"
+        ctx_file.write_text(">>> old\nstuff\n")
+        monkeypatch.setattr(l9m, "CONTEXT_FILE", ctx_file)
+        assert l9m.main(["--clear"]) == 0
+        assert not ctx_file.exists()
+
+    def test_clear_flag_no_error_when_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(l9m, "CONTEXT_FILE", tmp_path / "nope.txt")
+        assert l9m.main(["--clear"]) == 0
+
 
 # ---------- assemble_prompt ----------
 

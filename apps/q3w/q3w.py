@@ -82,7 +82,10 @@ the LLM must produce a program — it doesn't get to speak directly""")
         print(f"error: {e}", file=sys.stderr)
         return 1
 
-    full_prompt = l9m.assemble_prompt(prompt, "bash", instruction, "")
+    context_limit = l9m.resolve_context_limit(model)
+    rolling = l9m._read_context()
+    context = f"<Memories>\n{rolling}\n</Memories>" if rolling else ""
+    full_prompt = l9m.assemble_prompt(prompt, "bash", instruction, context)
 
     try:
         output = l9m.generate(model, full_prompt, stream=None)
@@ -94,6 +97,8 @@ the LLM must produce a program — it doesn't get to speak directly""")
     if not cmd:
         print("error: LLM produced empty output", file=sys.stderr)
         return 1
+
+    l9m._append_context(prompt, cmd, context_limit)
 
     # Always show what's about to run
     is_tty = sys.stderr.isatty()
