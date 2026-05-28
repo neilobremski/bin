@@ -3,19 +3,23 @@
 Run with: pytest -m llm
 Skipped by default in CI unless ollama is available.
 """
+import json
 import urllib.request
 
 import pytest
 
+import config
 import distill
 import engine
 
 pytestmark = pytest.mark.llm
 
+OLLAMA_URL = "http://localhost:11434"
+
 
 def _ollama_available():
     try:
-        urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2)
+        urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=2)
         return True
     except Exception:
         return False
@@ -25,6 +29,21 @@ def _ollama_available():
 def _skip_if_no_ollama():
     if not _ollama_available():
         pytest.skip("ollama not running")
+
+
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    """Isolated K7E store with ollama enabled (overrides conftest's store)."""
+    monkeypatch.setenv("K7E_HOME", str(tmp_path))
+    monkeypatch.setenv("OLLAMA_URL", OLLAMA_URL)
+
+    engine.reset(tmp_path)
+    engine.init()
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"llm": "ollama", "llm_model": "qwen3:0.6b"}))
+
+    return tmp_path
 
 
 class TestLLMDistill:
