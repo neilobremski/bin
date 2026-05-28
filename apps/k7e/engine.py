@@ -490,7 +490,7 @@ def compile_tag(tag, dry_run=False):
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=120,
-                cwd=os.getcwd(),
+                cwd=str(config._k7e_home()),
             )
             if result.returncode == 0 and result.stdout.strip():
                 compiled_content = result.stdout.strip()

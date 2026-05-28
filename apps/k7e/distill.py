@@ -252,7 +252,7 @@ def _run_llm_prompt(prompt, config):
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=60,
-                cwd=os.getcwd(),
+                cwd=str(config._k7e_home()),
             )
             if result.returncode == 0:
                 return _parse_llm_response(result.stdout)

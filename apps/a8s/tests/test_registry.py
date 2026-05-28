@@ -277,7 +277,7 @@ class TestScanForMarkers:
         (tmp_path / "GEMINI.md").write_text("# G: y\n")
         found = _scan_for_markers(tmp_path)
         assert len(found) == 1
-        assert found[0][1] == "gemini"
+        assert found[0][1] == "agy"
 
     def test_no_markers(self, tmp_path):
         assert _scan_for_markers(tmp_path) == []
