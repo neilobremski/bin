@@ -66,7 +66,7 @@ def get(key, default=None):
 # --- Provider detection ---
 
 KNOWN_LLMS = {
-    "agy": {"bin": "agy", "invoke": ["agy", "--sandbox", "--dangerously-skip-permissions", "-p", "{prompt}"]},
+    "agy": {"bin": "agy", "invoke": ["agy", "-p", "{prompt}"]},
     "claude": {"bin": "claude", "invoke": ["claude", "-p", "{prompt}"]},
     "codex": {"bin": "codex", "invoke": ["codex", "--full-auto", "{prompt}"]},
     "ollama": {"bin": "ollama", "invoke": None},  # uses HTTP API

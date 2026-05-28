@@ -223,6 +223,14 @@ def _llm_extract(text):
 
     import config
 
+    if not config.resolve_llm_command("test"):
+        ollama_url = config.get("ollama_url", "http://localhost:11434")
+        try:
+            urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=2)
+        except Exception:
+            print("  [distill] no LLM available — pattern extraction only", file=sys.stderr)
+            return []
+
     # Chunk the input and extract from each chunk independently
     chunks = _chunk_text(text, size=3000, overlap=200)
     all_candidates = []
@@ -246,18 +254,21 @@ def _llm_extract(text):
 
 def _run_llm_prompt(prompt, config):
     """Run a single LLM prompt and return parsed candidates."""
-    # Try configured CLI (gemini, claude, codex — auto-detected if not set)
     cmd = config.resolve_llm_command(prompt)
     if cmd:
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=60,
+                cmd, capture_output=True, text=True, timeout=180,
                 cwd=str(config._k7e_home()),
             )
             if result.returncode == 0:
                 return _parse_llm_response(result.stdout)
-        except (subprocess.TimeoutExpired, OSError):
-            pass
+            print(f"  [llm] non-zero exit ({result.returncode})", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            print("  [llm] timed out (180s)", file=sys.stderr)
+        except OSError as e:
+            print(f"  [llm] launch failed: {e}", file=sys.stderr)
+        return []
 
     # Fallback: ollama HTTP API
     ollama_url = config.get("ollama_url", "http://localhost:11434")
@@ -268,11 +279,11 @@ def _run_llm_prompt(prompt, config):
             f"{ollama_url}/api/generate",
             data=data, headers={"Content-Type": "application/json"}
         )
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:
             response = json.loads(resp.read())
             return _parse_llm_response(response.get("response", ""))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  [llm] ollama failed: {e}", file=sys.stderr)
 
     return []
 
