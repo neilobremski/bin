@@ -45,6 +45,20 @@ def _looks_dangerous(cmd: str, model: str) -> bool:
 
 def main() -> int:
     argv = sys.argv[1:]
+
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print("""q3w — NLP to bash command
+
+usage: q3w [options] <natural language...>
+
+options:
+  -n, --dry-run   Print command without executing
+  -f, --force     Skip danger prompt (still warns)
+
+flow: generate → print → validate → safety check → execute
+the LLM must produce a program — it doesn't get to speak directly""")
+        return 0
+
     dry_run = False
     force = False
     words = []

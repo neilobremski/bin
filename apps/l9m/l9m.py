@@ -212,6 +212,24 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
 
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print("""l9m — local LLM interface (auto-detects ollama model)
+
+usage: l9m [options] [prompt]
+       echo "text" | l9m [-p "question"]
+
+options:
+  -p, --prompt <text>     Prompt text
+  -t, --type <type>       Response type: bash, bool, list
+  -i, --instruction <text> Instruction framing
+  -c, --context <file>    Context from file
+  -e, --echo              Echo assembled prompt before generation
+  -s, --silent            Suppress stderr
+  --model                 Print resolved model and exit
+
+model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen3:0.6b""")
+        return 0
+
     prompt = ""
     prompt_flag = False
     response_type = ""
