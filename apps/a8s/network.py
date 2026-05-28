@@ -43,6 +43,7 @@ from core import (
 from registry import resolve_name
 from services import StorageService
 from transports import OnMessage, Transport, TransportError
+import txlog
 from ulid import is_ulid
 
 
@@ -377,6 +378,8 @@ def receive_envelope(
             out_agent(recipient.name, f"WARN failed to write incoming envelope id={msg_id}: {e}")
             continue
         out_agent(recipient.name, f"received from {sender_label} (via remote): {preview}")
+        file_names = [e.get("filename", "") for e in (msg_for_recipient.get("files") or []) if e.get("filename")]
+        txlog.log("RECEIVED_REMOTE", msg_id=msg_id, sender=sender_label, recipient=recipient.name, files=file_names or None, remote="remote", detail=preview)
     seen_id_append(msg_id)
 
 

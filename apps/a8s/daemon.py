@@ -62,6 +62,7 @@ from network import (
     stop_remotes,
 )
 from registry import participants_from_registry
+import txlog
 
 
 # ---------- subprocess execution ----------
@@ -125,6 +126,12 @@ def _deliver_file_proxy(p: Participant) -> None:
         target = dest / f.name
         shutil.move(str(f), str(target))
         out_agent(p.name, f"[{p.name}] proxy: delivered {f.name}")
+        try:
+            envelope = json.loads(target.read_text(encoding="utf-8"))
+            file_names = [e.get("filename", "") for e in (envelope.get("files") or []) if e.get("filename")]
+            txlog.log("PROXY_DELIVERED", msg_id=envelope.get("id", f.stem), sender=envelope.get("from", ""), recipient=p.name, files=file_names or None, detail=_preview(envelope.get("content", "")))
+        except (json.JSONDecodeError, OSError):
+            txlog.log("PROXY_DELIVERED", msg_id=f.stem, recipient=p.name)
 
 
 def wake_once(p: Participant, msg_path: Path) -> None:
