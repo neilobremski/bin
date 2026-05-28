@@ -431,3 +431,158 @@ class TestRollingContext:
         monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
         l9m.main(["-c", str(ctx), "-p", "q"])
         assert not self.ctx_file.exists()
+
+
+# ---------- chat mode ----------
+
+class TestChat:
+    @pytest.fixture(autouse=True)
+    def _isolate_context(self, tmp_path, monkeypatch):
+        ctx_dir = tmp_path / "l9m"
+        ctx_dir.mkdir()
+        monkeypatch.setattr(l9m, "CONTEXT_DIR", ctx_dir)
+        monkeypatch.setattr(l9m, "CONTEXT_FILE", ctx_dir / "context.txt")
+        monkeypatch.setattr(l9m, "CONTEXT_LIMIT", 10000)
+        self.ctx_dir = ctx_dir
+        self.ctx_file = ctx_dir / "context.txt"
+
+    @pytest.fixture(autouse=True)
+    def _isolate_model(self, monkeypatch):
+        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
+
+    def test_one_prompt_then_exit(self, monkeypatch):
+        inputs = iter(["hello", "exit"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        captured = []
+
+        def mock_generate(model, prompt, stream=None):
+            captured.append(prompt)
+            return "hi there"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        result = l9m.main(["--chat"])
+        assert result == 0
+        assert len(captured) == 1
+        assert "hello" in captured[0]
+
+    def test_multiple_turns_accumulate_context(self, monkeypatch):
+        inputs = iter(["first question", "second question", "quit"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        captured = []
+
+        def mock_generate(model, prompt, stream=None):
+            captured.append(prompt)
+            if len(captured) == 1:
+                return "first answer"
+            return "second answer"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        l9m.main(["--chat"])
+        assert len(captured) == 2
+        assert "first question" in captured[1]
+        assert "first answer" in captured[1]
+
+    def test_quit_terminates(self, monkeypatch):
+        inputs = iter(["quit"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "x")
+        result = l9m.main(["--chat"])
+        assert result == 0
+
+    def test_exit_terminates(self, monkeypatch):
+        inputs = iter(["exit"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "x")
+        result = l9m.main(["--chat"])
+        assert result == 0
+
+    def test_eof_terminates_cleanly(self, monkeypatch):
+        def raise_eof(prompt=""):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", raise_eof)
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "x")
+        result = l9m.main(["--chat"])
+        assert result == 0
+
+    def test_empty_lines_skipped(self, monkeypatch):
+        inputs = iter(["", "  ", "actual prompt", "quit"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        captured = []
+
+        def mock_generate(model, prompt, stream=None):
+            captured.append(prompt)
+            return "response"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        l9m.main(["--chat"])
+        assert len(captured) == 1
+        assert "actual prompt" in captured[0]
+
+    def test_type_flag_respected(self, monkeypatch):
+        inputs = iter(["list files", "exit"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        captured = []
+
+        def mock_generate(model, prompt, stream=None):
+            captured.append(prompt)
+            return "ls -la"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        l9m.main(["--chat", "-t", "bash"])
+        assert len(captured) == 1
+        assert "ONLY with the bash command" in captured[0]
+
+    def test_instruction_flag_respected(self, monkeypatch):
+        inputs = iter(["do something", "exit"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        captured = []
+
+        def mock_generate(model, prompt, stream=None):
+            captured.append(prompt)
+            return "done"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        l9m.main(["--chat", "-i", "be concise"])
+        assert len(captured) == 1
+        assert "be concise" in captured[0]
+
+    def test_keyboard_interrupt_on_input_exits(self, monkeypatch):
+        call_count = [0]
+
+        def interrupt_input(prompt=""):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr("builtins.input", interrupt_input)
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "resp")
+        result = l9m.main(["--chat"])
+        assert result == 0
+
+    def test_keyboard_interrupt_during_generate_continues(self, monkeypatch):
+        inputs = iter(["hello", "world", "quit"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        call_count = [0]
+
+        def mock_generate(model, prompt, stream=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise KeyboardInterrupt
+            return "response"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        result = l9m.main(["--chat"])
+        assert result == 0
+        assert call_count[0] == 2
+
+    def test_context_persists_to_file(self, monkeypatch):
+        inputs = iter(["remember this", "quit"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "noted")
+        l9m.main(["--chat"])
+        content = self.ctx_file.read_text()
+        assert ">>> remember this" in content
+        assert "noted" in content

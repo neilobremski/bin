@@ -252,6 +252,44 @@ def _append_context(prompt: str, response: str) -> None:
     CONTEXT_FILE.write_text(combined, encoding="utf-8")
 
 
+# ---------- chat REPL ----------
+
+def _chat_loop(model: str, response_type: str, instruction: str) -> int:
+    """Interactive REPL. Rolling context accumulates across turns."""
+    try:
+        import readline  # noqa: F401 — enables line editing in input()
+    except ImportError:
+        pass
+
+    while True:
+        try:
+            line = input("> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+
+        prompt = line.strip()
+        if not prompt:
+            continue
+        if prompt in ("quit", "exit"):
+            return 0
+
+        context = _read_context()
+        context_wrapped = f"<Memories>\n{context}\n</Memories>" if context else ""
+        full_prompt = assemble_prompt(prompt, response_type, instruction, context_wrapped)
+
+        try:
+            output = generate(model, full_prompt)
+        except KeyboardInterrupt:
+            print()
+            continue
+        except L9mError as e:
+            print(f"error: {e}", file=sys.stderr)
+            continue
+
+        _append_context(prompt, output.strip())
+
+
 # ---------- main ----------
 
 def main(argv: list[str] | None = None) -> int:
@@ -263,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
 
 usage: l9m [options] [prompt]
        echo "text" | l9m [-p "question"]
+       l9m --chat [-t bash] [-i "instruction"]
 
 options:
   -p, --prompt <text>     Prompt text
@@ -271,6 +310,7 @@ options:
   -c, --context <file>    Context from file (overrides rolling context)
   -e, --echo              Echo assembled prompt before generation
   -s, --silent            Suppress stderr
+  --chat                  Interactive REPL (CTRL+D or "quit" to exit)
   --model                 Print resolved model and exit
 
 rolling context: prompt+response pairs are kept in ~/.cache/l9m/context.txt
@@ -291,6 +331,7 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
     echo_prompt = False
     silent = False
     show_model = False
+    chat_mode = False
 
     i = 0
     while i < len(argv):
@@ -314,6 +355,8 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
             silent = True
         elif arg == "--model":
             show_model = True
+        elif arg == "--chat":
+            chat_mode = True
         elif not arg.startswith("-") and not arg.startswith(".") and not arg.startswith("/"):
             if not prompt:
                 prompt = arg
@@ -327,6 +370,9 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
     except L9mError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+
+    if chat_mode:
+        return _chat_loop(model, response_type, instruction)
 
     # stdin handling
     stdin_content = ""
