@@ -101,6 +101,54 @@ class TestResolveModel:
         assert l9m.resolve_model() == "cached-model"
 
 
+# ---------- _model_num_ctx ----------
+
+class TestModelNumCtx:
+    def test_extracts_context_length(self, monkeypatch):
+        import json
+        fake_resp = json.dumps({
+            "model_info": {"qwen2.context_length": 32768}
+        }).encode()
+
+        class FakeResp:
+            def read(self): return fake_resp
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr(l9m.urllib.request, "urlopen", lambda *a, **kw: FakeResp())
+        assert l9m._model_num_ctx("qwen3:7b") == 32768
+
+    def test_returns_none_on_missing_key(self, monkeypatch):
+        import json
+        fake_resp = json.dumps({"model_info": {"other_key": 999}}).encode()
+
+        class FakeResp:
+            def read(self): return fake_resp
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr(l9m.urllib.request, "urlopen", lambda *a, **kw: FakeResp())
+        assert l9m._model_num_ctx("qwen3:7b") is None
+
+    def test_returns_none_on_network_error(self, monkeypatch):
+        def boom(*a, **kw):
+            raise OSError("timeout")
+        monkeypatch.setattr(l9m.urllib.request, "urlopen", boom)
+        assert l9m._model_num_ctx("qwen3:7b") is None
+
+    def test_returns_none_on_empty_response(self, monkeypatch):
+        import json
+        fake_resp = json.dumps({}).encode()
+
+        class FakeResp:
+            def read(self): return fake_resp
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr(l9m.urllib.request, "urlopen", lambda *a, **kw: FakeResp())
+        assert l9m._model_num_ctx("qwen3:7b") is None
+
+
 # ---------- resolve_context_limit ----------
 
 class TestResolveContextLimit:
@@ -349,60 +397,60 @@ class TestRollingContext:
         self.ctx_file = ctx_dir / "context.txt"
 
     def test_read_empty_when_no_file(self):
-        assert l9m._read_context() == ""
+        assert l9m.read_context() == ""
 
     def test_append_creates_file(self):
-        l9m._append_context("hello", "world")
+        l9m.append_context("hello", "world")
         assert self.ctx_file.exists()
         content = self.ctx_file.read_text()
         assert ">>> hello" in content
         assert "world" in content
 
     def test_append_accumulates(self):
-        l9m._append_context("q1", "a1")
-        l9m._append_context("q2", "a2")
+        l9m.append_context("q1", "a1")
+        l9m.append_context("q2", "a2")
         content = self.ctx_file.read_text()
         assert ">>> q1" in content
         assert ">>> q2" in content
 
     def test_rolling_window_trims(self):
-        l9m._append_context("first question", "first answer", limit=50)
-        l9m._append_context("second question", "second answer", limit=50)
+        l9m.append_context("first question", "first answer", limit=50)
+        l9m.append_context("second question", "second answer", limit=50)
         content = self.ctx_file.read_text()
         assert len(content) <= 50
         assert ">>> second question" in content
         assert ">>> first question" not in content
 
     def test_trim_at_line_boundary(self):
-        l9m._append_context("aaa", "bbb", limit=30)
-        l9m._append_context("ccc", "ddd", limit=30)
+        l9m.append_context("aaa", "bbb", limit=30)
+        l9m.append_context("ccc", "ddd", limit=30)
         content = self.ctx_file.read_text()
         assert content.startswith(">>>") or content == ""
 
     def test_no_trim_at_exact_limit(self):
         entry = ">>> X\nY\n"
-        l9m._append_context("X", "Y", limit=len(entry))
+        l9m.append_context("X", "Y", limit=len(entry))
         content = self.ctx_file.read_text()
         assert content == entry
 
     def test_extremely_small_limit(self):
-        l9m._append_context("hello", "world", limit=1)
+        l9m.append_context("hello", "world", limit=1)
         content = self.ctx_file.read_text()
         assert isinstance(content, str)
 
     def test_empty_prompt_and_response(self):
-        l9m._append_context("", "")
+        l9m.append_context("", "")
         content = self.ctx_file.read_text()
         assert ">>> \n\n" in content
 
     def test_multiline_content(self):
-        l9m._append_context("line1\nline2", "resp\nwith\nnewlines")
+        l9m.append_context("line1\nline2", "resp\nwith\nnewlines")
         content = self.ctx_file.read_text()
         assert ">>> line1\nline2" in content
         assert "resp\nwith\nnewlines" in content
 
     def test_unicode_roundtrip(self):
-        l9m._append_context("café \U0001f680", "你好世界")
+        l9m.append_context("café \U0001f680", "你好世界")
         content = self.ctx_file.read_text()
         assert "\U0001f680" in content
         assert "你好" in content
@@ -412,7 +460,7 @@ class TestRollingContext:
             raise PermissionError("denied")
         self.ctx_file.write_text("data")
         monkeypatch.setattr(l9m.CONTEXT_FILE.__class__, "read_text", raise_perm)
-        assert l9m._read_context() == ""
+        assert l9m.read_context() == ""
 
     def test_stdin_not_stored_in_context(self, monkeypatch):
         monkeypatch.setenv("MODEL", "fake")
@@ -429,7 +477,7 @@ class TestRollingContext:
         monkeypatch.setenv("MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         # Pre-populate context
-        l9m._append_context("earlier question", "earlier answer")
+        l9m.append_context("earlier question", "earlier answer")
 
         captured = {}
 
@@ -447,7 +495,7 @@ class TestRollingContext:
         monkeypatch.setenv("MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         # Pre-populate rolling context
-        l9m._append_context("rolling stuff", "rolling response")
+        l9m.append_context("rolling stuff", "rolling response")
 
         ctx = tmp_path / "explicit.txt"
         ctx.write_text("explicit context here")

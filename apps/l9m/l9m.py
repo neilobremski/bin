@@ -132,7 +132,10 @@ def resolve_context_limit(model: str) -> int:
 
     cache = _read_cache()
     if cache.get("MODEL") == model and "NUM_CTX" in cache:
-        num_ctx = int(cache["NUM_CTX"])
+        try:
+            num_ctx = int(cache["NUM_CTX"])
+        except ValueError:
+            num_ctx = _model_num_ctx(model) or 0
     else:
         num_ctx = _model_num_ctx(model) or 0
 
@@ -220,9 +223,14 @@ class L9mError(RuntimeError):
     pass
 
 
-def generate(model: str, prompt: str, stream: object | None = sys.stdout) -> str:
+_STREAM_DEFAULT = object()
+
+
+def generate(model: str, prompt: str, stream: object | None = _STREAM_DEFAULT) -> str:
     """Generate text from ollama. Streams to `stream` if provided, returns full text.
     Raises L9mError on failure (never calls sys.exit)."""
+    if stream is _STREAM_DEFAULT:
+        stream = sys.stdout
     if not _ollama_running():
         if not _start_ollama():
             raise L9mError("ollama not installed or won't start")
@@ -275,17 +283,17 @@ def generate(model: str, prompt: str, stream: object | None = sys.stdout) -> str
 
 # ---------- rolling context ----------
 
-def _read_context() -> str:
+def read_context() -> str:
     try:
         return CONTEXT_FILE.read_text(encoding="utf-8")
     except OSError:
         return ""
 
 
-def _append_context(prompt: str, response: str, limit: int = 0) -> None:
+def append_context(prompt: str, response: str, limit: int = 0) -> None:
     ctx_limit = limit or 10000
     entry = f">>> {prompt}\n{response}\n"
-    existing = _read_context()
+    existing = read_context()
     combined = existing + entry
     if len(combined) > ctx_limit:
         combined = combined[-ctx_limit:]
@@ -320,7 +328,7 @@ def _chat_loop(model: str, response_type: str, instruction: str, context_limit: 
         if prompt in ("quit", "exit"):
             return 0
 
-        context = _read_context()
+        context = read_context()
         context_wrapped = f"<Memories>\n{context}\n</Memories>" if context else ""
         full_prompt = assemble_prompt(prompt, response_type, instruction, context_wrapped)
 
@@ -333,7 +341,7 @@ def _chat_loop(model: str, response_type: str, instruction: str, context_limit: 
             print(f"error: {e}", file=sys.stderr)
             continue
 
-        _append_context(prompt, output.strip(), context_limit)
+        append_context(prompt, output.strip(), context_limit)
 
 
 # ---------- main ----------
@@ -468,7 +476,7 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
         else:
             context_payload = file_content
     elif use_rolling_context:
-        rolling = _read_context()
+        rolling = read_context()
         if rolling:
             if context_payload:
                 context_payload = f"{rolling}\n{context_payload}"
@@ -492,7 +500,7 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
         return 1
 
     if use_rolling_context and prompt and (prompt_flag or not stdin_content):
-        _append_context(prompt, output.strip(), context_limit)
+        append_context(prompt, output.strip(), context_limit)
 
     return 0
 
