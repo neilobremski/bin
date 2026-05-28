@@ -4,18 +4,31 @@ Append-only file at ~/.a8s/transactions.tsv. One line per routing event.
 Columns are tab-separated, fixed-order, greppable.
 
 Designed for debugging message flow end-to-end: trace a msg_id from
-sender outbox → local routing → file transfer → remote publish → remote
-receive → recipient wake.
+sender outbox -> local routing -> file transfer -> remote publish -> remote
+receive -> recipient wake.
 """
 from __future__ import annotations
 
 import os
-import time
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
+
+__all__ = ["log"]
+
+Event = Literal[
+    "ROUTED",
+    "RECEIVED_REMOTE",
+    "FILE_DELIVERED",
+    "FILE_UPLOAD_FAILED",
+    "PUBLISHED",
+    "DROPPED",
+    "PROXY_DELIVERED",
+]
 
 _COLUMNS = [
-    "timestamp",    # ISO-8601 UTC
-    "event",        # event type (ROUTED, RECEIVED, FILE_DELIVERED, etc.)
+    "timestamp",    # ISO-8601 UTC with milliseconds
+    "event",        # event type (see Event literal above)
     "msg_id",       # envelope ULID
     "from",         # sender participant name
     "to",           # recipient participant name (or alias)
@@ -34,7 +47,8 @@ def _txlog_path() -> Path:
 
 
 def _ts() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
 def _sanitize(val: str) -> str:
@@ -43,7 +57,7 @@ def _sanitize(val: str) -> str:
 
 
 def log(
-    event: str,
+    event: Event,
     *,
     msg_id: str = "",
     sender: str = "",
@@ -52,23 +66,26 @@ def log(
     remote: str = "",
     detail: str = "",
 ) -> None:
-    """Append one transaction line."""
-    files_str = ",".join(files) if files else ""
-    fields = [
-        _ts(),
-        event,
-        msg_id,
-        sender,
-        recipient,
-        files_str,
-        remote,
-        _sanitize(detail)[:200],
-    ]
-    line = "\t".join(fields) + "\n"
-    path = _txlog_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(HEADER + "\n")
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(line)
+    """Append one transaction line. Never raises — OSError is swallowed."""
+    try:
+        files_str = ",".join(files) if files else ""
+        detail_truncated = detail[:200]
+        fields = [
+            _ts(),
+            event,
+            msg_id,
+            sender,
+            recipient,
+            files_str,
+            remote,
+            detail_truncated,
+        ]
+        line = "\t".join(_sanitize(f) for f in fields) + "\n"
+        path = _txlog_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            if f.tell() == 0:
+                f.write(HEADER + "\n")
+            f.write(line)
+    except OSError:
+        pass
