@@ -103,6 +103,7 @@ the LLM must produce a program — it doesn't get to speak directly""")
         print(f"$ {cmd}", file=sys.stderr)
 
     if dry_run:
+        print(cmd)
         return 0
 
     # Validate syntax before executing
