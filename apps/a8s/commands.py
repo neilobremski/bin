@@ -32,9 +32,12 @@ from core import (
     agent_dir,
     agent_log_path,
     canonical_name,
+    inbox_dir,
     out,
     out_agent,
     pid_path,
+    trash_dir,
+    unique_path,
 )
 from definitions import _autodiscover_definition, default_definition_path
 from daemon import (
@@ -827,6 +830,45 @@ def cmd_tell(args: list[str]) -> int:
         out_agent(sender_name, f"tell -> {canonical} (alias of {len(members)}): {_preview(content)}")
     else:
         out_agent(sender_name, f"tell -> {canonical}: {_preview(content)}")
+    return 0
+
+
+# ---------- drain ----------
+
+def cmd_drain(args: list[str]) -> int:
+    """`a8s drain <name>` — move all inbox messages to trash without invoking.
+    Prints a summary of each drained message."""
+    if len(args) != 1:
+        print("usage: a8s drain <name>", file=sys.stderr)
+        return 2
+    name = args[0]
+    inbox = inbox_dir(name)
+    trash = trash_dir(name)
+    if not inbox.is_dir():
+        print(f"no inbox for {name!r}", file=sys.stderr)
+        return 1
+    trash.mkdir(parents=True, exist_ok=True)
+
+    files = sorted(f for f in inbox.iterdir() if f.is_file() and f.name.endswith(".json"))
+    if not files:
+        print(f"{name}: inbox empty")
+        return 0
+
+    count = 0
+    for f in files:
+        try:
+            msg = json.loads(f.read_text())
+            sender = msg.get("from", "?")
+            content = msg.get("content", "")
+            preview = content.replace("\n", " ")[:80]
+            print(f"  {sender}: {preview}")
+        except Exception:
+            print(f"  (unreadable: {f.name})")
+        dest = unique_path(trash / f.name)
+        f.rename(dest)
+        count += 1
+
+    print(f"{name}: drained {count} message(s)")
     return 0
 
 

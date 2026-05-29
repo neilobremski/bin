@@ -11,6 +11,7 @@ from commands import (
     cmd_aliases,
     cmd_define,
     cmd_discover,
+    cmd_drain,
     cmd_exit,
     cmd_health,
     cmd_install,
@@ -48,6 +49,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("exit",     "",                          "Stop every running agent."),
     ("ls",       "",                          "List running agents."),
     ("tell",     "<name> <message>",          "Send a message to an agent or alias."),
+    ("drain",    "<name>",                   "Move inbox to trash without invoking."),
     ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
     ("remote",   "[<name> [<broker> <topic> [--<k> <v> ...]]]", "List, show, or set a cross-machine remote."),
     ("unremote", "<name>",                    "Remove a configured remote."),
@@ -105,6 +107,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_ls()
     if cmd == "tell":
         return cmd_tell(args)
+    if cmd == "drain":
+        return cmd_drain(args)
     if cmd == "install":
         return cmd_install()
     if cmd == "logs":
