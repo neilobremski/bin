@@ -36,7 +36,7 @@ def _looks_dangerous(cmd: str, model: str) -> bool:
     try:
         answer = l9m.generate(model, check_prompt, stream=None)
     except l9m.L9mError:
-        return False
+        return True
     return answer.strip().upper().startswith("YES")
 
 
@@ -82,7 +82,10 @@ the LLM must produce a program — it doesn't get to speak directly""")
         print(f"error: {e}", file=sys.stderr)
         return 1
 
-    full_prompt = l9m.assemble_prompt(prompt, "bash", instruction, "")
+    context_limit = l9m.resolve_context_limit(model)
+    rolling = l9m.read_context()
+    context = f"<Memories>\n{rolling}\n</Memories>" if rolling else ""
+    full_prompt = l9m.assemble_prompt(prompt, "bash", instruction, context)
 
     try:
         output = l9m.generate(model, full_prompt, stream=None)
@@ -103,6 +106,7 @@ the LLM must produce a program — it doesn't get to speak directly""")
         print(f"$ {cmd}", file=sys.stderr)
 
     if dry_run:
+        l9m.append_context(prompt, cmd, context_limit)
         print(cmd)
         return 0
 
@@ -131,7 +135,42 @@ the LLM must produce a program — it doesn't get to speak directly""")
                 print("aborted", file=sys.stderr)
                 return 130
 
-    return subprocess.call([shell, "-c", cmd])
+    MAX_CONTEXT_LINES = 20
+
+    proc = subprocess.Popen(
+        [shell, "-c", cmd],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, errors="replace",
+    )
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    # Stream stdout in real-time
+    for line in (proc.stdout or []):
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        stdout_lines.append(line.rstrip("\n"))
+
+    # Collect stderr after stdout closes
+    for line in (proc.stderr or []):
+        sys.stderr.write(line)
+        stderr_lines.append(line.rstrip("\n"))
+
+    proc.wait()
+
+    context_lines = []
+    for line in stdout_lines[:MAX_CONTEXT_LINES]:
+        context_lines.append(f"STDOUT: {line}")
+    if len(stdout_lines) > MAX_CONTEXT_LINES:
+        context_lines.append(f"[...{len(stdout_lines) - MAX_CONTEXT_LINES} lines truncated]")
+    for line in stderr_lines[:MAX_CONTEXT_LINES]:
+        context_lines.append(f"STDERR: {line}")
+
+    result_text = cmd if not context_lines else cmd + "\n" + "\n".join(context_lines)
+    l9m.append_context(prompt, result_text, context_limit)
+
+    return proc.returncode
 
 
 if __name__ == "__main__":
