@@ -104,7 +104,7 @@ PowerShell halves extract that block and pipe it to `python3 -`.
 ## Common operations
 
 ```bash
-# a8s tests (~378 tests)
+# a8s tests (~426 tests)
 python3 -m pytest apps/a8s/tests/
 
 # k7e tests (~69 tests)
@@ -116,6 +116,12 @@ a8s discover apps/a8s/tests/agents
 
 # Tail per-agent activity
 a8s logs CLAUDE GEMINI -f
+
+# Clear local inbox without invoking
+a8s drain knobert
+
+# Flush MQTT-queued messages (connect, trash for N seconds, exit)
+a8s run knobert --drain 5
 ```
 
 ## Memory note
