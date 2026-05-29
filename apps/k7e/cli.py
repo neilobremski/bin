@@ -21,7 +21,7 @@ from engine import (
     compile_tag,
     process_pending_embeddings,
 )
-from distill import distill
+from distill import distill, consolidate
 from hygiene import run_audit
 
 
@@ -33,6 +33,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("asset",       "<file>",                          "Store binary (content-addressed, deduped). Prints path."),
     ("compile",     "<tag> [--dry-run]",               "Synthesize entries for a tag into a reference page."),
     ("distill", "<file|dir> [--dry-run]",          "Extract knowledge from raw experience files."),
+    ("consolidate", "[--dry-run]",                 "Find and merge duplicate nodes."),
     ("reindex",     "[--embeddings]",                  "Rebuild search index from files."),
     ("embed-pending", "",                              "Process queued embeddings."),
     ("rebuild-mocs", "",                               "Rebuild all Maps of Content from entry tags."),
@@ -84,6 +85,10 @@ def main(argv=None):
     # distill
     p = sub.add_parser("distill", help="Extract knowledge from files")
     p.add_argument("paths", nargs="+", help="Files or directories")
+    p.add_argument("--dry-run", action="store_true")
+
+    # consolidate
+    p = sub.add_parser("consolidate", help="Find and merge duplicate nodes")
     p.add_argument("--dry-run", action="store_true")
 
     # compile
@@ -181,6 +186,20 @@ def main(argv=None):
             print(f"  [{action}] {entry_id} {title}")
         if not results:
             print("No new knowledge extracted.")
+
+    elif args.command == "consolidate":
+        results = consolidate(dry_run=args.dry_run)
+        total_superseded = 0
+        for r in results:
+            if r["action"] == "would_consolidate":
+                print(f"  [keep] {r['keeper']}  {r['title']}  (merge {len(r['duplicates'])} dupes)")
+            else:
+                print(f"  [done] {r['keeper']}  {r['title']}  (superseded {r['count']})")
+                total_superseded += r["count"]
+        if not results:
+            print("No duplicates found.")
+        elif not args.dry_run:
+            print(f"\nConsolidated: {total_superseded} nodes superseded across {len(results)} groups.")
 
     elif args.command == "compile":
         node_id = compile_tag(args.tag, dry_run=args.dry_run)

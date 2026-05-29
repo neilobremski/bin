@@ -51,3 +51,105 @@ class TestDistillDedup:
         results = distill.distill([str(journal)])
         stored = [r for r in results if r["action"] in ("stored", "would_store")]
         assert len(stored) >= 1
+
+
+class TestTitleDedup:
+    """Test title-similarity based deduplication."""
+
+    def test_paraphrased_titles_detected(self, store):
+        import distill
+        engine.store_entry(
+            "Send email via knobert-google",
+            "Use tell knobert-google /email to send an email message",
+            tags=["email"],
+        )
+        candidates = [
+            {"title": "Sending emails via knobert-google", "content": "Send emails using the knobert-google command", "tags": ["email"]},
+        ]
+        new = distill.diff_against_store(candidates)
+        assert len(new) == 0, f"Paraphrased title should be deduped, got: {new}"
+
+    def test_gerund_normalization(self):
+        import distill
+        assert distill._normalize_title("Sending emails via knobert") == distill._normalize_title("Send email via knobert")
+
+    def test_title_similarity_high_for_paraphrases(self):
+        import distill
+        sim = distill._title_similarity(
+            "Capture photo via knobert-android",
+            "Capturing photos with knobert-android",
+        )
+        assert sim >= 0.6, f"Expected >= 0.6, got {sim}"
+
+    def test_title_similarity_low_for_different_topics(self):
+        import distill
+        sim = distill._title_similarity(
+            "Send email via knobert-google",
+            "Redis default port configuration",
+        )
+        assert sim < 0.3, f"Expected < 0.3, got {sim}"
+
+    def test_distinct_topics_not_merged(self, store):
+        import distill
+        engine.store_entry("Redis port", "Redis runs on port 6379", tags=["redis"])
+        candidates = [
+            {"title": "PostgreSQL port", "content": "PostgreSQL default port is 5432", "tags": ["postgres"]},
+        ]
+        new = distill.diff_against_store(candidates)
+        assert len(new) == 1, "Distinct topics must not be merged"
+
+
+class TestConsolidate:
+    """Test the consolidate command."""
+
+    def test_merges_duplicate_titles(self, store):
+        import distill
+        engine.store_entry("Web Search Capabilities", "Agent can search the web", tags=["capabilities"])
+        engine.store_entry("Web Search Capabilities", "System has web search", tags=["capabilities"])
+        engine.store_entry("Web Search Capabilities", "Web search is available", tags=["capabilities"])
+        results = distill.consolidate()
+        assert len(results) == 1
+        assert results[0]["action"] == "consolidated"
+        assert results[0]["count"] == 2  # 2 superseded, 1 kept
+
+    def test_merges_similar_titles(self, store):
+        import distill
+        engine.store_entry("Send email via knobert-google", "Use tell to send", tags=["email"])
+        engine.store_entry("Sending emails via knobert-google", "Send emails with tell", tags=["email"])
+        engine.store_entry("Sending an email via knobert-google", "Email sending procedure", tags=["email"])
+        results = distill.consolidate()
+        assert len(results) >= 1
+        total_superseded = sum(r["count"] for r in results)
+        assert total_superseded >= 2
+
+    def test_dry_run_does_not_modify(self, store):
+        import distill
+        engine.store_entry("Duplicate Fact", "Content A", tags=["test"])
+        engine.store_entry("Duplicate Fact", "Content B", tags=["test"])
+        results = distill.consolidate(dry_run=True)
+        assert results[0]["action"] == "would_consolidate"
+        active = engine.list_nodes(status="active")
+        assert len(active) == 2  # nothing actually changed
+
+    def test_leaves_distinct_nodes_alone(self, store):
+        import distill
+        engine.store_entry("Redis port", "Redis runs on 6379", tags=["redis"])
+        engine.store_entry("PostgreSQL port", "Postgres runs on 5432", tags=["postgres"])
+        results = distill.consolidate()
+        assert len(results) == 0
+
+
+class TestGenericCapabilityRejection:
+    """Test that generic capability descriptions are rejected."""
+
+    def test_rejects_agent_capability_statement(self):
+        import distill
+        assert distill._should_reject("The agent is equipped with web search capabilities to look up information")
+
+    def test_rejects_system_capability(self):
+        import distill
+        assert distill._should_reject("The system has available tools for searching and sending messages")
+
+    def test_accepts_specific_fact(self):
+        import distill
+        assert not distill._should_reject("Redis default port is 6379, configurable via redis.conf bind directive")
