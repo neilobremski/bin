@@ -588,12 +588,12 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     started_remotes = start_remotes(load_remotes(), participants_from_registry, services=services)
     publish_remotes = make_publish_remotes(started_remotes) if started_remotes else None
     configured_remote_ids = [r.id for r in started_remotes]
-    if drain_seconds > 0:
-        timer = threading.Timer(drain_seconds, lambda: _STOP_EVENT.set())
-        timer.daemon = True
-        timer.start()
+    deadline = _time.monotonic() + drain_seconds if drain_seconds > 0 else 0
     try:
         while not _STOP_EVENT.is_set():
+            if deadline and _time.monotonic() >= deadline:
+                _STOP_EVENT.set()
+                break
             try:
                 # Honor kill-requests and detach-requests at the iteration
                 # top. Kill takes precedence (SIGUSR1 may have already killed
@@ -634,13 +634,14 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                     break
                 for p in handled:
                     ensure_mailboxes(p)
-                route_outboxes(
-                    handled,
-                    all_agents=all_agents,
-                    publish_remotes=publish_remotes,
-                    configured_remote_ids=configured_remote_ids,
-                    services=services,
-                )
+                if drain_seconds == 0:
+                    route_outboxes(
+                        handled,
+                        all_agents=all_agents,
+                        publish_remotes=publish_remotes,
+                        configured_remote_ids=configured_remote_ids,
+                        services=services,
+                    )
                 for p in handled:
                     while not _STOP_EVENT.is_set():
                         msg = next_inbox_message(p)
