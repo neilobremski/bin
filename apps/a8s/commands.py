@@ -32,9 +32,12 @@ from core import (
     agent_dir,
     agent_log_path,
     canonical_name,
+    inbox_dir,
     out,
     out_agent,
     pid_path,
+    trash_dir,
+    unique_path,
 )
 from definitions import _autodiscover_definition, default_definition_path
 from daemon import (
@@ -560,17 +563,39 @@ def _expand_to_agents(name: str) -> list[str] | None:
 
 
 def cmd_run(args: list[str], interval: float) -> int:
-    """`a8s run <name>` — foreground attached loop. <name> may be an agent or
-    an alias; aliases produce ONE process that handles every member (each
-    member's pid file points at this PID). Ctrl+C: graceful detach. 2nd
-    Ctrl+C: kills the wake subprocess group."""
-    if len(args) != 1:
-        print("usage: a8s run <name>", file=sys.stderr)
+    """`a8s run <name> [--drain <seconds>]` — foreground attached loop. <name>
+    may be an agent or an alias; aliases produce ONE process that handles every
+    member (each member's pid file points at this PID). Ctrl+C: graceful detach.
+    2nd Ctrl+C: kills the wake subprocess group.
+
+    --drain <seconds>: connect to MQTT remotes and trash incoming messages for
+    the specified duration without invoking. Default 1s when given without a
+    value."""
+    drain_seconds = 0.0
+    filtered = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--drain":
+            i += 1
+            if i < len(args) and not args[i].startswith("-"):
+                try:
+                    drain_seconds = float(args[i])
+                except ValueError:
+                    print("--drain requires a number (seconds)", file=sys.stderr)
+                    return 2
+            else:
+                drain_seconds = 1.0
+                continue
+        else:
+            filtered.append(args[i])
+        i += 1
+    if len(filtered) != 1:
+        print("usage: a8s run <name> [--drain <seconds>]", file=sys.stderr)
         return 2
-    members = _expand_to_agents(args[0])
+    members = _expand_to_agents(filtered[0])
     if members is None:
         return 1
-    return attached_loop(members, interval)
+    return attached_loop(members, interval, drain_seconds=drain_seconds)
 
 
 def cmd_start(args: list[str]) -> int:
@@ -827,6 +852,45 @@ def cmd_tell(args: list[str]) -> int:
         out_agent(sender_name, f"tell -> {canonical} (alias of {len(members)}): {_preview(content)}")
     else:
         out_agent(sender_name, f"tell -> {canonical}: {_preview(content)}")
+    return 0
+
+
+# ---------- drain ----------
+
+def cmd_drain(args: list[str]) -> int:
+    """`a8s drain <name>` — move all inbox messages to trash without invoking.
+    Prints a summary of each drained message."""
+    if len(args) != 1:
+        print("usage: a8s drain <name>", file=sys.stderr)
+        return 2
+    name = args[0]
+    inbox = inbox_dir(name)
+    trash = trash_dir(name)
+    if not inbox.is_dir():
+        print(f"no inbox for {name!r}", file=sys.stderr)
+        return 1
+    trash.mkdir(parents=True, exist_ok=True)
+
+    files = sorted(f for f in inbox.iterdir() if f.is_file() and f.name.endswith(".json"))
+    if not files:
+        print(f"{name}: inbox empty")
+        return 0
+
+    count = 0
+    for f in files:
+        try:
+            msg = json.loads(f.read_text())
+            sender = msg.get("from", "?")
+            content = msg.get("content", "")
+            preview = content.replace("\n", " ")[:80]
+            print(f"  {sender}: {preview}")
+        except Exception:
+            print(f"  (unreadable: {f.name})")
+        dest = unique_path(trash / f.name)
+        f.rename(dest)
+        count += 1
+
+    print(f"{name}: drained {count} message(s)")
     return 0
 
 

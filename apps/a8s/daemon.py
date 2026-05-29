@@ -512,7 +512,21 @@ def _on_kill_signal(_signum, _frame):
     _kill_wake_subprocess_group()
 
 
-def attached_loop(names: list[str], interval: float, *, single_pass: bool = False) -> int:
+def _drain_one(p: Participant, msg_path: Path) -> None:
+    """Trash a single inbox message without invoking, with summary output."""
+    try:
+        data = json.loads(msg_path.read_text())
+        sender = data.get("from", "?")
+        content = data.get("content", "")
+        preview = content.replace("\n", " ")[:80]
+        out_agent(p.name, f"[drain] {sender}: {preview}")
+    except Exception:
+        out_agent(p.name, f"[drain] (unreadable: {msg_path.name})")
+    dest = unique_path(trash_dir(p.name) / msg_path.name)
+    msg_path.rename(dest)
+
+
+def attached_loop(names: list[str], interval: float, *, single_pass: bool = False, drain_seconds: float = 0) -> int:
     """Body of `a8s run` / `a8s start` / `a8s step`. ONE process handles every
     name in `names`; multi-agent handlers share a PID across each member's
     pid file.
@@ -574,8 +588,12 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     started_remotes = start_remotes(load_remotes(), participants_from_registry, services=services)
     publish_remotes = make_publish_remotes(started_remotes) if started_remotes else None
     configured_remote_ids = [r.id for r in started_remotes]
+    deadline = _time.monotonic() + drain_seconds if drain_seconds > 0 else 0
     try:
         while not _STOP_EVENT.is_set():
+            if deadline and _time.monotonic() >= deadline:
+                _STOP_EVENT.set()
+                break
             try:
                 # Honor kill-requests and detach-requests at the iteration
                 # top. Kill takes precedence (SIGUSR1 may have already killed
@@ -616,25 +634,30 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                     break
                 for p in handled:
                     ensure_mailboxes(p)
-                route_outboxes(
-                    handled,
-                    all_agents=all_agents,
-                    publish_remotes=publish_remotes,
-                    configured_remote_ids=configured_remote_ids,
-                    services=services,
-                )
+                if drain_seconds == 0:
+                    route_outboxes(
+                        handled,
+                        all_agents=all_agents,
+                        publish_remotes=publish_remotes,
+                        configured_remote_ids=configured_remote_ids,
+                        services=services,
+                    )
                 for p in handled:
                     while not _STOP_EVENT.is_set():
                         msg = next_inbox_message(p)
                         if msg is None:
                             break
-                        wake_once(p, msg)
+                        if drain_seconds > 0:
+                            _drain_one(p, msg)
+                        else:
+                            wake_once(p, msg)
                 # Idle invoke: per-agent, only after the inbox has drained.
                 # Skipped while a wake is in flight automatically — the
                 # drain loop above is the only thing that calls
                 # `run_with_prefix`, so reaching this point means the
                 # agent is genuinely between wakes for this iteration.
-                if not _STOP_EVENT.is_set():
+                # Also skipped in drain mode — the goal is to discard, not run.
+                if not _STOP_EVENT.is_set() and drain_seconds == 0:
                     for p in handled:
                         try:
                             maybe_run_idle(p)
