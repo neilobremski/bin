@@ -563,17 +563,39 @@ def _expand_to_agents(name: str) -> list[str] | None:
 
 
 def cmd_run(args: list[str], interval: float) -> int:
-    """`a8s run <name>` — foreground attached loop. <name> may be an agent or
-    an alias; aliases produce ONE process that handles every member (each
-    member's pid file points at this PID). Ctrl+C: graceful detach. 2nd
-    Ctrl+C: kills the wake subprocess group."""
-    if len(args) != 1:
-        print("usage: a8s run <name>", file=sys.stderr)
+    """`a8s run <name> [--drain <seconds>]` — foreground attached loop. <name>
+    may be an agent or an alias; aliases produce ONE process that handles every
+    member (each member's pid file points at this PID). Ctrl+C: graceful detach.
+    2nd Ctrl+C: kills the wake subprocess group.
+
+    --drain <seconds>: connect to MQTT remotes and trash incoming messages for
+    the specified duration without invoking. Default 1s when given without a
+    value."""
+    drain_seconds = 0.0
+    filtered = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--drain":
+            i += 1
+            if i < len(args) and not args[i].startswith("-"):
+                try:
+                    drain_seconds = float(args[i])
+                except ValueError:
+                    print("--drain requires a number (seconds)", file=sys.stderr)
+                    return 2
+            else:
+                drain_seconds = 1.0
+                continue
+        else:
+            filtered.append(args[i])
+        i += 1
+    if len(filtered) != 1:
+        print("usage: a8s run <name> [--drain <seconds>]", file=sys.stderr)
         return 2
-    members = _expand_to_agents(args[0])
+    members = _expand_to_agents(filtered[0])
     if members is None:
         return 1
-    return attached_loop(members, interval)
+    return attached_loop(members, interval, drain_seconds=drain_seconds)
 
 
 def cmd_start(args: list[str]) -> int:
