@@ -128,7 +128,7 @@ class TestDrainNonexistentAgent:
         rc = cmd_drain(["nobody"])
         assert rc == 1
         err = capsys.readouterr().err
-        assert "no inbox" in err
+        assert "no agent named" in err
 
 
 # ---------------------------------------------------------------------------

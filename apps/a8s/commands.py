@@ -63,6 +63,7 @@ from registry import (
     load_registry,
     participants_from_registry,
     resolve_name,
+    resolve_recipient,
     save_aliases,
     save_registry,
     sender_from_cwd,
@@ -213,14 +214,16 @@ def cmd_remove(args: list[str]) -> int:
         return 2
     raw = args[0]
     try:
-        name = canonical_name(raw)
+        canonical_name(raw)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
-    reg = load_registry()
-    if name not in reg:
+    match = resolve_recipient(raw)
+    if match is None:
         print(f"no agent named {raw!r}", file=sys.stderr)
         return 1
+    name = match[0]
+    reg = load_registry()
     holder = _read_handler_pid(name)
     if holder is not None:
         print(f"{name} is running (PID {holder}); stop it first: `a8s stop {name}`", file=sys.stderr)
@@ -230,7 +233,7 @@ def cmd_remove(args: list[str]) -> int:
     dropped: list[str] = []
     for alias_name in list(aliases.keys()):
         members = aliases[alias_name]
-        kept = [m for m in members if m.lower() != name]
+        kept = [m for m in members if m.lower() != name.lower()]
         if len(kept) == len(members):
             continue
         if kept:
@@ -863,7 +866,11 @@ def cmd_drain(args: list[str]) -> int:
     if len(args) != 1:
         print("usage: a8s drain <name>", file=sys.stderr)
         return 2
-    name = args[0]
+    match = resolve_recipient(args[0])
+    if match is None:
+        print(f"no agent named {args[0]!r}", file=sys.stderr)
+        return 1
+    name = match[0]
     inbox = inbox_dir(name)
     trash = trash_dir(name)
     if not inbox.is_dir():
