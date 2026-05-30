@@ -11,6 +11,7 @@ from engine import (
     init,
     get,
     list_nodes,
+    recall,
     store_entry,
     rebuild_mocs,
     reindex,
@@ -32,6 +33,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("append",        "<id> --section <name>",           "Append to an existing entry's section."),
     ("asset",       "<file>",                          "Store binary (content-addressed, deduped). Prints path."),
     ("compile",     "<tag> [--dry-run]",               "Synthesize entries for a tag into a reference page."),
+    ("recall",      "<text> [--limit N]",            "Recall relevant knowledge for a topic or conversation (RAG)."),
     ("distill", "<file|dir> [--dry-run]",          "Extract knowledge from raw experience files."),
     ("consolidate", "[--dry-run]",                 "Find and merge duplicate nodes."),
     ("reindex",     "[--embeddings]",                  "Rebuild search index from files."),
@@ -81,6 +83,11 @@ def main(argv=None):
     # asset
     p = sub.add_parser("asset", help="Store binary file")
     p.add_argument("file", help="Path to file")
+
+    # recall
+    p = sub.add_parser("recall", help="Recall relevant knowledge (RAG)")
+    p.add_argument("text", nargs="?", default=None, help="Topic, question, or conversation (reads stdin if omitted)")
+    p.add_argument("--limit", type=int, default=8)
 
     # distill
     p = sub.add_parser("distill", help="Extract knowledge from files")
@@ -176,6 +183,26 @@ def main(argv=None):
         except FileNotFoundError as e:
             print(str(e), file=sys.stderr)
             return 1
+
+    elif args.command == "recall":
+        text = args.text
+        if text is None:
+            if sys.stdin.isatty():
+                print("Usage: k7e recall <text>  or  echo '...' | k7e recall", file=sys.stderr)
+                return 1
+            text = sys.stdin.read()
+        answer, sources = recall(text, limit=args.limit)
+        if answer:
+            print(answer)
+            if sources:
+                ids = ", ".join(e["id"] for e in sources)
+                print(f"\n---\nSources: {ids}")
+        elif sources:
+            print("No LLM available — raw search results:", file=sys.stderr)
+            for e in sources:
+                print(f"  {e['id']}  {e['title']}")
+        else:
+            print("No relevant knowledge found.")
 
     elif args.command == "distill":
         results = distill(args.paths, dry_run=args.dry_run)

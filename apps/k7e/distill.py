@@ -302,6 +302,7 @@ def diff_against_store(candidates):
 
         best_overlap = 0.0
         best_match_id = None
+        best_match_terms = None
         for result in results:
             try:
                 existing_text = engine.get(result["id"])
@@ -319,21 +320,15 @@ def diff_against_store(candidates):
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_match_id = result["id"]
+                best_match_terms = existing_terms
 
         if best_overlap >= 0.7:
-            # High overlap — this is a restatement, skip entirely
             continue
         elif best_overlap >= 0.45:
-            # Moderate overlap — check for novel content worth appending
-            existing_text = engine.get(best_match_id)
-            existing_terms_full = set(
-                w.lower() for w in re.findall(r"\b\w{4,}\b", existing_text)
-            )
-            novel_terms = candidate_terms - existing_terms_full
+            novel_terms = candidate_terms - best_match_terms
             if len(novel_terms) > len(candidate_terms) * 0.4:
                 candidate["_append_to"] = best_match_id
                 new.append(candidate)
-            # else: mostly covered, skip
         else:
             new.append(candidate)
 
@@ -505,7 +500,7 @@ def _llm_extract(text):
             "If nothing novel, return []. Text:\n\n" + chunk
         )
 
-        candidates = _run_llm_prompt(prompt, config)
+        candidates = _run_llm_prompt(prompt)
         if candidates:
             all_candidates.extend(candidates)
 
@@ -513,39 +508,11 @@ def _llm_extract(text):
     return _dedup_candidates(all_candidates)
 
 
-def _run_llm_prompt(prompt, config):
+def _run_llm_prompt(prompt):
     """Run a single LLM prompt and return parsed candidates."""
-    cmd = config.resolve_llm_command(prompt)
-    if cmd:
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=180,
-                cwd=str(config._k7e_home()),
-            )
-            if result.returncode == 0:
-                return _parse_llm_response(result.stdout)
-            print(f"  [llm] non-zero exit ({result.returncode})", file=sys.stderr)
-        except subprocess.TimeoutExpired:
-            print("  [llm] timed out (180s)", file=sys.stderr)
-        except OSError as e:
-            print(f"  [llm] launch failed: {e}", file=sys.stderr)
-        return []
-
-    # Fallback: ollama HTTP API
-    ollama_url = config.get("ollama_url", "http://localhost:11434")
-    model = config.get("llm_model", "qwen3.5:latest")
-    try:
-        data = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
-        req = urllib.request.Request(
-            f"{ollama_url}/api/generate",
-            data=data, headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            response = json.loads(resp.read())
-            return _parse_llm_response(response.get("response", ""))
-    except Exception as e:
-        print(f"  [llm] ollama failed: {e}", file=sys.stderr)
-
+    response = engine._call_llm(prompt, timeout=180)
+    if response:
+        return _parse_llm_response(response)
     return []
 
 
