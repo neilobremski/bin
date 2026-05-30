@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+
+# can-use-mlx: Check if Apple MLX framework is compatible/usable on this system
+# Exit 0 if MLX is usable (Apple Silicon macOS), exit 1 otherwise
+# Silent by default, use -v or --verbose for details
+
+VERBOSE=false
+for arg in "$@"; do
+  if [ "$arg" = "-v" ] || [ "$arg" = "--verbose" ]; then
+    VERBOSE=true
+  fi
+done
+
+# MLX is only available on macOS (Darwin)
+if [ "$(uname)" != "Darwin" ]; then
+  if [ "$VERBOSE" = true ]; then
+    echo "MLX not available (not macOS)"
+  fi
+  exit 1
+fi
+
+# MLX requires Apple Silicon (arm64 architecture or Apple processor brand)
+ARCH=$(uname -m)
+CPU_BRAND=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "")
+
+if [ "$ARCH" = "arm64" ] || [[ "$CPU_BRAND" == *"Apple"* ]]; then
+  if [ "$VERBOSE" = true ]; then
+    echo "MLX is available (Apple Silicon macOS detected)"
+    if [ -n "$CPU_BRAND" ]; then
+      echo "Processor: $CPU_BRAND"
+    fi
+  fi
+  exit 0
+else
+  if [ "$VERBOSE" = true ]; then
+    echo "MLX not available (requires Apple Silicon, found $ARCH / $CPU_BRAND)"
+  fi
+  exit 1
+fi
