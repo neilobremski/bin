@@ -6,6 +6,33 @@ on:
     branches: [main]
 
 jobs:
+  pii-check:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check for PII in diff
+        run: |
+          patterns=$(grep -v '^#' .github/pii-patterns.txt | grep -v '^$')
+          git diff origin/main...HEAD -- . ':!.github/pii-patterns.txt' > /tmp/pr-diff.txt
+          failed=0
+          while IFS= read -r pattern; do
+            hits=$(grep -inP "$pattern" /tmp/pr-diff.txt | grep '^+' | head -5)
+            if [ -n "$hits" ]; then
+              echo "::error::PII pattern '$pattern' found in diff:"
+              echo "$hits"
+              failed=1
+            fi
+          done <<< "$patterns"
+          if [ "$failed" -eq 1 ]; then
+            echo ""
+            echo "Remove PII before merging. Patterns defined in .github/pii-patterns.txt"
+            exit 1
+          fi
+          echo "No PII patterns found in diff."
+
   a8s:
     runs-on: ubuntu-latest
     steps:

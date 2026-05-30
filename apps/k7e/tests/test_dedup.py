@@ -59,32 +59,32 @@ class TestTitleDedup:
     def test_paraphrased_titles_detected(self, store):
         import distill
         engine.store_entry(
-            "Send email via knobert-google",
-            "Use tell knobert-google /email to send an email message",
+            "Send email via my-email-agent",
+            "Use tell my-email-agent /email to send an email message",
             tags=["email"],
         )
         candidates = [
-            {"title": "Sending emails via knobert-google", "content": "Send emails using the knobert-google command", "tags": ["email"]},
+            {"title": "Sending emails via my-email-agent", "content": "Send emails using the my-email-agent command", "tags": ["email"]},
         ]
         new = distill.diff_against_store(candidates)
         assert len(new) == 0, f"Paraphrased title should be deduped, got: {new}"
 
     def test_gerund_normalization(self):
         import distill
-        assert distill._normalize_title("Sending emails via knobert") == distill._normalize_title("Send email via knobert")
+        assert distill._normalize_title("Sending emails via my-agent") == distill._normalize_title("Send email via my-agent")
 
     def test_title_similarity_high_for_paraphrases(self):
         import distill
         sim = distill._title_similarity(
-            "Capture photo via knobert-android",
-            "Capturing photos with knobert-android",
+            "Capture photo via my-device",
+            "Capturing photos with my-device",
         )
         assert sim >= 0.6, f"Expected >= 0.6, got {sim}"
 
     def test_title_similarity_low_for_different_topics(self):
         import distill
         sim = distill._title_similarity(
-            "Send email via knobert-google",
+            "Send email via my-email-agent",
             "Redis default port configuration",
         )
         assert sim < 0.3, f"Expected < 0.3, got {sim}"
@@ -114,9 +114,9 @@ class TestConsolidate:
 
     def test_merges_similar_titles(self, store):
         import distill
-        engine.store_entry("Send email via knobert-google", "Use tell to send", tags=["email"])
-        engine.store_entry("Sending emails via knobert-google", "Send emails with tell", tags=["email"])
-        engine.store_entry("Sending an email via knobert-google", "Email sending procedure", tags=["email"])
+        engine.store_entry("Send email via my-email-agent", "Use tell to send", tags=["email"])
+        engine.store_entry("Sending emails via my-email-agent", "Send emails with tell", tags=["email"])
+        engine.store_entry("Sending an email via my-email-agent", "Email sending procedure", tags=["email"])
         results = distill.consolidate()
         assert len(results) >= 1
         total_superseded = sum(r["count"] for r in results)
