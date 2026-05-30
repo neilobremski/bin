@@ -20,3 +20,6 @@ __pycache__/
 **/.outbox/
 **/.trash/
 **/.claude/settings.local.json
+
+# Antigravity CLI
+.antigravitycli/
