@@ -35,6 +35,12 @@ REJECT_PATTERNS = [
     r"^.{0,10}$",  # anything under 10 chars
 ]
 
+GENERIC_CAPABILITY_PATTERNS = [
+    r"^the (agent|system|bot) (is equipped with|has|can use|can|has access to)",
+    r"^(this system|the system|we) (have|has|can|support)",
+    r"(is equipped with|equipped with .* capabilities|available tools|available commands)",
+]
+
 
 def _should_reject(text):
     """Reject trivial content that isn't worth storing."""
@@ -43,6 +49,10 @@ def _should_reject(text):
         return True
     for pattern in REJECT_PATTERNS:
         if re.match(pattern, text, re.IGNORECASE):
+            return True
+    # Reject generic capability descriptions
+    for pattern in GENERIC_CAPABILITY_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
             return True
     return False
 
@@ -224,23 +234,65 @@ def _parse_multimodal_response(text, path):
     return None
 
 
+_TITLE_STOPWORDS = {"the", "a", "an", "via", "with", "using", "from", "to", "for", "and", "or", "of", "in", "on", "by"}
+
+
+def _normalize_title(title):
+    """Normalize title for comparison: lowercase, stem, strip stopwords, sort."""
+    t = title.lower().strip()
+    t = re.sub(r"[^a-z0-9\s]", "", t)
+    t = re.sub(r"^(how to)\s+", "", t)
+    words = t.split()
+    normalized = []
+    for w in words:
+        if w in _TITLE_STOPWORDS:
+            continue
+        # Strip trailing 's' for plurals (simple)
+        if w.endswith("s") and len(w) > 3 and not w.endswith("ss"):
+            w = w[:-1]
+        # Normalize gerunds: "sending" → "send", "capturing" → "capture"
+        if w.endswith("ing") and len(w) > 5:
+            stem = w[:-3]
+            if stem.endswith("t") or stem.endswith("n") or stem.endswith("d"):
+                w = stem
+            elif stem.endswith("e"):
+                w = stem
+            elif stem + "e" != w:  # avoid "e" → "ee"
+                w = stem + "e"
+        normalized.append(w)
+    return " ".join(sorted(normalized))
+
+
+def _title_similarity(a, b):
+    """Jaccard similarity on normalized title words."""
+    words_a = set(_normalize_title(a).split())
+    words_b = set(_normalize_title(b).split())
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
 def diff_against_store(candidates):
     new = []
     for candidate in candidates:
-        # Two-stage dedup: broad search, then content overlap check
-        # Stage 1: search by content keywords (not title — titles often differ)
+        # Stage 0: title-based dedup — catches paraphrases with same topic
+        title_results = engine.search(candidate["title"], limit=8)
+        if _is_title_duplicate(candidate, title_results):
+            continue
+
+        # Stage 1: search by content keywords
         content_terms = " ".join(
             w for w in candidate["content"].split()[:20]
             if len(w) > 3
         )
         search_query = content_terms or candidate["title"]
-        results = engine.search(search_query, limit=5)
+        results = engine.search(search_query, limit=8)
 
         if not results:
             new.append(candidate)
             continue
 
-        # Stage 2: check content overlap against top results
+        # Stage 2: content overlap with normalized terms
         candidate_terms = set(
             w.lower() for w in re.findall(r"\b\w{4,}\b", candidate["content"])
         )
@@ -250,6 +302,7 @@ def diff_against_store(candidates):
 
         best_overlap = 0.0
         best_match_id = None
+        best_match_terms = None
         for result in results:
             try:
                 existing_text = engine.get(result["id"])
@@ -260,28 +313,106 @@ def diff_against_store(candidates):
             )
             if not existing_terms:
                 continue
-            overlap = len(candidate_terms & existing_terms) / len(candidate_terms)
+            # Bidirectional overlap: max of either direction
+            forward = len(candidate_terms & existing_terms) / len(candidate_terms)
+            backward = len(candidate_terms & existing_terms) / len(existing_terms)
+            overlap = max(forward, backward)
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_match_id = result["id"]
+                best_match_terms = existing_terms
 
-        if best_overlap >= 0.85:
-            # Almost identical — supersede the old entry
-            candidate["_supersedes"] = best_match_id
-            new.append(candidate)
-        elif best_overlap >= 0.6:
-            # Existing node covers 60%+ of candidate's content
-            novel_terms = [t for t in candidate_terms if t not in engine.get(best_match_id).lower()]
-            if len(novel_terms) > len(candidate_terms) * 0.3:
-                # >30% novel — append the new bits
+        if best_overlap >= 0.7:
+            continue
+        elif best_overlap >= 0.45:
+            novel_terms = candidate_terms - best_match_terms
+            if len(novel_terms) > len(candidate_terms) * 0.4:
                 candidate["_append_to"] = best_match_id
                 new.append(candidate)
-            # else: fully covered, skip
         else:
-            # No sufficient overlap — genuinely new
             new.append(candidate)
 
     return new
+
+
+def _is_title_duplicate(candidate, search_results):
+    """Check if candidate's title matches an existing node closely enough to skip."""
+    if not search_results:
+        return False
+    for result in search_results:
+        sim = _title_similarity(candidate["title"], result["title"])
+        if sim >= 0.6:
+            return True
+    return False
+
+
+def consolidate(dry_run=False):
+    """Find and merge duplicate nodes. Returns list of actions taken."""
+    engine.init()
+    nodes = engine.list_nodes(status="active")
+    if not nodes:
+        return []
+
+    # Group by normalized title
+    groups = {}
+    for node in nodes:
+        key = _normalize_title(node["title"])
+        groups.setdefault(key, []).append(node)
+
+    # Also merge groups with high title similarity
+    keys = list(groups.keys())
+    merged_keys = {}  # maps key → canonical key
+    for i, k1 in enumerate(keys):
+        if k1 in merged_keys:
+            continue
+        for k2 in keys[i + 1:]:
+            if k2 in merged_keys:
+                continue
+            sim = _title_similarity_raw(k1, k2)
+            if sim >= 0.6:
+                merged_keys[k2] = k1
+
+    for old_key, canonical in merged_keys.items():
+        groups.setdefault(canonical, []).extend(groups.pop(old_key, []))
+
+    results = []
+    for key, group in groups.items():
+        if len(group) < 2:
+            continue
+
+        # Pick the best node: highest confidence, then most recently updated
+        group.sort(key=lambda n: (n.get("confidence", 0), n["id"]), reverse=True)
+        keeper = group[0]
+        duplicates = group[1:]
+
+        if dry_run:
+            results.append({
+                "action": "would_consolidate",
+                "keeper": keeper["id"],
+                "title": keeper["title"],
+                "duplicates": [d["id"] for d in duplicates],
+            })
+        else:
+            for dup in duplicates:
+                engine.supersede(dup["id"], keeper["id"])
+            results.append({
+                "action": "consolidated",
+                "keeper": keeper["id"],
+                "title": keeper["title"],
+                "superseded": [d["id"] for d in duplicates],
+                "count": len(duplicates),
+            })
+
+    return results
+
+
+def _title_similarity_raw(norm_a, norm_b):
+    """Jaccard similarity on pre-normalized title strings."""
+    words_a = set(norm_a.split())
+    words_b = set(norm_b.split())
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
 
 
 def _chunk_text(text, size=3000, overlap=200):
@@ -354,14 +485,22 @@ def _llm_extract(text):
 
     for chunk in chunks:
         prompt = (
-            "Extract actionable knowledge from this text. Return JSON array of objects "
-            "with 'title' (short descriptive), 'content' (the factual/procedural knowledge), "
-            "and 'tags' (list of topic keywords). Only extract verified facts, procedures, "
-            "corrections, or preferences — not opinions, greetings, or planning. "
-            "If nothing extractable, return []. Text:\n\n" + chunk
+            "Extract ONLY genuinely novel knowledge from this text. Be extremely selective.\n\n"
+            "RULES:\n"
+            "- Extract: specific facts, corrections, procedures with concrete details\n"
+            "- Extract: user preferences, decisions, constraints that affect future behavior\n"
+            "- SKIP: generic capability descriptions ('the system can...', 'the agent has...')\n"
+            "- SKIP: command syntax that's already in documentation\n"
+            "- SKIP: conversational noise, acknowledgments, planning without decisions\n"
+            "- SKIP: anything that restates what a tool/system does in general terms\n"
+            "- Maximum 3 items per chunk. If unsure, extract fewer.\n\n"
+            "Return JSON array of objects with 'title' (specific, noun-phrase, max 6 words), "
+            "'content' (the concrete factual detail — not a general description), "
+            "and 'tags' (1-3 topic keywords). "
+            "If nothing novel, return []. Text:\n\n" + chunk
         )
 
-        candidates = _run_llm_prompt(prompt, config)
+        candidates = _run_llm_prompt(prompt)
         if candidates:
             all_candidates.extend(candidates)
 
@@ -369,39 +508,11 @@ def _llm_extract(text):
     return _dedup_candidates(all_candidates)
 
 
-def _run_llm_prompt(prompt, config):
+def _run_llm_prompt(prompt):
     """Run a single LLM prompt and return parsed candidates."""
-    cmd = config.resolve_llm_command(prompt)
-    if cmd:
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=180,
-                cwd=str(config._k7e_home()),
-            )
-            if result.returncode == 0:
-                return _parse_llm_response(result.stdout)
-            print(f"  [llm] non-zero exit ({result.returncode})", file=sys.stderr)
-        except subprocess.TimeoutExpired:
-            print("  [llm] timed out (180s)", file=sys.stderr)
-        except OSError as e:
-            print(f"  [llm] launch failed: {e}", file=sys.stderr)
-        return []
-
-    # Fallback: ollama HTTP API
-    ollama_url = config.get("ollama_url", "http://localhost:11434")
-    model = config.get("llm_model", "qwen3.5:latest")
-    try:
-        data = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
-        req = urllib.request.Request(
-            f"{ollama_url}/api/generate",
-            data=data, headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            response = json.loads(resp.read())
-            return _parse_llm_response(response.get("response", ""))
-    except Exception as e:
-        print(f"  [llm] ollama failed: {e}", file=sys.stderr)
-
+    response = engine._call_llm(prompt, timeout=180)
+    if response:
+        return _parse_llm_response(response)
     return []
 
 

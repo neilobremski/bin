@@ -1,0 +1,13 @@
+# PII patterns to block from public commits.
+# One regex per line. Lines starting with # are comments.
+# Checked against the diff of each PR (not the full repo).
+
+# Private agent/project names
+knobert
+
+# Server infrastructure
+hetzner
+178\.105\.88\.118
+
+# Credentials patterns
+rustdesk.*env

@@ -433,6 +433,140 @@ def stats():
     }
 
 
+# --- LLM ---
+
+def _call_llm(prompt, timeout=120):
+    """Call configured LLM with prompt. Returns response text or None."""
+    import config
+    import subprocess
+
+    cmd = config.resolve_llm_command(prompt)
+    if cmd:
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout,
+                cwd=str(config._k7e_home()),
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+            if result.returncode != 0:
+                print(f"  [llm] non-zero exit ({result.returncode})", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            print(f"  [llm] timed out ({timeout}s)", file=sys.stderr)
+        except OSError as e:
+            print(f"  [llm] launch failed: {e}", file=sys.stderr)
+        return None
+
+    # Fallback: ollama HTTP API
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+    model = config.get("llm_model", "qwen3.5:latest")
+    try:
+        data = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
+        req = urllib.request.Request(
+            f"{ollama_url}/api/generate",
+            data=data, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            response = json.loads(resp.read())
+            text = response.get("response", "").strip()
+            return text if text else None
+    except Exception as e:
+        print(f"  [llm] ollama failed: {e}", file=sys.stderr)
+        return None
+
+
+# --- Recall (RAG) ---
+
+def recall(text, limit=8):
+    """RAG recall: given arbitrary text, find relevant knowledge and synthesize.
+
+    Returns (answer_text, source_entries) where answer_text may be None if
+    no LLM is available (sources still returned for fallback display).
+    """
+    init()
+    text = text.strip()
+    if not text:
+        return None, []
+
+    # Decompose into search queries
+    if len(text) <= 100:
+        queries = [text]
+    else:
+        queries = _decompose_queries(text)
+        if not queries:
+            queries = [text[:100]]
+
+    # Search across all queries, merge by node ID (keep max score)
+    hit_counts = {}
+    hit_info = {}
+    for q in queries:
+        results = search(q, limit=limit)
+        for r in results:
+            hit_counts[r["id"]] = hit_counts.get(r["id"], 0) + 1
+            if r["id"] not in hit_info or r.get("score", 0) > hit_info[r["id"]].get("score", 0):
+                hit_info[r["id"]] = r
+
+    if not hit_counts:
+        return None, []
+
+    # Rank by frequency across queries, then by score
+    ranked_ids = sorted(
+        hit_counts.keys(),
+        key=lambda nid: (hit_counts[nid], hit_info[nid].get("score", 0)),
+        reverse=True,
+    )[:limit]
+
+    # Retrieve full content
+    entries = []
+    for nid in ranked_ids:
+        try:
+            node_text = get(nid)
+            body = _extract_body(node_text)
+            entries.append({"id": nid, "title": hit_info[nid]["title"], "content": body.strip()})
+        except FileNotFoundError:
+            continue
+
+    if not entries:
+        return None, []
+
+    # Synthesize
+    context_text = "\n\n---\n\n".join(
+        f"[{e['id']}] {e['title']}\n{e['content']}" for e in entries
+    )
+    prompt = (
+        "Summarize everything relevant from the knowledge entries below "
+        "about the given context. Be concise and factual. Cite entry IDs "
+        "in brackets when referencing specific facts. If the entries contain "
+        "nothing relevant, say so briefly.\n\n"
+        f"Context: {text[:2000]}\n\n"
+        f"Knowledge entries:\n{context_text}"
+    )
+
+    answer = _call_llm(prompt)
+    return answer, entries
+
+
+def _decompose_queries(text):
+    """Use LLM to extract search queries from long text. Falls back to splitting."""
+    prompt = (
+        "Extract 3-5 short search queries (2-4 words each) that capture the "
+        "key topics in this text. Return one query per line, nothing else.\n\n"
+        f"Text: {text[:2000]}"
+    )
+    response = _call_llm(prompt, timeout=30)
+    if response:
+        lines = [l.strip().strip("-•*").strip() for l in response.splitlines() if l.strip()]
+        queries = [l for l in lines if 2 <= len(l.split()) <= 8 and len(l) < 80]
+        if queries:
+            return queries[:5]
+
+    # Fallback: split into meaningful chunks by sentence boundaries
+    words = [w for w in text.split() if len(w) > 3]
+    if len(words) > 6:
+        return [" ".join(words[:5]), " ".join(words[-5:])]
+    return [" ".join(words)] if words else []
+
+
 # --- Compile (knowledge compounding) ---
 
 def compile_tag(tag, dry_run=False):
@@ -442,9 +576,6 @@ def compile_tag(tag, dry_run=False):
     produce a compiled overview. Source nodes are NOT modified or deleted.
     Returns the new compiled node ID, or None if dry_run.
     """
-    import config
-    import subprocess
-
     init()
     nodes = list_nodes(tag=tag, status="active")
     if len(nodes) < 3:
@@ -482,41 +613,7 @@ def compile_tag(tag, dry_run=False):
             print(f"  {e['id']}  {e['title']}")
         return None
 
-    # Call LLM
-    cmd = config.resolve_llm_command(prompt)
-    compiled_content = None
-
-    if cmd:
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120,
-                cwd=str(config._k7e_home()),
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                compiled_content = result.stdout.strip()
-            elif result.returncode != 0:
-                print(f"  [llm] non-zero exit ({result.returncode})", file=sys.stderr)
-        except subprocess.TimeoutExpired:
-            print("  [llm] timed out (120s)", file=sys.stderr)
-        except OSError as e:
-            print(f"  [llm] launch failed: {e}", file=sys.stderr)
-
-    # Fallback: ollama HTTP API
-    if not compiled_content:
-        ollama_url = config.get("ollama_url", "http://localhost:11434")
-        model = config.get("llm_model", "qwen3.5:latest")
-        try:
-            data = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
-            req = urllib.request.Request(
-                f"{ollama_url}/api/generate",
-                data=data, headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                response = json.loads(resp.read())
-                compiled_content = response.get("response", "").strip()
-        except Exception:
-            pass
-
+    compiled_content = _call_llm(prompt)
     if not compiled_content:
         print("Error: No LLM available to compile entries. Configure with: k7e config llm <provider>", file=sys.stderr)
         return None

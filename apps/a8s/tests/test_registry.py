@@ -53,7 +53,7 @@ class TestCanonicalName:
             canonical_name("   ")
 
     def test_hyphen_accepted(self):
-        assert canonical_name("knobert-android") == "knobert-android"
+        assert canonical_name("my-device") == "my-device"
 
     def test_underscore_accepted(self):
         assert canonical_name("foo_bar") == "foo_bar"

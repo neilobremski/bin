@@ -118,10 +118,10 @@ a8s discover apps/a8s/tests/agents
 a8s logs CLAUDE GEMINI -f
 
 # Clear local inbox without invoking
-a8s drain knobert
+a8s drain my-agent
 
 # Flush MQTT-queued messages (connect, trash for N seconds, exit)
-a8s run knobert --drain 5
+a8s run my-agent --drain 5
 ```
 
 ## Memory note

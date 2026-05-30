@@ -11,6 +11,7 @@ from engine import (
     init,
     get,
     list_nodes,
+    recall,
     store_entry,
     rebuild_mocs,
     reindex,
@@ -21,7 +22,7 @@ from engine import (
     compile_tag,
     process_pending_embeddings,
 )
-from distill import distill
+from distill import distill, consolidate
 from hygiene import run_audit
 
 
@@ -32,7 +33,9 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("append",        "<id> --section <name>",           "Append to an existing entry's section."),
     ("asset",       "<file>",                          "Store binary (content-addressed, deduped). Prints path."),
     ("compile",     "<tag> [--dry-run]",               "Synthesize entries for a tag into a reference page."),
+    ("recall",      "<text> [--limit N]",            "Recall relevant knowledge for a topic or conversation (RAG)."),
     ("distill", "<file|dir> [--dry-run]",          "Extract knowledge from raw experience files."),
+    ("consolidate", "[--dry-run]",                 "Find and merge duplicate nodes."),
     ("reindex",     "[--embeddings]",                  "Rebuild search index from files."),
     ("embed-pending", "",                              "Process queued embeddings."),
     ("rebuild-mocs", "",                               "Rebuild all Maps of Content from entry tags."),
@@ -81,9 +84,18 @@ def main(argv=None):
     p = sub.add_parser("asset", help="Store binary file")
     p.add_argument("file", help="Path to file")
 
+    # recall
+    p = sub.add_parser("recall", help="Recall relevant knowledge (RAG)")
+    p.add_argument("text", nargs="?", default=None, help="Topic, question, or conversation (reads stdin if omitted)")
+    p.add_argument("--limit", type=int, default=8)
+
     # distill
     p = sub.add_parser("distill", help="Extract knowledge from files")
     p.add_argument("paths", nargs="+", help="Files or directories")
+    p.add_argument("--dry-run", action="store_true")
+
+    # consolidate
+    p = sub.add_parser("consolidate", help="Find and merge duplicate nodes")
     p.add_argument("--dry-run", action="store_true")
 
     # compile
@@ -172,6 +184,26 @@ def main(argv=None):
             print(str(e), file=sys.stderr)
             return 1
 
+    elif args.command == "recall":
+        text = args.text
+        if text is None:
+            if sys.stdin.isatty():
+                print("Usage: k7e recall <text>  or  echo '...' | k7e recall", file=sys.stderr)
+                return 1
+            text = sys.stdin.read()
+        answer, sources = recall(text, limit=args.limit)
+        if answer:
+            print(answer)
+            if sources:
+                ids = ", ".join(e["id"] for e in sources)
+                print(f"\n---\nSources: {ids}")
+        elif sources:
+            print("No LLM available — raw search results:", file=sys.stderr)
+            for e in sources:
+                print(f"  {e['id']}  {e['title']}")
+        else:
+            print("No relevant knowledge found.")
+
     elif args.command == "distill":
         results = distill(args.paths, dry_run=args.dry_run)
         for r in results:
@@ -181,6 +213,20 @@ def main(argv=None):
             print(f"  [{action}] {entry_id} {title}")
         if not results:
             print("No new knowledge extracted.")
+
+    elif args.command == "consolidate":
+        results = consolidate(dry_run=args.dry_run)
+        total_superseded = 0
+        for r in results:
+            if r["action"] == "would_consolidate":
+                print(f"  [keep] {r['keeper']}  {r['title']}  (merge {len(r['duplicates'])} dupes)")
+            else:
+                print(f"  [done] {r['keeper']}  {r['title']}  (superseded {r['count']})")
+                total_superseded += r["count"]
+        if not results:
+            print("No duplicates found.")
+        elif not args.dry_run:
+            print(f"\nConsolidated: {total_superseded} nodes superseded across {len(results)} groups.")
 
     elif args.command == "compile":
         node_id = compile_tag(args.tag, dry_run=args.dry_run)

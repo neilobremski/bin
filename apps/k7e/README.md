@@ -44,6 +44,14 @@ k7e distill /tmp/notes.md
 # Search for the distilled knowledge
 k7e search "ProxyJump bastion"
 
+# Recall: ask a question or pass conversation context (requires LLM)
+k7e recall "SSH bastion access"
+echo "We were discussing port forwarding tunnels" | k7e recall
+
+# Consolidate duplicate nodes (dedup by title similarity)
+k7e consolidate --dry-run
+k7e consolidate
+
 # Compile a topic into a reference page (requires LLM)
 k7e compile networking
 
@@ -59,7 +67,9 @@ k7e search "query" [--limit N] [--json] [--ids]
 k7e get K7E-000-00001
 k7e append K7E-000-00001 --section "name" [--content "..." | stdin]
 k7e asset screenshot.png
+k7e recall "topic or conversation" [--limit N]
 k7e distill file.md [--dry-run]
+k7e consolidate [--dry-run]
 k7e compile <tag> [--dry-run]
 k7e reindex [--embeddings]
 k7e embed-pending
@@ -125,6 +135,8 @@ Config stored in `$K7E_HOME/config.json`. Env vars override: `K7E_LLM`, `EMBED_M
 | Keyword search (BM25) | SQLite FTS5 | Always available |
 | Semantic search | ollama embeddings | Optional — `ollama pull nomic-embed-text` |
 | Distillation (LLM) | gemini/claude/codex/ollama | Optional — pattern extraction without |
+| Recall (RAG synthesis) | any LLM | Optional — falls back to raw search results |
+| Consolidation (dedup) | title similarity | Always available |
 
 `k7e status` tells you exactly what's active and what to install for full capability.
 
