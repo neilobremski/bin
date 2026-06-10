@@ -40,20 +40,27 @@ from core import (
     kill_request_path,
     out_agent,
     pid_path,
+    clear_inbox_waiting_since,
+    read_inbox_waiting_since,
     read_last_active,
+    touch_inbox_waiting_since,
     touch_last_active,
     trash_dir,
     unique_path,
 )
 from definitions import (
+    batch_limit,
+    build_batch_command,
     build_command,
     build_idle_command,
     files_ttl_seconds,
+    has_batch_invoke,
     idle_timeout_seconds,
     is_file_proxy,
     load_definition,
+    pause_seconds,
 )
-from mailbox import ensure_mailboxes, next_inbox_message, route_outboxes
+from mailbox import ensure_mailboxes, next_inbox_message, peek_inbox_messages, route_outboxes
 from network import (
     load_remotes,
     load_services,
@@ -134,6 +141,26 @@ def _deliver_file_proxy(p: Participant) -> None:
             txlog.log("PROXY_DELIVERED", msg_id=f.stem, recipient=p.name)
 
 
+def _pause_ready_for_wake(
+    name: str, pause: float, *, now: datetime | None = None
+) -> bool:
+    """Return True when `pause` has elapsed since the first inbox message of
+    the current burst. Zero/negative pause means immediate readiness."""
+    if pause <= 0:
+        return True
+    if now is None:
+        now = datetime.now(timezone.utc)
+    since = read_inbox_waiting_since(name)
+    if since is None:
+        touch_inbox_waiting_since(name, now)
+        out_agent(name, f"[{name}] pause {pause:g}s before wake")
+        return False
+    if (now - since).total_seconds() < pause:
+        return False
+    clear_inbox_waiting_since(name)
+    return True
+
+
 def wake_once(p: Participant, msg_path: Path) -> None:
     # Mark activity before any work — covers the parse-error / load-error
     # exits below too. Without this, a bad inbox file in the only handled
@@ -169,6 +196,39 @@ def wake_once(p: Participant, msg_path: Path) -> None:
     run_with_prefix(p.name, cmd, p.root)
     # And again after the wake returns — a long-running LLM call shouldn't
     # leave last-active stuck at the pre-wake timestamp.
+    touch_last_active(p.name)
+
+
+def wake_batch(p: Participant, msg_paths: list[Path], definition: dict) -> None:
+    touch_last_active(p.name)
+    if is_file_proxy(definition):
+        _deliver_file_proxy(p)
+        touch_last_active(p.name)
+        return
+
+    trashed: list[Path] = []
+    previews: list[str] = []
+    for msg_path in msg_paths:
+        try:
+            with msg_path.open("r", encoding="utf-8") as f:
+                msg = json.load(f)
+            previews.append(_preview(msg.get("content", "")))
+        except (OSError, json.JSONDecodeError):
+            previews.append(msg_path.name)
+        dest = unique_path(trash_dir(p.name) / msg_path.name)
+        msg_path.rename(dest)
+        trashed.append(dest)
+
+    summary = "; ".join(previews[:3])
+    if len(previews) > 3:
+        summary += f"; +{len(previews) - 3} more"
+    out_agent(
+        p.name,
+        f"[{p.name}] batch waking ({len(trashed)}): {summary}",
+    )
+    cmd = build_batch_command(definition, p.name, trashed)
+    out_agent(p.name, f"[{p.name}] batch exec: {shlex.join(cmd)}")
+    run_with_prefix(p.name, cmd, p.root)
     touch_last_active(p.name)
 
 
@@ -643,14 +703,46 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                         services=services,
                     )
                 for p in handled:
+                    definition = None
+                    if drain_seconds == 0:
+                        try:
+                            definition = load_definition(p.name)
+                        except (FileNotFoundError, RuntimeError) as e:
+                            out_agent(p.name, f"[{p.name}] {e}")
                     while not _STOP_EVENT.is_set():
+                        if drain_seconds > 0:
+                            msg = next_inbox_message(p)
+                            if msg is None:
+                                clear_inbox_waiting_since(p.name)
+                                break
+                            _drain_one(p, msg)
+                            continue
+                        if not peek_inbox_messages(p, 1):
+                            clear_inbox_waiting_since(p.name)
+                            break
+                        if (
+                            definition is not None
+                            and not is_file_proxy(definition)
+                            and not _pause_ready_for_wake(
+                                p.name, pause_seconds(definition)
+                            )
+                        ):
+                            break
+                        if (
+                            definition is not None
+                            and has_batch_invoke(definition)
+                            and not is_file_proxy(definition)
+                        ):
+                            limit = batch_limit(definition)
+                            batch_paths = peek_inbox_messages(p, limit)
+                            if len(batch_paths) >= 2:
+                                wake_batch(p, batch_paths, definition)
+                                continue
                         msg = next_inbox_message(p)
                         if msg is None:
+                            clear_inbox_waiting_since(p.name)
                             break
-                        if drain_seconds > 0:
-                            _drain_one(p, msg)
-                        else:
-                            wake_once(p, msg)
+                        wake_once(p, msg)
                 # Idle invoke: per-agent, only after the inbox has drained.
                 # Skipped while a wake is in flight automatically — the
                 # drain loop above is the only thing that calls

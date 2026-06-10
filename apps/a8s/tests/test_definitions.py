@@ -260,6 +260,69 @@ class TestLoadDefinition:
             load_definition("X")
 
 
+# ---------- batch invoke ----------
+
+class TestPauseSeconds:
+    def test_zero_when_missing(self):
+        from definitions import pause_seconds
+        assert pause_seconds({"invoke": ["x"]}) == 0.0
+
+    def test_returns_positive_float(self):
+        from definitions import pause_seconds
+        assert pause_seconds({"invoke": ["x"], "pause": 3}) == 3.0
+        assert pause_seconds({"invoke": ["x"], "pause": "2.5"}) == 2.5
+
+    def test_zero_or_negative_or_garbage_disables(self):
+        from definitions import pause_seconds
+        assert pause_seconds({"invoke": ["x"], "pause": 0}) == 0.0
+        assert pause_seconds({"invoke": ["x"], "pause": -1}) == 0.0
+        assert pause_seconds({"invoke": ["x"], "pause": "soon"}) == 0.0
+
+
+class TestBatchInvoke:
+    def test_has_batch_invoke_false_when_missing(self):
+        from definitions import has_batch_invoke
+        assert has_batch_invoke({"invoke": ["x"]}) is False
+
+    def test_has_batch_invoke_true_when_set(self):
+        from definitions import has_batch_invoke
+        defn = {"invoke": ["x"], "batch": {"invoke": ["y"]}}
+        assert has_batch_invoke(defn) is True
+
+    def test_batch_limit_defaults_to_five(self):
+        from definitions import batch_limit
+        assert batch_limit({"invoke": ["x"]}) == 5
+        assert batch_limit({"invoke": ["x"], "batch": {"invoke": ["y"]}}) == 5
+
+    def test_batch_limit_respects_custom_value(self):
+        from definitions import batch_limit
+        defn = {"invoke": ["x"], "batch": {"invoke": ["y"], "limit": 3}}
+        assert batch_limit(defn) == 3
+
+    def test_batch_limit_tolerates_bad_input(self):
+        from definitions import batch_limit
+        defn = {"invoke": ["x"], "batch": {"invoke": ["y"], "limit": "nope"}}
+        assert batch_limit(defn) == 5
+
+    def test_build_batch_command_appends_paths(self, tmp_path):
+        from definitions import build_batch_command
+        p1 = tmp_path / "a.json"
+        p2 = tmp_path / "b.json"
+        p1.write_text("{}")
+        p2.write_text("{}")
+        defn = {"invoke": ["x"], "batch": {"invoke": ["agent", "--batch", "$RECIPIENT"]}}
+        argv = build_batch_command(defn, "neil", [p1, p2])
+        assert argv == ["agent", "--batch", "neil", str(p1.resolve()), str(p2.resolve())]
+
+    def test_build_batch_command_empty_message_fields(self):
+        from definitions import build_batch_command
+        defn = {"invoke": ["x"], "batch": {"invoke": [
+            "echo", "S=$SENDER", "M=$MESSAGE", "T=$TIMESTAMP", "A=$AGE",
+        ]}}
+        argv = build_batch_command(defn, "neil", [])
+        assert argv == ["echo", "S=", "M=", "T=", "A="]
+
+
 # ---------- build_idle_command + idle_timeout_seconds ----------
 
 class TestBuildIdleCommand:

@@ -7,8 +7,9 @@ Read `README.md` first for concept and usage.
 
 - **`cmd_start` re-execs via `core.ENTRYPOINT`**, not `__file__`.
 - **Argv interpolation** (`$SENDER`, `$RECIPIENT`, `$MESSAGE`, `$TIMESTAMP`,
-  `$AGE`, `$A8S_DIR`) expands via `definitions._expand_argv`. One wake verb
-  — `invoke` — and `build_command(definition, msg)` always reads it.
+  `$AGE`, `$A8S_DIR`) expands via `definitions._expand_argv`. Per-message
+  wakes use `invoke` via `build_command`; batch wakes use `batch.invoke` via
+  `build_batch_command` with message file paths appended as trailing argv.
 - **`core.PRINT_LOCK` is the cross-module log lock.** Only set when
   `daemon.attached_loop` starts.
 - **`run_with_prefix` uses `start_new_session=True`** — don't drop this.
