@@ -262,6 +262,23 @@ class TestLoadDefinition:
 
 # ---------- batch invoke ----------
 
+class TestPauseSeconds:
+    def test_zero_when_missing(self):
+        from definitions import pause_seconds
+        assert pause_seconds({"invoke": ["x"]}) == 0.0
+
+    def test_returns_positive_float(self):
+        from definitions import pause_seconds
+        assert pause_seconds({"invoke": ["x"], "pause": 3}) == 3.0
+        assert pause_seconds({"invoke": ["x"], "pause": "2.5"}) == 2.5
+
+    def test_zero_or_negative_or_garbage_disables(self):
+        from definitions import pause_seconds
+        assert pause_seconds({"invoke": ["x"], "pause": 0}) == 0.0
+        assert pause_seconds({"invoke": ["x"], "pause": -1}) == 0.0
+        assert pause_seconds({"invoke": ["x"], "pause": "soon"}) == 0.0
+
+
 class TestBatchInvoke:
     def test_has_batch_invoke_false_when_missing(self):
         from definitions import has_batch_invoke

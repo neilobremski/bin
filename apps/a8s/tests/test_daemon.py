@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -19,13 +20,16 @@ import pytest
 from core import (
     Participant,
     agent_log_path,
+    clear_inbox_waiting_since,
     detach_request_path,
     inbox_dir,
     kill_request_path,
     pid_path,
+    touch_inbox_waiting_since,
     trash_dir,
 )
 from daemon import (
+    _pause_ready_for_wake,
     _clear_detach_request,
     _clear_kill_request,
     _read_detach_request,
@@ -729,3 +733,63 @@ class TestBatchWake:
         assert first_batch.count(".json") == 5
         second_batch = log.split("batch exec:")[2].split("\n")[0]
         assert second_batch.count(".json") == 2
+
+
+class TestPauseBeforeWake:
+    T0 = datetime(2026, 4, 28, 14, 30, 0, tzinfo=timezone.utc)
+
+    def test_pause_ready_immediate_when_zero(self, fake_home):
+        assert _pause_ready_for_wake("X", 0, now=self.T0) is True
+
+    def test_pause_ready_starts_timer_then_waits(self, fake_home):
+        clear_inbox_waiting_since("X")
+        assert _pause_ready_for_wake("X", 5, now=self.T0) is False
+        assert _pause_ready_for_wake("X", 5, now=self.T0 + timedelta(seconds=3)) is False
+        assert _pause_ready_for_wake("X", 5, now=self.T0 + timedelta(seconds=5)) is True
+
+    def _batch_pause_def(self, tmp_path, fixtures_dir, pause: float) -> Path:
+        defn = {
+            "pause": pause,
+            "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "SINGLE"],
+            "batch": {
+                "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "BATCH|TO:$RECIPIENT"],
+                "limit": 5,
+            },
+        }
+        defp = tmp_path / "pause-batch.json"
+        defp.write_text(json.dumps(defn))
+        return defp
+
+    def test_pause_defers_wake_until_elapsed(self, fake_home, tmp_path, fixtures_dir):
+        d = tmp_path / "b"
+        d.mkdir()
+        defp = self._batch_pause_def(tmp_path, fixtures_dir, pause=60)
+        save_registry({"B": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("B", d))
+        clear_inbox_waiting_since("B")
+        (inbox_dir("B") / "m0.json").write_text(json.dumps({
+            "id": "m0", "date": "2026-04-28T14:30:00Z",
+            "from": "A", "to": "B", "content": "one", "files": [],
+        }))
+
+        attached_loop(["B"], 0.1, single_pass=True)
+        log = _read_log("B")
+        assert "exec:" not in log
+        assert "batch exec:" not in log
+        assert "pause 60s before wake" in log
+
+    def test_pause_after_elapsed_batches_all(self, fake_home, tmp_path, fixtures_dir):
+        d = tmp_path / "b"
+        d.mkdir()
+        defp = self._batch_pause_def(tmp_path, fixtures_dir, pause=2)
+        save_registry({"B": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("B", d))
+        touch_inbox_waiting_since(
+            "B", datetime.now(timezone.utc) - timedelta(seconds=10)
+        )
+        TestBatchWake()._queue_inbox("B", 3, prefix="late")
+
+        attached_loop(["B"], 0.1, single_pass=True)
+        log = _read_log("B")
+        assert log.count("batch exec:") == 1
+        assert "SINGLE" not in log

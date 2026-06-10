@@ -191,6 +191,17 @@ def build_idle_command(definition: dict, agent_name: str) -> list[str] | None:
     return _expand_argv(list(argv), "", agent_name, "", "", "")
 
 
+def pause_seconds(definition: dict) -> float:
+    raw = definition.get("pause")
+    if raw is None:
+        return 0.0
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if v > 0 else 0.0
+
+
 def has_batch_invoke(definition: dict) -> bool:
     batch = definition.get("batch")
     if not isinstance(batch, dict):

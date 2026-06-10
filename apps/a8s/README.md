@@ -235,6 +235,7 @@ Agents that can process multiple tells in one subprocess can declare a `batch` b
 
 ```json
 {
+  "pause": 3,
   "invoke": ["my-agent", "--single", "$SENDER", "$MESSAGE"],
   "batch": {
     "invoke": ["my-agent", "--batch"],
@@ -243,11 +244,14 @@ Agents that can process multiple tells in one subprocess can declare a `batch` b
 }
 ```
 
+- `pause` — seconds to wait after the first inbox message of a burst before waking. Closely-spaced tells accumulate across handler iterations so `batch` is more likely to fire. `0` or omitted = wake as soon as the loop drains (previous behavior).
 - `batch.invoke` — argv template with the same substitutions as `invoke` / `idle.invoke`.
 - `batch.limit` — max messages per batch wake; defaults to **5**.
 - One waiting message still uses normal `invoke` (unchanged).
 - Paths point at the trashed inbox JSON files (under `~/.a8s/agents/<NAME>/trash/`), appended after the expanded `batch.invoke` argv.
 - Batch argv expansion matches idle: `$RECIPIENT` is the agent's own name; `$SENDER` / `$MESSAGE` / `$TIMESTAMP` / `$AGE` are empty.
+
+Debounce mechanics: on the first inbox message, a8s stamps `~/.a8s/agents/<NAME>/inbox-waiting-since` and skips waking until `pause` seconds elapse. Each loop iteration re-routes outboxes, so messages that arrive during the wait window join the inbox before the wake decision. The stamp clears when the inbox drains or a wake fires.
 
 ### Recipient transparency
 

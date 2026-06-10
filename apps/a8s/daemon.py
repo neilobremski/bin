@@ -40,7 +40,10 @@ from core import (
     kill_request_path,
     out_agent,
     pid_path,
+    clear_inbox_waiting_since,
+    read_inbox_waiting_since,
     read_last_active,
+    touch_inbox_waiting_since,
     touch_last_active,
     trash_dir,
     unique_path,
@@ -55,6 +58,7 @@ from definitions import (
     idle_timeout_seconds,
     is_file_proxy,
     load_definition,
+    pause_seconds,
 )
 from mailbox import ensure_mailboxes, next_inbox_message, peek_inbox_messages, route_outboxes
 from network import (
@@ -135,6 +139,26 @@ def _deliver_file_proxy(p: Participant) -> None:
             txlog.log("PROXY_DELIVERED", msg_id=envelope.get("id", f.stem), sender=envelope.get("from", ""), recipient=p.name, files=file_names or None, detail=_preview(envelope.get("content", "")))
         except (json.JSONDecodeError, OSError):
             txlog.log("PROXY_DELIVERED", msg_id=f.stem, recipient=p.name)
+
+
+def _pause_ready_for_wake(
+    name: str, pause: float, *, now: datetime | None = None
+) -> bool:
+    """Return True when `pause` has elapsed since the first inbox message of
+    the current burst. Zero/negative pause means immediate readiness."""
+    if pause <= 0:
+        return True
+    if now is None:
+        now = datetime.now(timezone.utc)
+    since = read_inbox_waiting_since(name)
+    if since is None:
+        touch_inbox_waiting_since(name, now)
+        out_agent(name, f"[{name}] pause {pause:g}s before wake")
+        return False
+    if (now - since).total_seconds() < pause:
+        return False
+    clear_inbox_waiting_since(name)
+    return True
 
 
 def wake_once(p: Participant, msg_path: Path) -> None:
@@ -689,9 +713,21 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                         if drain_seconds > 0:
                             msg = next_inbox_message(p)
                             if msg is None:
+                                clear_inbox_waiting_since(p.name)
                                 break
                             _drain_one(p, msg)
                             continue
+                        if not peek_inbox_messages(p, 1):
+                            clear_inbox_waiting_since(p.name)
+                            break
+                        if (
+                            definition is not None
+                            and not is_file_proxy(definition)
+                            and not _pause_ready_for_wake(
+                                p.name, pause_seconds(definition)
+                            )
+                        ):
+                            break
                         if (
                             definition is not None
                             and has_batch_invoke(definition)
@@ -704,6 +740,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                                 continue
                         msg = next_inbox_message(p)
                         if msg is None:
+                            clear_inbox_waiting_since(p.name)
                             break
                         wake_once(p, msg)
                 # Idle invoke: per-agent, only after the inbox has drained.

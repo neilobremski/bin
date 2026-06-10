@@ -185,6 +185,46 @@ def touch_last_active(name: str, when: datetime | None = None) -> None:
         pass
 
 
+def inbox_waiting_since_path(name: str) -> Path:
+    """When the first inbox message of a burst arrived. `attached_loop` reads
+    this to debounce wakes per `definition.pause` so closely-spaced tells can
+    accumulate before invoke/batch runs."""
+    return agent_dir(name) / "inbox-waiting-since"
+
+
+def read_inbox_waiting_since(name: str) -> datetime | None:
+    p = inbox_waiting_since_path(name)
+    if not p.is_file():
+        return None
+    try:
+        s = p.read_text().strip()
+    except OSError:
+        return None
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def touch_inbox_waiting_since(name: str, when: datetime | None = None) -> None:
+    ts = (when or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z")
+    p = inbox_waiting_since_path(name)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(ts)
+    except OSError:
+        pass
+
+
+def clear_inbox_waiting_since(name: str) -> None:
+    try:
+        inbox_waiting_since_path(name).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def pending_dir(name: str) -> Path:
     """Ingested-but-not-yet-fully-routed messages. `route_outboxes` atomically
     moves each new file from `<root>/.outbox/` into here on every pass before
