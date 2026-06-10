@@ -229,6 +229,26 @@ A definition's `idle` block fires `idle.invoke` when the agent has gone `idle.ti
 
 This subsumes the retired `clear` use-case: define an idle invoke that runs whatever your CLI needs to reset session state (e.g. `claude -p "/clear"`).
 
+### Batch invoke (optional)
+
+Agents that can process multiple tells in one subprocess can declare a `batch` block. When **two or more** inbox messages are waiting, a8s wakes once with `batch.invoke` plus the message JSON file paths as trailing argv elements (shell-style — no extra placeholder).
+
+```json
+{
+  "invoke": ["my-agent", "--single", "$SENDER", "$MESSAGE"],
+  "batch": {
+    "invoke": ["my-agent", "--batch"],
+    "limit": 5
+  }
+}
+```
+
+- `batch.invoke` — argv template with the same substitutions as `invoke` / `idle.invoke`.
+- `batch.limit` — max messages per batch wake; defaults to **5**.
+- One waiting message still uses normal `invoke` (unchanged).
+- Paths point at the trashed inbox JSON files (under `~/.a8s/agents/<NAME>/trash/`), appended after the expanded `batch.invoke` argv.
+- Batch argv expansion matches idle: `$RECIPIENT` is the agent's own name; `$SENDER` / `$MESSAGE` / `$TIMESTAMP` / `$AGE` are empty.
+
 ### Recipient transparency
 
 The default definitions follow the opacity rule — `$SENDER tells $RECIPIENT: $MESSAGE` works equally well whether `$RECIPIENT` is an LLM session, a Python script, or (someday) an SMS gateway. Customize at your own risk.

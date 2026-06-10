@@ -191,6 +191,41 @@ def build_idle_command(definition: dict, agent_name: str) -> list[str] | None:
     return _expand_argv(list(argv), "", agent_name, "", "", "")
 
 
+def has_batch_invoke(definition: dict) -> bool:
+    batch = definition.get("batch")
+    if not isinstance(batch, dict):
+        return False
+    return bool(batch.get("invoke"))
+
+
+def batch_limit(definition: dict) -> int:
+    batch = definition.get("batch")
+    if not isinstance(batch, dict):
+        return 5
+    raw = batch.get("limit", 5)
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return 5
+    return max(1, v)
+
+
+def build_batch_command(
+    definition: dict, agent_name: str, msg_paths: list[Path]
+) -> list[str]:
+    """Expand `batch.invoke` like idle (no incoming message) and append each
+    message file path as a trailing argv element."""
+    batch = definition.get("batch")
+    if not isinstance(batch, dict):
+        raise ValueError("definition missing 'batch'")
+    argv = batch.get("invoke")
+    if not argv:
+        raise ValueError("definition missing 'batch.invoke'")
+    cmd = _expand_argv(list(argv), "", agent_name, "", "", "")
+    cmd.extend(str(p.resolve()) for p in msg_paths)
+    return cmd
+
+
 def idle_timeout_seconds(definition: dict) -> float | None:
     """Returns `definition.idle.timeout` as a positive float, or None if
     not configured / not a positive number. Loose typing tolerated:

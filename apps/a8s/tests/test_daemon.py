@@ -640,3 +640,92 @@ class TestAttachedLoopIdleIntegration:
         # Idle did NOT fire — wake_once just touched last-active.
         assert "idle exec:" not in log
         assert "IDLE-FIRED-FOR" not in log
+
+
+class TestBatchWake:
+    def _queue_inbox(self, recipient: str, n: int, *, prefix: str = "msg") -> list[Path]:
+        paths: list[Path] = []
+        for i in range(n):
+            msg = {
+                "id": f"{prefix}{i}",
+                "date": "2026-04-28T14:30:00.000000Z",
+                "from": "A",
+                "to": recipient,
+                "content": f"{prefix}-{i}",
+                "files": [],
+            }
+            p = inbox_dir(recipient) / f"{prefix}{i}.json"
+            p.write_text(json.dumps(msg))
+            paths.append(p)
+        return paths
+
+    def test_three_messages_batch_wake(self, fake_home, tmp_path, fixtures_dir):
+        d = tmp_path / "b"
+        d.mkdir()
+        save_registry({
+            "B": {"root": str(d), "definition": str(fixtures_dir / "mock-batch.json")},
+        })
+        ensure_mailboxes(Participant("B", d))
+        self._queue_inbox("B", 3)
+
+        rc = attached_loop(["B"], 0.1, single_pass=True)
+        assert rc == 0
+        log = _read_log("B")
+        assert log.count("batch exec:") == 1
+        assert "BATCH|TO:B" in log
+        assert log.count("MOCK-CLI: BATCH|TO:B") == 1
+        assert log.count("SINGLE|") == 0
+        for i in range(3):
+            assert str(trash_dir("B") / f"msg{i}.json") in log or f"msg{i}.json" in log
+
+    def test_single_message_uses_normal_invoke(self, fake_home, tmp_path, fixtures_dir):
+        d = tmp_path / "b"
+        d.mkdir()
+        save_registry({
+            "B": {"root": str(d), "definition": str(fixtures_dir / "mock-batch.json")},
+        })
+        ensure_mailboxes(Participant("B", d))
+        self._queue_inbox("B", 1)
+
+        attached_loop(["B"], 0.1, single_pass=True)
+        log = _read_log("B")
+        assert "batch exec:" not in log
+        assert "SINGLE|FROM:A|TO:B|MSG:msg-0" in log
+
+    def test_without_batch_block_one_wake_per_message(self, fake_home, tmp_path, fixtures_dir):
+        d = tmp_path / "b"
+        d.mkdir()
+        save_registry({
+            "B": {"root": str(d), "definition": str(fixtures_dir / "mock.json")},
+        })
+        ensure_mailboxes(Participant("B", d))
+        self._queue_inbox("B", 3, prefix="solo")
+
+        attached_loop(["B"], 0.1, single_pass=True)
+        log = _read_log("B")
+        assert "batch exec:" not in log
+        assert log.count("[B] exec: ") == 3
+
+    def test_limit_caps_batch_then_drains_remainder(self, fake_home, tmp_path, fixtures_dir):
+        d = tmp_path / "b"
+        d.mkdir()
+        defn = {
+            "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "SINGLE"],
+            "batch": {
+                "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "BATCH"],
+                "limit": 5,
+            },
+        }
+        defp = tmp_path / "batch5.json"
+        defp.write_text(json.dumps(defn))
+        save_registry({"B": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("B", d))
+        self._queue_inbox("B", 7, prefix="q")
+
+        attached_loop(["B"], 0.1, single_pass=True)
+        log = _read_log("B")
+        assert log.count("batch exec:") == 2
+        first_batch = log.split("batch exec:")[1].split("\n")[0]
+        assert first_batch.count(".json") == 5
+        second_batch = log.split("batch exec:")[2].split("\n")[0]
+        assert second_batch.count(".json") == 2

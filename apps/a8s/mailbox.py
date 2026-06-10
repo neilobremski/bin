@@ -717,12 +717,20 @@ def route_outboxes(
     return routed
 
 
-def next_inbox_message(p: Participant) -> Path | None:
+def _inbox_json_files(p: Participant) -> list[Path]:
     inbox = inbox_dir(p.name)
     if not inbox.is_dir():
-        return None
-    files = sorted(f for f in inbox.iterdir() if f.is_file() and f.name.endswith(".json"))
+        return []
+    return sorted(f for f in inbox.iterdir() if f.is_file() and f.name.endswith(".json"))
+
+
+def next_inbox_message(p: Participant) -> Path | None:
+    files = _inbox_json_files(p)
     return files[0] if files else None
+
+
+def peek_inbox_messages(p: Participant, limit: int) -> list[Path]:
+    return _inbox_json_files(p)[:limit]
 
 
 # ---------- queue helpers (used by cmd_tell, cmd_prompt, cmd_clear) ----------
