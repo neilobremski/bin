@@ -309,3 +309,11 @@ class TestScanForMarkers:
         found = _scan_for_markers(tmp_path)
         assert len(found) == 1
         assert found[0][1] == "claude"
+
+    def test_cursor_marker_wins_over_agents_md(self, tmp_path):
+        d = tmp_path / "agent1"; d.mkdir()
+        (d / "CURSOR.md").write_text("# C: x\n")
+        (d / "AGENTS.md").write_text("# B: y\n")
+        found = _scan_for_markers(tmp_path)
+        assert len(found) == 1
+        assert found[0][1] == "cursor"

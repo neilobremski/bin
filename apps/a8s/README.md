@@ -126,13 +126,13 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 | | |
 |---|---|
 | `a8s tell <name> <msg>` | Routed message. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose `.outbox/` encloses CWD (walks up); errors if no `.outbox/` is found. There is no senderless channel — every message has a force-stamped agent `from` (the router stamps it from the outbox's owning agent, regardless of what the client wrote). |
-| `tell <name> <msg>` (top-level shim, [`~/bin/tell`](/Users/neilo/bin/tell)) | Same end result, but **self-contained** — pure-stdlib Python with zero a8s imports. Walks up CWD to find any `.outbox/`, drops a JSON envelope. Mount this single file into a container alongside any dir containing `.outbox/` and it just works. The router still force-stamps `from`, so identity isn't compromised by the simpler client. |
+| `tell <name> <msg>` (top-level shim, [`~/bin/tell`](/Users/neilo/bin/tell)) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Walks up CWD to find any `.outbox/`, drops a JSON envelope — no `~/.a8s` access required. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. |
 | `a8s logs <name>... [--tail N] [-f]` | Read per-agent log files; merge-sort by ISO timestamp across multiple agents. `-f` follows. |
 
 ### Skills
 | | |
 |---|---|
-| `a8s install` | Install canonical skills (`tell`) into Claude / Gemini / Codex user scope. |
+| `a8s install` | Install bundled skills into the current agent dir (or `--global` for user home). |
 
 ### Remotes (issue #63)
 | | |
@@ -170,6 +170,7 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `agy.json` | Antigravity (agy) with `--sandbox` + `--dangerously-skip-permissions` + `--continue` for headless operation |
 | `codex.json` | Codex CLI with `--full-auto` workspace-write sandbox + `resume --last` |
 | `copilot.json` | GitHub Copilot CLI with `--allow-all-tools` (required for non-interactive `-p` mode) + `--continue`. Marker is `.github/copilot-instructions.md` (Copilot's native repo-instructions location). |
+| `cursor.json` | Cursor Agent CLI (`agent`) with `-p --trust --force --approve-mcps --continue` for headless tool use. Marker is `CURSOR.md`. |
 | `opencode.json` | [OpenCode](https://opencode.ai/) — BYO model. `opencode run --continue --dangerously-skip-permissions`. Operator picks the provider/model in each agent's own `opencode.json` (e.g. `{"model": "ollama/gpt-oss:20b"}`), not in the a8s definition. |
 | `default.json` | Fallback — runs `dummy-cli` and prints "no real CLI configured" |
 
@@ -183,11 +184,12 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `GEMINI.md` | agy | [Antigravity (agy) context files](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/configuration.md) |
 | `CODEX.md` | codex | [Codex CLI configuration](https://github.com/openai/codex) |
 | `.github/copilot-instructions.md` | copilot | [Copilot CLI repository custom instructions](https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions) — the same file Copilot itself auto-loads |
+| `CURSOR.md` | cursor | a8s marker for [Cursor Agent CLI](https://cursor.com/docs/cli/using) agents. Cursor also loads `AGENTS.md` and `.cursor/rules/`; use `CURSOR.md` when this directory is a Cursor CLI agent in a8s. |
 | `AGENTS.md` (fallback) | opencode | [The agents.md standard](https://agents.md/) — tool-agnostic instructions stewarded by the [Agentic AI Foundation](https://agentic.foundation/) under the Linux Foundation |
 
 The first four are **kind-specific** locations — for the tools that have a distinct native instruction file, a8s uses that location directly. For Copilot we use its repo-instructions location (`.github/copilot-instructions.md`) rather than inventing a `COPILOT.md` — same file serves both a8s discovery and Copilot's own persona loading.
 
-[AGENTS.md](https://agents.md/) is **tool-agnostic** and shared by 20+ tools (OpenAI Codex, Google Gemini CLI, GitHub Copilot, Cursor, Aider, Zed, Warp, JetBrains Junie, OpenCode, …). Because it can't disambiguate which CLI to invoke, a8s only resolves it as a marker when **no kind-specific marker is present** — and it falls through to **OpenCode**, which is BYO-model (the operator picks the provider in each agent's own `opencode.json`). A directory with `CLAUDE.md` + `AGENTS.md` resolves to `claude`; a directory with only `AGENTS.md` resolves to `opencode`.
+[AGENTS.md](https://agents.md/) is **tool-agnostic** and shared by 20+ tools (OpenAI Codex, Google Gemini CLI, GitHub Copilot, Cursor, Aider, Zed, Warp, JetBrains Junie, OpenCode, …). Because it can't disambiguate which CLI to invoke, a8s only resolves it as a marker when **no kind-specific marker is present** — and it falls through to **OpenCode**, which is BYO-model (the operator picks the provider in each agent's own `opencode.json`). A directory with `CLAUDE.md` + `AGENTS.md` resolves to `claude`; a directory with `CURSOR.md` + `AGENTS.md` resolves to `cursor`; a directory with only `AGENTS.md` resolves to `opencode`.
 
 ### The single verb
 
@@ -349,11 +351,12 @@ apps/a8s/
 ├── transports/       Transport ABC + per-kind implementations
 │   ├── __init__.py   abstract publish/subscribe/start/stop interface
 │   └── mqtt.py       MQTT transport (paho-mqtt impl; persistent session, QoS 1)
+├── tell.py           outbox drop + CLI (stdin, --attach)
 ├── commands.py       every cmd_*
 ├── cli.py            COMMANDS table, dispatch, main
-├── definitions/      built-in JSONs (claude/gemini/codex/default)
+├── definitions/      built-in JSONs (claude/cursor/codex/default)
 ├── dummy-cli         fallback bash script
-├── skills/           tell skill (installable into Claude / Gemini / Codex)
+├── skills/           tell skill (installable into Claude / Cursor / Codex)
 └── tests/
     ├── agents/       per-tool fixture dirs (CLAUDE/GEMINI/CODEX/Llama)
     ├── fixtures/     mock-cli + mock.json for end-to-end tests
@@ -413,7 +416,7 @@ Per-agent `opencode.json` then just picks the model: `{"model": "ollama/gpt-oss:
 The most common causes:
 
 - **Codex without `stdin=DEVNULL`.** Codex CLI hangs reading stdin in headless mode. a8s already passes `stdin=subprocess.DEVNULL` for every wake (`daemon.run_with_prefix`), so this only bites if you're running the underlying CLI manually.
-- **Headless permission denial.** Gemini without `--yolo`, Claude without `--permission-mode dontAsk`, Copilot without `--allow-all-tools`, OpenCode without `--dangerously-skip-permissions` — all silently deny tool calls in non-interactive mode and the wake stalls. The bundled `definitions/<kind>.json` files include the required flag for each kind; only worry if you write a custom definition.
+- **Headless permission denial.** Gemini without `--yolo`, Claude without `--permission-mode dontAsk`, Copilot without `--allow-all-tools`, OpenCode without `--dangerously-skip-permissions`, Cursor without `-p --force` — all silently deny tool calls in non-interactive mode and the wake stalls. The bundled `definitions/<kind>.json` files include the required flag for each kind; only worry if you write a custom definition.
 - **Ollama model still loading.** A cold-start of a 20B model can take 10–30s before any output. `ps aux | grep ollama` should show a `runner` process consuming RAM proportional to the model size.
 
 ## Roadmap

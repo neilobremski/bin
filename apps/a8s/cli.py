@@ -48,14 +48,14 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("kill",     "<name>",                    "Force-stop a running agent."),
     ("exit",     "",                          "Stop every running agent."),
     ("ls",       "",                          "List running agents."),
-    ("tell",     "<name> <message>",          "Send a message to an agent or alias."),
+    ("tell",     "<name> [<message>]",       "Send a message to an agent or alias."),
     ("drain",    "<name>",                   "Move local inbox to trash without invoking."),
     ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
     ("remote",   "[<name> [<broker> <topic> [--<k> <v> ...]]]", "List, show, or set a cross-machine remote."),
     ("unremote", "<name>",                    "Remove a configured remote."),
     ("storage",  "[<name> [<url> [--<k> <v> ...]]]",            "List, show, or set a cross-cluster file storage service."),
     ("unstorage","<name>",                    "Remove a configured storage service."),
-    ("install",  "",                          "Install the `tell` skill into supported tools."),
+    ("install",  "[path] [--global]",        "Install skills into an agent dir (default CWD) or user home."),
     ("health",   "",                          "Test connectivity of remotes and storage services."),
 ]
 
@@ -110,7 +110,7 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
     if cmd == "drain":
         return cmd_drain(args)
     if cmd == "install":
-        return cmd_install()
+        return cmd_install(args)
     if cmd == "logs":
         return cmd_logs(args)
     if cmd == "remote":

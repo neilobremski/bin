@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance when working with code in this repository.
 
 ## Repo shape
 
@@ -44,7 +44,7 @@ polyglots without reading an existing one (e.g., `~/bin/a8s`) first.
 `install.sh` is sourced from a shell rc. It adds `~/bin/` to `$PATH`. Pass
 `--skills` to also symlink `docs/*.md` into `~/.claude/skills/` (when Claude
 Code is present) and `~/.cursor/skills/` for Cursor. Per-agent skill install
-is `a8s install` from the agent directory (see below).
+is `a8s install` from the agent directory.
 
 Adding a new top-level CLI: write the script, write `docs/<name>.md` with YAML
 frontmatter if it should be installable as a Claude skill.
@@ -110,10 +110,10 @@ user-home install; `source ~/bin/install.sh --skills` for top-level doc skills.
 ## Common operations
 
 ```bash
-# a8s tests (~426 tests)
+# a8s tests
 python3 -m pytest apps/a8s/tests/
 
-# k7e tests (~69 tests)
+# k7e tests
 cd apps/k7e && tests/run
 
 # Start fresh after a schema change (pre-v1 scorch-the-earth)
@@ -135,5 +135,5 @@ a8s run my-agent --drain 5
 The user has a private memory system at
 `~/.claude/projects/-Users-neilo-bin/memory/` — that's separate from this
 file. Personal preferences, ongoing project state, and feedback rules live
-there. THIS file (`CLAUDE.md`) is the public-checked-in onboarding doc.
+there. THIS file (`AGENTS.md`) is the public-checked-in onboarding doc.
 Don't put anything in it that would be inappropriate for a public repo.

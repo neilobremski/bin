@@ -26,7 +26,6 @@ from pathlib import Path
 from core import (
     ENTRYPOINT,
     SKILLS_DIR,
-    BIN_ROOT,
     _pid_alive,
     _preview,
     agent_dir,
@@ -46,10 +45,6 @@ from daemon import (
     _write_kill_request,
     attached_loop,
 )
-from mailbox import (
-    _split_content_and_files,
-    _write_outbox,
-)
 from network import (
     configured_remote_ids,
     detect_service_kind,
@@ -66,74 +61,96 @@ from registry import (
     resolve_recipient,
     save_aliases,
     save_registry,
-    sender_from_cwd,
 )
 
 
 # ---------- skill installation helpers ----------
 
-def _install_skill_claude(skill_dir: Path) -> str:
-    docs_dir = BIN_ROOT / "docs"
-    if not docs_dir.is_dir():
-        return f"  claude: {docs_dir} not found; skipping"
-    skill_md = skill_dir / "SKILL.md"
-    if not skill_md.is_file():
-        return f"  claude: {skill_md} missing; skipping"
-    target_link = docs_dir / f"{skill_dir.name}.md"
-    rel = Path("..") / skill_md.relative_to(BIN_ROOT)
-    if target_link.is_symlink():
-        if os.readlink(target_link) == str(rel):
-            return f"  claude: docs/{target_link.name} already linked"
-        target_link.unlink()
-    elif target_link.exists():
-        return f"  claude: {target_link} exists and is not a symlink; refusing to overwrite"
-    target_link.symlink_to(rel)
-    return f"  claude: linked docs/{target_link.name} -> {rel} (install.sh will sync to ~/.claude/skills/)"
+def _link_symlink(link: Path, target: Path) -> tuple[bool, str | None]:
+    """Create or refresh `link` -> `target`. Returns (ok, error_message)."""
+    target = target.resolve()
+    if link.is_symlink():
+        if os.readlink(link) == str(target):
+            return True, None
+        link.unlink()
+    elif link.exists():
+        return False, f"{link} exists and is not a symlink; refusing to overwrite"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    return True, None
 
 
-def _install_skill_agy(skill_dir: Path) -> str:
+def _install_skill_claude(skill_dir: Path, base: Path) -> str:
+    dest = base / ".claude" / "skills" / skill_dir.name / "SKILL.md"
+    ok, err = _link_symlink(dest, skill_dir / "SKILL.md")
+    if not ok:
+        return f"  claude: {err}"
+    rel = dest.relative_to(base) if dest.is_relative_to(base) else dest
+    return f"  claude: linked {rel}"
+
+
+def _install_skill_cursor(skill_dir: Path, base: Path) -> str:
+    dest = base / ".cursor" / "skills" / skill_dir.name / "SKILL.md"
+    ok, err = _link_symlink(dest, skill_dir / "SKILL.md")
+    if not ok:
+        return f"  cursor: {err}"
+    rel = dest.relative_to(base) if dest.is_relative_to(base) else dest
+    return f"  cursor: linked {rel}"
+
+
+def _install_skill_agy(skill_dir: Path, base: Path) -> str:
     if shutil.which("agy") is None:
         return "  agy: not on PATH; skipping"
     return "  agy: plugin install not yet supported; skipping"
 
 
-def _install_skill_codex(skill_dir: Path) -> str:
-    codex_skills = Path.home() / ".codex" / "skills"
-    if not codex_skills.is_dir():
-        return f"  codex: {codex_skills} not found; skipping (codex may not be installed)"
-    skill_name = skill_dir.name
-    target = codex_skills / skill_name
-    src = str(skill_dir)
-    if target.is_symlink():
-        if os.readlink(target) == src:
-            return f"  codex: '{skill_name}' already linked"
-        target.unlink()
-    elif target.exists():
-        return f"  codex: {target} exists and is not a symlink; refusing to overwrite"
-    target.symlink_to(src)
-    return f"  codex: linked '{skill_name}' at {target}"
+def _install_skill_codex(skill_dir: Path, base: Path) -> str:
+    codex_skills = base / ".codex" / "skills"
+    target = codex_skills / skill_dir.name
+    ok, err = _link_symlink(target, skill_dir)
+    if not ok:
+        return f"  codex: {err}"
+    rel = target.relative_to(base) if target.is_relative_to(base) else target
+    return f"  codex: linked {rel}"
 
 
-def _install_skill_copilot(skill_dir: Path) -> str:
-    """Copilot CLI has no `copilot skills link <local-dir>` analog of the
-    other tools — `copilot plugin install` only accepts git sources, and
-    `--plugin-dir` is per-session. Until a stable user-scope mechanism
-    exists, the `tell` instructions live directly in each Copilot agent's
-    `.github/copilot-instructions.md` (which is also the a8s marker AND
-    the file Copilot itself auto-loads — see `tests/agents/copilot-agent/`)."""
+def _install_skill_copilot(skill_dir: Path, base: Path) -> str:
     if shutil.which("copilot") is None:
         return "  copilot: not on PATH; skipping"
-    return "  copilot: skill install delegated to per-agent .github/copilot-instructions.md (no user-scope skill mechanism)"
+    dest = base / ".claude" / "skills" / skill_dir.name / "SKILL.md"
+    ok, err = _link_symlink(dest, skill_dir / "SKILL.md")
+    if not ok:
+        return f"  copilot: {err}"
+    return f"  copilot: linked {dest.relative_to(base)} (Copilot also loads .github/copilot-instructions.md when present)"
 
 
-def _install_skill_opencode(skill_dir: Path) -> str:
-    """OpenCode auto-loads `AGENTS.md` plus `.claude/CLAUDE.md` and
-    `.claude/skills/` per project, but lacks a user-scope skill registry.
-    Per-agent `tell` instructions live directly in each agent's
-    `AGENTS.md` (the a8s marker — see `tests/agents/opencode-agent/`)."""
+def _install_skill_opencode(skill_dir: Path, base: Path) -> str:
     if shutil.which("opencode") is None:
         return "  opencode: not on PATH; skipping"
-    return "  opencode: skill install delegated to per-agent AGENTS.md (no user-scope skill mechanism)"
+    return _install_skill_claude(skill_dir, base).replace("  claude:", "  opencode:", 1)
+
+
+def _install_skills_into(base: Path) -> int:
+    if not SKILLS_DIR.is_dir():
+        print(f"no skills directory at {SKILLS_DIR}", file=sys.stderr)
+        return 1
+    skill_dirs = [
+        d for d in sorted(SKILLS_DIR.iterdir())
+        if d.is_dir() and (d / "SKILL.md").is_file()
+    ]
+    if not skill_dirs:
+        print(f"no skills found in {SKILLS_DIR}")
+        return 0
+    print(f"installing {len(skill_dirs)} skill(s) into {base}:")
+    for skill_dir in skill_dirs:
+        print(f"\n[{skill_dir.name}]")
+        print(_install_skill_claude(skill_dir, base))
+        print(_install_skill_cursor(skill_dir, base))
+        print(_install_skill_agy(skill_dir, base))
+        print(_install_skill_codex(skill_dir, base))
+        print(_install_skill_copilot(skill_dir, base))
+        print(_install_skill_opencode(skill_dir, base))
+    return 0
 
 
 # ---------- registry management commands ----------
@@ -357,26 +374,52 @@ def cmd_discover(args: list[str]) -> int:
     return 0
 
 
-def cmd_install() -> int:
-    if not SKILLS_DIR.is_dir():
-        print(f"no skills directory at {SKILLS_DIR}", file=sys.stderr)
-        return 1
-    skill_dirs = [
-        d for d in sorted(SKILLS_DIR.iterdir())
-        if d.is_dir() and (d / "SKILL.md").is_file()
-    ]
-    if not skill_dirs:
-        print(f"no skills found in {SKILLS_DIR}")
-        return 0
-    print(f"installing {len(skill_dirs)} skill(s) from {SKILLS_DIR}:")
-    for skill_dir in skill_dirs:
-        print(f"\n[{skill_dir.name}]")
-        print(_install_skill_claude(skill_dir))
-        print(_install_skill_agy(skill_dir))
-        print(_install_skill_codex(skill_dir))
-        print(_install_skill_copilot(skill_dir))
-        print(_install_skill_opencode(skill_dir))
-    return 0
+def cmd_install(args: list[str]) -> int:
+    """Install bundled skills into an agent directory (default CWD) or --global home."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="a8s install",
+        description=(
+            "Install a8s skills into an agent directory (default: CWD). "
+            "Creates .claude/skills/, .cursor/skills/, and .codex/skills/ "
+            "symlinks under the target. Use --global to install into user home instead."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  cd ~/projects/my-agent && a8s install\n"
+            "  a8s install /path/to/agent\n"
+            "  a8s install --global\n"
+        ),
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        help="agent root to install into (default: current directory)",
+    )
+    parser.add_argument(
+        "--global",
+        dest="global_install",
+        action="store_true",
+        help="install into user home (~/.claude/skills, ~/.cursor/skills, ~/.codex/skills)",
+    )
+    try:
+        parsed = parser.parse_args(args)
+        if parsed.global_install and parsed.path is not None:
+            parser.error("path argument conflicts with --global")
+    except SystemExit as e:
+        return int(e.code if e.code is not None else 0)
+
+    if parsed.global_install:
+        base = Path.home()
+    else:
+        base = Path(parsed.path or ".").expanduser().resolve()
+        if not base.is_dir():
+            print(f"not a directory: {base}", file=sys.stderr)
+            return 1
+
+    return _install_skills_into(base)
 
 
 # ---------- alias commands ----------
@@ -778,84 +821,14 @@ def cmd_ls() -> int:
 
 # ---------- messaging commands ----------
 
-def _join_tell_args(rest: list[str]) -> str:
-    """Concatenate the message-body argv into a single string suitable for
-    `_split_content_and_files`.
-
-    Plain shell usage stays untouched: `tell alice hello world` joins with
-    spaces. But when an argv element starts with `FILE:` — which is what
-    happens when an LLM forgets to fold the FILE: line into the same
-    quoted string — promote it to its own line. `_split_content_and_files`
-    only recognizes trailing FILE: lines (newline-delimited), so without
-    this lift the FILE: tag would silently inline into the body and the
-    attachment would be dropped.
-
-    Examples:
-      ['hello', 'world']                         -> 'hello world'
-      ['msg', 'FILE: ./x']                       -> 'msg\\nFILE: ./x'
-      ['FILE: ./x']                              -> 'FILE: ./x'
-      ['msg', 'FILE: ./a', 'FILE: ./b']          -> 'msg\\nFILE: ./a\\nFILE: ./b'
-    """
-    parts: list[str] = []
-    for arg in rest:
-        if arg.lstrip().startswith("FILE:"):
-            parts.append("\n" + arg.lstrip())
-        else:
-            if parts:
-                parts.append(" ")
-            parts.append(arg)
-    return "".join(parts).strip()
-
-
 def cmd_tell(args: list[str]) -> int:
     """`a8s tell <name> <msg>` — write a single outbox message; `name` may be
     an agent or alias. Fan-out to alias members happens at routing time and
     preserves the original `to` (alias name) — strict opacity, mailing-list
     style: the recipient knows it came via the list, not who else got it."""
-    if len(args) < 2:
-        print("usage: tell <name> <message>", file=sys.stderr)
-        return 2
-    target_query, *rest = args
-    content, files = _split_content_and_files(_join_tell_args(rest))
+    from tell import tell_main
 
-    sender = sender_from_cwd()
-    if sender is None:
-        print("tell: current directory is not inside any registered agent", file=sys.stderr)
-        print("hint: register the enclosing dir with `a8s add <name> <dir>`", file=sys.stderr)
-        return 1
-    sender_name, sender_info = sender
-
-    try:
-        kind, members = resolve_name(target_query)
-    except KeyError:
-        # Unknown locally. Allow the send if any remotes are configured —
-        # the recipient may live on another cluster and the receive-side
-        # filter will pick it up there. With zero remotes there's no path
-        # forward, so fail.
-        if not configured_remote_ids():
-            print(f"tell: no agent or alias named {target_query!r}", file=sys.stderr)
-            return 1
-        kind, members = "agent", [target_query]
-    except ValueError as e:
-        print(f"tell: {e}", file=sys.stderr)
-        return 1
-    if not members:
-        print(f"tell: {target_query!r} resolves to no agents", file=sys.stderr)
-        return 1
-    # Resolve the canonical name (preserves user's chosen casing) for the `to`
-    # field, regardless of agent vs alias.
-    if kind == "agent":
-        canonical = members[0]
-    else:
-        aliases = load_aliases()
-        canonical = next((k for k in aliases if k.lower() == target_query.lower()), target_query)
-
-    _write_outbox(sender_name, Path(sender_info["root"]), canonical, content, files)
-    if kind == "alias":
-        out_agent(sender_name, f"tell -> {canonical} (alias of {len(members)}): {_preview(content)}")
-    else:
-        out_agent(sender_name, f"tell -> {canonical}: {_preview(content)}")
-    return 0
+    return tell_main(args)
 
 
 # ---------- drain ----------

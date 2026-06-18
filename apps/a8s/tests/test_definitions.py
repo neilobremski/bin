@@ -230,6 +230,12 @@ class TestAutodiscoverDefinition:
         assert path == str(default_definition_path("copilot"))
         assert "auto-detected via .github/copilot-instructions.md" in note
 
+    def test_cursor_marker(self, tmp_path):
+        (tmp_path / "CURSOR.md").write_text("# CR\n")
+        path, note = _autodiscover_definition(tmp_path)
+        assert path == str(default_definition_path("cursor"))
+        assert "auto-detected via CURSOR.md" in note
+
 
 # ---------- load_definition ----------
 
