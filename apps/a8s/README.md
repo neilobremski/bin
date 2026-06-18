@@ -132,7 +132,7 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 ### Skills
 | | |
 |---|---|
-| `a8s install` | Install canonical skills (`tell`) into Claude / Gemini / Codex user scope. |
+| `a8s install` | Install bundled skills into the current agent dir (or `--global` for user home). |
 
 ### Remotes (issue #63)
 | | |

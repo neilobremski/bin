@@ -55,7 +55,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("unremote", "<name>",                    "Remove a configured remote."),
     ("storage",  "[<name> [<url> [--<k> <v> ...]]]",            "List, show, or set a cross-cluster file storage service."),
     ("unstorage","<name>",                    "Remove a configured storage service."),
-    ("install",  "",                          "Install the `tell` skill into supported tools."),
+    ("install",  "[path] [--global]",        "Install skills into an agent dir (default CWD) or user home."),
     ("health",   "",                          "Test connectivity of remotes and storage services."),
 ]
 
@@ -110,7 +110,7 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
     if cmd == "drain":
         return cmd_drain(args)
     if cmd == "install":
-        return cmd_install()
+        return cmd_install(args)
     if cmd == "logs":
         return cmd_logs(args)
     if cmd == "remote":

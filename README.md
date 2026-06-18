@@ -20,5 +20,6 @@ All bash scripts use `#!/usr/bin/env bash` instead of `#!/bin/bash`. This allows
 
 ## Claude Code Skills
 
-When `install.sh` detects Claude Code (`~/.claude`), it automatically installs each
-documented tool as a [skill](https://docs.anthropic.com/en/docs/claude-code/skills).
+Top-level tool docs under `docs/` can be installed as Claude skills with
+`source ~/bin/install.sh --skills` (requires `~/.claude`). a8s agent skills
+(`tell`, etc.) install per-project via `a8s install` from the agent directory.

@@ -27,8 +27,16 @@ if [ ! -d "$NEILS_BIN_CACHE" ]; then
   mkdir -p "$NEILS_BIN_CACHE"
 fi
 
-# Install Claude Code skills (symlink docs as skills)
-if [ -d "$HOME/.claude" ]; then
+# Install Claude Code skills (symlink docs as skills) only when --skills is passed.
+# Usage: source ~/bin/install.sh --skills
+INSTALL_SKILLS=false
+for _install_arg in "$@"; do
+  if [ "$_install_arg" = "--skills" ]; then
+    INSTALL_SKILLS=true
+  fi
+done
+
+if [ "$INSTALL_SKILLS" = true ] && [ -d "$HOME/.claude" ]; then
   SKILLS_HASH=$(ls "$NEIL_BIN/docs/"*.md 2>/dev/null | sort | shasum | cut -d' ' -f1)
   SKILLS_CACHE="$NEILS_BIN_CACHE/skills-hash"
   if [ ! -f "$SKILLS_CACHE" ] || [ "$(cat "$SKILLS_CACHE" 2>/dev/null)" != "$SKILLS_HASH" ]; then

@@ -41,10 +41,13 @@ polyglots without reading an existing one (e.g., `~/bin/a8s`) first.
 
 ### Install hook
 
-`install.sh` is sourced from a shell rc. It adds `~/bin/` to `$PATH` AND
-auto-links each `docs/<name>.md` into `~/.claude/skills/` if Claude Code is
-detected. Adding a new top-level CLI: write the script, write `docs/<name>.md`,
-the next shell session gets it as a Claude skill.
+`install.sh` is sourced from a shell rc. It adds `~/bin/` to `$PATH`. Pass
+`--skills` to also symlink `docs/*.md` into `~/.claude/skills/` when Claude
+Code is detected: `source ~/bin/install.sh --skills`. Per-agent skill install
+is `a8s install` from the agent directory.
+
+Adding a new top-level CLI: write the script, write `docs/<name>.md` with YAML
+frontmatter if it should be installable as a Claude skill.
 
 ### Workflow
 
@@ -99,6 +102,10 @@ apply on top.
 The router (`mailbox.py:_process_pending`) force-overwrites `from` based on
 which agent owns the enclosing root — the filesystem is the unforgeable
 identity.
+
+Run `a8s install` from an agent root to link bundled skills into
+`.claude/skills/` and `.codex/skills/` there. Use `a8s install --global` for
+user-home install; `source ~/bin/install.sh --skills` for top-level doc skills.
 
 ## Common operations
 
