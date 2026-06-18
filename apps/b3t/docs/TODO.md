@@ -30,9 +30,10 @@
 - [x] `givebacks pull/push` — Design JSON via API with localStorage buffer
 - [x] `givebacks duplicate --id UUID` — Three-dot menu → Duplicate → return new UUID
 - [x] `givebacks rename --id UUID --subject "..."` — Update subject via API PUT
-- [x] `givebacks upload --id UUID --image FILE --index N` — Coordinate-based click + chained upload
+- [x] `givebacks upload --id UUID --image FILE --index N` — Coordinate-based click + chained upload; waits for S3 save (size-scaled timeout)
 - [x] `givebacks screenshot --id UUID` — Full-page PNG of newsletter page
-- [x] `parentsquare scan` — Deterministic feed scan with auto-login
+- [x] `parentsquare scan` — Feed scan with full bodies (`--json`, `--since`)
+- [x] `parentsquare save --dir PATH` — Write `parentsquare-*.md` submission files
 - [x] `lwsd scan` — RMS + district events/news (no auth)
 - [x] `osp scan` — Site pages + calendar parsing
 - [x] `peachjar list/get` — GraphQL queries (no browser)
