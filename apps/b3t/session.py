@@ -11,6 +11,12 @@ from constants import SESSION_NAME, CHROME_PROFILE_DIR, STATE_FILE
 
 CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 CDP_PORT = 9222
+CDP_ATTACH_BASES = (
+    f"http://127.0.0.1:{CDP_PORT}",
+    f"http://localhost:{CDP_PORT}",
+    f"http://[::1]:{CDP_PORT}",
+)
+CHROME_STARTUP_WAIT = 60  # 60 × 0.2s = 12s
 
 
 def run(*args, timeout=30):
@@ -28,14 +34,59 @@ def is_running():
     return result.returncode == 0
 
 
+def _chrome_cdp_base():
+    """Return CDP base URL if Chrome is listening, else None."""
+    import urllib.request
+    for base in CDP_ATTACH_BASES:
+        try:
+            urllib.request.urlopen(f"{base}/json/version", timeout=2)
+            return base
+        except Exception:
+            continue
+    return None
+
+
 def _chrome_running():
     """Check if Chrome is listening on CDP port."""
-    import urllib.request
-    try:
-        urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/version", timeout=2)
-        return True
-    except Exception:
-        return False
+    return _chrome_cdp_base() is not None
+
+
+def _profile_process_running():
+    """True if Chrome is already using our profile (may be starting up)."""
+    result = subprocess.run(
+        ["pgrep", "-f", CHROME_PROFILE_DIR],
+        capture_output=True,
+        text=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def _wait_for_cdp():
+    """Wait for CDP to become available. Returns base URL or None."""
+    for _ in range(CHROME_STARTUP_WAIT):
+        base = _chrome_cdp_base()
+        if base:
+            return base
+        time.sleep(0.2)
+    return None
+
+
+def _launch_chrome():
+    """Start Chrome with the b3t profile (first launch only)."""
+    os.makedirs(CHROME_PROFILE_DIR, exist_ok=True)
+    cmd = [
+        CHROME_PATH,
+        f"--user-data-dir={CHROME_PROFILE_DIR}",
+        f"--remote-debugging-port={CDP_PORT}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+    ]
+    subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def open_browser():
@@ -44,32 +95,22 @@ def open_browser():
         print("Browser already running.", file=sys.stderr)
         return 0
 
-    if not _chrome_running():
-        os.makedirs(CHROME_PROFILE_DIR, exist_ok=True)
-        cmd = [
-            CHROME_PATH,
-            f"--user-data-dir={CHROME_PROFILE_DIR}",
-            f"--remote-debugging-port={CDP_PORT}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "about:blank",
-        ]
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        # Wait for Chrome to start listening
-        for _ in range(30):
-            if _chrome_running():
-                break
-            time.sleep(0.2)
+    cdp_base = _chrome_cdp_base()
+    if not cdp_base:
+        if _profile_process_running():
+            # Profile Chrome is up but CDP not ready yet — wait, do NOT relaunch
+            # (relaunching with the same profile opens a new about:blank tab).
+            cdp_base = _wait_for_cdp()
         else:
-            print("ERROR: Chrome did not start in time.", file=sys.stderr)
-            return 1
+            _launch_chrome()
+            cdp_base = _wait_for_cdp()
+
+    if not cdp_base:
+        print("ERROR: Chrome did not start in time.", file=sys.stderr)
+        return 1
 
     # Attach playwright-cli to the running Chrome via CDP
-    result = run("attach", f"--cdp=http://127.0.0.1:{CDP_PORT}", timeout=15)
+    result = run("attach", f"--cdp={cdp_base}", timeout=15)
     if result.returncode != 0:
         print(f"ERROR: Failed to attach: {result.stderr}", file=sys.stderr)
         return 1
