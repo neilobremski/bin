@@ -30,6 +30,7 @@ MARKER_FILES = {
     # an a8s agent should expect `a8s discover` to surface it as a
     # candidate — `discover` is read-only and only suggests, never adds.
     ".github/copilot-instructions.md": "copilot",
+    "CURSOR.md": "cursor",
     # Tool-agnostic standard (https://agents.md/) adopted by 20+ tools.
     # Listed LAST so kind-specific markers above always win when both are
     # present; AGENTS.md alone falls through to OpenCode (the BYO-model
