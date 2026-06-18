@@ -24,6 +24,9 @@ def test_install_local_creates_claude_skill_symlink(tmp_path):
     assert skill.is_symlink()
     assert skill.resolve().name == "SKILL.md"
     assert "tell" in skill.read_text()
+    cursor = agent / ".cursor" / "skills" / "tell" / "SKILL.md"
+    assert cursor.is_symlink()
+    assert cursor.resolve() == skill.resolve()
 
 
 def test_install_default_cwd(tmp_path, monkeypatch):
@@ -41,6 +44,8 @@ def test_install_global_uses_home(tmp_path, monkeypatch):
     assert rc == 0
     skill = tmp_path / ".claude" / "skills" / "tell" / "SKILL.md"
     assert skill.is_symlink()
+    cursor = tmp_path / ".cursor" / "skills" / "tell" / "SKILL.md"
+    assert cursor.is_symlink()
 
 
 def test_install_global_conflicts_with_path(capsys):

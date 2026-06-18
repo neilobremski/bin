@@ -27,7 +27,7 @@ if [ ! -d "$NEILS_BIN_CACHE" ]; then
   mkdir -p "$NEILS_BIN_CACHE"
 fi
 
-# Install Claude Code skills (symlink docs as skills) only when --skills is passed.
+# Install agent skills (symlink docs as skills) only when --skills is passed.
 # Usage: source ~/bin/install.sh --skills
 INSTALL_SKILLS=false
 for _install_arg in "$@"; do
@@ -36,31 +36,34 @@ for _install_arg in "$@"; do
   fi
 done
 
-if [ "$INSTALL_SKILLS" = true ] && [ -d "$HOME/.claude" ]; then
+if [ "$INSTALL_SKILLS" = true ]; then
   SKILLS_HASH=$(ls "$NEIL_BIN/docs/"*.md 2>/dev/null | sort | shasum | cut -d' ' -f1)
   SKILLS_CACHE="$NEILS_BIN_CACHE/skills-hash"
   if [ ! -f "$SKILLS_CACHE" ] || [ "$(cat "$SKILLS_CACHE" 2>/dev/null)" != "$SKILLS_HASH" ]; then
-    echo "Updating Claude Code skills..."
-    # Remove stale skill symlinks
-    for skill_dir in "$HOME/.claude/skills/"*/; do
-      if [ -L "$skill_dir/SKILL.md" ]; then
-        target=$(readlink "$skill_dir/SKILL.md")
-        if [[ "$target" == "$NEIL_BIN/docs/"* ]] && [ ! -f "$target" ]; then
-          echo "  Removing stale skill: $(basename "$skill_dir")"
-          rm -rf "$skill_dir"
+    echo "Updating agent skills..."
+    for skill_root in "$HOME/.claude/skills" "$HOME/.cursor/skills"; do
+      for skill_dir in "$skill_root/"*/; do
+        if [ -L "$skill_dir/SKILL.md" ]; then
+          target=$(readlink "$skill_dir/SKILL.md")
+          if [[ "$target" == "$NEIL_BIN/docs/"* ]] && [ ! -f "$target" ]; then
+            echo "  Removing stale skill: $(basename "$skill_dir")"
+            rm -rf "$skill_dir"
+          fi
         fi
-      fi
+      done
     done
-    # Create/update symlinks for each doc
     for doc in "$NEIL_BIN/docs/"*.md; do
       name=$(basename "$doc" .md)
-      # Only install docs with YAML frontmatter (first line is ---)
       if [ "$(head -1 "$doc")" != "---" ]; then
         continue
       fi
-      # Lowercase the name for consistency (NMP → nmp)
       name_lower=$(echo "$name" | tr '[:upper:]' '[:lower:]')
-      skill_dir="$HOME/.claude/skills/$name_lower"
+      if [ -d "$HOME/.claude" ]; then
+        skill_dir="$HOME/.claude/skills/$name_lower"
+        mkdir -p "$skill_dir"
+        ln -sf "$doc" "$skill_dir/SKILL.md"
+      fi
+      skill_dir="$HOME/.cursor/skills/$name_lower"
       mkdir -p "$skill_dir"
       ln -sf "$doc" "$skill_dir/SKILL.md"
     done

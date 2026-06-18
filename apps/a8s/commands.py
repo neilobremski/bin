@@ -89,6 +89,15 @@ def _install_skill_claude(skill_dir: Path, base: Path) -> str:
     return f"  claude: linked {rel}"
 
 
+def _install_skill_cursor(skill_dir: Path, base: Path) -> str:
+    dest = base / ".cursor" / "skills" / skill_dir.name / "SKILL.md"
+    ok, err = _link_symlink(dest, skill_dir / "SKILL.md")
+    if not ok:
+        return f"  cursor: {err}"
+    rel = dest.relative_to(base) if dest.is_relative_to(base) else dest
+    return f"  cursor: linked {rel}"
+
+
 def _install_skill_agy(skill_dir: Path, base: Path) -> str:
     if shutil.which("agy") is None:
         return "  agy: not on PATH; skipping"
@@ -136,6 +145,7 @@ def _install_skills_into(base: Path) -> int:
     for skill_dir in skill_dirs:
         print(f"\n[{skill_dir.name}]")
         print(_install_skill_claude(skill_dir, base))
+        print(_install_skill_cursor(skill_dir, base))
         print(_install_skill_agy(skill_dir, base))
         print(_install_skill_codex(skill_dir, base))
         print(_install_skill_copilot(skill_dir, base))
@@ -372,8 +382,8 @@ def cmd_install(args: list[str]) -> int:
         prog="a8s install",
         description=(
             "Install a8s skills into an agent directory (default: CWD). "
-            "Creates .claude/skills/ and .codex/skills/ symlinks under the target. "
-            "Use --global to install into user home instead."
+            "Creates .claude/skills/, .cursor/skills/, and .codex/skills/ "
+            "symlinks under the target. Use --global to install into user home instead."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -392,7 +402,7 @@ def cmd_install(args: list[str]) -> int:
         "--global",
         dest="global_install",
         action="store_true",
-        help="install into user home (~/.claude/skills, ~/.codex/skills)",
+        help="install into user home (~/.claude/skills, ~/.cursor/skills, ~/.codex/skills)",
     )
     try:
         parsed = parser.parse_args(args)

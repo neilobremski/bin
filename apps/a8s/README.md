@@ -354,7 +354,7 @@ apps/a8s/
 ├── cli.py            COMMANDS table, dispatch, main
 ├── definitions/      built-in JSONs (claude/gemini/codex/default)
 ├── dummy-cli         fallback bash script
-├── skills/           tell skill (installable into Claude / Gemini / Codex)
+├── skills/           tell skill (installable into Claude / Cursor / Codex)
 └── tests/
     ├── agents/       per-tool fixture dirs (CLAUDE/GEMINI/CODEX/Llama)
     ├── fixtures/     mock-cli + mock.json for end-to-end tests

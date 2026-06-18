@@ -42,8 +42,8 @@ polyglots without reading an existing one (e.g., `~/bin/a8s`) first.
 ### Install hook
 
 `install.sh` is sourced from a shell rc. It adds `~/bin/` to `$PATH`. Pass
-`--skills` to also symlink `docs/*.md` into `~/.claude/skills/` when Claude
-Code is detected: `source ~/bin/install.sh --skills`. Per-agent skill install
+`--skills` to also symlink `docs/*.md` into `~/.claude/skills/` (when Claude
+Code is present) and `~/.cursor/skills/` for Cursor. Per-agent skill install
 is `a8s install` from the agent directory (see below).
 
 Adding a new top-level CLI: write the script, write `docs/<name>.md` with YAML
@@ -104,7 +104,7 @@ which agent owns the enclosing root — the filesystem is the unforgeable
 identity.
 
 Run `a8s install` from an agent root to link bundled skills into
-`.claude/skills/` and `.codex/skills/` there. Use `a8s install --global` for
+`.claude/skills/`, `.cursor/skills/`, and `.codex/skills/` there. Use `a8s install --global` for
 user-home install; `source ~/bin/install.sh --skills` for top-level doc skills.
 
 ## Common operations
