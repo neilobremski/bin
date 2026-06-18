@@ -126,7 +126,7 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 | | |
 |---|---|
 | `a8s tell <name> <msg>` | Routed message. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose `.outbox/` encloses CWD (walks up); errors if no `.outbox/` is found. There is no senderless channel — every message has a force-stamped agent `from` (the router stamps it from the outbox's owning agent, regardless of what the client wrote). |
-| `tell <name> <msg>` (top-level shim, [`~/bin/tell`](/Users/neilo/bin/tell)) | Same end result, but **self-contained** — pure-stdlib Python with zero a8s imports. Walks up CWD to find any `.outbox/`, drops a JSON envelope. Mount this single file into a container alongside any dir containing `.outbox/` and it just works. The router still force-stamps `from`, so identity isn't compromised by the simpler client. |
+| `tell <name> <msg>` (top-level shim, [`~/bin/tell`](/Users/neilo/bin/tell)) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Walks up CWD to find any `.outbox/`, drops a JSON envelope — no `~/.a8s` access required. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. |
 | `a8s logs <name>... [--tail N] [-f]` | Read per-agent log files; merge-sort by ISO timestamp across multiple agents. `-f` follows. |
 
 ### Skills
@@ -349,6 +349,7 @@ apps/a8s/
 ├── transports/       Transport ABC + per-kind implementations
 │   ├── __init__.py   abstract publish/subscribe/start/stop interface
 │   └── mqtt.py       MQTT transport (paho-mqtt impl; persistent session, QoS 1)
+├── tell.py           outbox drop + CLI (stdin, --attach)
 ├── commands.py       every cmd_*
 ├── cli.py            COMMANDS table, dispatch, main
 ├── definitions/      built-in JSONs (claude/gemini/codex/default)

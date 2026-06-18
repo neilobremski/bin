@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from commands import (
-    _join_tell_args,
     cmd_add,
     cmd_alias,
     cmd_kill,
@@ -561,42 +560,50 @@ class TestCmdUnstorage:
         assert "usage:" in capsys.readouterr().err
 
 
-# ---------- _join_tell_args (FILE:-lifting argv joiner) ----------
+# ---------- join_args (FILE:-lifting argv joiner) ----------
 
 
 class TestJoinTellArgs:
     """`tell` accepts the message body as one or more argv elements. An LLM
     that splits the FILE: tag onto its own argument used to silently lose
     the attachment because the joined string had no newline before FILE:.
-    `_join_tell_args` lifts FILE:-leading argv elements onto their own line
-    so trailing-FILE: detection in `_split_content_and_files` recognizes
-    them."""
+    `join_args` lifts FILE:-leading argv elements onto their own line so
+    trailing-FILE: detection in `_split_content_and_files` recognizes them."""
 
     def test_plain_join_unchanged(self):
-        assert _join_tell_args(["hello", "world"]) == "hello world"
+        from tell import join_args
+
+        assert join_args(["hello", "world"]) == "hello world"
 
     def test_single_arg_unchanged(self):
-        assert _join_tell_args(["just a message"]) == "just a message"
+        from tell import join_args
+
+        assert join_args(["just a message"]) == "just a message"
 
     def test_file_promoted_to_own_line(self):
-        # Gemini's actual misfire — message and FILE: as separate args.
-        assert _join_tell_args(["msg", "FILE: ./x"]) == "msg\nFILE: ./x"
+        from tell import join_args
+
+        assert join_args(["msg", "FILE: ./x"]) == "msg\nFILE: ./x"
 
     def test_bare_file_only(self):
-        # Just a file, no body — still works.
-        assert _join_tell_args(["FILE: ./x"]) == "FILE: ./x"
+        from tell import join_args
+
+        assert join_args(["FILE: ./x"]) == "FILE: ./x"
 
     def test_multiple_files(self):
-        assert _join_tell_args(["body", "FILE: ./a", "FILE: ./b"]) == "body\nFILE: ./a\nFILE: ./b"
+        from tell import join_args
+
+        assert join_args(["body", "FILE: ./a", "FILE: ./b"]) == "body\nFILE: ./a\nFILE: ./b"
 
     def test_file_with_leading_whitespace_still_detected(self):
-        # If an LLM passes a leading-space-padded element, normalize it.
-        assert _join_tell_args(["msg", "  FILE: ./x"]) == "msg\nFILE: ./x"
+        from tell import join_args
+
+        assert join_args(["msg", "  FILE: ./x"]) == "msg\nFILE: ./x"
 
     def test_file_substring_in_body_unchanged(self):
-        # The word `FILE:` mid-string (not as the leading characters of an
-        # argv element) is left alone.
-        assert _join_tell_args(["see FILE: x in middle"]) == "see FILE: x in middle"
+        from tell import join_args
+
+        assert join_args(["see FILE: x in middle"]) == "see FILE: x in middle"
 
 
 class TestCmdTellWithSplitFileArg:

@@ -1,132 +1,18 @@
 #!/usr/bin/env bash
 echo `# <#` >/dev/null
 
-# Self-contained polyglot. Walks up CWD to find the first .outbox/ and drops
-# a JSON envelope there. NO dependency on the a8s package — this file plus
-# python3 plus a .outbox/ dir is enough. Mount it into a container and it
-# just works.
-#
-# The actual logic lives in the inline Python script between the
-# `# >>>PY` / `# <<<PY` markers below. Bash extracts and pipes it to
-# `python3 -`; PowerShell does the same via a regex match on
-# $PSCommandPath. One source of truth for the Python; both shells just
-# wrap.
-
 set -euo pipefail
-awk '/^# >>>PY$/{flag=1;next} /^# <<<PY$/{flag=0} flag' "${BASH_SOURCE[0]}" | python3 - "$@"
-exit $?
-
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$SCRIPT_DIR/a8s" tell "$@"
 #> > $null
 
 $ScriptPath = $PSCommandPath
 if (-not $ScriptPath) { $ScriptPath = $MyInvocation.MyCommand.Path }
 if (-not $ScriptPath) { $ScriptPath = Join-Path (Get-Location) "tell" }
 
-$Content = Get-Content $ScriptPath -Raw
-$Match = [regex]::Match($Content, '(?ms)^# >>>PY$\r?\n(.+?)\r?\n^# <<<PY$')
-if (-not $Match.Success) {
-    Write-Error "tell: could not locate inline Python block"
-    exit 2
-}
-$PyScript = $Match.Groups[1].Value
+$ScriptDir = Split-Path -Parent $ScriptPath
+$A8sPath = Join-Path $ScriptDir "a8s"
 
-$Python = $null
-foreach ($cmd in @('python3', 'python', 'py')) {
-    $found = Get-Command $cmd -ErrorAction SilentlyContinue
-    if ($found) { $Python = $found.Source; break }
-}
-if (-not $Python) {
-    Write-Error "tell: python3 not found on PATH"
-    exit 127
-}
-
-$PyScript | & $Python - @args
+& $A8sPath tell @args
 exit $LASTEXITCODE
 #>
-
-# >>>PY
-import json
-import os
-import secrets
-import sys
-import time
-from pathlib import Path
-
-
-def find_outbox():
-    cur = Path.cwd().resolve()
-    for d in (cur, *cur.parents):
-        candidate = d / ".outbox"
-        if candidate.is_dir():
-            return candidate
-    return None
-
-
-def make_ulid():
-    alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-    ts_ms = int(time.time() * 1000)
-    out = []
-    for i in range(9, -1, -1):
-        out.append(alphabet[(ts_ms >> (i * 5)) & 0x1F])
-    rand = int.from_bytes(secrets.token_bytes(10), "big")
-    for i in range(15, -1, -1):
-        out.append(alphabet[(rand >> (i * 5)) & 0x1F])
-    return "".join(out)
-
-
-def join_args(args):
-    parts = []
-    for a in args:
-        if a.lstrip().startswith("FILE:"):
-            parts.append("\n" + a.lstrip())
-        else:
-            if parts:
-                parts.append(" ")
-            parts.append(a)
-    return "".join(parts).strip()
-
-
-def split_content_and_files(text):
-    lines = text.splitlines()
-    files = []
-    while lines and lines[-1].startswith("FILE: "):
-        files.insert(0, lines.pop()[len("FILE: "):].strip())
-    return "\n".join(lines), files
-
-
-def main(argv):
-    if len(argv) < 2:
-        print("usage: tell <name> <message...>", file=sys.stderr)
-        return 2
-    outbox = find_outbox()
-    if outbox is None:
-        print(
-            "tell: no .outbox/ found in CWD or any parent "
-            "(run from inside an agent root)",
-            file=sys.stderr,
-        )
-        return 1
-    to = argv[0]
-    body = join_args(argv[1:])
-    content, files = split_content_and_files(body)
-    msg = {
-        "id": make_ulid(),
-        "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "to": to,
-        "content": content,
-        "files": [{"filename": Path(p).name, "path": p} for p in files],
-    }
-    dest = outbox / f"{msg['id']}.json"
-    tmp = outbox / f".{msg['id']}.tmp"
-    tmp.write_text(json.dumps(msg, indent=2), encoding="utf-8")
-    os.replace(tmp, dest)
-    preview = content.replace("\n", " ")[:80]
-    if len(content) > 80:
-        preview += "..."
-    print(f"tell -> {to}: {preview}")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
-# <<<PY

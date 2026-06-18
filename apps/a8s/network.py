@@ -362,6 +362,28 @@ def receive_envelope(
             from mailbox import _download_files_to_recipient
 
             msg_for_recipient = _download_files_to_recipient(msg, recipient, services)
+        from sync_listen import try_sync_capture
+
+        if try_sync_capture(recipient, msg_for_recipient):
+            out_agent(
+                recipient.name,
+                f"sync: captured remote reply from {sender_label}: {preview}",
+            )
+            file_names = [
+                e.get("filename", "")
+                for e in (msg_for_recipient.get("files") or [])
+                if e.get("filename")
+            ]
+            txlog.log(
+                "RECEIVED_REMOTE",
+                msg_id=msg_id,
+                sender=sender_label,
+                recipient=recipient.name,
+                files=file_names or None,
+                remote="remote",
+                detail=f"sync capture: {preview}",
+            )
+            continue
         # ensure_mailboxes lives in mailbox.py; importing it here would form
         # a cycle. Just create dirs.
         inbox_dir(recipient.name).mkdir(parents=True, exist_ok=True)

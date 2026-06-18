@@ -10,6 +10,8 @@ This file is the script entry point; functionality lives in sibling modules:
   mailbox.py      inbox/outbox/trash routing + queue helpers
   definitions.py  invoke* verbs, prompt formatting, definition loading
   daemon.py       wake subprocess, pid attachment, signal handling
+  sync_listen.py  tell --sync file-drop protocol (!a8s control envelopes)
+  tell.py          outbox drop + CLI parsing (stdin, --attach, --sync)
   commands.py     every cmd_* function
   cli.py          COMMANDS table, dispatch, main
 

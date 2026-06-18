@@ -66,6 +66,7 @@ from core import (
 )
 from network import seen_id_append
 from registry import resolve_name
+from sync_listen import A8S_CONTROL, expire_stale_listeners_for_participants, handle_a8s_command, try_sync_capture
 from services import StorageError, StorageService
 import txlog
 from ulid import new as new_ulid
@@ -532,6 +533,11 @@ def _process_pending(
             _trash_pending(sender, f)
             _drop_sidecar(f)
             continue
+        if recipient_name == A8S_CONTROL:
+            handle_a8s_command(sender, msg)
+            _trash_pending(sender, f)
+            _drop_sidecar(f)
+            continue
         # ----- LOCAL ROUTING -----
         local_target_known = False
         if not sidecar["local_delivered"]:
@@ -555,6 +561,7 @@ def _process_pending(
                         recipients.append(rp)
                 if recipients:
                     staged: list[tuple[Path, Path]] = []
+                    sync_captured = 0
                     stage_failed = False
                     try:
                         for recipient in recipients:
@@ -562,8 +569,11 @@ def _process_pending(
                             final = inbox_dir(recipient.name) / f.name
                             if final.is_file():
                                 continue
-                            staging = inbox_tmp_dir(recipient.name) / f.name
                             routed_msg = _build_routed_message(msg, sender.name, sender.root, recipient)
+                            if try_sync_capture(recipient, routed_msg):
+                                sync_captured += 1
+                                continue
+                            staging = inbox_tmp_dir(recipient.name) / f.name
                             with staging.open("w", encoding="utf-8") as out_f:
                                 json.dump(routed_msg, out_f, indent=2)
                             staged.append((staging, final))
@@ -577,30 +587,28 @@ def _process_pending(
                         stage_failed = True
                     if not stage_failed:
                         try:
-                            _commit_staged_inboxes(staged)
-                            sidecar["local_delivered"] = True
-                            # Claim the ULID in the cluster-wide seen-ids ring
-                            # so a remote round-trip (we publish to MQTT below;
-                            # the broker pushes back to our own subscriber)
-                            # gets deduped instead of writing a second inbox
-                            # entry. Whichever recipient(s) accepted the local
-                            # write counts — one append per envelope.
-                            local_msg_id = msg.get("id", "")
-                            if local_msg_id:
-                                seen_id_append(local_msg_id)
-                            msg_id = msg.get("id", "")
-                            if kind == "alias":
-                                out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (alias of {len(recipients)}): {preview}")
-                                for recipient in recipients:
-                                    out_agent(recipient.name, f"received from {sender.name} (via {recipient_name} alias): {preview}")
+                            if staged:
+                                _commit_staged_inboxes(staged)
+                            if staged or sync_captured:
+                                sidecar["local_delivered"] = True
+                                local_msg_id = msg.get("id", "")
+                                if local_msg_id:
+                                    seen_id_append(local_msg_id)
+                                msg_id = msg.get("id", "")
+                                delivered = sync_captured + len(staged)
+                                if kind == "alias":
+                                    out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (alias of {len(recipients)}): {preview}")
+                                    for recipient in recipients:
+                                        out_agent(recipient.name, f"received from {sender.name} (via {recipient_name} alias): {preview}")
+                                        txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
+                                    routed += delivered
+                                else:
+                                    recipient = recipients[0]
+                                    out_agent(sender.name, f"routed: {sender.name} -> {recipient.name}: {preview}")
+                                    if staged:
+                                        out_agent(recipient.name, f"received from {sender.name}: {preview}")
                                     txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
-                                routed += len(recipients)
-                            else:
-                                recipient = recipients[0]
-                                out_agent(sender.name, f"routed: {sender.name} -> {recipient.name}: {preview}")
-                                out_agent(recipient.name, f"received from {sender.name}: {preview}")
-                                txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
-                                routed += 1
+                                    routed += delivered
                         except OSError as e:
                             out_agent(sender.name, f"commit failed on {f.name}: {e}")
                             # leave for retry
@@ -709,6 +717,7 @@ def route_outboxes(
     if configured_remote_ids is None:
         configured_remote_ids = []
     _ingest_outboxes(senders)
+    expire_stale_listeners_for_participants(all_agents)
     routed = 0
     for sender in senders:
         routed += _process_pending(

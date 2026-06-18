@@ -48,7 +48,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("kill",     "<name>",                    "Force-stop a running agent."),
     ("exit",     "",                          "Stop every running agent."),
     ("ls",       "",                          "List running agents."),
-    ("tell",     "<name> <message>",          "Send a message to an agent or alias."),
+    ("tell",     "<name> [<message>]",       "Send a message to an agent or alias."),
     ("drain",    "<name>",                   "Move local inbox to trash without invoking."),
     ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
     ("remote",   "[<name> [<broker> <topic> [--<k> <v> ...]]]", "List, show, or set a cross-machine remote."),

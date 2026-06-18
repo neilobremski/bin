@@ -33,11 +33,11 @@ introduce `#!/bin/bash`.
 ### Polyglot bash + PowerShell scripts
 
 Cross-platform CLIs (`a8s`, `tell`) are polyglots — the same file is valid
-bash AND PowerShell. The bash side `exec`s into Python; the PowerShell side
+bash AND PowerShell. The bash side delegates to Python; the PowerShell side
 finds `python3`/`python`/`py` via `Get-Command`. The pattern uses
 `echo \`# <#` >/dev/null` as a no-op for bash that opens a PowerShell
-multi-line comment. Don't add new polyglots without reading an existing one
-(e.g., `~/bin/tell`) first.
+multi-line comment. `tell` is a thin shim around `a8s tell`; don't add new
+polyglots without reading an existing one (e.g., `~/bin/a8s`) first.
 
 ### Install hook
 
@@ -89,17 +89,16 @@ in skill frontmatter.
 
 ## Top-level scripts: `tell`
 
-`~/bin/tell` is a **self-contained polyglot** — bash + PowerShell wrapper
-around an inline Python script (stdlib only, no a8s imports). It walks up
-from CWD to find the first `.outbox/` directory, builds a JSON envelope
-({`id`, `date`, `to`, `content`, `files`}), and atomic-writes it. The
-router (`mailbox.py:_process_pending`) force-overwrites `from` based on
+`~/bin/tell` is a **thin shim** to `a8s tell` (plus `tell.cmd` on Windows).
+Implementation lives in `apps/a8s/tell.py`. It walks up from CWD to find
+the first `.outbox/` directory and atomic-writes a JSON envelope there — no
+`~/.a8s` access required. When the registry is reachable and CWD is inside a
+registered agent, recipient validation, `from` stamping, and agent logging
+apply on top.
+
+The router (`mailbox.py:_process_pending`) force-overwrites `from` based on
 which agent owns the enclosing root — the filesystem is the unforgeable
 identity.
-
-Don't reintroduce a8s-package imports in the polyglot. The single Python
-script lives between `# >>>PY` and `# <<<PY` markers; both bash and
-PowerShell halves extract that block and pipe it to `python3 -`.
 
 ## Common operations
 
