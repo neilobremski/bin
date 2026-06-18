@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+echo `# <#` >/dev/null
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="$SCRIPT_DIR/apps/b3t"
+VENV_DIR="$APP_DIR/.venv"
+
+# Create venv if missing
+if [ ! -f "$VENV_DIR/bin/python3" ]; then
+    echo "b3t: creating venv..." >&2
+    python3 -m venv "$VENV_DIR"
+    "$VENV_DIR/bin/pip" install -q -r "$APP_DIR/requirements.txt"
+fi
+
+exec "$VENV_DIR/bin/python3" "$APP_DIR/__main__.py" "$@"
+#> > $null
+
+$ScriptPath = $PSCommandPath
+if (-not $ScriptPath) { $ScriptPath = $MyInvocation.MyCommand.Path }
+if (-not $ScriptPath) { $ScriptPath = Join-Path (Get-Location) "b3t" }
+
+$ScriptDir = Split-Path -Parent $ScriptPath
+$AppDir = Join-Path $ScriptDir "apps/b3t"
+$VenvDir = Join-Path $AppDir ".venv"
+$B3tPath = Join-Path $AppDir "__main__.py"
+
+if (-not (Test-Path (Join-Path $VenvDir "Scripts/python.exe"))) {
+    Write-Host "b3t: creating venv..." -ForegroundColor Yellow
+    python -m venv $VenvDir
+    & (Join-Path $VenvDir "Scripts/pip.exe") install -q -r (Join-Path $AppDir "requirements.txt")
+}
+
+$Python = Join-Path $VenvDir "Scripts/python.exe"
+if (Test-Path $Python) { & $Python $B3tPath @args; exit $LASTEXITCODE }
+
+$Python = Get-Command python3 -ErrorAction SilentlyContinue
+if ($Python) { & $Python.Source $B3tPath @args; exit $LASTEXITCODE }
+$Python = Get-Command python -ErrorAction SilentlyContinue
+if ($Python) { & $Python.Source $B3tPath @args; exit $LASTEXITCODE }
+
+Write-Error "Could not find python3 or python on PATH."
+exit 127
