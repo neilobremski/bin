@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-if can-use-mps; then
+_N0B="${N0B_BIN:-$HOME/bin}/n0b"
+if "$_N0B" gpu mps 2>/dev/null; then
   export SUNO_ENABLE_MPS=True
   echo "MPS is available, enabling SUNO_ENABLE_MPS"
 else

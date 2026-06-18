@@ -10,16 +10,14 @@ All bash scripts use `#!/usr/bin/env bash` instead of `#!/bin/bash`. This allows
 
 | Command | Description |
 |---------|-------------|
-| `aztail` | Tail Azure web app logs by environment alias (dev, qa, staging, prod) |
+| `n0b` | Kitchen-sink utilities — `n0b json`, `n0b az tail`, `n0b ai video`, etc. ([apps/n0b/README.md](apps/n0b/README.md)) |
 | `h` | Highlight text patterns in color by piping ([docs](docs/h.md)) |
 | `install.sh` | Add ~/bin directory to PATH |
-| `ltx-video` | Generate videos using LTX-Video (2B model, 3s @ 24fps default) ([docs](docs/ltx-video.md)) |
 | `NMP.py` | [Neil's Manual Proxy](docs/NMP.md) |
-| `py-json-tool` | Pretty-print and validate JSON via Python ([docs](docs/py-json-tool.md)) |
 | `speak` | Cross-platform text-to-speech (macOS `say`, `spd-say`, `espeak`, WSL PowerShell) |
 
 ## Claude Code Skills
 
-Top-level tool docs under `docs/` can be installed as agent skills with
+Top-level tool docs under `docs/` and `apps/n0b/docs/` can be installed as agent skills with
 `source ~/bin/install.sh --skills` (Claude Code and Cursor). a8s agent skills
 (`tell`, etc.) install per-project via `a8s install` from the agent directory.

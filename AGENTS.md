@@ -6,9 +6,10 @@ This file provides guidance when working with code in this repository.
 
 `~/bin/` is a personal utilities repo plus two substantive sub-projects.
 
-- **Top level** — small single-file CLIs (`tell`, `aztail`, `speak`, `ltx-video`,
-  `h`, `NMP.py`, `py-json-tool`, etc.). Each is independently usable. `install.sh`
-  adds the dir to `$PATH` and links docs/skills.
+- **Top level** — small single-file CLIs (`tell`, `n0b`, `speak`, `h`, `NMP.py`, etc.).
+  `install.sh` adds the dir to `$PATH` and links docs/skills.
+- **`apps/n0b/`** — Kitchen-sink CLI namespace (`n0b json`, `n0b az`, `n0b ai`, …).
+  Docs in [`apps/n0b/docs/`](apps/n0b/docs/); index at [`apps/n0b/README.md`](apps/n0b/README.md).
 - **`apps/a8s/`** — Agent Infinity System. Filesystem-based message router
   letting independent CLI agents (Claude, Gemini, Codex, scripts) talk to each
   other via `tell`. See [`apps/a8s/README.md`](apps/a8s/README.md) for concept
@@ -42,7 +43,7 @@ polyglots without reading an existing one (e.g., `~/bin/a8s`) first.
 ### Install hook
 
 `install.sh` is sourced from a shell rc. It adds `~/bin/` to `$PATH`. Pass
-`--skills` to also symlink `docs/*.md` into `~/.claude/skills/` (when Claude
+`--skills` to also symlink `docs/*.md` and `apps/n0b/docs/*.md` into `~/.claude/skills/` (when Claude
 Code is present) and `~/.cursor/skills/` for Cursor. Per-agent skill install
 is `a8s install` from the agent directory.
 

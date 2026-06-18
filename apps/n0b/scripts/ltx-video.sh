@@ -66,13 +66,14 @@ do_install() {
   # Detect GPU backend and reinstall PyTorch if needed for CUDA
   echo "Detecting GPU backend..."
   
-  if can-use-cuda; then
+  _N0B="${N0B_BIN:-$HOME/bin}/n0b"
+  if "$_N0B" gpu cuda 2>/dev/null; then
     echo "CUDA detected - reinstalling PyTorch with CUDA support..."
     # Uninstall CPU-only PyTorch that may have been installed
     pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
     # Install PyTorch with CUDA 11.8 support
     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-  elif can-use-mps; then
+  elif "$_N0B" gpu mps 2>/dev/null; then
     echo "MPS (Apple Silicon) detected - PyTorch already has MPS support"
     # MPS support is built into the standard PyTorch for macOS, no reinstall needed
   else
@@ -157,7 +158,7 @@ EOF
     echo ""
   fi
 
-  echo "For full documentation, see: ~/bin/docs/ltx-video.md"
+  echo "For full documentation, see: ~/bin/apps/n0b/docs/ltx-video.md"
   exit 0
 }
 

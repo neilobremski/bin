@@ -1,0 +1,73 @@
+# n0b — Neil's Bin kitchen-sink CLI
+
+Unified namespace for small utilities. Stdlib-only Python 3.x for the core CLI; no pip deps required to run `n0b` itself.
+
+## Entry points
+
+| Platform | Path |
+|----------|------|
+| Unix / macOS / Git Bash | `~/bin/n0b` (polyglot bash + PowerShell → `apps/n0b/n0b.py`) |
+| Windows cmd | `~/bin/n0b.cmd` |
+
+```bash
+n0b --help
+n0b json --help   # per-group help where implemented
+```
+
+## Documentation index
+
+Detailed docs live in [`docs/`](docs/):
+
+| Doc | Command | Summary |
+|-----|---------|---------|
+| [json.md](docs/json.md) | `n0b json` | Pretty-print JSON via stdlib `json.tool` |
+| [ltx-video.md](docs/ltx-video.md) | `n0b ai video` | LTX-Video generation, models, setup guide |
+| [research.md](docs/research.md) | `n0b openai research` | OpenAI o4-mini-deep-research |
+
+### Quick reference (no separate doc yet)
+
+| Group | Subcommands | Notes |
+|-------|-------------|-------|
+| `az` | `tail <env>` | Azure webapp log tail — env aliases: `dev`, `qa`, `staging`, `prod` |
+| `ports` | `free`, `listen <port>` | Ephemeral free port; list process on a port (`lsof` / `netstat`) |
+| `gpu` | `cuda`, `mps`, `mb-free` | GPU availability checks; free MiB (nvidia-smi or macOS unified memory) |
+| `secrets` | `get <NAME>` | `$NAME` env var or `~/lib/<name>.txt` |
+| `mqtt` | `pub`, `sub` | `mosquitto_*` with `MQTT_HOST`, `MQTT_PORT`, `MQTT_USER`, `MQTT_PASS` |
+| `ai` | `image`, `video`, `audio` | See [ltx-video.md](docs/ltx-video.md) for video; image/audio use `scripts/` backends |
+| `video` | `last-frame` | Extract last frame with `ffmpeg` |
+
+### AI model defaults
+
+| Subcommand | Default backend | Override |
+|------------|-----------------|----------|
+| `n0b ai image` | Z-Image (`z-image.sh`) | `--model z-image` |
+| `n0b ai video` | LTX-Video (`ltx-video.sh`) | `--model ltx-video` |
+| `n0b ai audio` | AudioLDM (`audioldm.sh`) | `--model bark` for Suno Bark |
+
+## Layout
+
+```
+apps/n0b/
+├── n0b.py          entry point
+├── cli.py          argparse dispatch
+├── commands/       per-group implementations
+├── scripts/        AI wrapper bash scripts
+├── docs/           user + skill-installable docs (this index links them)
+└── tests/
+```
+
+## Agent skills
+
+Docs under `docs/` with YAML frontmatter install as Claude/Cursor skills via:
+
+```bash
+source ~/bin/install.sh --skills
+```
+
+(`install.sh` scans both `~/bin/docs/` and `~/bin/apps/n0b/docs/`.)
+
+## Tests
+
+```bash
+python3 -m pytest apps/n0b/tests/
+```

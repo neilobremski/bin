@@ -1,37 +1,37 @@
 ---
-name: py-json-tool
-description: Pretty-prints and validates JSON from stdin or files. Use when formatting or validating JSON output.
-allowed-tools: Bash(py-json-tool *)
+name: n0b-json
+description: "Pretty-prints and validates JSON via n0b json. Use when formatting or validating JSON output."
+allowed-tools: Bash(n0b json *)
 ---
 
-# py-json-tool
+# n0b json
 
 Pretty-print and validate JSON from stdin or files using Python's built-in `json.tool` module.
 
 ## Usage
 
 ```bash
-command | py-json-tool [options]
-py-json-tool [options] [infile [outfile]]
+command | n0b json [options]
+n0b json [options] [infile [outfile]]
 ```
 
 ## Examples
 
 ```bash
 # Pretty-print from a pipe
-curl -s https://api.example.com/data | py-json-tool
+curl -s https://api.example.com/data | n0b json
 
 # Pretty-print a file
-py-json-tool data.json
+n0b json data.json
 
 # Sort keys
-curl -s https://api.example.com/data | py-json-tool --sort-keys
+curl -s https://api.example.com/data | n0b json --sort-keys
 
 # Compact output (no pretty-print)
-py-json-tool --compact data.json
+n0b json --compact data.json
 
 # Write to file
-py-json-tool data.json output.json
+n0b json data.json output.json
 ```
 
 ## Options

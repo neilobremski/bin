@@ -1,0 +1,31 @@
+---
+name: n0b-research
+description: "Deep research via n0b openai research (o4-mini-deep-research). Requires OPENAI_API_KEY."
+allowed-tools: Bash(n0b openai research *)
+---
+
+# n0b openai research
+
+CLI for OpenAI's Deep Research API (`o4-mini-deep-research`) — multi-step, agentic research with source transparency.
+
+## Usage
+
+```bash
+n0b openai research "Your research prompt here"
+```
+
+All arguments after `research` are concatenated into a single prompt.
+
+## How it works
+
+1. Requires `OPENAI_API_KEY` (or `~/bin/.temp/openai.env`).
+2. SHA-256 hash of the prompt (whitespace-stripped) for cache key.
+3. Responses cached in `.files/research/<hash>.json` (relative to project root).
+4. Submits to OpenAI Responses API or resumes from cache.
+5. Polls every 30 seconds until `completed` or `failed`.
+6. Final JSON on stdout (pipe to `jq`).
+
+## Implementation
+
+- **CLI:** `n0b openai research`
+- **Code:** `apps/n0b/research.py` (stdlib only)

@@ -37,7 +37,12 @@ for _install_arg in "$@"; do
 done
 
 if [ "$INSTALL_SKILLS" = true ]; then
-  SKILLS_HASH=$(ls "$NEIL_BIN/docs/"*.md 2>/dev/null | sort | shasum | cut -d' ' -f1)
+  SKILLS_HASH=$(
+    {
+      ls "$NEIL_BIN/docs/"*.md 2>/dev/null || true
+      ls "$NEIL_BIN/apps/n0b/docs/"*.md 2>/dev/null || true
+    } | sort | shasum | cut -d' ' -f1
+  )
   SKILLS_CACHE="$NEILS_BIN_CACHE/skills-hash"
   if [ ! -f "$SKILLS_CACHE" ] || [ "$(cat "$SKILLS_CACHE" 2>/dev/null)" != "$SKILLS_HASH" ]; then
     echo "Updating agent skills..."
@@ -45,14 +50,15 @@ if [ "$INSTALL_SKILLS" = true ]; then
       for skill_dir in "$skill_root/"*/; do
         if [ -L "$skill_dir/SKILL.md" ]; then
           target=$(readlink "$skill_dir/SKILL.md")
-          if [[ "$target" == "$NEIL_BIN/docs/"* ]] && [ ! -f "$target" ]; then
+          if [[ "$target" == "$NEIL_BIN/docs/"* || "$target" == "$NEIL_BIN/apps/n0b/docs/"* ]] && [ ! -f "$target" ]; then
             echo "  Removing stale skill: $(basename "$skill_dir")"
             rm -rf "$skill_dir"
           fi
         fi
       done
     done
-    for doc in "$NEIL_BIN/docs/"*.md; do
+    for doc in "$NEIL_BIN/docs/"*.md "$NEIL_BIN/apps/n0b/docs/"*.md; do
+      [ -f "$doc" ] || continue
       name=$(basename "$doc" .md)
       if [ "$(head -1 "$doc")" != "---" ]; then
         continue

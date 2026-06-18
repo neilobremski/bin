@@ -1,4 +1,10 @@
-# ltx-video
+---
+name: n0b-ltx-video
+description: "Generate video with n0b ai video (LTX-Video). Run n0b ai video --help for model and flag reference."
+allowed-tools: Bash(n0b ai video *)
+---
+
+# LTX-Video (`n0b ai video`)
 
 Wrapper script for generating videos using LTX-Video with intelligent argument parsing and automatic GPU acceleration.
 
@@ -6,33 +12,33 @@ Wrapper script for generating videos using LTX-Video with intelligent argument p
 
 ```bash
 # Basic text-to-video
-ltx-video "a cat playing with yarn"
+n0b ai video "a cat playing with yarn"
 
 # Image-to-video
-ltx-video image.jpg "zoom out slowly"
+n0b ai video image.jpg "zoom out slowly"
 
 # Custom output filename
-ltx-video "spinning cube" cube.mp4
+n0b ai video "spinning cube" cube.mp4
 
 # Use a different model
-ltx-video --model ltxv-13b-0.9.8-distilled "high quality video"
+n0b ai video --model ltxv-13b-0.9.8-distilled "high quality video"
 
 # Override defaults
-ltx-video --num_frames 121 "longer video of a sunset"
+n0b ai video --num_frames 121 "longer video of a sunset"
 
 # Show help and available models
-ltx-video --help
+n0b ai video --help
 ```
 
 ## Usage
 
 ```bash
-ltx-video [options] [prompt text...] [output.mp4]
+n0b ai video [options] [prompt text...] [output.mp4]
 ```
 
 ## Getting Help
 
-Run `ltx-video --help` or `ltx-video -h` to see:
+Run `n0b ai video --help` or `n0b ai video -h` to see:
 - Usage syntax and argument parsing rules
 - Default parameters
 - Examples
@@ -44,15 +50,15 @@ Run `ltx-video --help` or `ltx-video -h` to see:
 The script intelligently parses arguments:
 
 - **Text arguments**: Concatenated with spaces to form the prompt
-  - `ltx-video hello world` → prompt: "hello world"
+  - `n0b ai video hello world` → prompt: "hello world"
 - **Single dash arguments**: Added to negative prompt (things to avoid)
-  - `ltx-video "cat playing" -yarn -red` → negative_prompt: "yarn, red"
+  - `n0b ai video "cat playing" -yarn -red` → negative_prompt: "yarn, red"
 - **File paths**: Used as reference image for image-to-video generation
-  - `ltx-video photo.jpg "zoom in"` → uses photo.jpg as starting frame
+  - `n0b ai video photo.jpg "zoom in"` → uses photo.jpg as starting frame
 - **Options starting with `--`**: Passed directly to inference.py
-  - `ltx-video --num_frames 121 "long video"`
+  - `n0b ai video --num_frames 121 "long video"`
 - **Last argument ending in `.mp4`**: Output filename
-  - `ltx-video "test" output.mp4` → saves as output.mp4
+  - `n0b ai video "test" output.mp4` → saves as output.mp4
   - Default: `YYYY-MM-DD-HHMMSS-ltx-video.mp4`
 
 ## Default Parameters
@@ -65,7 +71,7 @@ The script intelligently parses arguments:
 
 ## Wrapper Options
 
-These options are handled by the ltx-video wrapper script itself (not passed to inference.py):
+These options are handled by the n0b ai video wrapper script itself (not passed to inference.py):
 
 ### Model Selection (`--model` / `-m`)
 
@@ -73,13 +79,13 @@ Select a different model configuration:
 
 ```bash
 # Use the 13B distilled model for higher quality
-ltx-video --model ltxv-13b-0.9.8-distilled "cinematic landscape"
+n0b ai video --model ltxv-13b-0.9.8-distilled "cinematic landscape"
 
 # Short form
-ltx-video -m ltxv-13b-0.9.8-distilled "cinematic landscape"
+n0b ai video -m ltxv-13b-0.9.8-distilled "cinematic landscape"
 ```
 
-Available models (run `ltx-video --help` to see your installed models):
+Available models (run `n0b ai video --help` to see your installed models):
 - `ltxv-2b-0.9.8-distilled` - Default, fastest, lowest VRAM
 - `ltxv-13b-0.9.8-distilled` - Higher quality, more VRAM
 - `ltxv-13b-0.9.8-dev` - Highest quality, most VRAM
@@ -89,50 +95,50 @@ Available models (run `ltx-video --help` to see your installed models):
 
 ### Basic Generation
 ```bash
-ltx-video "a serene mountain lake at sunset"
+n0b ai video "a serene mountain lake at sunset"
 ```
 
 ### Image-to-Video
 ```bash
-ltx-video vacation.jpg "camera pans left revealing the ocean"
+n0b ai video vacation.jpg "camera pans left revealing the ocean"
 ```
 
 ### Custom Output Filename
 ```bash
-ltx-video "robot dancing" robot-dance.mp4
+n0b ai video "robot dancing" robot-dance.mp4
 ```
 
 ### Longer Video (5 seconds)
 ```bash
-ltx-video --num_frames 121 "waves crashing on shore"
+n0b ai video --num_frames 121 "waves crashing on shore"
 ```
 
 ### Higher Resolution
 ```bash
 # Warning: may require more VRAM
-ltx-video --height 512 --width 896 "city street at night"
+n0b ai video --height 512 --width 896 "city street at night"
 ```
 
 ### Custom Seed for Reproducibility
 ```bash
-ltx-video --seed 42 "abstract art" art-v1.mp4
+n0b ai video --seed 42 "abstract art" art-v1.mp4
 ```
 
 ### Using Negative Prompts
 ```bash
 # Avoid specific elements
-ltx-video "beautiful landscape" -people -buildings -cars
+n0b ai video "beautiful landscape" -people -buildings -cars
 
 # Generate cat without yarn
-ltx-video "cat playing" -yarn
+n0b ai video "cat playing" -yarn
 ```
 
 ### Multiple Words in Prompt
 ```bash
 # All these are equivalent:
-ltx-video hello world test
-ltx-video "hello world test"
-ltx-video hello "world test"
+n0b ai video hello world test
+n0b ai video "hello world test"
+n0b ai video hello "world test"
 ```
 
 ## Advanced Options
@@ -163,17 +169,17 @@ If you get OOM errors, try these in order:
 
 1. Reduce resolution:
    ```bash
-   ltx-video --height 384 --width 640 "your prompt"
+   n0b ai video --height 384 --width 640 "your prompt"
    ```
 
 2. Reduce frames:
    ```bash
-   ltx-video --num_frames 49 "your prompt"
+   n0b ai video --num_frames 49 "your prompt"
    ```
 
 3. Enable CPU offloading:
    ```bash
-   ltx-video --offload_to_cpu "your prompt"
+   n0b ai video --offload_to_cpu "your prompt"
    ```
 
 ### Script Not Found
