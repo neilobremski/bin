@@ -1,34 +1,41 @@
 ---
 name: n0b-ltx-video
-description: "Generate video with n0b ai video (LTX-Video). Run n0b ai video --help for model and flag reference."
+description: "Generate video with n0b ai video — LTX-Video 1, LTX-2 (PyTorch/MLX). Run n0b ai video --help for flags."
 allowed-tools: Bash(n0b ai video *)
 ---
 
 # LTX-Video (`n0b ai video`)
 
-Wrapper script for generating videos using LTX-Video with intelligent argument parsing and automatic GPU acceleration.
+Generate video with **LTX-Video 1** (legacy), **LTX-Video 2** (PyTorch on CUDA/CPU), or **MLX-Video** on Apple Silicon when `mlx-video` is installed and `n0b gpu mlx` succeeds.
 
 ## Quick Start
 
 ```bash
-# Basic text-to-video
+# Auto: LTX-2 (MLX if available, else PyTorch) when repos exist; else LTX-Video 1
 n0b ai video "a cat playing with yarn"
 
-# Image-to-video
-n0b ai video image.jpg "zoom out slowly"
+# Force a pipeline
+n0b ai video --model ltx-2 "a robotic dog running"   # same as -2 / --ltx2
+n0b ai video --model ltx-1 "a cat sleeping"          # legacy LTX-Video 1
 
-# Custom output filename
-n0b ai video "spinning cube" cube.mp4
+# Install backends
+n0b ai video --install          # LTX-2 + uv venv
+n0b ai video --install-ltx1     # LTX-Video 1 + pip venv
 
-# Use a different model
-n0b ai video --model ltxv-13b-0.9.8-distilled "high quality video"
-
-# Override defaults
-n0b ai video --num_frames 121 "longer video of a sunset"
-
-# Show help and available models
 n0b ai video --help
 ```
+
+## Backends
+
+| Backend | When | Install |
+|---------|------|---------|
+| MLX-Video | Apple Silicon + `~/repos/mlx-video` + `n0b gpu mlx` | Clone [mlx-video](https://github.com/prince-canuma/mlx-video), `uv venv && uv pip install -e .` |
+| LTX-2 PyTorch | LTX-2 repo, non-MLX or CUDA | `n0b ai video --install`, then `python ~/repos/LTX-2/download_models.py` |
+| LTX-Video 1 | `--ltx1` / `-1` or auto when only LTX-Video repo present | `n0b ai video --install-ltx1` |
+
+---
+
+Wrapper script for generating videos using LTX-Video with intelligent argument parsing and automatic GPU acceleration.
 
 ## Usage
 

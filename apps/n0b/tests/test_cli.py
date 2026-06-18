@@ -5,10 +5,14 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 N0B_PY = Path(__file__).resolve().parents[1] / "n0b.py"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from commands.ai_cmd import cmd_ai  # noqa: E402
 
 
 def run_n0b(*args: str) -> subprocess.CompletedProcess[str]:
@@ -58,3 +62,14 @@ def test_secrets_missing():
     proc = run_n0b("secrets", "get", "N0B_NONEXISTENT_SECRET_XYZ")
     assert proc.returncode == 1
     assert "not found" in proc.stderr
+
+
+def test_ai_video_ltx2_passes_flag():
+    with patch("commands.ai_cmd.subprocess.run") as run:
+        run.return_value.returncode = 0
+        rc = cmd_ai("video", "ltx-2", ["hello"])
+        assert rc == 0
+        argv = run.call_args[0][0]
+        assert argv[0] == "bash"
+        assert argv[2] == "--ltx2"
+        assert argv[3] == "hello"

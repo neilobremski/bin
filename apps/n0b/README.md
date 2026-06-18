@@ -30,7 +30,7 @@ Detailed docs live in [`docs/`](docs/):
 |-------|-------------|-------|
 | `az` | `tail <env>` | Azure webapp log tail — env aliases: `dev`, `qa`, `staging`, `prod` |
 | `ports` | `free`, `listen <port>` | Ephemeral free port; list process on a port (`lsof` / `netstat`) |
-| `gpu` | `cuda`, `mps`, `mb-free` | GPU availability checks; free MiB (nvidia-smi or macOS unified memory) |
+| `gpu` | `cuda`, `mps`, `mlx`, `mb-free` | GPU / MLX checks; free MiB |
 | `secrets` | `get <NAME>` | `$NAME` env var or `~/lib/<name>.txt` |
 | `mqtt` | `pub`, `sub` | `mosquitto_*` with `MQTT_HOST`, `MQTT_PORT`, `MQTT_USER`, `MQTT_PASS` |
 | `ai` | `image`, `video`, `audio` | See [ltx-video.md](docs/ltx-video.md) for video; image/audio use `scripts/` backends |
@@ -41,7 +41,7 @@ Detailed docs live in [`docs/`](docs/):
 | Subcommand | Default backend | Override |
 |------------|-----------------|----------|
 | `n0b ai image` | Z-Image (`z-image.sh`) | `--model z-image` |
-| `n0b ai video` | LTX-Video (`ltx-video.sh`) | `--model ltx-video` |
+| `n0b ai video` | LTX-Video 1, LTX-2 (PyTorch), MLX-Video (Apple Silicon) | `--model ltx-2`, `--model ltx-1`, or `-2`/`-1` flags |
 | `n0b ai audio` | AudioLDM (`audioldm.sh`) | `--model bark` for Suno Bark |
 
 ## Layout

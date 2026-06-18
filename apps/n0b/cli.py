@@ -6,7 +6,7 @@ import sys
 
 from commands.ai_cmd import cmd_ai
 from commands.az_cmd import cmd_tail
-from commands.gpu_cmd import cmd_cuda, cmd_mb_free, cmd_mps
+from commands.gpu_cmd import cmd_cuda, cmd_mb_free, cmd_mlx, cmd_mps
 from commands.json_cmd import cmd_json
 from commands.mqtt_cmd import cmd_pub, cmd_sub
 from commands.openai_cmd import cmd_research
@@ -50,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     gpu_cuda.add_argument("-v", "--verbose", action="store_true")
     gpu_mps = gpu_sub.add_parser("mps", help="Exit 0 if Apple MPS is available")
     gpu_mps.add_argument("-v", "--verbose", action="store_true")
+    gpu_mlx = gpu_sub.add_parser("mlx", help="Exit 0 if Apple MLX (Apple Silicon) is available")
+    gpu_mlx.add_argument("-v", "--verbose", action="store_true")
     gpu_sub.add_parser("mb-free", help="Print free GPU memory in MiB")
 
     secrets_p = sub.add_parser("secrets", help="Resolve secrets from env or ~/lib")
@@ -73,13 +75,16 @@ def build_parser() -> argparse.ArgumentParser:
     ai_sub = ai_p.add_subparsers(dest="ai_kind", required=True)
     for kind, help_text in (
         ("image", "Generate images (default model: z-image)"),
-        ("video", "Generate videos (default model: ltx-video)"),
+        ("video", "Generate videos — LTX-Video 1/2, MLX on Apple Silicon (default: auto)"),
         ("audio", "Generate audio (default model: audioldm)"),
     ):
         p = ai_sub.add_parser(kind, help=help_text)
         p.add_argument(
             "--model",
-            help="Model backend (image: z-image; video: ltx-video; audio: audioldm, bark)",
+            help=(
+                "Backend override (video: ltx-video auto, ltx-2, ltx-1; "
+                "image: z-image; audio: audioldm, bark)"
+            ),
         )
         p.add_argument("args", nargs=argparse.REMAINDER)
 
@@ -112,6 +117,8 @@ def dispatch(args: argparse.Namespace) -> int:
             return cmd_cuda(args.verbose)
         if args.gpu_cmd == "mps":
             return cmd_mps(args.verbose)
+        if args.gpu_cmd == "mlx":
+            return cmd_mlx(args.verbose)
         if args.gpu_cmd == "mb-free":
             return cmd_mb_free()
     if group == "secrets":

@@ -1,26 +1,52 @@
 #!/usr/bin/env bash
 
-# ltx-video: Wrapper script for generating videos with LTX-Video
-# Usage: ltx-video [options] [prompt text...] [output.mp4]
-# Options starting with - or -- are passed to inference.py
-# File paths are used as reference images
-# Text arguments become the prompt
-# Last argument ending in .mp4 is the output filename
+# n0b ai video backend: LTX-Video 1, LTX-2 (PyTorch), and MLX-Video on Apple Silicon
+# Usage: n0b ai video [options] [prompt text...] [output.mp4]
 
 set -e
 
-# Determine LTX-Video repo location early (for help to show available models)
-if [ -d "$HOME/repos/LTX-Video" ]; then
-  LTX_DIR="$HOME/repos/LTX-Video"
-elif [ -d "$HOME/LTX-Video" ]; then
-  LTX_DIR="$HOME/LTX-Video"
+_n0b() {
+  local bin="${N0B_BIN:-$HOME/bin}"
+  if [ -x "$bin/n0b" ]; then
+    "$bin/n0b" "$@"
+  elif command -v n0b >/dev/null 2>&1; then
+    n0b "$@"
+  else
+    return 127
+  fi
+}
+
+# Helper to check if argument was passed in INFERENCE_ARGS
+has_arg() {
+  local target="$1"
+  for arg in "${INFERENCE_ARGS[@]}"; do
+    if [[ "$arg" == "$target"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Determine repo locations
+if [ -d "$HOME/repos/LTX-2" ]; then
+  LTX2_DIR="$HOME/repos/LTX-2"
+elif [ -d "$HOME/LTX-2" ]; then
+  LTX2_DIR="$HOME/LTX-2"
 else
-  LTX_DIR=""
+  LTX2_DIR=""
+fi
+
+if [ -d "$HOME/repos/LTX-Video" ]; then
+  LTX1_DIR="$HOME/repos/LTX-Video"
+elif [ -d "$HOME/LTX-Video" ]; then
+  LTX1_DIR="$HOME/LTX-Video"
+else
+  LTX1_DIR=""
 fi
 
 # Install function
 do_install() {
-  echo "=== LTX-Video Installation ==="
+  echo "=== LTX-Video & LTX-2 Installation ==="
   
   # Determine install location
   if [ -d "$HOME/repos" ]; then
@@ -29,12 +55,57 @@ do_install() {
     INSTALL_DIR="$HOME"
   fi
   
-  TARGET_DIR="$INSTALL_DIR/LTX-Video"
+  TARGET_DIR="$INSTALL_DIR/LTX-2"
   
-  # Clone if not already present
+  # Clone or pull LTX-2
+  if [ -d "$TARGET_DIR" ]; then
+    echo "LTX-2 repo already exists at $TARGET_DIR"
+    echo "Pulling latest changes..."
+    cd "$TARGET_DIR"
+    git pull
+  else
+    echo "Cloning LTX-2 to $TARGET_DIR..."
+    git clone https://github.com/Lightricks/LTX-2.git "$TARGET_DIR"
+    cd "$TARGET_DIR"
+  fi
+  
+  # Check if uv is installed
+  if ! which uv >/dev/null 2>&1; then
+    if which brew >/dev/null 2>&1; then
+      echo "Installing uv via Homebrew..."
+      brew install uv
+    else
+      echo "uv not found. Please install uv (https://github.com/astral-sh/uv) manually to configure LTX-2."
+      exit 1
+    fi
+  fi
+  
+  # Sync environment
+  echo "Syncing LTX-2 virtual environment with uv..."
+  cd "$TARGET_DIR"
+  uv sync
+  
+  echo ""
+  echo "=== Installation Complete ==="
+  echo "LTX-2 installed at: $TARGET_DIR"
+  echo "Model downloader location: $TARGET_DIR/download_models.py"
+  echo ""
+  echo "Please download the models by running:"
+  echo "  python $TARGET_DIR/download_models.py"
+  echo ""
+  exit 0
+}
+
+do_install_ltx1() {
+  echo "=== LTX-Video 1 Installation ==="
+  if [ -d "$HOME/repos" ]; then
+    INSTALL_DIR="$HOME/repos"
+  else
+    INSTALL_DIR="$HOME"
+  fi
+  TARGET_DIR="$INSTALL_DIR/LTX-Video"
   if [ -d "$TARGET_DIR" ]; then
     echo "LTX-Video repo already exists at $TARGET_DIR"
-    echo "Pulling latest changes..."
     cd "$TARGET_DIR"
     git pull
   else
@@ -42,123 +113,88 @@ do_install() {
     git clone https://github.com/Lightricks/LTX-Video.git "$TARGET_DIR"
     cd "$TARGET_DIR"
   fi
-  
-  # Create venv if it doesn't exist
-  if [ -d "$TARGET_DIR/venv" ]; then
-    echo "Virtual environment already exists"
-  else
-    echo "Creating Python virtual environment..."
+  if [ ! -d "$TARGET_DIR/venv" ]; then
     python3 -m venv "$TARGET_DIR/venv"
   fi
-  
-  # Activate venv
   source "$TARGET_DIR/venv/bin/activate"
-  
-  # Upgrade pip
-  echo "Upgrading pip..."
   pip install --upgrade pip
-  
-  # Install base dependencies from the package
-  echo "Installing LTX-Video package with inference dependencies..."
-  cd "$TARGET_DIR"
   pip install -e '.[inference]'
-  
-  # Detect GPU backend and reinstall PyTorch if needed for CUDA
   echo "Detecting GPU backend..."
-  
-  _N0B="${N0B_BIN:-$HOME/bin}/n0b"
-  if "$_N0B" gpu cuda 2>/dev/null; then
-    echo "CUDA detected - reinstalling PyTorch with CUDA support..."
-    # Uninstall CPU-only PyTorch that may have been installed
+  if _n0b gpu cuda 2>/dev/null; then
     pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
-    # Install PyTorch with CUDA 11.8 support
     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-  elif "$_N0B" gpu mps 2>/dev/null; then
-    echo "MPS (Apple Silicon) detected - PyTorch already has MPS support"
-    # MPS support is built into the standard PyTorch for macOS, no reinstall needed
+  elif _n0b gpu mps 2>/dev/null; then
+    echo "MPS detected — standard PyTorch includes MPS support"
   else
-    echo "No GPU detected - using CPU-only PyTorch"
-    # The default PyTorch from pip install -e '.[inference]' works for CPU
+    echo "No GPU detected — using CPU-only PyTorch"
   fi
-  
-  echo ""
-  echo "=== Installation Complete ==="
-  echo "LTX-Video installed at: $TARGET_DIR"
-  echo "Virtual environment: $TARGET_DIR/venv"
-  echo ""
-  echo "You can now run: ltx-video \"your prompt here\""
-  
+  echo "LTX-Video 1 installed at: $TARGET_DIR"
   exit 0
 }
 
-# Check for --install flag
+# Check for --install flags
 for arg in "$@"; do
   if [ "$arg" = "--install" ]; then
     do_install
+  fi
+  if [ "$arg" = "--install-ltx1" ]; then
+    do_install_ltx1
   fi
 done
 
 # Show help if requested
 show_help() {
   cat << 'EOF'
-ltx-video - Generate videos using LTX-Video
+n0b ai video - Generate videos using LTX-Video 1, LTX-2, or MLX-Video
 
 USAGE
-  ltx-video [options] [prompt text...] [output.mp4]
+  n0b ai video [options] [prompt text...] [output.mp4]
 
 ARGUMENT PARSING
   Text arguments       Concatenated with spaces to form the prompt
-  -text                Single dash: added to negative prompt (things to avoid)
-  --option             Double dash: passed directly to inference.py
+  -text                Single dash followed by text: added to negative prompt (things to avoid)
+                       (Note: Negative prompts only apply to LTX-Video 1 and LTX-2 Dev)
+  --option             Double dash: passed directly to the inference pipeline
   file.jpg             Existing file: used as reference image (image-to-video)
                        Multiple images are auto-distributed across frames
   output.mp4           Last argument ending in .mp4: output filename
                        Default: YYYY-MM-DD-HHMMSS-ltx-video.mp4
 
-DEFAULT PARAMETERS
+DEFAULT PARAMETERS (LTX-Video 2)
+  Model:       ltx-2.3-22b-distilled-1.1 (default)
+  Resolution:  832x512 (divisible by 64)
+  Duration:    97 frames (4 seconds at 24 FPS)
+  Frame Rate:  24 FPS
+
+DEFAULT PARAMETERS (LTX-Video 1)
   Model:       ltxv-2b-0.9.8-distilled
   Resolution:  854x480
-  Duration:    73 frames (3 seconds at 24 FPS)
+  Duration:    121 frames (5 seconds at 24 FPS)
   Frame Rate:  24 FPS
 
 EXAMPLES
-  ltx-video "a cat playing with yarn"
-  ltx-video image.jpg "zoom out slowly"
-  ltx-video start.jpg end.jpg "morph between images"
-  ltx-video "spinning cube" cube.mp4
-  ltx-video "beautiful landscape" -people -buildings
-  ltx-video --num_frames 121 "longer video of a sunset"
-  ltx-video --model ltxv-13b-0.9.8-distilled "high quality video"
+  n0b ai video "a cat playing with yarn"
+  n0b ai video image.jpg "zoom out slowly"
+  n0b ai video start.jpg end.jpg "morph between images"
+  n0b ai video -2 "a robotic dog running"                    # Force LTX-Video 2
+  n0b ai video -1 "a cat sleeping"                           # Force LTX-Video 1
+  n0b ai video --model ltx-2.3-22b-dev "high quality video"  # LTX-2.3 Dev Pipeline
 
 WRAPPER OPTIONS
-  --install            Install/update LTX-Video repo, create venv, install dependencies
-  --model MODEL        Select model config (see AVAILABLE MODELS below)
+  --install            Install/update LTX-2 repo (uv sync)
+  --install-ltx1       Install LTX-Video 1 (legacy PyTorch pipeline)
+  --ltx1, -1           Force using LTX-Video 1
+  --ltx2, -2           Force using LTX-Video 2
+  --model MODEL        Select model config (e.g., ltxv-2b-0.9.8-distilled or ltx-2.3-22b-distilled-1.1)
   -m MODEL             Short form of --model
 
-INFERENCE OPTIONS (passed to inference.py)
-  --num_frames NUM     Number of frames (must be 8*N + 1: 9, 17, 25, 49, 73, 121)
-  --height HEIGHT      Video height in pixels (must be divisible by 32)
-  --width WIDTH        Video width in pixels (must be divisible by 32)
-  --seed SEED          Random seed for reproducibility
-  --offload_to_cpu     Enable CPU offloading for lower VRAM usage
+BACKENDS (LTX-Video 2)
+  Apple Silicon with mlx-video repo: MLX-Video (auto when n0b gpu mlx succeeds)
+  Otherwise: PyTorch LTX-2 (CUDA or CPU) via LTX-2 repo + uv venv
+
+Documentation: ~/bin/apps/n0b/docs/ltx-video.md
 
 EOF
-
-  # List available models if LTX_DIR is found
-  if [ -n "$LTX_DIR" ] && [ -d "$LTX_DIR/configs" ]; then
-    echo "AVAILABLE MODELS"
-    for config in "$LTX_DIR/configs"/*.yaml; do
-      name=$(basename "$config" .yaml)
-      if [ "$name" = "ltxv-2b-0.9.8-distilled" ]; then
-        echo "  $name (default)"
-      else
-        echo "  $name"
-      fi
-    done
-    echo ""
-  fi
-
-  echo "For full documentation, see: ~/bin/apps/n0b/docs/ltx-video.md"
   exit 0
 }
 
@@ -169,99 +205,35 @@ for arg in "$@"; do
   fi
 done
 
-# Determine LTX-Video repo location
-if [ -d "$HOME/repos/LTX-Video" ]; then
-  LTX_DIR="$HOME/repos/LTX-Video"
-elif [ -d "$HOME/LTX-Video" ]; then
-  LTX_DIR="$HOME/LTX-Video"
-else
-  echo "Error: LTX-Video repository not found in $HOME/repos/LTX-Video or $HOME/LTX-Video"
-  exit 1
-fi
-
-# Default parameters
-MODEL="ltxv-2b-0.9.8-distilled"
-NUM_FRAMES=${NUM_FRAMES:-121}  # 5 seconds at 24 FPS (5*24 + 1)
-FRAME_RATE=${FRAME_RATE:-24}
-HEIGHT=${HEIGHT:-480}
-WIDTH=${WIDTH:-832}
+# Initialize version variable (0=auto, 1=LTX-Video 1, 2=LTX-Video 2)
+LTX_VERSION=0
+MODEL=""
 OUTPUT_FILE=""
+OUTPUT_FILE_IDX=-1
 PROMPT=""
 NEGATIVE_PROMPT=""
 REFERENCE_IMAGES=()
 INFERENCE_ARGS=()
 
-# ============================================================
-# PASS 1: Process wrapper options and build filtered args list
-# ============================================================
-FILTERED_ARGS=()
-SKIP_NEXT=false
 ARGS=("$@")
 
-for i in "${!ARGS[@]}"; do
-  if [ "$SKIP_NEXT" = true ]; then
-    SKIP_NEXT=false
-    continue
-  fi
-  
-  arg="${ARGS[$i]}"
-  next_arg="${ARGS[$((i+1))]:-}"
-  
-  # Wrapper option: --model / -m
-  if [ "$arg" = "--model" ] || [ "$arg" = "-m" ]; then
-    if [ -n "$next_arg" ]; then
-      MODEL="$next_arg"
-      SKIP_NEXT=true
-    else
-      echo "Error: $arg requires a model name"
-      exit 1
-    fi
-  # Add more wrapper options here in the future
-  # elif [ "$arg" = "--some-option" ]; then
-  #   ...
-  else
-    # Not a wrapper option, keep it for pass 2
-    FILTERED_ARGS+=("$arg")
-  fi
-done
-
 # ============================================================
-# PASS 2: Process remaining arguments
+# PASS 1: Find output file first (last argument ending in .mp4)
 # ============================================================
-# Get last element (Bash 3.2 compatible - no negative indexing)
-FILTERED_COUNT=${#FILTERED_ARGS[@]}
-if [ "$FILTERED_COUNT" -gt 0 ]; then
-  LAST_ARG="${FILTERED_ARGS[$((FILTERED_COUNT-1))]}"
-else
-  LAST_ARG=""
-fi
-
-for arg in "${FILTERED_ARGS[@]}"; do
-  # Check if it's the last argument and ends with .mp4
-  if [ "$arg" = "$LAST_ARG" ] && [[ "$arg" == *.mp4 ]]; then
-    OUTPUT_FILE="$arg"
-  # Check if it starts with single dash (negative prompt)
-  elif [[ "$arg" =~ ^-[^-].* ]]; then
-    # Remove leading dash and add to negative prompt
-    NEGATIVE_TEXT="${arg#-}"
-    if [ -z "$NEGATIVE_PROMPT" ]; then
-      NEGATIVE_PROMPT="$NEGATIVE_TEXT"
-    else
-      NEGATIVE_PROMPT="$NEGATIVE_PROMPT, $NEGATIVE_TEXT"
+for ((idx=${#ARGS[@]}-1; idx>=0; idx--)); do
+  val="${ARGS[$idx]}"
+  if [[ "$val" == *.mp4 ]]; then
+    # Ensure it's not the value of an option (e.g. --output-path output.mp4)
+    prev_idx=$((idx-1))
+    if [ $prev_idx -ge 0 ]; then
+      prev_val="${ARGS[$prev_idx]}"
+      if [ "$prev_val" = "--output-path" ] || [ "$prev_val" = "--output_path" ]; then
+        continue
+      fi
     fi
-  # Check if it starts with double dash (option for inference.py)
-  elif [[ "$arg" =~ ^--.+ ]]; then
-    INFERENCE_ARGS+=("$arg")
-  # Check if it's an existing file (reference image)
-  elif [ -f "$arg" ]; then
-    REFERENCE_IMAGES+=("$arg")
-  # Otherwise it's part of the prompt
-  else
-    if [ -z "$PROMPT" ]; then
-      PROMPT="$arg"
-    else
-      PROMPT="$PROMPT $arg"
-    fi
+    OUTPUT_FILE="$val"
+    OUTPUT_FILE_IDX=$idx
+    break
   fi
 done
 
@@ -271,123 +243,507 @@ if [ -z "$OUTPUT_FILE" ]; then
   OUTPUT_FILE="${TIMESTAMP}-ltx-video.mp4"
 fi
 
+# ============================================================
+# PASS 2: Process all arguments
+# ============================================================
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+  if [ $i -eq $OUTPUT_FILE_IDX ]; then
+    i=$((i + 1))
+    continue
+  fi
+  
+  arg="${ARGS[$i]}"
+  next_arg="${ARGS[$((i+1))]:-}"
+  
+  # Wrapper options
+  if [ "$arg" = "--ltx1" ] || [ "$arg" = "-1" ]; then
+    LTX_VERSION=1
+    i=$((i + 1))
+    continue
+  elif [ "$arg" = "--ltx2" ] || [ "$arg" = "-2" ]; then
+    LTX_VERSION=2
+    i=$((i + 1))
+    continue
+  elif [ "$arg" = "--model" ] || [ "$arg" = "-m" ]; then
+    if [ -n "$next_arg" ]; then
+      MODEL="$next_arg"
+      i=$((i + 2))
+    else
+      echo "Error: $arg requires a model name"
+      exit 1
+    fi
+    continue
+  fi
+  
+  # Check if it starts with dash (option or flag)
+  if [[ "$arg" =~ ^- ]]; then
+    # Is it a negative prompt (starts with single dash followed by a letter, not a number)
+    if [[ "$arg" =~ ^-[^-] ]] && [[ ! "$arg" =~ ^-[0-9] ]]; then
+      NEGATIVE_TEXT="${arg#-}"
+      if [ -z "$NEGATIVE_PROMPT" ]; then
+        NEGATIVE_PROMPT="$NEGATIVE_TEXT"
+      else
+        NEGATIVE_PROMPT="$NEGATIVE_PROMPT, $NEGATIVE_TEXT"
+      fi
+      i=$((i + 1))
+    else
+      # Double dash or numeric single dash (inference option)
+      # Check if it has an equal sign
+      if [[ "$arg" == *=* ]]; then
+        INFERENCE_ARGS+=("$arg")
+        i=$((i + 1))
+      else
+        # Check if next_arg is the value of this option
+        is_value=false
+        if [ -n "$next_arg" ] && [[ ! "$next_arg" =~ ^- ]]; then
+          # Ensure next_arg is not the output file
+          next_idx=$((i+1))
+          if [ $next_idx -ne $OUTPUT_FILE_IDX ]; then
+            is_value=true
+          fi
+        fi
+        
+        if [ "$is_value" = true ]; then
+          INFERENCE_ARGS+=("$arg" "$next_arg")
+          i=$((i + 2))
+        else
+          # Boolean flag
+          INFERENCE_ARGS+=("$arg")
+          i=$((i + 1))
+        fi
+      fi
+    fi
+  elif [ -f "$arg" ]; then
+    # Reference image
+    REFERENCE_IMAGES+=("$arg")
+    i=$((i + 1))
+  else
+    # Prompt text
+    if [ -z "$PROMPT" ]; then
+      PROMPT="$arg"
+    else
+      PROMPT="$PROMPT $arg"
+    fi
+    i=$((i + 1))
+  fi
+done
+
+# Check if MLX-Video is installed and compatible
+USE_MLX_COMPAT=false
+if _n0b gpu mlx 2>/dev/null; then
+  if [ -d "$HOME/repos/mlx-video" ] || [ -d "$HOME/mlx-video" ]; then
+    USE_MLX_COMPAT=true
+  fi
+fi
+
+# Version Auto-detection based on model name
+if [ $LTX_VERSION -eq 0 ]; then
+  if [ -n "$MODEL" ]; then
+    if [[ "$MODEL" == *ltx-2* ]] || [[ "$MODEL" == *ltx2* ]] || [[ "$MODEL" == *2.3* ]] || [[ "$MODEL" == "distilled" ]] || [[ "$MODEL" == "dev" ]]; then
+      LTX_VERSION=2
+    else
+      LTX_VERSION=1
+    fi
+  else
+    # Default to version 2 if LTX-2 repo OR MLX compatibility is present
+    if [ -n "$LTX2_DIR" ] || [ "$USE_MLX_COMPAT" = true ]; then
+      LTX_VERSION=2
+    else
+      LTX_VERSION=1
+    fi
+  fi
+fi
+
+# Ensure selected repository is present (with graceful degradation for version 2 if using MLX)
+if [ $LTX_VERSION -eq 2 ]; then
+  if [ "$USE_MLX_COMPAT" = false ]; then
+    if [ -z "$LTX2_DIR" ]; then
+      echo "Error: LTX-2 repository not found. Please install it using: n0b ai video --install"
+      exit 1
+    fi
+    LTX_DIR="$LTX2_DIR"
+  else
+    LTX_DIR=""
+  fi
+else
+  if [ -z "$LTX1_DIR" ]; then
+    echo "Error: LTX-Video repository not found in $HOME/repos/LTX-Video or $HOME/LTX-Video"
+    exit 1
+  fi
+  LTX_DIR="$LTX1_DIR"
+fi
+
+# Set default parameters based on version
+if [ $LTX_VERSION -eq 2 ]; then
+  if [ -z "$MODEL" ]; then
+    MODEL="ltx-2.3-22b-distilled-1.1"
+  fi
+  NUM_FRAMES=${NUM_FRAMES:-97}  # 4 seconds at 24 FPS (8*12 + 1)
+  FRAME_RATE=${FRAME_RATE:-24}
+  HEIGHT=${HEIGHT:-512}         # Must be divisible by 64 for 2-stage LTX-2
+  WIDTH=${WIDTH:-832}           # Must be divisible by 64 for 2-stage LTX-2
+else
+  if [ -z "$MODEL" ]; then
+    MODEL="ltxv-2b-0.9.8-distilled"
+  fi
+  NUM_FRAMES=${NUM_FRAMES:-121}  # 5 seconds at 24 FPS (8*15 + 1)
+  FRAME_RATE=${FRAME_RATE:-24}
+  HEIGHT=${HEIGHT:-480}
+  WIDTH=${WIDTH:-832}
+fi
+
 # Create temporary directory for inference output
 TEMP_DIR=$(mktemp -d)
 echo "Temporary output directory: $TEMP_DIR"
 
-# Activate venv if present
-if [ -d "$LTX_DIR/venv" ]; then
-  source "$LTX_DIR/venv/bin/activate"
-fi
-
-# Check if height, width, num_frames, or frame_rate were passed in INFERENCE_ARGS
-HAS_HEIGHT=false
-HAS_WIDTH=false
-HAS_NUM_FRAMES=false
-HAS_FRAME_RATE=false
-
-for arg in "${INFERENCE_ARGS[@]}"; do
-  # CHANGED: Use pattern matching to catch both "--arg" and "--arg=value"
-  if [[ "$arg" == --height* ]]; then
-    HAS_HEIGHT=true
-  elif [[ "$arg" == --width* ]]; then
-    HAS_WIDTH=true
-  elif [[ "$arg" == --num_frames* ]]; then
-    HAS_NUM_FRAMES=true
-  elif [[ "$arg" == --frame_rate* ]]; then
-    HAS_FRAME_RATE=true
-  elif [[ "$arg" == --offload_to_cpu* ]]; then
-     # Optional: You might want to detect this to auto-skip defaults if needed
-     :
+# ============================================================
+# EXECUTION (LTX-Video 1)
+# ============================================================
+if [ $LTX_VERSION -eq 1 ]; then
+  # Activate venv if present
+  if [ -d "$LTX_DIR/venv" ]; then
+    source "$LTX_DIR/venv/bin/activate"
   fi
-done
 
-# Build command
-CMD=(python "$LTX_DIR/inference.py")
-CMD+=(--pipeline_config "$LTX_DIR/configs/${MODEL}.yaml")
+  HAS_HEIGHT=false
+  HAS_WIDTH=false
+  HAS_NUM_FRAMES=false
+  HAS_FRAME_RATE=false
 
-# Only add defaults if not already specified in INFERENCE_ARGS
-if [ "$HAS_HEIGHT" = false ]; then
-  CMD+=(--height "$HEIGHT")
-fi
-if [ "$HAS_WIDTH" = false ]; then
-  CMD+=(--width "$WIDTH")
-fi
-if [ "$HAS_NUM_FRAMES" = false ]; then
-  CMD+=(--num_frames "$NUM_FRAMES")
-fi
-if [ "$HAS_FRAME_RATE" = false ]; then
-  CMD+=(--frame_rate "$FRAME_RATE")
-fi
-
-CMD+=(--output_path "$TEMP_DIR")
-
-# Add prompt if provided
-if [ -n "$PROMPT" ]; then
-  CMD+=(--prompt "$PROMPT")
-fi
-
-# Add negative prompt if provided
-if [ -n "$NEGATIVE_PROMPT" ]; then
-  CMD+=(--negative_prompt "$NEGATIVE_PROMPT")
-fi
-
-# Add reference images if provided
-# Multiple images are distributed evenly across the frame range
-if [ ${#REFERENCE_IMAGES[@]} -gt 0 ]; then
-  NUM_IMAGES=${#REFERENCE_IMAGES[@]}
-  
-  # Calculate evenly distributed frame positions (spanning first to last frame)
-  # For N images across F frames: position[i] = i * (F-1) / (N-1)
-  # Examples:
-  #   1 image, 25 frames: frame 0
-  #   2 images, 25 frames: frames 0, 24
-  #   3 images, 25 frames: frames 0, 12, 24
-  #   4 images, 25 frames: frames 0, 8, 16, 24
-  FRAME_POSITIONS=()
-  i=0
-  while [ $i -lt $NUM_IMAGES ]; do
-    if [ $NUM_IMAGES -eq 1 ]; then
-      FRAME_POS=0
-    else
-      # Calculate position: i * (NUM_FRAMES - 1) / (NUM_IMAGES - 1)
-      # Using integer division, spans from frame 0 to last frame
-      FRAME_POS=$(( i * (NUM_FRAMES - 1) / (NUM_IMAGES - 1) ))
+  for arg in "${INFERENCE_ARGS[@]}"; do
+    if [[ "$arg" == --height* ]]; then
+      HAS_HEIGHT=true
+    elif [[ "$arg" == --width* ]]; then
+      HAS_WIDTH=true
+    elif [[ "$arg" == --num_frames* ]]; then
+      HAS_NUM_FRAMES=true
+    elif [[ "$arg" == --frame_rate* ]]; then
+      HAS_FRAME_RATE=true
     fi
-    FRAME_POSITIONS+=("$FRAME_POS")
-    i=$((i + 1))
   done
-  
-  echo "Reference images: ${REFERENCE_IMAGES[*]}"
-  echo "Frame positions: ${FRAME_POSITIONS[*]}"
-  
-  # Pass as space-separated arguments (not comma-separated)
-  CMD+=(--conditioning_media_paths "${REFERENCE_IMAGES[@]}")
-  CMD+=(--conditioning_start_frames "${FRAME_POSITIONS[@]}")
-fi
 
-# Add extra arguments
-if [ ${#INFERENCE_ARGS[@]} -gt 0 ]; then
-  CMD+=("${INFERENCE_ARGS[@]}")
-fi
+  # Build command
+  CMD=(python "$LTX_DIR/inference.py")
+  CMD+=(--pipeline_config "$LTX_DIR/configs/${MODEL}.yaml")
 
-# Execute with timing
-echo "Running: ${CMD[*]}"
-START_TIME=$(date +%s)
-"${CMD[@]}"
-END_TIME=$(date +%s)
-ELAPSED=$((END_TIME - START_TIME))
+  if [ "$HAS_HEIGHT" = false ]; then
+    CMD+=(--height "$HEIGHT")
+  fi
+  if [ "$HAS_WIDTH" = false ]; then
+    CMD+=(--width "$WIDTH")
+  fi
+  if [ "$HAS_NUM_FRAMES" = false ]; then
+    CMD+=(--num_frames "$NUM_FRAMES")
+  fi
+  if [ "$HAS_FRAME_RATE" = false ]; then
+    CMD+=(--frame_rate "$FRAME_RATE")
+  fi
 
-# Find the generated video file and move it
-GENERATED_VIDEO=$(find "$TEMP_DIR" -name "*.mp4" -type f | head -n 1)
+  CMD+=(--output_path "$TEMP_DIR")
 
-if [ -n "$GENERATED_VIDEO" ]; then
-  mv "$GENERATED_VIDEO" "$OUTPUT_FILE"
-  echo "Video saved to: $OUTPUT_FILE"
-  echo "Generation time: ${ELAPSED} seconds"
-  # Clean up temp directory
-  rm -rf "$TEMP_DIR"
+  if [ -n "$PROMPT" ]; then
+    CMD+=(--prompt "$PROMPT")
+  fi
+
+  if [ -n "$NEGATIVE_PROMPT" ]; then
+    CMD+=(--negative_prompt "$NEGATIVE_PROMPT")
+  fi
+
+  if [ ${#REFERENCE_IMAGES[@]} -gt 0 ]; then
+    NUM_IMAGES=${#REFERENCE_IMAGES[@]}
+    FRAME_POSITIONS=()
+    i=0
+    while [ $i -lt $NUM_IMAGES ]; do
+      if [ $NUM_IMAGES -eq 1 ]; then
+        FRAME_POS=0
+      else
+        FRAME_POS=$(( i * (NUM_FRAMES - 1) / (NUM_IMAGES - 1) ))
+      fi
+      FRAME_POSITIONS+=("$FRAME_POS")
+      i=$((i + 1))
+    done
+    
+    echo "Reference images: ${REFERENCE_IMAGES[*]}"
+    echo "Frame positions: ${FRAME_POSITIONS[*]}"
+    CMD+=(--conditioning_media_paths "${REFERENCE_IMAGES[@]}")
+    CMD+=(--conditioning_start_frames "${FRAME_POSITIONS[@]}")
+  fi
+
+  if [ ${#INFERENCE_ARGS[@]} -gt 0 ]; then
+    CMD+=("${INFERENCE_ARGS[@]}")
+  fi
+
+  echo "Running LTX-Video 1: ${CMD[*]}"
+  START_TIME=$(date +%s)
+  "${CMD[@]}"
+  END_TIME=$(date +%s)
+  ELAPSED=$((END_TIME - START_TIME))
+
+  GENERATED_VIDEO=$(find "$TEMP_DIR" -name "*.mp4" -type f | head -n 1)
+  if [ -n "$GENERATED_VIDEO" ]; then
+    mv "$GENERATED_VIDEO" "$OUTPUT_FILE"
+    echo "Video saved to: $OUTPUT_FILE"
+    echo "Generation time: ${ELAPSED} seconds"
+    rm -rf "$TEMP_DIR"
+  else
+    echo "Error: No video file generated in $TEMP_DIR"
+    exit 1
+  fi
+
+# ============================================================
+# EXECUTION (LTX-Video 2)
+# ============================================================
 else
-  echo "Error: No video file generated in $TEMP_DIR"
-  exit 1
+  # Use early compatibility evaluation
+  USE_MLX="$USE_MLX_COMPAT"
+
+  if [ "$USE_MLX" = true ]; then
+    # ==========================================
+    # MLX-Video Backend (Optimized Apple Silicon)
+    # ==========================================
+    if [ -d "$HOME/repos/mlx-video" ]; then
+      MLX_VIDEO_DIR="$HOME/repos/mlx-video"
+    else
+      MLX_VIDEO_DIR="$HOME/mlx-video"
+    fi
+
+    # Activate MLX-Video virtual environment
+    if [ -d "$MLX_VIDEO_DIR/.venv" ]; then
+      source "$MLX_VIDEO_DIR/.venv/bin/activate"
+    else
+      echo "Error: MLX-Video virtual environment not found at $MLX_VIDEO_DIR/.venv"
+      echo "Please set up the virtual environment by running:"
+      echo "  cd $MLX_VIDEO_DIR && uv venv && uv pip install -e ."
+      exit 1
+    fi
+
+    # Determine model repo/path and pipeline type
+    if [ -n "$MODEL" ]; then
+      if [ "$MODEL" = "ltx-2.3-22b-distilled-1.1" ] || [ "$MODEL" = "distilled" ] || [ "$MODEL" = "ltx2-distilled" ]; then
+        if [ -d "$HOME/models/LTX-2/mlx/distilled" ]; then
+          MODEL_REPO="$HOME/models/LTX-2/mlx/distilled"
+        else
+          MODEL_REPO="prince-canuma/LTX-2.3-distilled"
+        fi
+        PIPELINE_ARG="distilled"
+      elif [ "$MODEL" = "ltx-2.3-22b-dev" ] || [ "$MODEL" = "dev" ] || [ "$MODEL" = "ltx2-dev" ]; then
+        if [ -d "$HOME/models/LTX-2/mlx/dev" ]; then
+          MODEL_REPO="$HOME/models/LTX-2/mlx/dev"
+        else
+          MODEL_REPO="prince-canuma/LTX-2.3-dev"
+        fi
+        PIPELINE_ARG="dev"
+      else
+        # Custom path or Hugging Face repo ID
+        MODEL_REPO="$MODEL"
+        PIPELINE_ARG="distilled"
+      fi
+    else
+      # Default to distilled version
+      if [ -d "$HOME/models/LTX-2/mlx/distilled" ]; then
+        MODEL_REPO="$HOME/models/LTX-2/mlx/distilled"
+      else
+        MODEL_REPO="prince-canuma/LTX-2.3-distilled"
+      fi
+      PIPELINE_ARG="distilled"
+    fi
+
+    # Build command
+    CMD=(python -m mlx_video.models.ltx_2.generate)
+    CMD+=("--model-repo" "$MODEL_REPO")
+    CMD+=("--pipeline" "$PIPELINE_ARG")
+
+    if ! has_arg "--height" && ! has_arg "-H"; then
+      CMD+=("--height" "$HEIGHT")
+    fi
+    if ! has_arg "--width" && ! has_arg "-W"; then
+      CMD+=("--width" "$WIDTH")
+    fi
+    if ! has_arg "--num-frames" && ! has_arg "-n"; then
+      CMD+=("--num-frames" "$NUM_FRAMES")
+    fi
+    if ! has_arg "--fps"; then
+      CMD+=("--fps" "$FRAME_RATE")
+    fi
+    if ! has_arg "--output-path" && ! has_arg "-o"; then
+      CMD+=("--output-path" "$TEMP_DIR/output.mp4")
+    fi
+    if [ -n "$PROMPT" ] && ! has_arg "--prompt" && ! has_arg "-p"; then
+      CMD+=("--prompt" "$PROMPT")
+    fi
+
+    # Map reference images (up to 2: first and last)
+    if [ ${#REFERENCE_IMAGES[@]} -gt 0 ]; then
+      if ! has_arg "--image" && ! has_arg "-i"; then
+        CMD+=("--image" "${REFERENCE_IMAGES[0]}")
+        if [ ${#REFERENCE_IMAGES[@]} -gt 1 ]; then
+          if ! has_arg "--end-image"; then
+            CMD+=("--end-image" "${REFERENCE_IMAGES[${#REFERENCE_IMAGES[@]}-1]}")
+          fi
+          if [ ${#REFERENCE_IMAGES[@]} -gt 2 ]; then
+            echo "Warning: MLX-Video supports a maximum of 2 reference images (first and last frame). Only using the first and last images provided."
+          fi
+        fi
+      fi
+    fi
+
+    # Add all other passthrough inference arguments
+    if [ ${#INFERENCE_ARGS[@]} -gt 0 ]; then
+      CMD+=("${INFERENCE_ARGS[@]}")
+    fi
+
+    echo "Running LTX-Video 2 (MLX-Video): ${CMD[*]}"
+
+  else
+    # ==========================================
+    # PyTorch LTX-2 Backend (CUDA or Fallback)
+    # ==========================================
+    # Activate uv venv
+    if [ -d "$LTX_DIR/.venv" ]; then
+      source "$LTX_DIR/.venv/bin/activate"
+    else
+      echo "Error: LTX-2 virtual environment not found. Please run: n0b ai video --install"
+      exit 1
+    fi
+
+    # Determine pipeline based on model selection
+    if [ "$MODEL" = "ltx-2.3-22b-distilled-1.1" ] || [ "$MODEL" = "distilled" ] || [ "$MODEL" = "ltx2-distilled" ]; then
+      PIPELINE="ltx_pipelines.distilled"
+      CHECKPOINT_FLAG="--distilled-checkpoint-path"
+      CHECKPOINT_PATH="$HOME/models/LTX-2/checkpoint/ltx-2.3-22b-distilled-1.1.safetensors"
+    elif [ "$MODEL" = "ltx-2.3-22b-dev" ] || [ "$MODEL" = "dev" ] || [ "$MODEL" = "ltx2-dev" ]; then
+      PIPELINE="ltx_pipelines.ti2vid_two_stages"
+      CHECKPOINT_FLAG="--checkpoint-path"
+      CHECKPOINT_PATH="$HOME/models/LTX-2/checkpoint/ltx-2.3-22b-dev.safetensors"
+      DISTILLED_LORA_PATH="$HOME/models/LTX-2/lora/ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+    else
+      # Assume custom checkpoint path (passed directly via passthrough)
+      PIPELINE="ltx_pipelines.ti2vid_two_stages"
+      CHECKPOINT_FLAG=""
+      CHECKPOINT_PATH=""
+    fi
+
+    # Verify model checkpoints exist if using defaults
+    if [ -n "$CHECKPOINT_PATH" ] && [ ! -f "$CHECKPOINT_PATH" ]; then
+      echo "Error: Model checkpoint not found at: $CHECKPOINT_PATH"
+      echo "Please download the models first using the downloader script:"
+      echo "  python $LTX_DIR/download_models.py"
+      exit 1
+    fi
+
+    GEMMA_ROOT="$HOME/models/LTX-2/gemma"
+    if [ -n "$CHECKPOINT_PATH" ] && [ ! -d "$GEMMA_ROOT" ]; then
+      echo "Error: Gemma 3 text encoder directory not found at: $GEMMA_ROOT"
+      echo "Please download the text encoder using the downloader script:"
+      echo "  python $LTX_DIR/download_models.py"
+      exit 1
+    fi
+
+    UPSAMPLER_PATH="$HOME/models/LTX-2/upscaler/ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+    if [ -n "$CHECKPOINT_PATH" ] && [ ! -f "$UPSAMPLER_PATH" ]; then
+      echo "Error: Spatial upsampler checkpoint not found at: $UPSAMPLER_PATH"
+      echo "Please download the upsampler checkpoint using the downloader script:"
+      echo "  python $LTX_DIR/download_models.py"
+      exit 1
+    fi
+
+    CMD=(python -m "$PIPELINE")
+
+    # Add default checkpoints if not manually overridden
+    if [ -n "$CHECKPOINT_FLAG" ] && ! has_arg "--checkpoint-path" && ! has_arg "--distilled-checkpoint-path"; then
+      CMD+=("$CHECKPOINT_FLAG" "$CHECKPOINT_PATH")
+    fi
+
+    if ! has_arg "--gemma-root"; then
+      CMD+=("--gemma-root" "$GEMMA_ROOT")
+    fi
+
+    if ! has_arg "--spatial-upsampler-path"; then
+      CMD+=("--spatial-upsampler-path" "$UPSAMPLER_PATH")
+    fi
+
+    if [ "$PIPELINE" = "ltx_pipelines.ti2vid_two_stages" ] && [ -n "$DISTILLED_LORA_PATH" ]; then
+      if ! has_arg "--distilled-lora"; then
+        if [ ! -f "$DISTILLED_LORA_PATH" ]; then
+          echo "Error: Distilled LoRA checkpoint not found at: $DISTILLED_LORA_PATH"
+          echo "Please download it first using the downloader script:"
+          echo "  python $LTX_DIR/download_models.py"
+          exit 1
+        fi
+        CMD+=("--distilled-lora" "$DISTILLED_LORA_PATH" "0.8")
+      fi
+    fi
+
+    # Default height/width/num-frames/frame-rate if not overridden
+    if ! has_arg "--height"; then
+      CMD+=("--height" "$HEIGHT")
+    fi
+    if ! has_arg "--width"; then
+      CMD+=("--width" "$WIDTH")
+    fi
+    if ! has_arg "--num-frames"; then
+      CMD+=("--num-frames" "$NUM_FRAMES")
+    fi
+    if ! has_arg "--frame-rate"; then
+      CMD+=("--frame-rate" "$FRAME_RATE")
+    fi
+
+    # Output path
+    CMD+=("--output-path" "$TEMP_DIR/output.mp4")
+
+    # Prompt
+    if [ -n "$PROMPT" ]; then
+      CMD+=("--prompt" "$PROMPT")
+    fi
+
+    # Negative prompt (only for dev pipeline, distilled doesn't support it)
+    if [ -n "$NEGATIVE_PROMPT" ] && [ "$PIPELINE" != "ltx_pipelines.distilled" ]; then
+      if ! has_arg "--negative-prompt"; then
+        CMD+=("--negative-prompt" "$NEGATIVE_PROMPT")
+      fi
+    fi
+
+    # Map reference images to LTX-2 format: --image PATH FRAME_POS STRENGTH
+    if [ ${#REFERENCE_IMAGES[@]} -gt 0 ]; then
+      if ! has_arg "--image"; then
+        NUM_IMAGES=${#REFERENCE_IMAGES[@]}
+        i=0
+        while [ $i -lt $NUM_IMAGES ]; do
+          if [ $NUM_IMAGES -eq 1 ]; then
+            FRAME_POS=0
+          else
+            FRAME_POS=$(( i * (NUM_FRAMES - 1) / (NUM_IMAGES - 1) ))
+          fi
+          # Default strength 1.0
+          CMD+=("--image" "${REFERENCE_IMAGES[$i]}" "$FRAME_POS" "1.0")
+          i=$((i + 1))
+        done
+      fi
+    fi
+
+    # Add all other passthrough inference arguments
+    if [ ${#INFERENCE_ARGS[@]} -gt 0 ]; then
+      CMD+=("${INFERENCE_ARGS[@]}")
+    fi
+
+    echo "Running LTX-Video 2 (PyTorch): ${CMD[*]}"
+  fi
+
+  # Execute and timing
+  START_TIME=$(date +%s)
+  "${CMD[@]}"
+  END_TIME=$(date +%s)
+  ELAPSED=$((END_TIME - START_TIME))
+
+  GENERATED_VIDEO="$TEMP_DIR/output.mp4"
+  if [ -f "$GENERATED_VIDEO" ]; then
+    mv "$GENERATED_VIDEO" "$OUTPUT_FILE"
+    echo "Video saved to: $OUTPUT_FILE"
+    echo "Generation time: ${ELAPSED} seconds"
+    rm -rf "$TEMP_DIR"
+  else
+    echo "Error: No video file generated in $TEMP_DIR"
+    exit 1
+  fi
 fi

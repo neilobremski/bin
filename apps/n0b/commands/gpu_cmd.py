@@ -70,12 +70,40 @@ def mps_available(verbose: bool = False) -> bool:
     return False
 
 
+def mlx_available(verbose: bool = False) -> bool:
+    if platform.system() != "Darwin":
+        if verbose:
+            print("MLX not available (not macOS)")
+        return False
+    arch = platform.machine()
+    proc = subprocess.run(
+        ["sysctl", "-n", "machdep.cpu.brand_string"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    cpu_brand = proc.stdout.strip() if proc.returncode == 0 else ""
+    if arch == "arm64" or "Apple" in cpu_brand:
+        if verbose:
+            print("MLX is available (Apple Silicon macOS detected)")
+            if cpu_brand:
+                print(f"Processor: {cpu_brand}")
+        return True
+    if verbose:
+        print(f"MLX not available (requires Apple Silicon, found {arch} / {cpu_brand})")
+    return False
+
+
 def cmd_cuda(verbose: bool) -> int:
     return 0 if cuda_available(verbose) else 1
 
 
 def cmd_mps(verbose: bool) -> int:
     return 0 if mps_available(verbose) else 1
+
+
+def cmd_mlx(verbose: bool) -> int:
+    return 0 if mlx_available(verbose) else 1
 
 
 def cmd_mb_free() -> int:
