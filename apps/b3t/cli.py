@@ -95,7 +95,12 @@ def main():
     ps_sub = ps.add_subparsers(dest="action")
 
     ps_sub.add_parser("login", help="Auto-login")
-    ps_sub.add_parser("scan", help="Scan recent feed posts")
+    p = ps_sub.add_parser("scan", help="Scan feed posts with full bodies")
+    p.add_argument("--json", action="store_true", help="JSON output")
+    p.add_argument("--since", type=int, help="Only posts from last N days")
+    p = ps_sub.add_parser("save", help="Save posts as submission markdown files")
+    p.add_argument("--dir", required=True, help="Output directory (e.g. editions/YYYY-MM-DD/submissions)")
+    p.add_argument("--since", type=int, help="Only posts from last N days")
 
     # -- LWSD --
     lw = sub.add_parser("lwsd", help="School and district website scanning")

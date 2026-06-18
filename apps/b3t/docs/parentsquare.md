@@ -13,25 +13,36 @@ Feed URL: `https://www.parentsquare.com/schools/{SCHOOL_ID}/feeds`
 
 Login flow: navigate to feed → if redirected to `/signin` → fill email + password textboxes → submit. No CAPTCHA or MFA.
 
-## Feed Structure (Accessibility Tree)
+## Commands
 
-```
-region "Posts"
-  heading "Post Title" [level=2]
-  list
-    listitem: link "Posted by Author Name"
-    listitem: text: • N days ago • DayOfWeek, Mon DD at HH:MM PM •
+```bash
+b3t ps login
+b3t ps scan                    # print posts with full bodies
+b3t ps scan --json             # JSON for scripts
+b3t ps scan --since 14         # filter by "N days ago"
+b3t ps save --dir editions/YYYY-MM-DD/submissions --since 14
 ```
 
-**Key insight:** Only top-level posts have `"Posted by"` metadata within ~12 lines of their heading. Nested sub-headings (e.g., inside district newsletters like "Connections") do NOT have "Posted by" nearby — this differentiates real posts from newsletter content.
+`ps save` writes `parentsquare-{slug}.md` with title, author, date, URL, body, and extracted links.
 
 ## Scan Flow
 
 1. Auto-login if needed
 2. Navigate to feed URL
-3. Scroll down twice (`mousewheel 3000 0`) to trigger lazy-load
-4. Snapshot → parse headings that have "Posted by" nearby
-5. Extract: title, author, relative date
+3. Scroll twice (`mousewheel 3000 0`) to lazy-load recent posts
+4. Click every **Read More** button to expand truncated bodies
+5. Run in-page extraction via `run-code`: each `[role="region"]` with `Posted by` → title, author, date, body text, links
+
+## Feed Structure
+
+Top-level posts have `h2` title + `Posted by Author` link. Nested headings inside district newsletters (e.g. Connections) lack `Posted by` and are skipped.
+
+## Editorial Notes
+
+- **Classroom posts** (single teacher, class roster in metadata) — usually skip for Bear Tracks unless editor wants them
+- **Expired posts** — skip even if still on feed
+- **Band / department posts** — optional one-liner if broadly relevant
+- Prefer folding PS body text into draft articles; do not write "see ParentSquare" when body was captured
 
 ## Scrolling
 
@@ -39,7 +50,6 @@ Feed is lazy-loaded. Two scrolls loads ~2 weeks of posts. The `mousewheel` comma
 
 ## Limitations
 
-- No public API
-- Feed is the only content endpoint
-- District-level posts (Connections newsletter) appear in feed but are better captured via `lwsd scan`
-- Individual post content requires clicking into it (not implemented — editor reviews manually if needed)
+- No public API — browser automation only
+- Very old posts require additional scrolling
+- District Connections newsletter appears as one feed item; sub-articles are not split out (use `lwsd scan` for district content)

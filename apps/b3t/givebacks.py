@@ -302,11 +302,87 @@ def _parse_json_result(stdout):
         try:
             parsed = json.loads(line)
             if isinstance(parsed, str):
-                return json.loads(parsed)
+                try:
+                    return json.loads(parsed)
+                except json.JSONDecodeError:
+                    return parsed
             return parsed
         except (json.JSONDecodeError, ValueError, TypeError):
             continue
     return None
+
+
+def _run_code_json(js, timeout=15):
+    result = session.run("run-code", js, timeout=timeout)
+    return _parse_json_result(result.stdout)
+
+
+def _get_image_src(target_index):
+    """Return src URL for image slot in Unlayer iframe, or empty string."""
+    js = (
+        f'async function main() {{ for (const f of page.frames()) {{ '
+        f'if (f.url().includes("unlayer")) {{ '
+        f'const imgs = await f.locator("img[alt]").all(); '
+        f'if (imgs.length > {target_index}) {{ '
+        f'return await imgs[{target_index}].getAttribute("src") || ""; }} }} }} return ""; }}'
+    )
+    value = _run_code_json(js, timeout=10)
+    return value if isinstance(value, str) else ""
+
+
+def _wait_for_unlayer_images(min_count=1, timeout=40):
+    """Poll until Unlayer iframe has loaded image placeholders."""
+    js = (
+        f'async function main() {{ const deadline = Date.now() + {timeout * 1000}; '
+        f'while (Date.now() < deadline) {{ for (const f of page.frames()) {{ '
+        f'if (f.url().includes("unlayer")) {{ '
+        f'const n = await f.locator("img[alt]").count(); '
+        f'if (n >= {min_count}) return JSON.stringify({{count: n}}); }} }} '
+        f'await new Promise(r => setTimeout(r, 500)); }} '
+        f'return JSON.stringify({{count: 0}}); }}'
+    )
+    result = _run_code_json(js, timeout=timeout + 5)
+    return isinstance(result, dict) and result.get("count", 0) >= min_count
+
+
+def _image_loaded(target_index):
+    """Return True when image slot has finished loading (naturalWidth > 50)."""
+    js = (
+        f'async function main() {{ for (const f of page.frames()) {{ '
+        f'if (f.url().includes("unlayer")) {{ '
+        f'const imgs = await f.locator("img[alt]").all(); '
+        f'if (imgs.length > {target_index}) {{ '
+        f'const complete = await imgs[{target_index}].evaluate(el => el.complete); '
+        f'const w = await imgs[{target_index}].evaluate(el => el.naturalWidth); '
+        f'return JSON.stringify({{loaded: complete && w > 50, width: w}}); }} }} }} '
+        f'return JSON.stringify({{loaded: false}}); }}'
+    )
+    result = _run_code_json(js, timeout=10)
+    return isinstance(result, dict) and result.get("loaded")
+
+
+def _wait_for_image_saved(target_index, before_src="", timeout=90):
+    """Wait until image slot has a new persisted URL (Unlayer S3 upload complete)."""
+    deadline = time.time() + timeout
+    print(f"  Waiting for S3 save (up to {timeout}s)...", file=sys.stderr)
+    while time.time() < deadline:
+        src = _get_image_src(target_index)
+        if src.startswith("http") and src != before_src and _image_loaded(target_index):
+            print(f"  Saved: {src[:80]}...", file=sys.stderr)
+            return True
+        time.sleep(2)
+    return False
+
+
+def _click_save_changes_if_needed():
+    """Click Save Changes when Unlayer leaves the button enabled."""
+    snap = session.snapshot()
+    if not snap:
+        return
+    save_ref = _find_ref(snap, lambda l: "Save Changes" in l and "button" in l.lower() and "[disabled]" not in l.lower())
+    if save_ref:
+        session.run("click", save_ref, timeout=5)
+        time.sleep(3)
 
 
 def cmd_login(args):
@@ -627,9 +703,11 @@ def cmd_upload(args):
     # Open editor and resize viewport for full visibility
     url = _design_url(args.id)
     session.navigate(url)
-    time.sleep(5)
     session.run("resize", "1600", "1000")
-    time.sleep(1)
+    time.sleep(2)
+    if not _wait_for_unlayer_images(min_count=1, timeout=40):
+        print("ERROR: Unlayer editor did not load image placeholders.", file=sys.stderr)
+        return 1
 
     # Take snapshot of the editor iframe content
     snap = session.snapshot()
@@ -639,6 +717,7 @@ def cmd_upload(args):
 
     # Find image elements inside the Unlayer iframe (refs start with 'f')
     target_index = getattr(args, 'index', 0) or 0
+    before_src = _get_image_src(target_index)
     img_refs = []
     for line in snap.split("\n"):
         if "img" in line and "[ref=f" in line:
@@ -702,13 +781,23 @@ def cmd_upload(args):
         f'playwright-cli -s={SESSION_NAME} click {upload_ref} && '
         f'playwright-cli -s={SESSION_NAME} upload "{image_path}"'
     )
-    result = sp.run(shell_cmd, shell=True, capture_output=True, text=True, timeout=30)
+    file_mb = os.path.getsize(image_path) / (1024 * 1024)
+    upload_timeout = max(60, int(30 + file_mb * 10))
+    result = sp.run(shell_cmd, shell=True, capture_output=True, text=True, timeout=upload_timeout)
     if result.returncode != 0:
         print(f"ERROR: Upload failed: {result.stderr}", file=sys.stderr)
         return 1
 
-    time.sleep(3)
-    print(f"Uploaded: {os.path.basename(image_path)}", file=sys.stderr)
+    save_timeout = max(90, int(45 + file_mb * 15))
+    print(f"Waiting for upload to save ({file_mb:.1f} MB, up to {save_timeout}s)...", file=sys.stderr)
+    if not _wait_for_image_saved(target_index, before_src=before_src, timeout=save_timeout):
+        print("ERROR: Upload did not finish saving before timeout.", file=sys.stderr)
+        print("Stay on this page — do not navigate away — and re-run upload.", file=sys.stderr)
+        return 1
+
+    _click_save_changes_if_needed()
+    time.sleep(2)
+    print(f"Uploaded and saved: {os.path.basename(image_path)}", file=sys.stderr)
     return 0
 
 
