@@ -106,7 +106,7 @@ def cmd_status(args):
         print(json.dumps(entry, indent=2))
     else:
         # Show latest / all in-progress
-        in_progress = [e for e in editions if e.get("status") not in ("published",)]
+        in_progress = [e for e in editions if e.get("status") not in ("published", "unused")]
         if in_progress:
             print("In progress:")
             for e in in_progress[-5:]:
