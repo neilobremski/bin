@@ -22,7 +22,7 @@ Detailed docs live in [`docs/`](docs/):
 |-----|---------|---------|
 | [json.md](docs/json.md) | `n0b json` | Pretty-print JSON via stdlib `json.tool` |
 | [ltx-video.md](docs/ltx-video.md) | `n0b ai video` | LTX-Video generation, models, setup guide |
-| [research.md](docs/research.md) | `n0b openai research` | OpenAI o4-mini-deep-research |
+| [research.md](docs/research.md) | `n0b ai research` | OpenAI o4-mini-deep-research |
 
 ### Quick reference (no separate doc yet)
 
@@ -33,7 +33,7 @@ Detailed docs live in [`docs/`](docs/):
 | `gpu` | `cuda`, `mps`, `mlx`, `mb-free` | GPU / MLX checks; free MiB |
 | `secrets` | `get <NAME>` | `$NAME` env var or `~/lib/<name>.txt` |
 | `mqtt` | `pub`, `sub` | `mosquitto_*` with `MQTT_HOST`, `MQTT_PORT`, `MQTT_USER`, `MQTT_PASS` |
-| `ai` | `image`, `video`, `audio` | See [ltx-video.md](docs/ltx-video.md) for video; image/audio use `scripts/` backends |
+| `ai` | `image`, `video`, `audio`, `research` | See [ltx-video.md](docs/ltx-video.md) for video; [research.md](docs/research.md) for deep research |
 | `video` | `last-frame` | Extract last frame with `ffmpeg` |
 
 ### AI model defaults

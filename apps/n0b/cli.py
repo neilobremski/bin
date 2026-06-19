@@ -4,12 +4,11 @@ from __future__ import annotations
 import argparse
 import sys
 
-from commands.ai_cmd import cmd_ai
+from commands.ai_cmd import cmd_ai, cmd_research
 from commands.az_cmd import cmd_tail
 from commands.gpu_cmd import cmd_cuda, cmd_mb_free, cmd_mlx, cmd_mps
 from commands.json_cmd import cmd_json
 from commands.mqtt_cmd import cmd_pub, cmd_sub
-from commands.openai_cmd import cmd_research
 from commands.ports_cmd import cmd_free, cmd_listen
 from commands.secrets_cmd import cmd_get
 from commands.video_cmd import cmd_last_frame
@@ -66,13 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
     mqtt_sub_p = mqtt_sub.add_parser("sub", help="Subscribe (mosquitto_sub)")
     mqtt_sub_p.add_argument("args", nargs=argparse.REMAINDER)
 
-    openai_p = sub.add_parser("openai", help="OpenAI utilities")
-    openai_sub = openai_p.add_subparsers(dest="openai_cmd", required=True)
-    openai_research = openai_sub.add_parser("research", help="Deep research via o4-mini-deep-research")
-    openai_research.add_argument("prompt", nargs=argparse.REMAINDER)
-
-    ai_p = sub.add_parser("ai", help="AI generation (image, video, audio)")
+    ai_p = sub.add_parser("ai", help="AI generation and research")
     ai_sub = ai_p.add_subparsers(dest="ai_kind", required=True)
+    ai_research = ai_sub.add_parser("research", help="Deep research via o4-mini-deep-research")
+    ai_research.add_argument("prompt", nargs=argparse.REMAINDER)
     for kind, help_text in (
         ("image", "Generate images (default model: z-image)"),
         ("video", "Generate videos — LTX-Video 1/2, MLX on Apple Silicon (default: auto)"),
@@ -132,10 +128,9 @@ def dispatch(args: argparse.Namespace) -> int:
             return cmd_pub(rest)
         if args.mqtt_cmd == "sub":
             return cmd_sub(rest)
-    if group == "openai":
-        if args.openai_cmd == "research":
-            return cmd_research(args.prompt)
     if group == "ai":
+        if args.ai_kind == "research":
+            return cmd_research(args.prompt)
         rest = args.args
         if rest[:1] == ["--"]:
             rest = rest[1:]

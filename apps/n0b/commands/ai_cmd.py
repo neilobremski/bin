@@ -1,4 +1,4 @@
-"""AI generation wrappers (image, video, audio)."""
+"""AI generation wrappers (image, video, audio) and deep research."""
 from __future__ import annotations
 
 import os
@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from paths import BIN_ROOT, SCRIPTS_DIR
+from research import run_research
 
 _DEFAULT_MODEL = {
     "image": "z-image",
@@ -40,6 +41,13 @@ def _script_path(model: str) -> Path | None:
         return None
     path = SCRIPTS_DIR / script_name
     return path if path.is_file() else None
+
+
+def cmd_research(args: list[str]) -> int:
+    if not args:
+        print("Usage: n0b ai research <prompt...>", file=sys.stderr)
+        return 2
+    return run_research(args)
 
 
 def cmd_ai(kind: str, model: str | None, args: list[str]) -> int:

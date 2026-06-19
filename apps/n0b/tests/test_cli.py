@@ -64,6 +64,12 @@ def test_secrets_missing():
     assert "not found" in proc.stderr
 
 
+def test_ai_research_requires_prompt():
+    proc = run_n0b("ai", "research")
+    assert proc.returncode == 2
+    assert "Usage: n0b ai research" in proc.stderr
+
+
 def test_ai_video_ltx2_passes_flag():
     with patch("commands.ai_cmd.subprocess.run") as run:
         run.return_value.returncode = 0
