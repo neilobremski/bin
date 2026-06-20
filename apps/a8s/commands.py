@@ -440,6 +440,8 @@ def _install_client_wrapper(bin_path: Path, a8s_entry: Path) -> None:
         f'exec python3 "{entry}" tell "$@"\n'
     )
     bin_path.parent.mkdir(parents=True, exist_ok=True)
+    if bin_path.is_symlink() or bin_path.exists():
+        bin_path.unlink()
     bin_path.write_text(wrapper, encoding="utf-8")
     bin_path.chmod(0o755)
 
@@ -452,13 +454,11 @@ def _chmod_install_tree(root: Path) -> None:
 
 
 def _install_a8s_tree(lib_dir: Path) -> Path:
-    dest = lib_dir / "apps" / "a8s"
     if lib_dir.exists():
         shutil.rmtree(lib_dir)
-    dest.parent.mkdir(parents=True, mode=0o755)
-    shutil.copytree(_A8S_SOURCE, dest, ignore=_install_ignore)
+    shutil.copytree(_A8S_SOURCE, lib_dir, ignore=_install_ignore)
     _chmod_install_tree(lib_dir)
-    entry = dest / "a8s.py"
+    entry = lib_dir / "a8s.py"
     if not entry.is_file():
         raise FileNotFoundError(f"missing {entry}")
     return entry
@@ -472,7 +472,7 @@ def cmd_install_client(args: list[str]) -> int:
         prog="a8s install-client",
         description=(
             "Install a copy of apps/a8s for agent users. "
-            "Copies the a8s package to --lib-dir/apps/a8s (excluding tests) "
+            "Copies the a8s package to --lib-dir (excluding tests) "
             "and writes a tell wrapper to --bin-dir/tell. Re-running overwrites "
             "any previous install."
         ),

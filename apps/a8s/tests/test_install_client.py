@@ -28,7 +28,7 @@ def test_install_client_positional_dest(tmp_path, monkeypatch):
     lib_dir = tmp_path / "opt" / "a8s"
     bin_dir = tmp_path / "bin"
     assert cmd_install_client([str(lib_dir), "--bin-dir", str(bin_dir)]) == 0
-    assert (lib_dir / "apps" / "a8s" / "a8s.py").is_file()
+    assert (lib_dir / "a8s.py").is_file()
     assert (bin_dir / "tell").is_file()
 
 
@@ -41,20 +41,40 @@ def test_install_client_copies_a8s_and_overwrites(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     bin_dir = tmp_path / "bin"
     lib_dir = tmp_path / "lib" / "a8s"
-    a8s_dest = lib_dir / "apps" / "a8s"
 
     assert cmd_install_client(["--bin-dir", str(bin_dir), "--lib-dir", str(lib_dir)]) == 0
     tell_bin = bin_dir / "tell"
     assert tell_bin.is_file()
+    assert not tell_bin.is_symlink()
     assert tell_bin.stat().st_mode & 0o777 == 0o755
-    assert (a8s_dest / "a8s.py").is_file()
-    assert (a8s_dest / "tell.py").is_file()
-    assert not (a8s_dest / "tests").exists()
-    assert (a8s_dest / "tell.py").stat().st_mode & 0o777 == 0o644
+    assert (lib_dir / "a8s.py").is_file()
+    assert (lib_dir / "tell.py").is_file()
+    assert not (lib_dir / "tests").exists()
+    assert (lib_dir / "tell.py").stat().st_mode & 0o777 == 0o644
 
-    (a8s_dest / "tell.py").write_text("# stale\n", encoding="utf-8")
+    (lib_dir / "tell.py").write_text("# stale\n", encoding="utf-8")
     assert cmd_install_client(["--bin-dir", str(bin_dir), "--lib-dir", str(lib_dir)]) == 0
-    assert "stale" not in (a8s_dest / "tell.py").read_text(encoding="utf-8")
+    assert "stale" not in (lib_dir / "tell.py").read_text(encoding="utf-8")
+
+
+def test_install_client_replaces_symlink_tell(tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    bin_dir = tmp_path / "bin"
+    lib_dir = tmp_path / "lib" / "a8s"
+    other = tmp_path / "old-tell.sh"
+    other.write_text("#!/bin/sh\necho old\n", encoding="utf-8")
+    other.chmod(0o755)
+    bin_dir.mkdir()
+    tell_bin = bin_dir / "tell"
+    tell_bin.symlink_to(other)
+
+    assert cmd_install_client(["--bin-dir", str(bin_dir), "--lib-dir", str(lib_dir)]) == 0
+    assert tell_bin.is_file()
+    assert not tell_bin.is_symlink()
+    assert "a8s.py" in tell_bin.read_text(encoding="utf-8")
+    proc = subprocess.run([str(tell_bin), "--help"], capture_output=True, text=True, check=False)
+    assert proc.returncode == 0
+    assert "old" not in proc.stdout
 
 
 def test_installed_tell_writes_outbox(tmp_path, monkeypatch):
