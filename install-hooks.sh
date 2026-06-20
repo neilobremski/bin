@@ -19,4 +19,5 @@ if [ ! -f "${ROOT}/.github/pii-patterns.local.txt" ]; then
   echo ""
   echo "Next: copy and customize local PII patterns (gitignored):"
   echo "  cp .github/pii-patterns.example.txt .github/pii-patterns.local.txt"
+  echo "  .github/sync-pii-patterns.sh   # push patterns to GitHub Actions secret"
 fi

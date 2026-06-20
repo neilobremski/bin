@@ -7,6 +7,7 @@
 #
 # Setup (GitHub Actions):
 #   Repository secret PII_PATTERNS — same format, one regex per line.
+#   After editing the local file: .github/sync-pii-patterns.sh
 #
 # Enforced by .github/pii_check.py (pre-push hook + CI).
 
