@@ -154,6 +154,53 @@ def test_tell_default_dir_walks_up(tmp_path):
     assert msg["content"] == "default subdir"
 
 
+def test_tell_dir_locks_mailbox(tmp_path):
+    locked = tmp_path / "mailbox"
+    cwd_agent = tmp_path / "cwd-agent"
+    (locked / ".outbox").mkdir(parents=True)
+    (cwd_agent / ".outbox").mkdir(parents=True)
+    res = _run(
+        cwd_agent,
+        "gerry",
+        "locked send",
+        env={"TELL_DIR": str(locked)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert list((cwd_agent / ".outbox").glob("*.json")) == []
+    _name, msg = _read_outbox(locked / ".outbox")
+    assert msg["content"] == "locked send"
+
+
+def test_tell_dir_missing_outbox_fails(tmp_path):
+    mailbox = tmp_path / "mailbox"
+    mailbox.mkdir()
+    res = _run(
+        tmp_path,
+        "gerry",
+        "nope",
+        env={"TELL_DIR": str(mailbox)},
+    )
+    assert res.returncode != 0
+    assert "cannot send from this directory" in res.stderr
+
+
+def test_tell_dir_overrides_tell_default_dir(tmp_path):
+    locked = tmp_path / "locked"
+    other = tmp_path / "other"
+    (locked / ".outbox").mkdir(parents=True)
+    (other / ".outbox").mkdir(parents=True)
+    res = _run(
+        tmp_path,
+        "gerry",
+        "dir wins",
+        env={"TELL_DIR": str(locked), "TELL_DEFAULT_DIR": str(other)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert list((other / ".outbox").glob("*.json")) == []
+    _name, msg = _read_outbox(locked / ".outbox")
+    assert msg["content"] == "dir wins"
+
+
 def test_tell_lifts_file_lines_into_files_array(tmp_path):
     (tmp_path / ".outbox").mkdir()
     res = _run(tmp_path, "gerry", "Here you go.", "FILE: ./report.pdf", "FILE: /tmp/data.csv")

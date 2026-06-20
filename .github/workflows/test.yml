@@ -14,34 +14,21 @@ jobs:
         with:
           fetch-depth: 0
       - name: Check for PII in diff
-        run: |
-          patterns=$(grep -v '^#' .github/pii-patterns.txt | grep -v '^$')
-          git diff origin/main...HEAD -- . ':!.github/pii-patterns.txt' > /tmp/pr-diff.txt
-          failed=0
-          while IFS= read -r pattern; do
-            hits=$(grep -inP "$pattern" /tmp/pr-diff.txt | grep '^+' | head -5)
-            if [ -n "$hits" ]; then
-              echo "::error::PII pattern '$pattern' found in diff:"
-              echo "$hits"
-              failed=1
-            fi
-          done <<< "$patterns"
-          if [ "$failed" -eq 1 ]; then
-            echo ""
-            echo "Remove PII before merging. Patterns defined in .github/pii-patterns.txt"
-            exit 1
-          fi
-          echo "No PII patterns found in diff."
+        env:
+          PII_PATTERNS: ${{ secrets.PII_PATTERNS }}
+        run: python .github/pii_check.py
 
   a8s:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install pytest
-      - run: python -m pytest apps/a8s/tests/ -x -q
+      - run: python -m pytest tests/test_pii.py apps/a8s/tests/ -x -q
 
   k7e:
     runs-on: ubuntu-latest
