@@ -23,7 +23,10 @@ def test_install_local_creates_claude_skill_symlink(tmp_path):
     skill = agent / ".claude" / "skills" / "tell" / "SKILL.md"
     assert skill.is_symlink()
     assert skill.resolve().name == "SKILL.md"
-    assert "tell" in skill.read_text()
+    text = skill.read_text()
+    assert "tell" in text
+    assert ".outbox" not in text
+    assert ".temp" not in text
     cursor = agent / ".cursor" / "skills" / "tell" / "SKILL.md"
     assert cursor.is_symlink()
     assert cursor.resolve() == skill.resolve()

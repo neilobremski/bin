@@ -85,7 +85,14 @@ def test_tell_walks_up_from_subdir(tmp_path):
 def test_tell_errors_when_no_outbox(tmp_path):
     res = _run(tmp_path, "anyone", "should fail")
     assert res.returncode != 0
-    assert "no .outbox/" in res.stderr
+    assert "cannot send from this directory" in res.stderr
+
+
+def test_tell_help_is_opaque(tmp_path):
+    res = _run(tmp_path, "--help")
+    assert res.returncode == 0
+    assert ".outbox" not in res.stderr
+    assert ".temp" not in res.stderr
 
 
 def test_tell_lifts_file_lines_into_files_array(tmp_path):

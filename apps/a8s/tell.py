@@ -176,7 +176,7 @@ _USAGE = (
 def _print_usage() -> None:
     print(_USAGE, file=sys.stderr)
     print("       message may be `-` to read stdin; stdin is used when piped", file=sys.stderr)
-    print("       --sync waits for a reply via .temp/ files (default timeout 300s)", file=sys.stderr)
+    print("       --sync block until the recipient replies (default timeout 300s)", file=sys.stderr)
 
 
 def _optional_sender() -> tuple[str, dict] | None:
@@ -357,11 +357,7 @@ def tell_main(argv: list[str]) -> int:
 
     outbox = find_outbox()
     if outbox is None:
-        print(
-            "tell: no .outbox/ found in CWD or any parent "
-            "(run from inside an agent root)",
-            file=sys.stderr,
-        )
+        print("tell: cannot send from this directory", file=sys.stderr)
         return 1
 
     agent_root = agent_root_from_outbox(outbox)
