@@ -23,6 +23,7 @@ Surface (CLI):
   stop / kill / exit / ls     handler control
   prompt / tell / clear       message queueing
   install                     install canonical skills
+  install-client              install standalone tell to /usr/local
   logs <name>... [--tail N] [-f]   per-agent log readout (merge-sorted)
 
 `a8s` with no command prints help. There is no auto-discovery — agents must

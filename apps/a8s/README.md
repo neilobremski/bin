@@ -133,6 +133,7 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 | | |
 |---|---|
 | `a8s install` | Install bundled skills into the current agent dir (or `--global` for user home). |
+| `a8s install-client` | Copy `apps/a8s` to `/usr/local/lib/a8s/apps/a8s` and install `/usr/local/bin/tell` (`sudo`). Re-run to upgrade. |
 
 ### Remotes (issue #63)
 | | |
