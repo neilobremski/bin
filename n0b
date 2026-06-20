@@ -3,14 +3,8 @@ echo `# <#` >/dev/null
 
 set -euo pipefail
 
-_self="${BASH_SOURCE[0]}"
-while [ -L "$_self" ]; do
-  _dir="$(cd -P "$(dirname "$_self")" && pwd)"
-  _self="$(readlink "$_self")"
-  [[ "$_self" != /* ]] && _self="$_dir/$_self"
-done
-SCRIPT_DIR="$(cd -P "$(dirname "$_self")" && pwd)"
-exec python3 "$SCRIPT_DIR/apps/a8s/a8s.py" "$@"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$SCRIPT_DIR/apps/n0b/n0b.py" "$@"
 #> > $null
 
 $ScriptPath = $PSCommandPath
@@ -18,30 +12,27 @@ if (-not $ScriptPath) {
     $ScriptPath = $MyInvocation.MyCommand.Path
 }
 if (-not $ScriptPath) {
-    $ScriptPath = Join-Path (Get-Location) "a8s"
-}
-if ($ScriptPath) {
-    $ScriptPath = (Resolve-Path -LiteralPath $ScriptPath).ProviderPath
+    $ScriptPath = Join-Path (Get-Location) "n0b"
 }
 
 $ScriptDir = Split-Path -Parent $ScriptPath
-$A8sPath = Join-Path $ScriptDir "apps/a8s/a8s.py"
+$N0bPath = Join-Path $ScriptDir "apps/n0b/n0b.py"
 
 $Python = Get-Command python3 -ErrorAction SilentlyContinue
 if ($Python) {
-    & $Python.Source $A8sPath @args
+    & $Python.Source $N0bPath @args
     exit $LASTEXITCODE
 }
 
 $Python = Get-Command python -ErrorAction SilentlyContinue
 if ($Python) {
-    & $Python.Source $A8sPath @args
+    & $Python.Source $N0bPath @args
     exit $LASTEXITCODE
 }
 
 $Python = Get-Command py -ErrorAction SilentlyContinue
 if ($Python) {
-    & $Python.Source -3 $A8sPath @args
+    & $Python.Source -3 $N0bPath @args
     exit $LASTEXITCODE
 }
 

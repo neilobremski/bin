@@ -22,3 +22,6 @@ venv/
 **/.outbox/
 **/.trash/
 **/.claude/settings.local.json
+
+# Antigravity CLI
+.antigravitycli/

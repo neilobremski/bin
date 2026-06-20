@@ -54,10 +54,10 @@ do_install() {
   # Install PyTorch with appropriate backend
   echo "Detecting GPU backend..."
   
-  if command -v can-use-cuda &> /dev/null && can-use-cuda; then
+  if command -v n0b &> /dev/null && n0b gpu cuda 2>/dev/null; then
     echo "CUDA detected - installing PyTorch with CUDA support..."
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-  elif command -v can-use-mps &> /dev/null && can-use-mps; then
+  elif command -v n0b &> /dev/null && n0b gpu mps 2>/dev/null; then
     echo "MPS (Apple Silicon) detected - PyTorch already has MPS support"
     pip install torch torchvision
   else
