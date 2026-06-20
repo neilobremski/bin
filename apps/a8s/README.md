@@ -126,13 +126,14 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 | | |
 |---|---|
 | `a8s tell <name> <msg>` | Routed message. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose `.outbox/` encloses CWD (walks up); errors if no `.outbox/` is found. There is no senderless channel — every message has a force-stamped agent `from` (the router stamps it from the outbox's owning agent, regardless of what the client wrote). |
-| `tell <name> <msg>` (top-level shim, [`~/bin/tell`](/Users/neilo/bin/tell)) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Walks up CWD to find any `.outbox/`, drops a JSON envelope — no `~/.a8s` access required. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. |
+| `tell <name> <msg>` (top-level shim, [`~/bin/tell`](/Users/neilo/bin/tell)) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Walks up CWD to find any `.outbox/`, drops a JSON envelope — no `~/.a8s` access required. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: [`docs/tell.md`](docs/tell.md). |
 | `a8s logs <name>... [--tail N] [-f]` | Read per-agent log files; merge-sort by ISO timestamp across multiple agents. `-f` follows. |
 
 ### Skills
 | | |
 |---|---|
 | `a8s install` | Install bundled skills into the current agent dir (or `--global` for user home). |
+| `a8s install-client` | Copy `apps/a8s` to `/usr/local/lib/a8s/` and install `/usr/local/bin/tell` (`sudo`). Re-run to upgrade. |
 
 ### Remotes (issue #63)
 | | |

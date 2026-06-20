@@ -1,6 +1,7 @@
 """tell — drop a JSON envelope in the nearest `.outbox/`.
 
-Walks up from CWD for `.outbox/` and writes; no registry required. When
+Walks up from CWD for `.outbox/` and writes; falls back to `TELL_DEFAULT_DIR`
+(walks up from that path too) when CWD has no outbox. No registry required.
 `~/.a8s` is reachable and CWD sits inside a registered agent, validates the
 recipient (with remote fallback), stamps `from`, and logs to the agent log.
 
@@ -31,15 +32,34 @@ from ulid import new as new_ulid
 DEFAULT_SYNC_TIMEOUT = DEFAULT_SYNC_TIMEOUT_SEC
 SYNC_ACK_TIMEOUT = 30.0
 SYNC_POLL_INTERVAL = 0.25
+TELL_DEFAULT_DIR_ENV = "TELL_DEFAULT_DIR"
+
+
+def _outbox_at(root: Path) -> Path | None:
+    candidate = root / ".outbox"
+    return candidate if candidate.is_dir() else None
+
+
+def _walk_outbox_from(start: Path) -> Path | None:
+    cur = start.resolve()
+    for d in (cur, *cur.parents):
+        found = _outbox_at(d)
+        if found is not None:
+            return found
+    return None
 
 
 def find_outbox() -> Path | None:
-    cur = Path.cwd().resolve()
-    for d in (cur, *cur.parents):
-        candidate = d / ".outbox"
-        if candidate.is_dir():
-            return candidate
-    return None
+    found = _walk_outbox_from(Path.cwd())
+    if found is not None:
+        return found
+    default_dir = os.environ.get(TELL_DEFAULT_DIR_ENV, "").strip()
+    if not default_dir:
+        return None
+    try:
+        return _walk_outbox_from(Path(default_dir).expanduser())
+    except OSError:
+        return None
 
 
 def agent_root_from_outbox(outbox: Path) -> Path:
@@ -176,7 +196,7 @@ _USAGE = (
 def _print_usage() -> None:
     print(_USAGE, file=sys.stderr)
     print("       message may be `-` to read stdin; stdin is used when piped", file=sys.stderr)
-    print("       --sync waits for a reply via .temp/ files (default timeout 300s)", file=sys.stderr)
+    print("       --sync block until the recipient replies (default timeout 300s)", file=sys.stderr)
 
 
 def _optional_sender() -> tuple[str, dict] | None:
@@ -357,11 +377,7 @@ def tell_main(argv: list[str]) -> int:
 
     outbox = find_outbox()
     if outbox is None:
-        print(
-            "tell: no .outbox/ found in CWD or any parent "
-            "(run from inside an agent root)",
-            file=sys.stderr,
-        )
+        print("tell: cannot send from this directory", file=sys.stderr)
         return 1
 
     agent_root = agent_root_from_outbox(outbox)

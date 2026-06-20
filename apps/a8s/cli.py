@@ -15,6 +15,7 @@ from commands import (
     cmd_exit,
     cmd_health,
     cmd_install,
+    cmd_install_client,
     cmd_kill,
     cmd_logs,
     cmd_ls,
@@ -56,6 +57,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("storage",  "[<name> [<url> [--<k> <v> ...]]]",            "List, show, or set a cross-cluster file storage service."),
     ("unstorage","<name>",                    "Remove a configured storage service."),
     ("install",  "[path] [--global]",        "Install skills into an agent dir (default CWD) or user home."),
+    ("install-client", "[dest] [--bin-dir]", "Copy a8s to dest (default /usr/local/lib/a8s) and install tell."),
     ("health",   "",                          "Test connectivity of remotes and storage services."),
 ]
 
@@ -111,6 +113,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_drain(args)
     if cmd == "install":
         return cmd_install(args)
+    if cmd == "install-client":
+        return cmd_install_client(args)
     if cmd == "logs":
         return cmd_logs(args)
     if cmd == "remote":
