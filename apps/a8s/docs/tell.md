@@ -14,11 +14,12 @@ Operator documentation for how `tell` works under the hood. Agent-facing usage l
 
 ## Send path (async)
 
-1. Walk up from CWD for the first `.outbox/` directory.
-2. If none found, walk up from `TELL_DEFAULT_DIR` (agent root or any path under it).
-3. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`.
-4. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root.
-5. Write a JSON envelope atomically into `.outbox/` (`.{id}.tmp` → `{id}.json`).
+1. If `TELL_DIR` is set, use `$TELL_DIR/.outbox` directly (no CWD or parent walk).
+2. Else walk up from CWD for the first `.outbox/` directory.
+3. If none found, walk up from `TELL_DEFAULT_DIR` (agent root or any path under it).
+4. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`.
+5. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root.
+6. Write a JSON envelope atomically into `.outbox/` (`.{id}.tmp` → `{id}.json`).
 
 Envelope shape:
 
@@ -35,14 +36,25 @@ Envelope shape:
 
 `from` is omitted when registry is unreachable; the router **force-overwrites** `from` based on which agent owns the outbox directory.
 
-6. `route_outboxes` ingests outbox files into `~/.a8s/agents/<NAME>/pending/`, routes to recipient inboxes (or alias fan-out), and handles remotes.
+7. `route_outboxes` ingests outbox files into `~/.a8s/agents/<NAME>/pending/`, routes to recipient inboxes (or alias fan-out), and handles remotes.
+
+### `TELL_DIR`
+
+Hard lock to a mailbox root. When set, `tell` always writes to `$TELL_DIR/.outbox` — no walk from CWD, no fallback to `TELL_DEFAULT_DIR`. Use for isolated agent sandboxes where the mailbox tree (`.outbox/`, `.temp/`, etc.) lives in a dedicated directory:
+
+```bash
+export TELL_DIR=/var/mailboxes/agent-one
+cd /anywhere && tell GEMINI "locked to this mailbox"
+```
+
+If `$TELL_DIR/.outbox` is missing, send fails. Sync session files use `$TELL_DIR/.temp/`.
 
 ### `TELL_DEFAULT_DIR`
 
-Set on an agent process (systemd, wrapper script, `.env`) to an agent root or any directory beneath it. When CWD is outside the agent tree — e.g. `/tmp` — `tell` still finds `.outbox/` via this fallback. CWD wins when it already encloses an outbox.
+Set on an agent process (systemd, wrapper script, `.env`) to an agent root or any directory beneath it. When CWD is outside the agent tree — e.g. `/tmp` — `tell` still finds `.outbox/` via this fallback. Ignored when `TELL_DIR` is set. CWD wins over this fallback when it already encloses an outbox.
 
 ```bash
-export TELL_DEFAULT_DIR=/home/knobert/my-agent
+export TELL_DEFAULT_DIR=/home/agent/my-agent
 cd /tmp && tell GEMINI "works from anywhere"
 ```
 
