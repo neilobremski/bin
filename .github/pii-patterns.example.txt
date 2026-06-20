@@ -18,5 +18,5 @@ example-agent-name
 example-hostname
 example\.host\.example
 
-# Credentials patterns
-rustdesk.*env
+# Credentials patterns — replace with your own
+example.*env
