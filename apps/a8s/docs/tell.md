@@ -15,9 +15,10 @@ Operator documentation for how `tell` works under the hood. Agent-facing usage l
 ## Send path (async)
 
 1. Walk up from CWD for the first `.outbox/` directory.
-2. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`.
-3. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD is inside a registered agent root.
-4. Write a JSON envelope atomically into `.outbox/` (`.{id}.tmp` → `{id}.json`).
+2. If none found, walk up from `TELL_DEFAULT_DIR` (agent root or any path under it).
+3. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`.
+4. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root.
+5. Write a JSON envelope atomically into `.outbox/` (`.{id}.tmp` → `{id}.json`).
 
 Envelope shape:
 
@@ -34,7 +35,18 @@ Envelope shape:
 
 `from` is omitted when registry is unreachable; the router **force-overwrites** `from` based on which agent owns the outbox directory.
 
-5. `route_outboxes` ingests outbox files into `~/.a8s/agents/<NAME>/pending/`, routes to recipient inboxes (or alias fan-out), and handles remotes.
+6. `route_outboxes` ingests outbox files into `~/.a8s/agents/<NAME>/pending/`, routes to recipient inboxes (or alias fan-out), and handles remotes.
+
+### `TELL_DEFAULT_DIR`
+
+Set on an agent process (systemd, wrapper script, `.env`) to an agent root or any directory beneath it. When CWD is outside the agent tree — e.g. `/tmp` — `tell` still finds `.outbox/` via this fallback. CWD wins when it already encloses an outbox.
+
+```bash
+export TELL_DEFAULT_DIR=/home/knobert/my-agent
+cd /tmp && tell GEMINI "works from anywhere"
+```
+
+Does not affect `sender_from_cwd()`; the router still force-stamps `from` from outbox ownership.
 
 ## `--sync`
 

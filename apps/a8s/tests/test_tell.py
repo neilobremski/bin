@@ -6,6 +6,7 @@ nearest `.outbox/` without requiring registry access.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -21,7 +22,12 @@ A8S_TELL = [
 ]
 
 
-def _run(cwd: Path, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
+def _run(
+    cwd: Path,
+    *args: str,
+    stdin: str | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
     kw: dict = {
         "cwd": str(cwd),
         "capture_output": True,
@@ -29,6 +35,8 @@ def _run(cwd: Path, *args: str, stdin: str | None = None) -> subprocess.Complete
     }
     if stdin is not None:
         kw["input"] = stdin
+    if env is not None:
+        kw["env"] = {**os.environ, **env}
     return subprocess.run([str(TELL), *args], **kw)
 
 
@@ -93,6 +101,57 @@ def test_tell_help_is_opaque(tmp_path):
     assert res.returncode == 0
     assert ".outbox" not in res.stderr
     assert ".temp" not in res.stderr
+
+
+def test_tell_uses_tell_default_dir(tmp_path):
+    agent = tmp_path / "agent"
+    (agent / ".outbox").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    res = _run(
+        elsewhere,
+        "gerry",
+        "via default dir",
+        env={"TELL_DEFAULT_DIR": str(agent)},
+    )
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(agent / ".outbox")
+    assert msg["content"] == "via default dir"
+
+
+def test_tell_cwd_outbox_wins_over_tell_default_dir(tmp_path):
+    cwd_agent = tmp_path / "here"
+    other_agent = tmp_path / "there"
+    (cwd_agent / ".outbox").mkdir(parents=True)
+    (other_agent / ".outbox").mkdir(parents=True)
+    res = _run(
+        cwd_agent,
+        "gerry",
+        "from cwd",
+        env={"TELL_DEFAULT_DIR": str(other_agent)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert list((other_agent / ".outbox").glob("*.json")) == []
+    _name, msg = _read_outbox(cwd_agent / ".outbox")
+    assert msg["content"] == "from cwd"
+
+
+def test_tell_default_dir_walks_up(tmp_path):
+    agent = tmp_path / "agent"
+    (agent / ".outbox").mkdir(parents=True)
+    sub = agent / "src" / "pkg"
+    sub.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    res = _run(
+        elsewhere,
+        "gerry",
+        "default subdir",
+        env={"TELL_DEFAULT_DIR": str(sub)},
+    )
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(agent / ".outbox")
+    assert msg["content"] == "default subdir"
 
 
 def test_tell_lifts_file_lines_into_files_array(tmp_path):
