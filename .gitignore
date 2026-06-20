@@ -25,3 +25,6 @@ venv/
 
 # Antigravity CLI
 .antigravitycli/
+
+# PII patterns (local only — CI uses GitHub secret PII_PATTERNS)
+.github/pii-patterns.local.txt
