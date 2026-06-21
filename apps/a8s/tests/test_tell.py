@@ -356,7 +356,83 @@ def test_tell_stamps_from_when_registered(fake_home, tmp_path, monkeypatch):
     assert msg["to"] == "bob"
 
 
+def test_tell_attach_requires_path(tmp_path):
     (tmp_path / ".outbox").mkdir()
     res = _run(tmp_path, "gerry", "--attach")
     assert res.returncode == 2
     assert "--attach requires a path" in res.stderr
+
+
+def test_tell_check_ok_without_recipient(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    res = _run(tmp_path, "--check")
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.splitlines()[0] == "tell: ok"
+    assert f"send-from: {tmp_path.resolve()}" in res.stdout
+    assert "via: cwd" in res.stdout
+    assert list((tmp_path / ".outbox").glob("*.json")) == []
+
+
+def test_tell_check_validates_recipient(fake_home, tmp_path, monkeypatch):
+    from registry import save_registry
+
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    (agent_root / ".outbox").mkdir()
+    bob_root = tmp_path / "bob"
+    bob_root.mkdir()
+    save_registry({"SENDER": {"root": str(agent_root)}, "bob": {"root": str(bob_root)}})
+    monkeypatch.chdir(agent_root)
+
+    res = _run_a8s(agent_root, "--check", "bob")
+    assert res.returncode == 0, res.stderr
+    assert "recipient 'bob': ok" in res.stdout
+    assert "sender: SENDER" in res.stdout
+    assert list((agent_root / ".outbox").glob("*.json")) == []
+
+
+def test_tell_check_unknown_recipient_fails(fake_home, tmp_path, monkeypatch):
+    from registry import save_registry
+
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    (agent_root / ".outbox").mkdir()
+    save_registry({"SENDER": {"root": str(agent_root)}})
+    monkeypatch.chdir(agent_root)
+
+    res = _run_a8s(agent_root, "--check", "ghost")
+    assert res.returncode == 1
+    assert "no agent or alias named 'ghost'" in res.stderr
+    assert list((agent_root / ".outbox").glob("*.json")) == []
+
+
+def test_tell_check_fails_without_outbox(tmp_path):
+    res = _run(tmp_path, "--check")
+    assert res.returncode == 1
+    assert "cannot send from this directory" in res.stderr
+
+
+def test_tell_check_reports_tell_dir(tmp_path):
+    locked = tmp_path / "mailbox"
+    (locked / ".outbox").mkdir(parents=True)
+    res = _run(
+        tmp_path,
+        "--check",
+        env={"TELL_DIR": str(locked)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert "via: TELL_DIR" in res.stdout
+    assert f"send-from: {locked.resolve()}" in res.stdout
+
+
+def test_tell_check_rejects_message_body(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    res = _run(tmp_path, "--check", "bob", "hello")
+    assert res.returncode == 2
+    assert "does not accept a message" in res.stderr
+
+
+def test_tell_help_omits_check(tmp_path):
+    res = _run(tmp_path, "--help")
+    assert res.returncode == 0
+    assert "--check" not in res.stderr

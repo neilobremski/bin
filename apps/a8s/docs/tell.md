@@ -14,6 +14,7 @@ Operator documentation for how `tell` works under the hood. Agent-facing usage l
 
 ## Send path (async)
 
+0. **`tell --check`** — optional self-test: resolves send directory, probes writability, reports `send-from` / `via` / `sender`; with a recipient name, validates registry routing. No envelope written.
 1. If `TELL_DIR` is set, use `$TELL_DIR/.outbox` directly (no CWD or parent walk).
 2. Else walk up from CWD for the first `.outbox/` directory.
 3. If none found, walk up from `TELL_DEFAULT_DIR` (agent root or any path under it).
