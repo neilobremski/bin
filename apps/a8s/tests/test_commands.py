@@ -14,6 +14,7 @@ from commands import (
     cmd_add,
     cmd_alias,
     cmd_kill,
+    cmd_logs,
     cmd_remote,
     cmd_remove,
     cmd_storage,
@@ -22,7 +23,7 @@ from commands import (
     cmd_unremote,
     cmd_unstorage,
 )
-from core import Participant, agent_dir, kill_request_path, outbox_dir, pid_path
+from core import Participant, agent_dir, agent_log_path, kill_request_path, outbox_dir, pid_path
 from mailbox import ensure_mailboxes
 from network import load_network_config, save_network_config
 from registry import load_aliases, load_registry, save_registry
@@ -626,5 +627,49 @@ class TestCmdTellWithSplitFileArg:
         msg = _json.loads(outbox_files[0].read_text())
         assert msg["content"] == "Here is the doc."
         assert msg["files"] == [{"filename": "report.pdf", "path": "./report.pdf"}]
+
+
+class TestCmdLogs:
+    def test_single_agent_preserves_append_order(self, fake_home, tmp_path, capsys):
+        root = tmp_path / "x"; root.mkdir()
+        save_registry({"claude": {"root": str(root)}})
+        log = agent_log_path("claude")
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            "2026-01-01T12:00:02Z later timestamp first in file\n"
+            "2026-01-01T12:00:01Z earlier timestamp second in file\n"
+            "legacy line without timestamp prefix\n"
+        )
+        assert cmd_logs(["claude"]) == 0
+        out = capsys.readouterr().out
+        assert out.splitlines() == [
+            "2026-01-01T12:00:02Z later timestamp first in file",
+            "2026-01-01T12:00:01Z earlier timestamp second in file",
+            "legacy line without timestamp prefix",
+        ]
+
+    def test_multi_agent_merge_sorts_by_timestamp(self, fake_home, tmp_path, capsys):
+        a_root = tmp_path / "a"; a_root.mkdir()
+        b_root = tmp_path / "b"; b_root.mkdir()
+        save_registry({"claude": {"root": str(a_root)}, "gemini": {"root": str(b_root)}})
+        agent_log_path("claude").parent.mkdir(parents=True, exist_ok=True)
+        agent_log_path("gemini").parent.mkdir(parents=True, exist_ok=True)
+        agent_log_path("claude").write_text("2026-01-01T12:00:03Z from claude\n")
+        agent_log_path("gemini").write_text("2026-01-01T12:00:01Z from gemini\n")
+        assert cmd_logs(["claude", "gemini"]) == 0
+        out = capsys.readouterr().out.splitlines()
+        assert out == [
+            "2026-01-01T12:00:01Z from gemini",
+            "2026-01-01T12:00:03Z from claude",
+        ]
+
+    def test_tail_keeps_last_lines_of_single_agent_log(self, fake_home, tmp_path, capsys):
+        root = tmp_path / "x"; root.mkdir()
+        save_registry({"claude": {"root": str(root)}})
+        log = agent_log_path("claude")
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("line1\nline2\nline3\n")
+        assert cmd_logs(["claude", "--tail", "2"]) == 0
+        assert capsys.readouterr().out.splitlines() == ["line2", "line3"]
 
 
