@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from core import (
@@ -993,11 +994,52 @@ def cmd_drain(args: list[str]) -> int:
 
 # ---------- logs ----------
 
+def _parse_log_line_ts(line: str) -> datetime | None:
+    if not line:
+        return None
+    head = line.split(" ", 1)[0]
+    if head.endswith("Z"):
+        head = head[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(head)
+    except ValueError:
+        return None
+
+
+def _read_agent_log(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        return f.readlines()
+
+
+def _merge_log_lines(paths: list[Path]) -> list[str]:
+    tagged: list[tuple[tuple, str]] = []
+    for fi, path in enumerate(paths):
+        for li, line in enumerate(_read_agent_log(path)):
+            ts = _parse_log_line_ts(line)
+            key = (0, ts, fi, li) if ts is not None else (1, fi, li)
+            tagged.append((key, line))
+    tagged.sort(key=lambda item: item[0])
+    return [line for _key, line in tagged]
+
+
+def _dump_logs(paths: list[Path], tail_n: int | None) -> None:
+    existing = [p for p in paths if p.is_file()]
+    if not existing:
+        return
+    lines = _read_agent_log(existing[0]) if len(existing) == 1 else _merge_log_lines(existing)
+    if tail_n is not None:
+        lines = lines[-tail_n:]
+    for line in lines:
+        sys.stdout.write(line)
+    sys.stdout.flush()
+
+
 def cmd_logs(args: list[str]) -> int:
-    """Read each named agent's log.txt and emit lines merge-sorted by ISO
-    timestamp prefix. -f follows each file; new lines from any source are
-    interleaved using a small ordering buffer so multi-file output stays
-    roughly chronological."""
+    """Read each named agent's log.txt. One agent: append order (file order).
+    Multiple agents: merge by leading ISO timestamp. -f follows; multi-agent
+    follow uses a short ordering buffer."""
     if not args:
         print("usage: a8s logs <name> [<name>...] [--tail N] [-f|--follow]", file=sys.stderr)
         return 2
@@ -1060,48 +1102,51 @@ def cmd_logs(args: list[str]) -> int:
             print(f"no log yet at {p}", file=sys.stderr)
         return 1
 
-    # Initial dump: read all existing lines, merge-sort by leading timestamp.
-    lines: list[str] = []
-    for p in paths:
-        if p.is_file():
-            with p.open("r", encoding="utf-8", errors="replace") as f:
-                lines.extend(f)
-    lines.sort(key=lambda ln: ln.split(" ", 1)[0] if ln else "")
-    if tail_n is not None:
-        lines = lines[-tail_n:]
-    for ln in lines:
-        sys.stdout.write(ln)
-    sys.stdout.flush()
+    # Initial dump: one file in append order; multiple files merge by timestamp.
+    _dump_logs(paths, tail_n)
 
     if not follow:
         return 0
 
-    # Follow: poll each file's tail, emit new lines in chronological order
-    # using a ~1s ordering window. Cheap and correct enough for v1.
-    handles: list[tuple[Path, "os.IOBase"]] = []
+    handles: list[tuple[int, Path, "os.IOBase"]] = []
     try:
-        for p in paths:
+        for fi, p in enumerate(paths):
             p.parent.mkdir(parents=True, exist_ok=True)
             p.touch(exist_ok=True)
             f = p.open("r", encoding="utf-8", errors="replace")
             f.seek(0, 2)
-            handles.append((p, f))
-        buf: list[str] = []
+            handles.append((fi, p, f))
+        if len(handles) == 1:
+            try:
+                while True:
+                    ln = handles[0][2].readline()
+                    if not ln:
+                        time.sleep(0.25)
+                        continue
+                    sys.stdout.write(ln)
+                    sys.stdout.flush()
+            except KeyboardInterrupt:
+                return 0
+        buf: list[tuple[tuple, str]] = []
+        seq = 0
         last_emit = time.time()
         try:
             while True:
                 progress = False
-                for _path, f in handles:
+                for fi, _path, f in handles:
                     while True:
                         ln = f.readline()
                         if not ln:
                             break
-                        buf.append(ln)
+                        ts = _parse_log_line_ts(ln)
+                        key = (0, ts, fi, seq) if ts is not None else (1, fi, seq)
+                        buf.append((key, ln))
+                        seq += 1
                         progress = True
                 now = time.time()
                 if buf and (not progress or now - last_emit >= 1.0):
-                    buf.sort(key=lambda ln: ln.split(" ", 1)[0] if ln else "")
-                    for ln in buf:
+                    buf.sort(key=lambda item: item[0])
+                    for _key, ln in buf:
                         sys.stdout.write(ln)
                     sys.stdout.flush()
                     buf.clear()
@@ -1110,13 +1155,13 @@ def cmd_logs(args: list[str]) -> int:
                     time.sleep(0.25)
         except KeyboardInterrupt:
             if buf:
-                buf.sort(key=lambda ln: ln.split(" ", 1)[0] if ln else "")
-                for ln in buf:
+                buf.sort(key=lambda item: item[0])
+                for _key, ln in buf:
                     sys.stdout.write(ln)
                 sys.stdout.flush()
             return 0
     finally:
-        for _p, f in handles:
+        for _fi, _p, f in handles:
             try:
                 f.close()
             except Exception:
