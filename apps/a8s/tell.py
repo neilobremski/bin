@@ -62,18 +62,24 @@ def _walk_outbox_from(start: Path) -> Path | None:
 
 
 def find_outbox() -> Path | None:
+    outbox, _source = resolve_outbox()
+    return outbox
+
+
+def resolve_outbox() -> tuple[Path | None, str]:
     if os.environ.get(TELL_DIR_ENV, "").strip():
-        return _outbox_from_tell_dir()
+        return _outbox_from_tell_dir(), TELL_DIR_ENV
     found = _walk_outbox_from(Path.cwd())
     if found is not None:
-        return found
+        return found, "cwd"
     default_dir = os.environ.get(TELL_DEFAULT_DIR_ENV, "").strip()
     if not default_dir:
-        return None
+        return None, "none"
     try:
-        return _walk_outbox_from(Path(default_dir).expanduser())
+        found = _walk_outbox_from(Path(default_dir).expanduser())
     except OSError:
-        return None
+        return None, TELL_DEFAULT_DIR_ENV
+    return (found, TELL_DEFAULT_DIR_ENV) if found is not None else (None, TELL_DEFAULT_DIR_ENV)
 
 
 def agent_root_from_outbox(outbox: Path) -> Path:
@@ -94,12 +100,13 @@ def join_args(args: list[str]) -> str:
 
 def parse_tell_argv(
     argv: list[str],
-) -> tuple[str, list[str], list[str], bool, float]:
-    """Return `(recipient, attachments, message_argv, sync, timeout_sec)`."""
+) -> tuple[str | None, list[str], list[str], bool, float, bool]:
+    """Return `(recipient, attachments, message_argv, sync, timeout_sec, check)`."""
     attachments: list[str] = []
     recipient: str | None = None
     message_argv: list[str] = []
     sync = False
+    check = False
     timeout = DEFAULT_SYNC_TIMEOUT
     i = 0
     while i < len(argv):
@@ -111,6 +118,8 @@ def parse_tell_argv(
             attachments.append(argv[i])
         elif arg == "--sync":
             sync = True
+        elif arg == "--check":
+            check = True
         elif arg == "--timeout":
             i += 1
             if i >= len(argv):
@@ -130,9 +139,9 @@ def parse_tell_argv(
         else:
             message_argv.append(arg)
         i += 1
-    if recipient is None:
+    if recipient is None and not check:
         raise TellUsageError("recipient name required")
-    return recipient, attachments, message_argv, sync, timeout
+    return recipient, attachments, message_argv, sync, timeout, check
 
 
 def resolve_message_body(message_argv: list[str]) -> str | None:
@@ -369,9 +378,58 @@ def _run_sync(
             )
 
 
+def _probe_outbox_writable(outbox: Path) -> str | None:
+    probe = outbox / f".tell-check-{os.getpid()}.tmp"
+    try:
+        probe.write_text("{}", encoding="utf-8")
+        probe.unlink()
+    except OSError as e:
+        return str(e)
+    return None
+
+
+def run_check(recipient: str | None) -> int:
+    outbox, source = resolve_outbox()
+    if outbox is None:
+        print("tell: cannot send from this directory", file=sys.stderr)
+        if source == TELL_DIR_ENV:
+            print(f"tell: {TELL_DIR_ENV} is set but has no send directory", file=sys.stderr)
+        elif source == TELL_DEFAULT_DIR_ENV:
+            print(f"tell: {TELL_DEFAULT_DIR_ENV} is set but has no send directory", file=sys.stderr)
+        return 1
+
+    err = _probe_outbox_writable(outbox)
+    if err is not None:
+        print(f"tell: send directory not writable: {err}", file=sys.stderr)
+        return 1
+
+    agent_root = agent_root_from_outbox(outbox)
+    lines = ["tell: ok", f"  send-from: {agent_root}", f"  via: {source}"]
+
+    sender = _optional_sender()
+    if sender is not None:
+        lines.append(f"  sender: {sender[0]}")
+    else:
+        lines.append("  sender: (registry unavailable)")
+
+    if recipient is not None:
+        rc, canonical, kind = _validate_recipient(recipient)
+        if rc != 0:
+            return rc
+        assert canonical is not None
+        if kind == "alias":
+            lines.append(f"  recipient {recipient!r}: ok (alias -> {canonical})")
+        else:
+            lines.append(f"  recipient {recipient!r}: ok")
+
+    for line in lines:
+        print(line)
+    return 0
+
+
 def tell_main(argv: list[str]) -> int:
     try:
-        recipient, attachments, message_argv, sync, timeout = parse_tell_argv(argv)
+        recipient, attachments, message_argv, sync, timeout, check = parse_tell_argv(argv)
     except TellHelp:
         _print_usage()
         return 0
@@ -379,6 +437,17 @@ def tell_main(argv: list[str]) -> int:
         print(f"tell: {e}", file=sys.stderr)
         _print_usage()
         return 2
+
+    if check:
+        if sync:
+            print("tell: --check cannot be used with --sync", file=sys.stderr)
+            return 2
+        if attachments or message_argv:
+            print("tell: --check does not accept a message or attachments", file=sys.stderr)
+            return 2
+        return run_check(recipient)
+
+    assert recipient is not None
 
     body = resolve_message_body(message_argv)
     if body is None:
