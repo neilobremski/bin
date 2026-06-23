@@ -618,6 +618,7 @@ class TestCmdTellWithSplitFileArg:
         (tmp_path / "alice").mkdir()
         ensure_mailboxes(Participant("sender", sender_root))
         monkeypatch.chdir(sender_root)
+        (sender_root / "report.pdf").write_text("doc")
 
         rc = cmd_tell(["alice", "Here is the doc.", "FILE: ./report.pdf"])
         assert rc == 0
@@ -626,7 +627,9 @@ class TestCmdTellWithSplitFileArg:
         import json as _json
         msg = _json.loads(outbox_files[0].read_text())
         assert msg["content"] == "Here is the doc."
-        assert msg["files"] == [{"filename": "report.pdf", "path": "./report.pdf"}]
+        assert msg["files"] == [
+            {"filename": "report.pdf", "path": str((sender_root / "report.pdf").resolve())}
+        ]
 
 
 class TestCmdLogs:

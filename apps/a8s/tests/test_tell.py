@@ -203,24 +203,27 @@ def test_tell_dir_overrides_tell_default_dir(tmp_path):
 
 def test_tell_lifts_file_lines_into_files_array(tmp_path):
     (tmp_path / ".outbox").mkdir()
-    res = _run(tmp_path, "gerry", "Here you go.", "FILE: ./report.pdf", "FILE: /tmp/data.csv")
+    (tmp_path / "report.pdf").write_text("r")
+    (tmp_path / "data.csv").write_text("d")
+    res = _run(tmp_path, "gerry", "Here you go.", "FILE: ./report.pdf", f"FILE: {tmp_path / 'data.csv'}")
     assert res.returncode == 0, res.stderr
     _name, msg = _read_outbox(tmp_path / ".outbox")
     assert msg["content"] == "Here you go."
     assert msg["files"] == [
-        {"filename": "report.pdf", "path": "./report.pdf"},
-        {"filename": "data.csv", "path": "/tmp/data.csv"},
+        {"filename": "report.pdf", "path": str((tmp_path / "report.pdf").resolve())},
+        {"filename": "data.csv", "path": str((tmp_path / "data.csv").resolve())},
     ]
 
 
 def test_tell_handles_inline_newline_file_lines(tmp_path):
     (tmp_path / ".outbox").mkdir()
+    (tmp_path / "report.pdf").write_text("r")
     body = "Here you go.\nFILE: ./report.pdf"
     res = _run(tmp_path, "gerry", body)
     assert res.returncode == 0, res.stderr
     _name, msg = _read_outbox(tmp_path / ".outbox")
     assert msg["content"] == "Here you go."
-    assert msg["files"] == [{"filename": "report.pdf", "path": "./report.pdf"}]
+    assert msg["files"] == [{"filename": "report.pdf", "path": str((tmp_path / "report.pdf").resolve())}]
 
 
 def test_tell_omits_from_field_without_registry(tmp_path):
@@ -269,43 +272,49 @@ def test_tell_envelope_shape_is_router_compatible(tmp_path):
     finally:
         sys.path.pop(0)
     (tmp_path / ".outbox").mkdir()
+    (tmp_path / "x.txt").write_text("x")
     res = _run(tmp_path, "gerry", "header line\nbody line", "FILE: ./x.txt")
     assert res.returncode == 0, res.stderr
     _name, msg = _read_outbox(tmp_path / ".outbox")
     assert msg["to"] == "gerry"
-    assert msg["files"] == [{"filename": "x.txt", "path": "./x.txt"}]
+    assert msg["files"] == [{"filename": "x.txt", "path": str((tmp_path / "x.txt").resolve())}]
     assert "header line" in msg["content"]
     assert "body line" in msg["content"]
 
 
 def test_tell_attach_flag(tmp_path):
     (tmp_path / ".outbox").mkdir()
+    (tmp_path / "report.pdf").write_text("r")
     res = _run(tmp_path, "gerry", "--attach", "./report.pdf", "see attached")
     assert res.returncode == 0, res.stderr
     _name, msg = _read_outbox(tmp_path / ".outbox")
     assert msg["content"] == "see attached"
-    assert msg["files"] == [{"filename": "report.pdf", "path": "./report.pdf"}]
+    assert msg["files"] == [{"filename": "report.pdf", "path": str((tmp_path / "report.pdf").resolve())}]
 
 
 def test_tell_file_flag_is_alias_for_attach(tmp_path):
     (tmp_path / ".outbox").mkdir()
+    (tmp_path / "data.csv").write_text("d")
     res = _run(tmp_path, "gerry", "--file", "./data.csv", "csv inside")
     assert res.returncode == 0, res.stderr
     _name, msg = _read_outbox(tmp_path / ".outbox")
-    assert msg["files"] == [{"filename": "data.csv", "path": "./data.csv"}]
+    assert msg["files"] == [{"filename": "data.csv", "path": str((tmp_path / "data.csv").resolve())}]
 
 
 def test_tell_attach_before_recipient(tmp_path):
     (tmp_path / ".outbox").mkdir()
+    (tmp_path / "a.txt").write_text("a")
     res = _run(tmp_path, "--attach", "./a.txt", "bob", "hello")
     assert res.returncode == 0, res.stderr
     _name, msg = _read_outbox(tmp_path / ".outbox")
     assert msg["to"] == "bob"
-    assert msg["files"] == [{"filename": "a.txt", "path": "./a.txt"}]
+    assert msg["files"] == [{"filename": "a.txt", "path": str((tmp_path / "a.txt").resolve())}]
 
 
 def test_tell_multiple_attachments(tmp_path):
     (tmp_path / ".outbox").mkdir()
+    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "b.txt").write_text("b")
     res = _run(
         tmp_path,
         "gerry",
@@ -318,9 +327,90 @@ def test_tell_multiple_attachments(tmp_path):
     assert res.returncode == 0, res.stderr
     _name, msg = _read_outbox(tmp_path / ".outbox")
     assert msg["files"] == [
-        {"filename": "a.txt", "path": "./a.txt"},
-        {"filename": "b.txt", "path": "./b.txt"},
+        {"filename": "a.txt", "path": str((tmp_path / "a.txt").resolve())},
+        {"filename": "b.txt", "path": str((tmp_path / "b.txt").resolve())},
     ]
+
+
+def test_tell_absolutizes_attach_relative_to_cwd_not_outbox_root(tmp_path):
+    agent_root = tmp_path / "agent"
+    work = agent_root / "project"
+    work.mkdir(parents=True)
+    (agent_root / ".outbox").mkdir()
+    payload = work / "report.pdf"
+    payload.write_text("payload")
+    res = _run(work, "bob", "--attach", "report.pdf", "see attached")
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(agent_root / ".outbox")
+    assert msg["files"] == [{"filename": "report.pdf", "path": str(payload.resolve())}]
+
+
+def test_tell_absolutized_attach_delivers_after_routing(fake_home, tmp_path):
+    from core import Participant, files_dir, inbox_dir
+    from mailbox import ensure_mailboxes, route_outboxes
+    from registry import save_registry
+
+    sender_root = tmp_path / "sender"
+    recipient_root = tmp_path / "recipient"
+    work = sender_root / "project"
+    work.mkdir(parents=True)
+    (sender_root / ".outbox").mkdir()
+    recipient_root.mkdir()
+    payload = work / "data.txt"
+    payload.write_text("hello file")
+    save_registry(
+        {"SENDER": {"root": str(sender_root)}, "BOB": {"root": str(recipient_root)}}
+    )
+    res = _run_a8s(work, "BOB", "--attach", "data.txt", "see attached")
+    assert res.returncode == 0, res.stderr
+    sender = Participant("SENDER", sender_root)
+    bob = Participant("BOB", recipient_root)
+    ensure_mailboxes(sender)
+    ensure_mailboxes(bob)
+    route_outboxes([sender, bob], all_agents=[sender, bob])
+    copied = list(files_dir(bob.root).iterdir())
+    assert len(copied) == 1
+    assert copied[0].read_text() == "hello file"
+    delivered = json.loads(next(inbox_dir("BOB").iterdir()).read_text())
+    assert delivered["files"] == [{"filename": "data.txt", "path": "./.files/data.txt"}]
+
+
+def test_tell_rejects_attachment_outside_cwd_and_mailbox(tmp_path):
+    agent = tmp_path / "agent"
+    (agent / ".outbox").mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x")
+    res = _run(agent, "bob", "--attach", str(outside), "hi")
+    assert res.returncode == 1
+    assert "outside allowed paths" in res.stderr
+    assert list((agent / ".outbox").glob("*.json")) == []
+
+
+def test_tell_rejects_missing_attachment(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    res = _run(tmp_path, "bob", "--attach", "./missing.txt", "hi")
+    assert res.returncode == 1
+    assert "not found" in res.stderr
+
+
+def test_tell_allows_attach_from_cwd_when_outbox_via_tell_dir(tmp_path):
+    mailbox = tmp_path / "mailbox"
+    (mailbox / ".outbox").mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    note = workspace / "note.txt"
+    note.write_text("x")
+    res = _run(
+        workspace,
+        "bob",
+        "--attach",
+        "./note.txt",
+        "hi",
+        env={"TELL_DIR": str(mailbox)},
+    )
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(mailbox / ".outbox")
+    assert msg["files"] == [{"filename": "note.txt", "path": str(note.resolve())}]
 
 
 def test_tell_stdin_dash(tmp_path):

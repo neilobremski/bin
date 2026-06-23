@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core import _preview, out_agent
-from mailbox import _split_content_and_files
+from mailbox import _split_content_and_files, allowed_file_roots, path_under_allowed_roots
 from sync_listen import (
     DEFAULT_SYNC_TIMEOUT_SEC,
     build_cancel_envelope,
@@ -84,6 +84,75 @@ def resolve_outbox() -> tuple[Path | None, str]:
 
 def agent_root_from_outbox(outbox: Path) -> Path:
     return outbox.parent.resolve()
+
+
+def _absolutize_file_path(path: str) -> str:
+    p = Path(path).expanduser()
+    if p.is_absolute():
+        return str(p.resolve())
+    return str((Path.cwd() / p).resolve())
+
+
+def _normalize_file_entries(entries: list[dict]) -> list[dict]:
+    normalized: list[dict] = []
+    for entry in entries:
+        raw = (entry.get("path") or "").strip()
+        if not raw:
+            normalized.append(dict(entry))
+            continue
+        abs_path = _absolutize_file_path(raw)
+        normalized.append({"filename": Path(abs_path).name, "path": abs_path})
+    return normalized
+
+
+def _validate_file_entries(entries: list[dict], allowed_roots: list[Path]) -> int:
+    if not entries:
+        return 0
+    for entry in entries:
+        raw = (entry.get("path") or "").strip()
+        if not raw:
+            continue
+        try:
+            resolved = Path(raw).resolve()
+        except (OSError, RuntimeError) as e:
+            print(f"tell: attachment path invalid: {raw}: {e}", file=sys.stderr)
+            return 1
+        if not path_under_allowed_roots(resolved, allowed_roots):
+            print(f"tell: attachment outside allowed paths: {resolved}", file=sys.stderr)
+            return 1
+        if not resolved.is_file():
+            print(f"tell: attachment not found: {resolved}", file=sys.stderr)
+            return 1
+    return 0
+
+
+def _sender_sandbox_root(outbox: Path, sender: tuple[str, dict] | None) -> Path:
+    if sender is not None:
+        root = sender[1].get("root", "")
+        if root:
+            return Path(root).expanduser().resolve()
+    return agent_root_from_outbox(outbox)
+
+
+def _validate_file_attachments(files: list[dict], sandbox_root: Path) -> int:
+    if not files:
+        return 0
+    root = sandbox_root.resolve()
+    for entry in files:
+        raw = (entry.get("path") or "").strip()
+        if not raw:
+            print("tell: attachment path required", file=sys.stderr)
+            return 1
+        try:
+            path = Path(raw).resolve()
+            path.relative_to(root)
+        except (ValueError, OSError, RuntimeError):
+            print(f"tell: attachment outside send root: {raw}", file=sys.stderr)
+            return 1
+        if not path.is_file():
+            print(f"tell: attachment not found: {raw}", file=sys.stderr)
+            return 1
+    return 0
 
 
 def join_args(args: list[str]) -> str:
@@ -457,11 +526,17 @@ def tell_main(argv: list[str]) -> int:
     content, files = _split_content_and_files(body)
     for path in attachments:
         files.append({"filename": Path(path).name, "path": path})
+    files = _normalize_file_entries(files)
 
     outbox = find_outbox()
     if outbox is None:
         print("tell: cannot send from this directory", file=sys.stderr)
         return 1
+
+    allowed_roots = allowed_file_roots(agent_root_from_outbox(outbox), [Path.cwd()])
+    rc = _validate_file_entries(files, allowed_roots)
+    if rc != 0:
+        return rc
 
     agent_root = agent_root_from_outbox(outbox)
     sender = _optional_sender()

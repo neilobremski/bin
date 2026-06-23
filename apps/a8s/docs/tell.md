@@ -18,7 +18,7 @@ Operator documentation for how `tell` works under the hood. Agent-facing usage l
 1. If `TELL_DIR` is set, use `$TELL_DIR/.outbox` directly (no CWD or parent walk).
 2. Else walk up from CWD for the first `.outbox/` directory.
 3. If none found, walk up from `TELL_DEFAULT_DIR` (agent root or any path under it).
-4. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`.
+4. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`. `--attach` / `--file` append to the same `files` array. All paths are resolved to absolute paths against tell's CWD, then validated: each must exist and lie under the mailbox root (parent of `.outbox`) **or** tell's CWD (subfolders OK; symlinks resolved).
 5. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root.
 6. Write a JSON envelope atomically into `.outbox/` (`.{id}.tmp` → `{id}.json`).
 
@@ -37,7 +37,7 @@ Envelope shape:
 
 `from` is omitted when registry is unreachable; the router **force-overwrites** `from` based on which agent owns the outbox directory.
 
-7. `route_outboxes` ingests outbox files into `~/.a8s/agents/<NAME>/pending/`, routes to recipient inboxes (or alias fan-out), and handles remotes.
+7. `route_outboxes` ingests outbox files into `~/.a8s/agents/<NAME>/pending/`, routes to recipient inboxes (or alias fan-out), and handles remotes. FILE attachments must lie under the sender's registry `root` or any listed `safe_dirs`.
 
 ### `TELL_DIR`
 

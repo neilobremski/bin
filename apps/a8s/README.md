@@ -48,7 +48,7 @@ flowchart LR
 
 Three concepts:
 
-- **Registry** (`~/.a8s/a8s.json`) — the list of agents and aliases. Agents have a name, a directory, and a *definition* (a JSON file describing how to wake them).
+- **Registry** (`~/.a8s/a8s.json`) — the list of agents and aliases. Agents have a name, a directory, and a *definition* (a JSON file describing how to wake them). Optional `safe_dirs` lists extra directories where that agent's FILE attachments may originate at routing time (in addition to `root`).
 - **Handlers** — a process that holds the attachment for one or more agents. Pid file at `~/.a8s/agents/<NAME>/pid`. One agent is handled by exactly one process at a time, but one process can handle many agents (typically by attaching to an alias).
 - **Mailboxes** — agents write to `<agent-root>/.outbox/`; routing copies into `~/.a8s/agents/<RECIPIENT>/inbox/`; the handler drains the inbox by waking the agent's CLI. Routing is process-agnostic — only waking requires the handler attachment.
 

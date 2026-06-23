@@ -36,8 +36,9 @@ skipped — retries are idempotent.
 FILE: payload transfer (issue #62): each `FILE:` entry's bytes are copied
 into `<recipient>/.files/<filename>` and the routed message's path rewritten
 to the recipient-local copy. Sender paths are validated to live inside the
-sender's own root before copy — the outbox is agent-writable, so an
-unvalidated path could be a probe for files outside the sandbox.
+sender's own root (plus optional `safe_dirs` from the registry) before copy —
+the outbox is agent-writable, so an unvalidated path could be a probe for
+files outside the sandbox.
 """
 from __future__ import annotations
 
@@ -108,9 +109,39 @@ def _recipient_relative_path(files_dir_path: Path, dest: Path) -> str:
     return f"./{files_dir_path.name}/{dest.name}"
 
 
+def allowed_file_roots(primary: Path, extra: list[Path] | tuple[Path, ...] = ()) -> list[Path]:
+    roots: list[Path] = []
+    for candidate in (primary, *extra):
+        try:
+            resolved = candidate.expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def path_under_allowed_roots(path: Path, roots: list[Path]) -> bool:
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        return False
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def sender_file_roots(sender: Participant) -> list[Path]:
+    return allowed_file_roots(sender.root, list(sender.safe_dirs))
+
+
 def _transfer_file_to_recipient(
     sender_name: str,
-    sender_root: Path,
+    allowed_roots: list[Path],
     recipient_root: Path,
     entry: dict,
 ) -> dict | None:
@@ -119,9 +150,8 @@ def _transfer_file_to_recipient(
     file was rejected (logged to sender's per-agent log).
 
     Defenses:
-      - source must resolve INSIDE `sender_root` (the outbox is
-        agent-writable, so an unvalidated path could be a probe for files
-        outside the sandbox)
+      - source must resolve INSIDE one of `allowed_roots` (sender root plus
+        optional registry `safe_dirs`)
       - source must exist and be a regular file
       - source size must be <= MAX_FILE_BYTES (large payloads belong on a
         side-channel; see issue #63)
@@ -130,21 +160,18 @@ def _transfer_file_to_recipient(
     routed message's `files[i].path` is updated to match.
     """
     src_path = Path(entry.get("path") or "").expanduser()
-    sender_root_resolved = sender_root.resolve()
     try:
         if src_path.is_absolute():
             src_resolved = src_path.resolve()
         else:
-            src_resolved = (sender_root_resolved / src_path).resolve()
+            src_resolved = (allowed_roots[0] / src_path).resolve()
     except (OSError, RuntimeError) as e:
         out_agent(sender_name, f"FILE: cannot resolve {src_path!s}: {e}")
         return None
-    try:
-        src_resolved.relative_to(sender_root_resolved)
-    except ValueError:
+    if not path_under_allowed_roots(src_resolved, allowed_roots):
         out_agent(
             sender_name,
-            f"FILE: rejected — path outside sender root: {src_resolved}",
+            f"FILE: rejected — path outside allowed directories: {src_resolved}",
         )
         return None
     if not src_resolved.is_file():
@@ -177,8 +204,7 @@ def _transfer_file_to_recipient(
 
 def _build_routed_message(
     base_msg: dict,
-    sender_name: str,
-    sender_root: Path,
+    sender: Participant,
     recipient: Participant,
 ) -> dict:
     """Construct the routed copy of `base_msg` for `recipient` — copies any
@@ -195,7 +221,7 @@ def _build_routed_message(
         new_files: list[dict] = []
         for entry in src_files:
             rewritten = _transfer_file_to_recipient(
-                sender_name, sender_root, recipient.root, entry
+                sender.name, sender_file_roots(sender), recipient.root, entry
             )
             if rewritten is not None:
                 new_files.append(rewritten)
@@ -315,24 +341,21 @@ def _schedule_retry(pending_file: Path, sidecar: dict, sender: Participant) -> N
     _save_sidecar(pending_file, sidecar)
 
 
-def _resolve_file_source(sender_root: Path, entry: dict) -> Path | None:
+def _resolve_file_source(allowed_roots: list[Path], entry: dict) -> Path | None:
     """Validate and resolve a `FILE:` entry's source path, returning a
     sandbox-safe absolute path or None if the path can't be used. Same
     validation rules as `_transfer_file_to_recipient` (exists, regular file,
-    inside sender_root, under MAX_FILE_BYTES) — factored out so the upload
+    inside allowed roots, under MAX_FILE_BYTES) — factored out so the upload
     path can reuse the defenses without copying bytes."""
     src_path = Path(entry.get("path") or "").expanduser()
-    sender_root_resolved = sender_root.resolve()
     try:
         if src_path.is_absolute():
             src_resolved = src_path.resolve()
         else:
-            src_resolved = (sender_root_resolved / src_path).resolve()
+            src_resolved = (allowed_roots[0] / src_path).resolve()
     except (OSError, RuntimeError):
         return None
-    try:
-        src_resolved.relative_to(sender_root_resolved)
-    except ValueError:
+    if not path_under_allowed_roots(src_resolved, allowed_roots):
         return None
     if not src_resolved.is_file():
         return None
@@ -347,8 +370,7 @@ def _resolve_file_source(sender_root: Path, entry: dict) -> Path | None:
 
 def _upload_files_for_remote(
     msg: dict,
-    sender_name: str,
-    sender_root: Path,
+    sender: Participant,
     services: list[StorageService],
     sidecar: dict,
 ) -> bool:
@@ -372,6 +394,7 @@ def _upload_files_for_remote(
 
     uploaded: dict = sidecar.setdefault("uploaded", {})
     all_done = True
+    allowed_roots = sender_file_roots(sender)
     for entry in files:
         filename = entry.get("filename") or ""
         if not filename:
@@ -380,18 +403,13 @@ def _upload_files_for_remote(
         # We need the source path each pass — even on retry. The sender's
         # outbox bytes still live at the original location until the message
         # finalizes (we don't move them).
-        src = _resolve_file_source(sender_root, entry)
+        src = _resolve_file_source(allowed_roots, entry)
         if src is None and any(s.id not in per_file for s in services):
-            # Source unreadable / oversized / outside-root and at least one
-            # service still needs it. Treat as upload failure for those
-            # services so the message retries (the file may have appeared
-            # mid-pass, etc.). If every service already has its URL, we're
-            # fine even with the source gone.
             out_agent(
-                sender_name,
+                sender.name,
                 f"FILE: cannot read source for upload (filename={filename!r}); will retry",
             )
-            txlog.log("FILE_UPLOAD_FAILED", msg_id=msg.get("id", ""), sender=sender_name, files=[filename], detail="source unreadable")
+            txlog.log("FILE_UPLOAD_FAILED", msg_id=msg.get("id", ""), sender=sender.name, files=[filename], detail="source unreadable")
             all_done = False
             continue
         for service in services:
@@ -401,14 +419,14 @@ def _upload_files_for_remote(
                 url = service.store(src)  # type: ignore[arg-type]
             except StorageError as e:
                 out_agent(
-                    sender_name,
+                    sender.name,
                     f"WARN storage {service.id} upload failed for {filename!r} (attempt {sidecar['attempts'] + 1}): {e}",
                 )
                 all_done = False
                 continue
             except Exception as e:
                 out_agent(
-                    sender_name,
+                    sender.name,
                     f"WARN storage {service.id} upload raised for {filename!r} (attempt {sidecar['attempts'] + 1}): {e}",
                 )
                 all_done = False
@@ -569,7 +587,7 @@ def _process_pending(
                             final = inbox_dir(recipient.name) / f.name
                             if final.is_file():
                                 continue
-                            routed_msg = _build_routed_message(msg, sender.name, sender.root, recipient)
+                            routed_msg = _build_routed_message(msg, sender, recipient)
                             if try_sync_capture(recipient, routed_msg):
                                 sync_captured += 1
                                 continue
@@ -641,7 +659,7 @@ def _process_pending(
                 if has_files:
                     publish_msg["files"] = list(msg.get("files") or [])
                     upload_ok = _upload_files_for_remote(
-                        publish_msg, sender.name, sender.root, services_list, sidecar,
+                        publish_msg, sender, services_list, sidecar,
                     )
                 if upload_ok:
                     prev_remotes = list(sidecar["succeeded_remotes"])

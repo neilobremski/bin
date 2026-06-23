@@ -412,6 +412,33 @@ class TestFileTransfer:
         assert delivered["files"] == []
         assert delivered["content"] == "leaking"
 
+    def test_safe_dirs_allows_attachment_outside_agent_root(self, fake_home, tmp_path):
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        drop = tmp_path / "mailbox"
+        a_root.mkdir()
+        b_root.mkdir()
+        drop.mkdir()
+        payload = drop / "note.txt"
+        payload.write_text("from drop folder")
+        save_registry(
+            {
+                "A": {"root": str(a_root), "safe_dirs": [str(drop)]},
+                "B": {"root": str(b_root)},
+            }
+        )
+        a = Participant("A", a_root, safe_dirs=(drop.resolve(),))
+        b = Participant("B", b_root)
+        ensure_mailboxes(a)
+        ensure_mailboxes(b)
+        _write_outbox("A", a.root, "B", "drop attach", [
+            {"filename": "note.txt", "path": str(payload.resolve())},
+        ])
+        route_outboxes([a, b], all_agents=[a, b])
+        copied = list(files_dir(b.root).iterdir())
+        assert len(copied) == 1
+        assert copied[0].read_text() == "from drop folder"
+
     def test_missing_source_is_dropped(self, file_agents):
         a, b = file_agents
         # FILE: points at a path that doesn't exist (sender promised something

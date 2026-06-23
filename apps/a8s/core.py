@@ -392,3 +392,4 @@ def out_agent(name: str, text: str = "", end: str = "\n") -> None:
 class Participant:
     name: str
     root: Path
+    safe_dirs: tuple[Path, ...] = ()
