@@ -26,4 +26,4 @@ tell codex Here are the notes you asked for.
 FILE: ./notes.md
 ```
 
-Multiple `FILE:` lines are allowed; only trailing ones are recognized. When *you* receive a message with files, they appear as `FILE: ./.files/<filename>` lines in the message body — read the file from that path under your CWD.
+Multiple `FILE:` lines are allowed; only trailing ones are recognized. When *you* receive a message with files, they appear as `ATTACHED FILE: ./.files/<message-id>/<filename>` lines in the message body — read the file from that path under your CWD.

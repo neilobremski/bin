@@ -2,9 +2,11 @@
 
 Schema:
   {
-    "agents":  {"<NAME>": {"root": "...", "definition": "...?"}},
+    "agents":  {"<NAME>": {"root": "...", "definition": "...?", "safe_dirs": ["..."]}},
     "aliases": {"<ALIAS>": ["<NAME-or-ALIAS>", ...]}
   }
+  `safe_dirs` — optional extra directories (absolute paths) where FILE
+  attachments may originate at routing time, in addition to `root`.
 Agent and alias namespaces are disjoint (`cmd_alias` rejects collisions).
 
 Also hosts the read-only marker-file scan used by `cmd_discover` and the
@@ -174,7 +176,17 @@ def participants_from_registry() -> list[Participant]:
             root = Path(root_str).expanduser().resolve()
         except (OSError, RuntimeError):
             continue
-        parts.append(Participant(name=name, root=root))
+        safe_dirs: list[Path] = []
+        raw_dirs = info.get("safe_dirs") or []
+        if isinstance(raw_dirs, list):
+            for item in raw_dirs:
+                if not isinstance(item, str) or not item.strip():
+                    continue
+                try:
+                    safe_dirs.append(Path(item).expanduser().resolve())
+                except (OSError, RuntimeError):
+                    continue
+        parts.append(Participant(name=name, root=root, safe_dirs=tuple(safe_dirs)))
     return parts
 
 

@@ -12,6 +12,7 @@ from core import (
     MAX_FILE_BYTES,
     Participant,
     files_dir,
+    inbound_bundle_dir,
     inbox_dir,
     inbox_tmp_dir,
     outbox_dir,
@@ -27,6 +28,17 @@ from mailbox import (
     route_outboxes,
 )
 from registry import save_aliases, save_registry
+
+
+def _write_staged(sender_name: str, sender_root: Path, to: str, content: str, *sources: Path) -> Path:
+    return _write_outbox(
+        sender_name,
+        sender_root,
+        to,
+        content,
+        [],
+        attachment_sources=list(sources),
+    )
 
 
 # ---------- _split_content_and_files ----------
@@ -333,10 +345,7 @@ class TestAtomicFanout:
 
 
 class TestFileTransfer:
-    """Issue #62 — `FILE:` payloads are copied into each recipient's `.files/`
-    at routing time. The routed message's `files[i].path` is rewritten to the
-    recipient-local copy so the recipient's wake prompt emits a path it can
-    actually open under its own sandbox."""
+    """Issue #62 — outbox bundles copy into each recipient's `.files/<id>/`."""
 
     @pytest.fixture
     def file_agents(self, fake_home, tmp_path):
@@ -351,30 +360,18 @@ class TestFileTransfer:
 
     def test_copies_file_to_recipient_files_dir(self, file_agents):
         a, b = file_agents
-        # Sender prepares a payload under its OWN root.
         payload = a.root / "report.txt"
         payload.write_text("hello payload")
-        _write_outbox("A", a.root, "B", "see attached", [
-            {"filename": "report.txt", "path": str(payload)},
-        ])
+        out_path = _write_staged("A", a.root, "B", "see attached", payload)
+        msg_id = out_path.stem
         route_outboxes([a, b], all_agents=[a, b])
-        # File arrived in B's .files/ and content matches.
-        b_files = list(files_dir(b.root).iterdir())
-        assert len(b_files) == 1
-        assert b_files[0].name == "report.txt"
-        assert b_files[0].read_text() == "hello payload"
-        # Routed message's path points at B's local copy.
+        bundle = inbound_bundle_dir(b.root, msg_id)
+        assert (bundle / "report.txt").read_text() == "hello payload"
         delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
-        assert len(delivered["files"]) == 1
-        # Path is CWD-relative-to-recipient-root, not an absolute host path —
-        # so an agent running in a container with its dir mapped under a
-        # different prefix still finds the file via $MESSAGE's `FILE:` line.
-        assert delivered["files"][0]["path"] == "./.files/report.txt"
-        assert delivered["files"][0]["filename"] == "report.txt"
+        assert delivered["files"] == [{"filename": "report.txt"}]
+        assert delivered["id"] == msg_id
 
     def test_alias_fanout_copies_to_each_recipient(self, fake_home, tmp_path):
-        # A sends to alias devs=[B, C] with a FILE; each recipient gets its
-        # own copy under its own .files/.
         agents = {}
         for n in ("A", "B", "C"):
             d = tmp_path / n; d.mkdir()
@@ -386,39 +383,44 @@ class TestFileTransfer:
         a = agents["A"]
         payload = a.root / "data.csv"
         payload.write_text("col1,col2\n1,2\n")
-        _write_outbox("A", a.root, "devs", "team data", [
-            {"filename": "data.csv", "path": str(payload)},
-        ])
+        out_path = _write_staged("A", a.root, "devs", "team data", payload)
+        msg_id = out_path.stem
         route_outboxes(list(agents.values()), all_agents=list(agents.values()))
         for n in ("B", "C"):
-            recipient_files = list(files_dir(agents[n].root).iterdir())
-            assert len(recipient_files) == 1
-            assert recipient_files[0].read_text() == "col1,col2\n1,2\n"
+            assert (inbound_bundle_dir(agents[n].root, msg_id) / "data.csv").read_text() == "col1,col2\n1,2\n"
 
-    def test_path_outside_sender_root_is_rejected(self, fake_home, tmp_path, file_agents):
+    def test_envelope_path_field_is_rejected(self, fake_home, tmp_path, file_agents):
         a, b = file_agents
-        # Attacker writes a FILE: pointing OUTSIDE A's root (e.g., system
-        # secrets). Routing must drop the file rather than copy it.
-        outside = tmp_path / "secrets.txt"
-        outside.write_text("PASSWORD=hunter2")
         _write_outbox("A", a.root, "B", "leaking", [
-            {"filename": "secrets.txt", "path": str(outside)},
+            {"filename": "secrets.txt", "path": "/outside/secrets.txt"},
         ])
         route_outboxes([a, b], all_agents=[a, b])
-        # File NOT copied into B's .files/.
         assert list(files_dir(b.root).iterdir()) == []
-        # Message still delivered (with the file dropped).
         delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
         assert delivered["files"] == []
-        assert delivered["content"] == "leaking"
 
-    def test_missing_source_is_dropped(self, file_agents):
+    def test_staged_attachment_outside_sender_root_delivers(self, fake_home, tmp_path):
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        drop = tmp_path / "mailbox"
+        a_root.mkdir()
+        b_root.mkdir()
+        drop.mkdir()
+        payload = drop / "note.txt"
+        payload.write_text("from drop folder")
+        save_registry({"A": {"root": str(a_root)}, "B": {"root": str(b_root)}})
+        a = Participant("A", a_root)
+        b = Participant("B", b_root)
+        ensure_mailboxes(a)
+        ensure_mailboxes(b)
+        out_path = _write_staged("A", a.root, "B", "drop attach", payload)
+        msg_id = out_path.stem
+        route_outboxes([a, b], all_agents=[a, b])
+        assert (inbound_bundle_dir(b.root, msg_id) / "note.txt").read_text() == "from drop folder"
+
+    def test_missing_staged_file_is_dropped(self, file_agents):
         a, b = file_agents
-        # FILE: points at a path that doesn't exist (sender promised something
-        # they didn't write). Routing drops the file silently into the log.
-        _write_outbox("A", a.root, "B", "ghost", [
-            {"filename": "ghost.txt", "path": str(a.root / "ghost.txt")},
-        ])
+        _write_outbox("A", a.root, "B", "ghost", [{"filename": "ghost.txt"}])
         route_outboxes([a, b], all_agents=[a, b])
         assert list(files_dir(b.root).iterdir()) == []
         delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
@@ -427,30 +429,23 @@ class TestFileTransfer:
     def test_oversized_source_is_dropped(self, file_agents):
         a, b = file_agents
         big = a.root / "big.bin"
-        # 1 byte over the cap.
         big.write_bytes(b"x" * (MAX_FILE_BYTES + 1))
-        _write_outbox("A", a.root, "B", "huge", [
-            {"filename": "big.bin", "path": str(big)},
-        ])
+        _write_staged("A", a.root, "B", "huge", big)
         route_outboxes([a, b], all_agents=[a, b])
         assert list(files_dir(b.root).iterdir()) == []
 
-    def test_collision_uniquifies(self, file_agents):
+    def test_same_basename_different_messages_both_deliver(self, file_agents):
         a, b = file_agents
-        # Two messages, each carrying a FILE with the same basename.
+        msg_ids: list[str] = []
         for i in range(2):
-            payload = a.root / f"p{i}.txt"
-            payload.write_text(f"contents {i}")
-            # Force same destination filename via shared "doc.txt" name.
             entry_path = a.root / "doc.txt"
             entry_path.write_text(f"v{i}")
-            _write_outbox("A", a.root, "B", f"msg {i}", [
-                {"filename": "doc.txt", "path": str(entry_path)},
-            ])
+            out_path = _write_staged("A", a.root, "B", f"msg {i}", entry_path)
+            msg_ids.append(out_path.stem)
             route_outboxes([a, b], all_agents=[a, b])
-        # Two distinct copies in B's .files/ thanks to unique_path uniquify.
-        names = {p.name for p in files_dir(b.root).iterdir()}
-        assert names == {"doc.txt", "doc.1.txt"}
+        assert len(msg_ids) == 2
+        for mid, expected in zip(msg_ids, ("v0", "v1"), strict=True):
+            assert (inbound_bundle_dir(b.root, mid) / "doc.txt").read_text() == expected
 
 
 class TestNextInboxMessage:
@@ -663,9 +658,7 @@ class TestRemotePublishHook:
             called.append(msg)
             return list(succeeded_so_far) + ["hub"]
 
-        _write_outbox("A", a.root, "B", "see attached", [
-            {"filename": "doc.txt", "path": str(payload)},
-        ])
+        _write_staged("A", a.root, "B", "see attached", payload)
         route_outboxes(
             [a, b],
             all_agents=[a, b],
@@ -740,9 +733,8 @@ class TestStorageUpload:
             return list(succeeded_so_far) + ["hub"]
 
         s = _StubStorage("svc")
-        _write_outbox("A", a.root, "GHOST", "see attached", [
-            {"filename": "doc.txt", "path": str(payload)},
-        ])
+        out_path = _write_staged("A", a.root, "GHOST", "see attached", payload)
+        entry_id = out_path.stem
         route_outboxes(
             [a, b],
             all_agents=[a, b],
@@ -750,9 +742,7 @@ class TestStorageUpload:
             configured_remote_ids=["hub"],
             services=[s],
         )
-        # Upload happened exactly once.
         assert len(s.uploads) == 1
-        # Publish hook saw the rewritten wire shape.
         assert len(published) == 1
         files = published[0]["files"]
         assert len(files) == 1
@@ -779,9 +769,8 @@ class TestStorageUpload:
 
         good = _StubStorage("good")
         flaky = _StubStorage("flaky", fail_n=1)
-        _write_outbox("A", a.root, "GHOST", "see attached", [
-            {"filename": "doc.txt", "path": str(payload)},
-        ])
+        out_path = _write_staged("A", a.root, "GHOST", "see attached", payload)
+        entry_id = out_path.stem
         route_outboxes(
             [a, b],
             all_agents=[a, b],
@@ -798,8 +787,9 @@ class TestStorageUpload:
         pending_files = [f for f in pending_dir("A").iterdir()
                          if f.name.endswith(".json") and not f.name.endswith(".retry")]
         sidecar = json.loads(retry_sidecar_path(pending_files[0]).read_text())
-        assert sidecar["uploaded"]["doc.txt"]["good"].startswith("stub://good/")
-        assert "flaky" not in sidecar["uploaded"]["doc.txt"]
+        staged_name = "doc.txt"
+        assert sidecar["uploaded"][staged_name]["good"].startswith("stub://good/")
+        assert "flaky" not in sidecar["uploaded"][staged_name]
         # Force the next-attempt clock open and route again.
         sidecar["next_attempt"] = ""
         retry_sidecar_path(pending_files[0]).write_text(json.dumps(sidecar))
@@ -833,9 +823,7 @@ class TestStorageUpload:
             published.append(msg)
             return list(succeeded_so_far) + ["hub"]
 
-        _write_outbox("A", a.root, "B", "see attached", [
-            {"filename": "doc.txt", "path": str(payload)},
-        ])
+        _write_staged("A", a.root, "B", "see attached", payload)
         route_outboxes(
             [a, b],
             all_agents=[a, b],
@@ -883,16 +871,9 @@ class TestStorageDownload:
             }],
         }).encode()
         receive_envelope(envelope, [b], services=[s_first, s_second])
-        # File materialized into B's .files/.
-        files = list(files_dir(b_root).iterdir())
-        assert len(files) == 1
-        assert files[0].name == "doc.txt"
-        assert files[0].read_bytes() == b"the-payload"
-        # The inbox-written envelope has the local-path shape.
+        assert (inbound_bundle_dir(b_root, msg_id) / "doc.txt").read_bytes() == b"the-payload"
         inbox_msg = json.loads(next(inbox_dir("B").iterdir()).read_text())
-        # Same CWD-relative shape as the local-routing case — the receiver's
-        # agent doesn't see an absolute host path either.
-        assert inbox_msg["files"] == [{"filename": "doc.txt", "path": "./.files/doc.txt"}]
+        assert inbox_msg["files"] == [{"filename": "doc.txt"}]
 
     def test_all_urls_unsupported_drops_file_keeps_message(self, fake_home, tmp_path):
         from network import receive_envelope

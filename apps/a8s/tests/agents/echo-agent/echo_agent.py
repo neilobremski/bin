@@ -5,7 +5,7 @@ expansion, prints the canonical `Date:` / `From:` / `To:` / blank /
 body lines to stdout (so `a8s logs echoman` keeps working), and
 persists each tell to `.files/<ulid>.txt` for easy monitoring.
 
-Trailing `FILE: <path>` lines in the message body are stripped from
+Trailing `ATTACHED FILE: <path>` lines in the message body are stripped from
 the persisted body and the referenced files are copied to
 `.files/<ulid>-<basename>` via shutil.copy2. Missing referenced files
 are logged to stderr and skipped (the wake still succeeds).
@@ -41,8 +41,8 @@ def new_ulid() -> str:
 def split_body_and_files(text: str) -> tuple[str, list[str]]:
     lines = text.splitlines()
     files: list[str] = []
-    while lines and lines[-1].startswith("FILE: "):
-        files.insert(0, lines.pop()[len("FILE: "):].strip())
+    while lines and lines[-1].startswith("ATTACHED FILE: "):
+        files.insert(0, lines.pop()[len("ATTACHED FILE: "):].strip())
     return "\n".join(lines), files
 
 

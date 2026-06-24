@@ -18,26 +18,35 @@ Operator documentation for how `tell` works under the hood. Agent-facing usage l
 1. If `TELL_DIR` is set, use `$TELL_DIR/.outbox` directly (no CWD or parent walk).
 2. Else walk up from CWD for the first `.outbox/` directory.
 3. If none found, walk up from `TELL_DEFAULT_DIR` (agent root or any path under it).
-4. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`.
+4. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`. `--attach` / `--file` append to the same `files` array. Any source path tell can read is attachable. Allocate `msg_id`, copy each file into `.outbox/<msg_id>/<basename>`, then write `.outbox/<msg_id>.json` with **filename-only** `files` entries (no `path` field).
 5. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root.
-6. Write a JSON envelope atomically into `.outbox/` (`.{id}.tmp` → `{id}.json`).
 
 Envelope shape:
 
 ```json
 {
-  "id": "<ulid>",
+  "id": "01J…",
   "date": "<iso8601 Z>",
   "to": "<recipient>",
   "content": "...",
-  "files": [{"filename": "...", "path": "..."}],
+  "files": [{"filename": "avatar.jpg"}],
   "from": "<sender>"
 }
 ```
 
+On disk alongside the JSON:
+
+```
+.outbox/
+  01J….json
+  01J…/
+    avatar.jpg
+```
+
 `from` is omitted when registry is unreachable; the router **force-overwrites** `from` based on which agent owns the outbox directory.
 
-7. `route_outboxes` ingests outbox files into `~/.a8s/agents/<NAME>/pending/`, routes to recipient inboxes (or alias fan-out), and handles remotes.
+6. **Ingest** — move `<msg_id>.json` and `.outbox/<msg_id>/` together into `~/.a8s/agents/<SENDER>/pending/`.
+7. **Route** — copy pending bundle bytes into each recipient's `.files/<msg_id>/`. Inbox JSON keeps filename-only `files`. Wake `$MESSAGE` appends `ATTACHED FILE: ./.files/<msg_id>/<filename>` lines.
 
 ### `TELL_DIR`
 

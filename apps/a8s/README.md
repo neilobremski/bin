@@ -48,7 +48,7 @@ flowchart LR
 
 Three concepts:
 
-- **Registry** (`~/.a8s/a8s.json`) — the list of agents and aliases. Agents have a name, a directory, and a *definition* (a JSON file describing how to wake them).
+- **Registry** (`~/.a8s/a8s.json`) — the list of agents and aliases. Agents have a name, a directory, and a *definition* (a JSON file describing how to wake them). Optional `safe_dirs` remains in the schema but is unused for attachment routing: tell stages files into `<root>/.files/` and envelopes reference filename only.
 - **Handlers** — a process that holds the attachment for one or more agents. Pid file at `~/.a8s/agents/<NAME>/pid`. One agent is handled by exactly one process at a time, but one process can handle many agents (typically by attaching to an alias).
 - **Mailboxes** — agents write to `<agent-root>/.outbox/`; routing copies into `~/.a8s/agents/<RECIPIENT>/inbox/`; the handler drains the inbox by waking the agent's CLI. Routing is process-agnostic — only waking requires the handler attachment.
 
@@ -211,7 +211,7 @@ Strict opacity (issues #69, #70) still holds: a routed message looks identical w
 Argv elements run through six substitutions:
 - `$SENDER` → sender's canonical name (always non-empty — every message has a force-stamped agent `from`).
 - `$RECIPIENT` → what the sender wrote in `to` (alias name for fanned messages, agent name for direct ones).
-- `$MESSAGE` → the message body (`content`, with any `FILE: <path>` lines appended).
+- `$MESSAGE` → the message body (`content`, with any `ATTACHED FILE: <path>` lines appended for inbound attachments).
 - `$TIMESTAMP` → ISO 8601 UTC timestamp the message was queued (e.g. `2026-04-28T14:30:00.123456Z`). Useful when you want a stable machine-readable time.
 - `$AGE` → human-readable age relative to now (e.g. `5 minutes ago`). Computed at wake time, so a long backlog gets accurate values per message. Pick this OR `$TIMESTAMP` per definition based on which the LLM will read more naturally.
 - `$A8S_DIR` → `apps/a8s/` itself, so definitions can point at bundled scripts (`default.json` uses this for `dummy-cli`).
@@ -319,7 +319,7 @@ a8s add my-email /mnt/gdrive/my-email/ file-proxy.json
 
 - **On message:** A8S moves inbox JSON files into `<root>/.inbox/` instead of invoking a subprocess. The remote side polls `.inbox/`, processes, deletes.
 - **Outbox:** The remote side writes response envelopes to `<root>/.outbox/`. A8S ingests these on its normal routing pass (no change from regular agents).
-- **Files:** Attachments flow through `<root>/.files/` bidirectionally. A8S cleans up files older than `files_ttl_hours` (default 48) on each idle cycle.
+- **Files:** Tell copies attachments into `.outbox/<msg_id>/` before writing the envelope (filename only in JSON). Ingest moves the bundle with the JSON; routing delivers into `.files/<msg_id>/` on each recipient. Wake prompts use `ATTACHED FILE: ./.files/<msg_id>/<name>`. A8S cleans up files older than `files_ttl_hours` (default 48) on each idle cycle.
 - **Idle:** The `idle.timeout` controls how often A8S syncs (moves inbox files + runs TTL cleanup). No CLI is invoked.
 
 ### Filesystem layout (agent root)

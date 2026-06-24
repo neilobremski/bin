@@ -53,8 +53,8 @@ def send(to: str, subject: str, body: str) -> int:
     attachments = []
     body_lines = []
     for line in body.splitlines():
-        if line.startswith("FILE: "):
-            path = line[len("FILE: "):].strip()
+        if line.startswith("ATTACHED FILE: "):
+            path = line[len("ATTACHED FILE: "):].strip()
             try:
                 p = Path(path)
                 data = p.read_bytes()

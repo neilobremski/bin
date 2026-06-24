@@ -239,6 +239,16 @@ class TestParticipantsFromRegistry:
         parts = participants_from_registry()
         assert {p.name for p in parts} == {"A"}
 
+    def test_loads_safe_dirs(self, fake_home, tmp_path):
+        root = tmp_path / "a"
+        root.mkdir()
+        drop = tmp_path / "drop"
+        drop.mkdir()
+        save_registry({"A": {"root": str(root), "safe_dirs": [str(drop), ""]}})
+        parts = participants_from_registry()
+        assert len(parts) == 1
+        assert parts[0].safe_dirs == (drop.resolve(),)
+
 
 # ---------- parse_name + _scan_for_markers ----------
 
