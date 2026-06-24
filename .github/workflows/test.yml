@@ -27,7 +27,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest
+      - name: Install a8s test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mosquitto
+          pip install pytest -r apps/a8s/tests/requirements.txt
       - run: python -m pytest tests/test_pii.py apps/a8s/tests/ -x -q
 
   k7e:
