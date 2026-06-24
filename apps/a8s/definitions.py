@@ -21,6 +21,7 @@ from core import (
     DEFINITIONS_DIR,
     MARKER_FILES,
     SCRIPT_DIR,
+    resolve_outbox_path,
 )
 from registry import load_registry
 
@@ -42,6 +43,24 @@ def files_ttl_seconds(definition: dict) -> float:
     except (TypeError, ValueError):
         h = 48.0
     return max(0.0, h * 3600)
+
+
+def resolve_outbox_dir(agent_root: Path, definition: dict) -> Path:
+    """Outbox path from definition `outbox_dir` (default `.outbox` under root)."""
+    spec = definition.get("outbox_dir")
+    if spec is not None and not isinstance(spec, str):
+        raise ValueError("definition outbox_dir must be a string")
+    if isinstance(spec, str) and not spec.strip():
+        raise ValueError("definition outbox_dir must not be empty")
+    return resolve_outbox_path(agent_root, spec if isinstance(spec, str) else None)
+
+
+def resolve_outbox_dir_for_agent(name: str, agent_root: Path) -> Path:
+    try:
+        definition = load_definition(name)
+    except (FileNotFoundError, RuntimeError):
+        definition = {}
+    return resolve_outbox_dir(agent_root, definition)
 
 
 def load_definition(name: str) -> dict:

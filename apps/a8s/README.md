@@ -77,9 +77,8 @@ a8s ls
 #   CLAUDE  PID 12345  /Users/me/projects/code-review
 #   GEMINI  PID 12345  /Users/me/projects/research
 
-# Send messages. `tell` writes a JSON file to the nearest enclosing
-# `.outbox/` directory (the agent root, walking up from CWD), so you
-# must `cd` into one of your agents first.
+# Send messages. Woken agents get `TELL_OUTBOX_DIR` from a8s; manual tell
+# requires `export TELL_OUTBOX_DIR=…/.outbox` (see docs/tell.md).
 cd ~/projects/code-review
 tell GEMINI "look at lines 40-80 of foo.py"
 tell devs   "stand-up at 3pm"
@@ -125,8 +124,8 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 ### Messaging
 | | |
 |---|---|
-| `a8s tell <name> <msg>` | Routed message. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose `.outbox/` encloses CWD (walks up); errors if no `.outbox/` is found. There is no senderless channel — every message has a force-stamped agent `from` (the router stamps it from the outbox's owning agent, regardless of what the client wrote). |
-| `tell <name> <msg>` (top-level shim, [`~/bin/tell`](/Users/neilo/bin/tell)) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Walks up CWD to find any `.outbox/`, drops a JSON envelope — no `~/.a8s` access required. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: [`docs/tell.md`](docs/tell.md). |
+| `a8s tell <name> <msg>` | Routed message via `_write_outbox` into the sender's configured outbox. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose root encloses CWD; router force-stamps `from` from outbox ownership. |
+| `tell <name> <msg>` (top-level shim, [`~/bin/tell`](/Users/neilo/bin/tell)) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Requires `TELL_OUTBOX_DIR` (a8s injects it on wake). Drops a JSON envelope — no `~/.a8s` access required. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: [`docs/tell.md`](docs/tell.md). |
 | `a8s logs <name>... [--tail N] [-f]` | Read per-agent log files; one agent in append order, multiple merge by ISO timestamp. `-f` follows. |
 
 ### Skills

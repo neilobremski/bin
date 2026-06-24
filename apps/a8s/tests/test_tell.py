@@ -1,7 +1,7 @@
 """Tests for `tell` — invoked as a subprocess via the ~/bin/tell shim.
 
-The shim delegates to `a8s tell`, which writes JSON envelopes into the
-nearest `.outbox/` without requiring registry access.
+The shim delegates to `a8s tell`, which requires `TELL_OUTBOX_DIR` (a8s sets
+this on wake). Tests pass it explicitly when exercising tell directly.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from core import files_dir, inbound_bundle_dir, outbox_bundle_dir, outbox_dir
+from core import TELL_OUTBOX_DIR_ENV, files_dir, inbound_bundle_dir, outbox_bundle_dir, outbox_dir
 
 TELL = Path(__file__).resolve().parent.parent.parent.parent / "tell"
 A8S_TELL = [
@@ -24,29 +24,52 @@ A8S_TELL = [
 ]
 
 
+def _merge_tell_env(
+    cwd: Path,
+    env: dict[str, str] | None = None,
+    *,
+    outbox: Path | None = None,
+) -> dict[str, str]:
+    merged = dict(os.environ)
+    extra = dict(env or {})
+    if TELL_OUTBOX_DIR_ENV not in extra:
+        target = outbox if outbox is not None else cwd / ".outbox"
+        if outbox is not None or target.is_dir():
+            extra[TELL_OUTBOX_DIR_ENV] = str(target.resolve() if outbox is None else target)
+    merged.update(extra)
+    return merged
+
+
 def _run(
     cwd: Path,
     *args: str,
     stdin: str | None = None,
     env: dict[str, str] | None = None,
+    outbox: Path | None = None,
 ) -> subprocess.CompletedProcess:
     kw: dict = {
         "cwd": str(cwd),
         "capture_output": True,
         "text": True,
+        "env": _merge_tell_env(cwd, env, outbox=outbox),
     }
     if stdin is not None:
         kw["input"] = stdin
-    if env is not None:
-        kw["env"] = {**os.environ, **env}
     return subprocess.run([str(TELL), *args], **kw)
 
 
-def _run_a8s(cwd: Path, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
+def _run_a8s(
+    cwd: Path,
+    *args: str,
+    stdin: str | None = None,
+    env: dict[str, str] | None = None,
+    outbox: Path | None = None,
+) -> subprocess.CompletedProcess:
     kw: dict = {
         "cwd": str(cwd),
         "capture_output": True,
         "text": True,
+        "env": _merge_tell_env(cwd, env, outbox=outbox),
     }
     if stdin is not None:
         kw["input"] = stdin
@@ -89,13 +112,18 @@ def test_a8s_tell_writes_outbox_without_registry(tmp_path):
     assert msg["content"] == "via a8s tell"
 
 
-def test_tell_walks_up_from_subdir(tmp_path):
-    (tmp_path / ".outbox").mkdir()
+def test_tell_requires_tell_outbox_dir_from_subdir(tmp_path):
+    outbox = tmp_path / ".outbox"
+    outbox.mkdir()
     sub = tmp_path / "deep" / "nested"
     sub.mkdir(parents=True)
     res = _run(sub, "codex", "from below")
+    assert res.returncode != 0
+    assert "TELL_OUTBOX_DIR is not set" in res.stderr
+
+    res = _run(sub, "codex", "from below", outbox=outbox)
     assert res.returncode == 0, res.stderr
-    _name, msg = _read_outbox(tmp_path / ".outbox")
+    _name, msg = _read_outbox(outbox)
     assert msg["to"] == "codex"
     assert msg["content"] == "from below"
 
@@ -103,7 +131,7 @@ def test_tell_walks_up_from_subdir(tmp_path):
 def test_tell_errors_when_no_outbox(tmp_path):
     res = _run(tmp_path, "anyone", "should fail")
     assert res.returncode != 0
-    assert "cannot send from this directory" in res.stderr
+    assert "TELL_OUTBOX_DIR is not set" in res.stderr
 
 
 def test_tell_help_is_opaque(tmp_path):
@@ -113,102 +141,48 @@ def test_tell_help_is_opaque(tmp_path):
     assert ".temp" not in res.stderr
 
 
-def test_tell_uses_tell_default_dir(tmp_path):
-    agent = tmp_path / "agent"
-    (agent / ".outbox").mkdir(parents=True)
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    res = _run(
-        elsewhere,
-        "gerry",
-        "via default dir",
-        env={"TELL_DEFAULT_DIR": str(agent)},
-    )
-    assert res.returncode == 0, res.stderr
-    _name, msg = _read_outbox(agent / ".outbox")
-    assert msg["content"] == "via default dir"
-
-
-def test_tell_cwd_outbox_wins_over_tell_default_dir(tmp_path):
-    cwd_agent = tmp_path / "here"
-    other_agent = tmp_path / "there"
-    (cwd_agent / ".outbox").mkdir(parents=True)
-    (other_agent / ".outbox").mkdir(parents=True)
-    res = _run(
-        cwd_agent,
-        "gerry",
-        "from cwd",
-        env={"TELL_DEFAULT_DIR": str(other_agent)},
-    )
-    assert res.returncode == 0, res.stderr
-    assert list((other_agent / ".outbox").glob("*.json")) == []
-    _name, msg = _read_outbox(cwd_agent / ".outbox")
-    assert msg["content"] == "from cwd"
-
-
-def test_tell_default_dir_walks_up(tmp_path):
-    agent = tmp_path / "agent"
-    (agent / ".outbox").mkdir(parents=True)
-    sub = agent / "src" / "pkg"
-    sub.mkdir(parents=True)
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    res = _run(
-        elsewhere,
-        "gerry",
-        "default subdir",
-        env={"TELL_DEFAULT_DIR": str(sub)},
-    )
-    assert res.returncode == 0, res.stderr
-    _name, msg = _read_outbox(agent / ".outbox")
-    assert msg["content"] == "default subdir"
-
-
-def test_tell_dir_locks_mailbox(tmp_path):
-    locked = tmp_path / "mailbox"
+def test_tell_outbox_dir_locks_over_cwd_outbox(tmp_path):
+    locked = tmp_path / "mailbox" / ".outbox"
+    locked.mkdir(parents=True)
     cwd_agent = tmp_path / "cwd-agent"
-    (locked / ".outbox").mkdir(parents=True)
     (cwd_agent / ".outbox").mkdir(parents=True)
     res = _run(
         cwd_agent,
         "gerry",
         "locked send",
-        env={"TELL_DIR": str(locked)},
+        env={"TELL_OUTBOX_DIR": str(locked)},
     )
     assert res.returncode == 0, res.stderr
     assert list((cwd_agent / ".outbox").glob("*.json")) == []
-    _name, msg = _read_outbox(locked / ".outbox")
+    _name, msg = _read_outbox(locked)
     assert msg["content"] == "locked send"
 
 
-def test_tell_dir_missing_outbox_fails(tmp_path):
-    mailbox = tmp_path / "mailbox"
-    mailbox.mkdir()
+def test_tell_outbox_dir_creates_when_missing(tmp_path):
+    outbox = tmp_path / "mailbox" / ".outbox"
+    assert not outbox.exists()
     res = _run(
         tmp_path,
         "gerry",
-        "nope",
-        env={"TELL_DIR": str(mailbox)},
-    )
-    assert res.returncode != 0
-    assert "cannot send from this directory" in res.stderr
-
-
-def test_tell_dir_overrides_tell_default_dir(tmp_path):
-    locked = tmp_path / "locked"
-    other = tmp_path / "other"
-    (locked / ".outbox").mkdir(parents=True)
-    (other / ".outbox").mkdir(parents=True)
-    res = _run(
-        tmp_path,
-        "gerry",
-        "dir wins",
-        env={"TELL_DIR": str(locked), "TELL_DEFAULT_DIR": str(other)},
+        "created",
+        env={"TELL_OUTBOX_DIR": str(outbox)},
     )
     assert res.returncode == 0, res.stderr
-    assert list((other / ".outbox").glob("*.json")) == []
-    _name, msg = _read_outbox(locked / ".outbox")
-    assert msg["content"] == "dir wins"
+    assert outbox.is_dir()
+    _name, msg = _read_outbox(outbox)
+    assert msg["content"] == "created"
+
+
+def test_tell_fails_when_outbox_not_writable(tmp_path):
+    outbox = tmp_path / ".outbox"
+    outbox.mkdir()
+    outbox.chmod(0o555)
+    try:
+        res = _run(tmp_path, "gerry", "nope", outbox=outbox)
+        assert res.returncode != 0
+        assert "outbox is unavailable" in res.stderr
+    finally:
+        outbox.chmod(0o755)
 
 
 def test_tell_lifts_file_lines_into_files_array(tmp_path):
@@ -360,7 +334,7 @@ def test_tell_absolutizes_attach_relative_to_cwd_not_outbox_root(tmp_path):
     (agent_root / ".outbox").mkdir()
     payload = work / "report.pdf"
     payload.write_text("payload")
-    res = _run(work, "bob", "--attach", "report.pdf", "see attached")
+    res = _run(work, "bob", "--attach", "report.pdf", "see attached", outbox=agent_root / ".outbox")
     assert res.returncode == 0, res.stderr
     _name, msg = _read_outbox(agent_root / ".outbox")
     _assert_staged_files(agent_root / ".outbox", msg, ["report.pdf"])
@@ -382,7 +356,14 @@ def test_tell_absolutized_attach_delivers_after_routing(fake_home, tmp_path):
     save_registry(
         {"SENDER": {"root": str(sender_root)}, "BOB": {"root": str(recipient_root)}}
     )
-    res = _run_a8s(work, "BOB", "--attach", "data.txt", "see attached")
+    res = _run_a8s(
+        work,
+        "BOB",
+        "--attach",
+        "data.txt",
+        "see attached",
+        outbox=sender_root / ".outbox",
+    )
     assert res.returncode == 0, res.stderr
     _name, out_msg = _read_outbox(sender_root / ".outbox")
     msg_id = out_msg["id"]
@@ -414,9 +395,9 @@ def test_tell_rejects_missing_attachment(tmp_path):
     assert "not found" in res.stderr
 
 
-def test_tell_stages_attach_from_cwd_when_outbox_via_tell_dir(tmp_path):
-    mailbox = tmp_path / "mailbox"
-    (mailbox / ".outbox").mkdir(parents=True)
+def test_tell_stages_attach_from_cwd_when_outbox_via_tell_outbox_dir(tmp_path):
+    outbox = tmp_path / "mailbox" / ".outbox"
+    outbox.mkdir(parents=True)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     note = workspace / "note.txt"
@@ -427,12 +408,12 @@ def test_tell_stages_attach_from_cwd_when_outbox_via_tell_dir(tmp_path):
         "--attach",
         "./note.txt",
         "hi",
-        env={"TELL_DIR": str(mailbox)},
+        env={"TELL_OUTBOX_DIR": str(outbox)},
     )
     assert res.returncode == 0, res.stderr
-    _name, msg = _read_outbox(mailbox / ".outbox")
-    _assert_staged_files(mailbox / ".outbox", msg, ["note.txt"])
-    assert (outbox_bundle_dir(mailbox / ".outbox", msg["id"]) / "note.txt").read_text() == "x"
+    _name, msg = _read_outbox(outbox)
+    _assert_staged_files(outbox, msg, ["note.txt"])
+    assert (outbox_bundle_dir(outbox, msg["id"]) / "note.txt").read_text() == "x"
 
 
 def test_tell_stdin_dash(tmp_path):
@@ -520,33 +501,32 @@ def test_tell_check_unknown_recipient_fails(fake_home, tmp_path, monkeypatch):
 def test_tell_check_fails_without_outbox(tmp_path):
     res = _run(tmp_path, "--check")
     assert res.returncode == 1
-    assert "cannot send from this directory" in res.stderr
+    assert "TELL_OUTBOX_DIR is not set" in res.stderr
 
 
-def test_tell_check_reports_tell_dir(tmp_path):
-    locked = tmp_path / "mailbox"
-    (locked / ".outbox").mkdir(parents=True)
+def test_tell_check_reports_outbox_dir(tmp_path):
+    outbox = tmp_path / "mailbox" / ".outbox"
+    outbox.mkdir(parents=True)
     res = _run(
         tmp_path,
         "--check",
-        env={"TELL_DIR": str(locked)},
+        env={"TELL_OUTBOX_DIR": str(outbox)},
     )
     assert res.returncode == 0, res.stderr
-    assert f"outbox: {locked.resolve() / '.outbox'}" in res.stdout
+    assert f"outbox: {outbox.resolve()}" in res.stdout
 
 
-def test_tell_check_creates_outbox_when_tell_dir_set(tmp_path):
-    locked = tmp_path / "mailbox"
-    locked.mkdir()
-    assert not (locked / ".outbox").exists()
+def test_tell_check_creates_outbox_when_outbox_dir_set(tmp_path):
+    outbox = tmp_path / "mailbox" / ".outbox"
+    assert not outbox.exists()
     res = _run(
         tmp_path,
         "--check",
-        env={"TELL_DIR": str(locked)},
+        env={"TELL_OUTBOX_DIR": str(outbox)},
     )
     assert res.returncode == 0, res.stderr
-    assert (locked / ".outbox").is_dir()
-    assert list((locked / ".outbox").glob("*.json")) == []
+    assert outbox.is_dir()
+    assert list(outbox.glob("*.json")) == []
 
 
 def test_tell_check_rejects_message_body(tmp_path):
@@ -560,3 +540,53 @@ def test_tell_help_omits_check(tmp_path):
     res = _run(tmp_path, "--help")
     assert res.returncode == 0
     assert "--check" not in res.stderr
+
+
+def _strip_tell_outbox_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k != TELL_OUTBOX_DIR_ENV}
+    if extra:
+        env.update(extra)
+    return env
+
+
+def _run_raw(
+    cwd: Path,
+    *args: str,
+    stdin: str | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    kw: dict = {
+        "cwd": str(cwd),
+        "capture_output": True,
+        "text": True,
+        "env": _strip_tell_outbox_env(env),
+    }
+    if stdin is not None:
+        kw["input"] = stdin
+    return subprocess.run([str(TELL), *args], **kw)
+
+
+class TestTellOutboxDirContract:
+    """PR #136 test plan — replaces manual checklist items for tell outbox resolution."""
+
+    def test_without_tell_outbox_dir_fails_clearly(self, tmp_path):
+        res = _run_raw(tmp_path, "bob", "hi")
+        assert res.returncode == 1
+        assert "cannot send from this directory" in res.stderr
+        assert "TELL_OUTBOX_DIR is not set" in res.stderr
+
+    def test_wake_injected_env_sufficient_without_cwd_outbox(self, tmp_path):
+        """Simulates a8s wake: only TELL_OUTBOX_DIR set, CWD has no .outbox."""
+        outbox = tmp_path / "external-outbox"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        res = _run_raw(
+            workspace,
+            "bob",
+            "from wake env",
+            env={TELL_OUTBOX_DIR_ENV: str(outbox)},
+        )
+        assert res.returncode == 0, res.stderr
+        assert outbox.is_dir()
+        _name, msg = _read_outbox(outbox)
+        assert msg["content"] == "from wake env"

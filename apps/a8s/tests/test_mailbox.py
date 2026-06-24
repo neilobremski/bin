@@ -510,6 +510,35 @@ class TestIngestPhase:
         # Trashed.
         assert any("lost" in f.read_text() for f in trash_dir("SOLO").iterdir())
 
+    def test_ingest_from_custom_outbox_dir(self, fake_home, tmp_path):
+        a_root = tmp_path / "agent"
+        a_root.mkdir()
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        external = tmp_path / "external-outbox"
+        external.mkdir()
+        save_registry({"A": {"root": str(a_root)}, "B": {"root": str(b_root)}})
+        a = Participant("A", a_root, outbox=external)
+        b = Participant("B", b_root)
+        ensure_mailboxes(a)
+        ensure_mailboxes(b)
+        msg_path = external / "01TEST.json"
+        msg_path.write_text(
+            json.dumps(
+                {
+                    "id": "01TEST",
+                    "date": "2026-01-01T00:00:00Z",
+                    "from": "A",
+                    "to": "B",
+                    "content": "from external",
+                    "files": [],
+                }
+            )
+        )
+        route_outboxes([a, b], all_agents=[a, b])
+        assert list(external.iterdir()) == []
+        assert (inbox_dir("B") / "01TEST.json").is_file()
+
 
 class TestRetrySidecar:
     """Per-message retry sidecar. With no remotes configured, the happy path

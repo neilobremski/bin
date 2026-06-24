@@ -1,9 +1,7 @@
-"""tell — drop a JSON envelope in the nearest `.outbox/`.
+"""tell — drop a JSON envelope in the outbox directory.
 
-Walks up from CWD for `.outbox/` and writes; `TELL_DIR` locks to a fixed
-mailbox root (`$TELL_DIR/.outbox`, no scan). Falls back to `TELL_DEFAULT_DIR`
-(walks up from that path) when CWD has no outbox. No registry required.
-`~/.a8s` is reachable and CWD sits inside a registered agent, validates the
+Requires `TELL_OUTBOX_DIR` (set by a8s on agent wake). No filesystem
+discovery. `~/.a8s` reachable and CWD inside a registered agent validates the
 recipient (with remote fallback), stamps `from`, and logs to the agent log.
 
 Attachments: any path tell can read is copied into `.outbox/<msg_id>/` before
@@ -26,7 +24,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core import _preview, out_agent, outbox_bundle_dir
+from core import _preview, out_agent, outbox_bundle_dir, TELL_OUTBOX_DIR_ENV
 from mailbox import _split_content_and_files
 from sync_listen import (
     DEFAULT_SYNC_TIMEOUT_SEC,
@@ -39,72 +37,42 @@ from ulid import new as new_ulid
 DEFAULT_SYNC_TIMEOUT = DEFAULT_SYNC_TIMEOUT_SEC
 SYNC_ACK_TIMEOUT = 30.0
 SYNC_POLL_INTERVAL = 0.25
-TELL_DIR_ENV = "TELL_DIR"
-TELL_DEFAULT_DIR_ENV = "TELL_DEFAULT_DIR"
 
 
-def _outbox_at(root: Path) -> Path | None:
-    candidate = root / ".outbox"
-    return candidate if candidate.is_dir() else None
-
-
-def _outbox_from_tell_dir() -> Path | None:
-    tell_dir = os.environ.get(TELL_DIR_ENV, "").strip()
-    if not tell_dir:
-        return None
+def _probe_outbox_writable(outbox: Path) -> str | None:
+    probe = outbox / f".tell-check-{os.getpid()}.tmp"
     try:
-        return _outbox_at(Path(tell_dir).expanduser().resolve())
-    except OSError:
-        return None
-
-
-def _walk_outbox_from(start: Path) -> Path | None:
-    cur = start.resolve()
-    for d in (cur, *cur.parents):
-        found = _outbox_at(d)
-        if found is not None:
-            return found
+        probe.write_text("{}", encoding="utf-8")
+        probe.unlink()
+    except OSError as e:
+        return str(e)
     return None
 
 
-def find_outbox() -> Path | None:
-    outbox, _source = resolve_outbox()
-    return outbox
-
-
-def resolve_outbox() -> tuple[Path | None, str]:
-    if os.environ.get(TELL_DIR_ENV, "").strip():
-        return _outbox_from_tell_dir(), TELL_DIR_ENV
-    found = _walk_outbox_from(Path.cwd())
-    if found is not None:
-        return found, "cwd"
-    default_dir = os.environ.get(TELL_DEFAULT_DIR_ENV, "").strip()
-    if not default_dir:
-        return None, "none"
-    try:
-        found = _walk_outbox_from(Path(default_dir).expanduser())
-    except OSError:
-        return None, TELL_DEFAULT_DIR_ENV
-    return (found, TELL_DEFAULT_DIR_ENV) if found is not None else (None, TELL_DEFAULT_DIR_ENV)
-
-
-def _ensure_tell_dir_outbox() -> Path | None:
-    tell_dir = os.environ.get(TELL_DIR_ENV, "").strip()
-    if not tell_dir:
+def _outbox_from_env() -> Path | None:
+    raw = os.environ.get(TELL_OUTBOX_DIR_ENV, "").strip()
+    if not raw:
         return None
     try:
-        outbox = Path(tell_dir).expanduser().resolve() / ".outbox"
+        outbox = Path(raw).expanduser().resolve()
         outbox.mkdir(parents=True, exist_ok=True)
+        if _probe_outbox_writable(outbox) is not None:
+            return None
         return outbox
     except OSError:
         return None
 
 
-def resolve_outbox_for_check() -> Path | None:
-    if os.environ.get(TELL_DIR_ENV, "").strip():
-        return _ensure_tell_dir_outbox()
-    outbox, _source = resolve_outbox()
-    return outbox
+def find_outbox() -> Path | None:
+    return _outbox_from_env()
+
+
+def _report_outbox_unavailable() -> None:
+    print("tell: cannot send from this directory", file=sys.stderr)
+    if os.environ.get(TELL_OUTBOX_DIR_ENV, "").strip():
+        print(f"tell: {TELL_OUTBOX_DIR_ENV} is set but outbox is unavailable", file=sys.stderr)
+    else:
+        print(f"tell: {TELL_OUTBOX_DIR_ENV} is not set", file=sys.stderr)
 
 
 def agent_root_from_outbox(outbox: Path) -> Path:
@@ -474,29 +442,10 @@ def _run_sync(
             )
 
 
-def _probe_outbox_writable(outbox: Path) -> str | None:
-    probe = outbox / f".tell-check-{os.getpid()}.tmp"
-    try:
-        probe.write_text("{}", encoding="utf-8")
-        probe.unlink()
-    except OSError as e:
-        return str(e)
-    return None
-
-
 def run_check(recipient: str | None) -> int:
-    outbox = resolve_outbox_for_check()
+    outbox = find_outbox()
     if outbox is None:
-        print("tell: cannot send from this directory", file=sys.stderr)
-        if os.environ.get(TELL_DIR_ENV, "").strip():
-            print(f"tell: {TELL_DIR_ENV} is set but send directory is unavailable", file=sys.stderr)
-        elif os.environ.get(TELL_DEFAULT_DIR_ENV, "").strip():
-            print(f"tell: {TELL_DEFAULT_DIR_ENV} is set but has no .outbox", file=sys.stderr)
-        return 1
-
-    err = _probe_outbox_writable(outbox)
-    if err is not None:
-        print(f"tell: .outbox not writable: {err}", file=sys.stderr)
+        _report_outbox_unavailable()
         return 1
 
     lines = ["tell: ok", f"  outbox: {outbox}"]
@@ -552,7 +501,7 @@ def tell_main(argv: list[str]) -> int:
 
     outbox = find_outbox()
     if outbox is None:
-        print("tell: cannot send from this directory", file=sys.stderr)
+        _report_outbox_unavailable()
         return 1
 
     rc = _validate_attachment_sources(files)

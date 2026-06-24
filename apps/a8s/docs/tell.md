@@ -14,12 +14,10 @@ Operator documentation for how `tell` works under the hood. Agent-facing usage l
 
 ## Send path (async)
 
-0. **`tell --check`** — optional self-test: verifies a writable `.outbox/` is available (walk from CWD / `TELL_DEFAULT_DIR`, or `$TELL_DIR/.outbox` — creating that directory when `TELL_DIR` is set and `.outbox` is missing). Optional recipient name validates registry routing. No envelope written.
-1. If `TELL_DIR` is set, use `$TELL_DIR/.outbox` directly (no CWD or parent walk).
-2. Else walk up from CWD for the first `.outbox/` directory.
-3. If none found, walk up from `TELL_DEFAULT_DIR` (agent root or any path under it).
-4. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`. `--attach` / `--file` append to the same `files` array. Any source path tell can read is attachable. Allocate `msg_id`, copy each file into `.outbox/<msg_id>/<basename>`, then write `.outbox/<msg_id>.json` with **filename-only** `files` entries (no `path` field).
-5. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root.
+0. **`tell --check`** — optional self-test: verifies `TELL_OUTBOX_DIR` points at a writable outbox (creates the path when missing). Optional recipient name validates registry routing. No envelope written.
+1. **`TELL_OUTBOX_DIR` required** — tell writes only to this path. a8s sets it on every wake/idle/batch invoke from the agent definition's `outbox_dir` (default `<agent-root>/.outbox`). Manual use: export it explicitly.
+2. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`. `--attach` / `--file` append to the same `files` array. Any source path tell can read is attachable. Allocate `msg_id`, copy each file into `<outbox>/<msg_id>/<basename>`, then write `<outbox>/<msg_id>.json` with **filename-only** `files` entries (no `path` field).
+3. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root.
 
 Envelope shape:
 
@@ -37,7 +35,7 @@ Envelope shape:
 On disk alongside the JSON:
 
 ```
-.outbox/
+<outbox>/
   01J….json
   01J…/
     avatar.jpg
@@ -45,28 +43,21 @@ On disk alongside the JSON:
 
 `from` is omitted when registry is unreachable; the router **force-overwrites** `from` based on which agent owns the outbox directory.
 
-6. **Ingest** — move `<msg_id>.json` and `.outbox/<msg_id>/` together into `~/.a8s/agents/<SENDER>/pending/`.
-7. **Route** — copy pending bundle bytes into each recipient's `.files/<msg_id>/`. Inbox JSON keeps filename-only `files`. Wake `$MESSAGE` appends `ATTACHED FILE: ./.files/<msg_id>/<filename>` lines.
+4. **Ingest** — move `<msg_id>.json` and `<outbox>/<msg_id>/` together into `~/.a8s/agents/<SENDER>/pending/`.
+5. **Route** — copy pending bundle bytes into each recipient's `.files/<msg_id>/`. Inbox JSON keeps filename-only `files`. Wake `$MESSAGE` appends `ATTACHED FILE: ./.files/<msg_id>/<filename>` lines.
 
-### `TELL_DIR`
+### `TELL_OUTBOX_DIR`
 
-Hard lock to a mailbox root. When set, `tell` always writes to `$TELL_DIR/.outbox` — no walk from CWD, no fallback to `TELL_DEFAULT_DIR`. Use for isolated agent sandboxes where the mailbox tree (`.outbox/`, `.temp/`, etc.) lives in a dedicated directory:
-
-```bash
-export TELL_DIR=/var/mailboxes/agent-one
-cd /anywhere && tell GEMINI "locked to this mailbox"
-```
-
-If `$TELL_DIR/.outbox` is missing, send fails. `tell --check` creates it when probing a `TELL_DIR` mailbox. Sync session files use `$TELL_DIR/.temp/`.
-
-### `TELL_DEFAULT_DIR`
-
-Set on an agent process (systemd, wrapper script, `.env`) to an agent root or any directory beneath it. When CWD is outside the agent tree — e.g. `/tmp` — `tell` still finds `.outbox/` via this fallback. Ignored when `TELL_DIR` is set. CWD wins over this fallback when it already encloses an outbox.
+The outbox path tell writes to. **Required** — no CWD walk or implicit discovery.
 
 ```bash
-export TELL_DEFAULT_DIR=/home/agent/my-agent
-cd /tmp && tell GEMINI "works from anywhere"
+export TELL_OUTBOX_DIR=/var/mailboxes/agent-one/.outbox
+tell GEMINI "hello"
 ```
+
+Created when missing. Sync session files use `<outbox-parent>/.temp/`.
+
+When a8s wakes an agent, it sets `TELL_OUTBOX_DIR` in the invoke subprocess environment to the agent definition's resolved `outbox_dir` (default `<agent-root>/.outbox`). Use a separate absolute `outbox_dir` to keep outgoing tell traffic outside the agent workspace.
 
 Does not affect `sender_from_cwd()`; the router still force-stamps `from` from outbox ownership.
 

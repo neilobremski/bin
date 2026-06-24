@@ -32,7 +32,7 @@ def test_pii_check_catches_example_agent_name_in_added_line():
         [
             "diff --git a/example.md b/example.md",
             "+++ b/example.md",
-            "+export TELL_DIR=/var/mailboxes/example-agent-name",
+            "+export TELL_OUTBOX_DIR=/var/mailboxes/example-agent-name/.outbox",
         ]
     )
     hits = check_diff(diff, parse_patterns(SAMPLE_PATTERNS))

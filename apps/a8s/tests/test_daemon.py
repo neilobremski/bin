@@ -19,6 +19,7 @@ import pytest
 
 from core import (
     Participant,
+    TELL_OUTBOX_DIR_ENV,
     agent_log_path,
     clear_inbox_waiting_since,
     detach_request_path,
@@ -291,6 +292,49 @@ def mock_agent(fake_home, tmp_path, fixtures_dir):
 
 def _read_log(name: str) -> str:
     return agent_log_path(name).read_text() if agent_log_path(name).is_file() else ""
+
+
+class TestTellOutboxEnv:
+    def test_run_with_prefix_sets_tell_outbox_dir(self, tmp_path, monkeypatch):
+        from core import TELL_OUTBOX_DIR_ENV
+
+        agent_root = tmp_path / "a"
+        agent_root.mkdir()
+        external = tmp_path / "out"
+        external.mkdir()
+        p = Participant("X", agent_root, outbox=external)
+        captured: dict = {}
+
+        class FakeProc:
+            stdout = iter([])
+            returncode = 0
+
+            def wait(self):
+                return 0
+
+            def poll(self):
+                return 0
+
+        def fake_popen(cmd, **kwargs):
+            captured["env"] = kwargs["env"]
+            return FakeProc()
+
+        monkeypatch.setattr("daemon.subprocess.Popen", fake_popen)
+        from daemon import _tell_outbox_env, run_with_prefix
+
+        run_with_prefix("X", ["true"], agent_root, env=_tell_outbox_env(p))
+        assert captured["env"][TELL_OUTBOX_DIR_ENV] == str(external.resolve())
+
+    def test_wake_env_matches_participant_outbox_path(self, tmp_path):
+        from daemon import _tell_outbox_env
+
+        agent_root = tmp_path / "agent"
+        agent_root.mkdir()
+        external = tmp_path / "mail" / ".outbox"
+        p = Participant("X", agent_root, outbox=external)
+        assert _tell_outbox_env(p) == {
+            TELL_OUTBOX_DIR_ENV: str(external.resolve()),
+        }
 
 
 class TestWakeOnce:
