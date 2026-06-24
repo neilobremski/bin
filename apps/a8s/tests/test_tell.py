@@ -481,8 +481,7 @@ def test_tell_check_ok_without_recipient(tmp_path):
     res = _run(tmp_path, "--check")
     assert res.returncode == 0, res.stderr
     assert res.stdout.splitlines()[0] == "tell: ok"
-    assert f"send-from: {tmp_path.resolve()}" in res.stdout
-    assert "via: cwd" in res.stdout
+    assert f"outbox: {tmp_path.resolve() / '.outbox'}" in res.stdout
     assert list((tmp_path / ".outbox").glob("*.json")) == []
 
 
@@ -500,7 +499,6 @@ def test_tell_check_validates_recipient(fake_home, tmp_path, monkeypatch):
     res = _run_a8s(agent_root, "--check", "bob")
     assert res.returncode == 0, res.stderr
     assert "recipient 'bob': ok" in res.stdout
-    assert "sender: SENDER" in res.stdout
     assert list((agent_root / ".outbox").glob("*.json")) == []
 
 
@@ -534,8 +532,21 @@ def test_tell_check_reports_tell_dir(tmp_path):
         env={"TELL_DIR": str(locked)},
     )
     assert res.returncode == 0, res.stderr
-    assert "via: TELL_DIR" in res.stdout
-    assert f"send-from: {locked.resolve()}" in res.stdout
+    assert f"outbox: {locked.resolve() / '.outbox'}" in res.stdout
+
+
+def test_tell_check_creates_outbox_when_tell_dir_set(tmp_path):
+    locked = tmp_path / "mailbox"
+    locked.mkdir()
+    assert not (locked / ".outbox").exists()
+    res = _run(
+        tmp_path,
+        "--check",
+        env={"TELL_DIR": str(locked)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert (locked / ".outbox").is_dir()
+    assert list((locked / ".outbox").glob("*.json")) == []
 
 
 def test_tell_check_rejects_message_body(tmp_path):

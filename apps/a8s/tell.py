@@ -88,6 +88,25 @@ def resolve_outbox() -> tuple[Path | None, str]:
     return (found, TELL_DEFAULT_DIR_ENV) if found is not None else (None, TELL_DEFAULT_DIR_ENV)
 
 
+def _ensure_tell_dir_outbox() -> Path | None:
+    tell_dir = os.environ.get(TELL_DIR_ENV, "").strip()
+    if not tell_dir:
+        return None
+    try:
+        outbox = Path(tell_dir).expanduser().resolve() / ".outbox"
+        outbox.mkdir(parents=True, exist_ok=True)
+        return outbox
+    except OSError:
+        return None
+
+
+def resolve_outbox_for_check() -> Path | None:
+    if os.environ.get(TELL_DIR_ENV, "").strip():
+        return _ensure_tell_dir_outbox()
+    outbox, _source = resolve_outbox()
+    return outbox
+
+
 def agent_root_from_outbox(outbox: Path) -> Path:
     return outbox.parent.resolve()
 
@@ -466,28 +485,21 @@ def _probe_outbox_writable(outbox: Path) -> str | None:
 
 
 def run_check(recipient: str | None) -> int:
-    outbox, source = resolve_outbox()
+    outbox = resolve_outbox_for_check()
     if outbox is None:
         print("tell: cannot send from this directory", file=sys.stderr)
-        if source == TELL_DIR_ENV:
-            print(f"tell: {TELL_DIR_ENV} is set but has no send directory", file=sys.stderr)
-        elif source == TELL_DEFAULT_DIR_ENV:
-            print(f"tell: {TELL_DEFAULT_DIR_ENV} is set but has no send directory", file=sys.stderr)
+        if os.environ.get(TELL_DIR_ENV, "").strip():
+            print(f"tell: {TELL_DIR_ENV} is set but send directory is unavailable", file=sys.stderr)
+        elif os.environ.get(TELL_DEFAULT_DIR_ENV, "").strip():
+            print(f"tell: {TELL_DEFAULT_DIR_ENV} is set but has no .outbox", file=sys.stderr)
         return 1
 
     err = _probe_outbox_writable(outbox)
     if err is not None:
-        print(f"tell: send directory not writable: {err}", file=sys.stderr)
+        print(f"tell: .outbox not writable: {err}", file=sys.stderr)
         return 1
 
-    agent_root = agent_root_from_outbox(outbox)
-    lines = ["tell: ok", f"  send-from: {agent_root}", f"  via: {source}"]
-
-    sender = _optional_sender()
-    if sender is not None:
-        lines.append(f"  sender: {sender[0]}")
-    else:
-        lines.append("  sender: (registry unavailable)")
+    lines = ["tell: ok", f"  outbox: {outbox}"]
 
     if recipient is not None:
         rc, canonical, kind = _validate_recipient(recipient)
