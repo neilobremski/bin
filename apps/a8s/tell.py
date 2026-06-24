@@ -25,7 +25,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core import _preview, out_agent, outbox_bundle_dir
+from core import _preview, out_agent, outbox_bundle_dir, TELL_OUTBOX_DIR_ENV
 from mailbox import _split_content_and_files
 from sync_listen import (
     DEFAULT_SYNC_TIMEOUT_SEC,
@@ -38,7 +38,6 @@ from ulid import new as new_ulid
 DEFAULT_SYNC_TIMEOUT = DEFAULT_SYNC_TIMEOUT_SEC
 SYNC_ACK_TIMEOUT = 30.0
 SYNC_POLL_INTERVAL = 0.25
-TELL_OUTBOX_DIR_ENV = "TELL_OUTBOX_DIR"
 
 
 def _probe_outbox_writable(outbox: Path) -> str | None:

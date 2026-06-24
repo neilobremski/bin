@@ -186,8 +186,21 @@ def participants_from_registry() -> list[Participant]:
                     safe_dirs.append(Path(item).expanduser().resolve())
                 except (OSError, RuntimeError):
                     continue
-        parts.append(Participant(name=name, root=root, safe_dirs=tuple(safe_dirs)))
+        parts.append(
+            Participant(
+                name=name,
+                root=root,
+                safe_dirs=tuple(safe_dirs),
+                outbox=_participant_outbox(name, root),
+            )
+        )
     return parts
+
+
+def _participant_outbox(name: str, root: Path) -> Path:
+    from definitions import resolve_outbox_dir_for_agent
+
+    return resolve_outbox_dir_for_agent(name, root)
 
 
 # ---------- discovery (suggestions only) ----------

@@ -60,6 +60,8 @@ Sync session files use `<outbox-parent>/.temp/` (parent of the outbox path).
 
 Does not affect `sender_from_cwd()`; the router still force-stamps `from` from outbox ownership.
 
+When a8s wakes an agent, it sets `TELL_OUTBOX_DIR` in the invoke subprocess environment to the agent definition's resolved `outbox_dir` (default `<agent-root>/.outbox`). Use a separate absolute `outbox_dir` to keep outgoing tell traffic outside the agent workspace.
+
 ## `--sync`
 
 Client side (`tell.py` + `sync_listen.py`):

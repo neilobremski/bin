@@ -16,6 +16,7 @@ from definitions import (
     build_command,
     default_definition_path,
     load_definition,
+    resolve_outbox_dir,
 )
 
 
@@ -241,6 +242,37 @@ class TestAutodiscoverDefinition:
         path, note = _autodiscover_definition(tmp_path)
         assert path == str(default_definition_path("cursor"))
         assert "auto-detected via CURSOR.md" in note
+
+
+# ---------- resolve_outbox_dir ----------
+
+class TestResolveOutboxDir:
+    def test_default_relative(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        assert resolve_outbox_dir(root, {}) == (root / ".outbox").resolve()
+
+    def test_explicit_relative(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        assert resolve_outbox_dir(root, {"outbox_dir": "mail/out"}) == (
+            root / "mail" / "out"
+        ).resolve()
+
+    def test_absolute(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        external = tmp_path / "external"
+        external.mkdir()
+        assert resolve_outbox_dir(root, {"outbox_dir": str(external)}) == external.resolve()
+
+    def test_rejects_non_string(self, tmp_path):
+        with pytest.raises(ValueError, match="outbox_dir must be a string"):
+            resolve_outbox_dir(tmp_path, {"outbox_dir": 1})
+
+    def test_rejects_empty(self, tmp_path):
+        with pytest.raises(ValueError, match="must not be empty"):
+            resolve_outbox_dir(tmp_path, {"outbox_dir": "  "})
 
 
 # ---------- load_definition ----------

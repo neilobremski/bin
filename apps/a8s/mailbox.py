@@ -94,7 +94,7 @@ def ensure_mailboxes(p: Participant) -> None:
         trash_dir(p.name),
     ):
         d.mkdir(parents=True, exist_ok=True)
-    outbox_dir(p.root).mkdir(parents=True, exist_ok=True)
+    p.outbox_path().mkdir(parents=True, exist_ok=True)
     files_dir(p.root).mkdir(parents=True, exist_ok=True)
 
 
@@ -226,7 +226,7 @@ def _ingest_outboxes(senders: list[Participant]) -> None:
     `<root>/.outbox/<id>/` attachment bundle into pending."""
     for sender in senders:
         ensure_mailboxes(sender)
-        outbox = outbox_dir(sender.root)
+        outbox = sender.outbox_path()
         if not outbox.is_dir():
             continue
         dest_dir = pending_dir(sender.name)

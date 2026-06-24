@@ -293,6 +293,38 @@ def _read_log(name: str) -> str:
     return agent_log_path(name).read_text() if agent_log_path(name).is_file() else ""
 
 
+class TestTellOutboxEnv:
+    def test_run_with_prefix_sets_tell_outbox_dir(self, tmp_path, monkeypatch):
+        from core import TELL_OUTBOX_DIR_ENV
+
+        agent_root = tmp_path / "a"
+        agent_root.mkdir()
+        external = tmp_path / "out"
+        external.mkdir()
+        p = Participant("X", agent_root, outbox=external)
+        captured: dict = {}
+
+        class FakeProc:
+            stdout = iter([])
+            returncode = 0
+
+            def wait(self):
+                return 0
+
+            def poll(self):
+                return 0
+
+        def fake_popen(cmd, **kwargs):
+            captured["env"] = kwargs["env"]
+            return FakeProc()
+
+        monkeypatch.setattr("daemon.subprocess.Popen", fake_popen)
+        from daemon import _tell_outbox_env, run_with_prefix
+
+        run_with_prefix("X", ["true"], agent_root, env=_tell_outbox_env(p))
+        assert captured["env"][TELL_OUTBOX_DIR_ENV] == str(external.resolve())
+
+
 class TestWakeOnce:
     """End-to-end wake_once exercise via the mock CLI. With the single-`invoke`
     verb every wake produces the same argv shape — the wake line surfaces

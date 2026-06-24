@@ -51,6 +51,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 SKILLS_DIR = SCRIPT_DIR / "skills"
 BIN_ROOT = SCRIPT_DIR.parent.parent
 DEFINITIONS_DIR = SCRIPT_DIR / "definitions"
+TELL_OUTBOX_DIR_ENV = "TELL_OUTBOX_DIR"
 # Explicit path for `cmd_start`'s re-exec. After the modular split, `__file__`
 # resolved inside any module would point at that module — not the entry script.
 ENTRYPOINT = SCRIPT_DIR / "a8s.py"
@@ -245,16 +246,21 @@ def retry_sidecar_path(pending_file: Path) -> Path:
     return pending_file.with_suffix(pending_file.suffix + ".retry")
 
 
-def outbox_dir(root: Path) -> Path:
-    """Outbox lives **inside the agent's own dir** so the agent can write to it
-    even under a strict workspace sandbox (codex --full-auto). Inbox and trash
-    stay isolated under ~/.a8s/agents/<NAME>/ where the agent never sees them.
+def resolve_outbox_path(agent_root: Path, spec: str | None = None) -> Path:
+    """Resolve an outbox directory from a definition `outbox_dir` value.
 
-    `route_outboxes()` re-stamps the `from` field to the enclosing participant's
-    name on every read, so an agent can't spoof a senderless prompt by writing
-    a JSON with `from: ""`.
-    """
-    return root / ".outbox"
+    Relative paths are under `agent_root`; absolute paths are used as-is.
+    Default / omitted spec is `.outbox` under the agent root."""
+    raw = (spec if spec is not None else ".outbox").strip() or ".outbox"
+    p = Path(raw).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    return (agent_root / p).resolve()
+
+
+def outbox_dir(root: Path) -> Path:
+    """Default outbox path: `<agent-root>/.outbox`."""
+    return resolve_outbox_path(root)
 
 
 def outbox_bundle_dir(outbox: Path, msg_id: str) -> Path:
@@ -405,3 +411,9 @@ class Participant:
     name: str
     root: Path
     safe_dirs: tuple[Path, ...] = ()
+    outbox: Path | None = None
+
+    def outbox_path(self) -> Path:
+        if self.outbox is not None:
+            return self.outbox
+        return outbox_dir(self.root)

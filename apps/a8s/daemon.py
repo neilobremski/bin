@@ -32,6 +32,7 @@ from pathlib import Path
 import core
 from core import (
     Participant,
+    TELL_OUTBOX_DIR_ENV,
     _pid_alive,
     _preview,
     agent_dir,
@@ -82,16 +83,26 @@ _CURRENT_WAKE_PROC: subprocess.Popen | None = None
 _CURRENT_WAKE_NAME: str | None = None
 
 
-def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
+def run_with_prefix(
+    name: str,
+    cmd: list[str],
+    cwd: Path,
+    *,
+    env: dict[str, str] | None = None,
+) -> int:
     """Run the wake subprocess in its own session so SIGKILL can target the
     whole process group (LLM CLI + any helpers it spawns). Tracks the live
     process in `_CURRENT_WAKE_PROC` and the agent in `_CURRENT_WAKE_NAME` so
     signal handlers can identify which agent's wake is in-flight."""
     global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME
+    proc_env = os.environ.copy()
+    if env:
+        proc_env.update(env)
     try:
         proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
+            env=proc_env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -118,6 +129,10 @@ def run_with_prefix(name: str, cmd: list[str], cwd: Path) -> int:
     finally:
         _CURRENT_WAKE_PROC = None
         _CURRENT_WAKE_NAME = None
+
+
+def _tell_outbox_env(p: Participant) -> dict[str, str]:
+    return {TELL_OUTBOX_DIR_ENV: str(p.outbox_path())}
 
 
 def _deliver_file_proxy(p: Participant) -> None:
@@ -193,7 +208,7 @@ def wake_once(p: Participant, msg_path: Path) -> None:
     out_agent(p.name, f"[{p.name}] waking from {trashed.name}: {_preview(msg.get('content', ''))}")
     cmd = build_command(definition, msg)
     out_agent(p.name, f"[{p.name}] exec: {shlex.join(cmd)}")
-    run_with_prefix(p.name, cmd, p.root)
+    run_with_prefix(p.name, cmd, p.root, env=_tell_outbox_env(p))
     # And again after the wake returns — a long-running LLM call shouldn't
     # leave last-active stuck at the pre-wake timestamp.
     touch_last_active(p.name)
@@ -228,7 +243,7 @@ def wake_batch(p: Participant, msg_paths: list[Path], definition: dict) -> None:
     )
     cmd = build_batch_command(definition, p.name, trashed)
     out_agent(p.name, f"[{p.name}] batch exec: {shlex.join(cmd)}")
-    run_with_prefix(p.name, cmd, p.root)
+    run_with_prefix(p.name, cmd, p.root, env=_tell_outbox_env(p))
     touch_last_active(p.name)
 
 
@@ -304,7 +319,7 @@ def maybe_run_idle(p: Participant) -> bool:
     )
     out_agent(p.name, f"[{p.name}] idle exec: {shlex.join(cmd)}")
     try:
-        run_with_prefix(p.name, cmd, p.root)
+        run_with_prefix(p.name, cmd, p.root, env=_tell_outbox_env(p))
     finally:
         touch_last_active(p.name)
     return True
