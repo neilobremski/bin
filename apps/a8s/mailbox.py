@@ -655,6 +655,14 @@ def _process_pending(
             and (not local_target_known or sidecar["local_delivered"])
         )
         if all_done:
+            remote_published = bool(sidecar["succeeded_remotes"])
+            if has_files and not (services or []):
+                # v1 fallback: remotes marked succeeded without a wire publish.
+                remote_published = False
+            if remote_published:
+                import convo
+
+                convo.record(msg, recipients=[recipient_name])
             _finalize_pending(sender, f)
             continue
         # Still pending — schedule a retry with backoff.

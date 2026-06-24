@@ -259,10 +259,10 @@ def seen_id_append(ulid: str) -> None:
 
 def make_publish_remotes(remotes: list[Transport]) -> Callable:
     """Build the `publish_remotes` callable that `route_outboxes` invokes.
-    For each not-yet-succeeded remote, attempts a publish; on failure logs
-    a warning to the sender's per-agent log and leaves the remote in the
-    `pending_remotes` set for the next pass. Returns the updated
-    `succeeded_remotes` list."""
+    For each not-yet-succeeded remote, attempts a publish; on success logs to
+    the sender's per-agent log (and stdout under `a8s run`); on failure logs
+    a warning and leaves the remote in the `pending_remotes` set for the next
+    pass. Returns the updated `succeeded_remotes` list."""
 
     def publish_with_backoff(
         msg: dict,
@@ -271,6 +271,8 @@ def make_publish_remotes(remotes: list[Transport]) -> Callable:
         attempt_count: int,
     ) -> list[str]:
         envelope = json.dumps(msg).encode("utf-8")
+        recipient = (msg.get("to") or "").strip() or "?"
+        preview = _preview(msg.get("content", ""))
         succeeded = list(succeeded_so_far)
         for remote in remotes:
             if remote.id in succeeded:
@@ -278,6 +280,10 @@ def make_publish_remotes(remotes: list[Transport]) -> Callable:
             try:
                 remote.publish(envelope)
                 succeeded.append(remote.id)
+                out_agent(
+                    sender_name,
+                    f"remote {remote.id}: published -> {recipient}: {preview}",
+                )
             except TransportError as e:
                 out_agent(
                     sender_name,

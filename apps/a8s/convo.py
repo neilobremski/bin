@@ -91,7 +91,10 @@ def load_entries() -> list[dict[str, Any]]:
 
 
 def record(msg: dict[str, Any], *, recipients: list[str]) -> None:
-    """Append one logical message if at least one local recipient exists."""
+    """Append one logical message when delivery completes (local inbox, remote
+    receive, or outbound remote publish). `recipients` lists local deliverees
+    for routed/RECEIVED_REMOTE rows, or the logical `to` name for outbound
+    remote-only sends."""
     if not recipients:
         return
     entry = _entry_from_message(msg, recipients=recipients)

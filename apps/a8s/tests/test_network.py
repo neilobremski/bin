@@ -13,6 +13,7 @@ import pytest
 from core import (
     MAX_SEEN_IDS,
     Participant,
+    agent_log_path,
     inbox_dir,
     network_config_path,
     seen_ids_path,
@@ -184,6 +185,9 @@ class TestPublishWithBackoff:
         assert len(r2.published) == 1
         # Envelope is JSON-serialized msg.
         assert json.loads(r1.published[0])["to"] == "X"
+        log = agent_log_path("A").read_text()
+        assert "remote r1: published -> X: hi" in log
+        assert "remote r2: published -> X: hi" in log
 
     def test_failure_warns_and_returns_partial(self, fake_home, tmp_path):
         a_root = tmp_path / "A"; a_root.mkdir()
