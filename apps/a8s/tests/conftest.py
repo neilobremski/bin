@@ -18,6 +18,8 @@ import pytest
 _PKG_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG_DIR))
 
+from mqtt_cluster import mqtt_broker  # noqa: E402 — re-export for pytest
+
 
 @pytest.fixture
 def fake_home(tmp_path, monkeypatch):

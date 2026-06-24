@@ -13,79 +13,14 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import socket
-import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
+from mqtt_cluster import write_network_json
+
 pytest.importorskip("paho.mqtt.client")
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-@pytest.fixture
-def mqtt_broker(tmp_path):
-    if shutil.which("mosquitto") is None:
-        pytest.skip("mosquitto binary not on PATH")
-    port = _free_port()
-    conf = tmp_path / "mosquitto.conf"
-    conf.write_text(
-        f"listener {port} 127.0.0.1\nallow_anonymous true\npersistence false\n"
-    )
-    proc = subprocess.Popen(
-        ["mosquitto", "-c", str(conf)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                break
-        except OSError:
-            time.sleep(0.05)
-    else:
-        proc.terminate()
-        pytest.fail("mosquitto failed to start within 5s")
-    yield port
-    proc.terminate()
-    try:
-        proc.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-
-
-def _write_network_json(
-    home: Path,
-    port: int,
-    topic: str,
-    client_id: str,
-    storage_url: str | None = None,
-) -> None:
-    a8s_dir = home / ".a8s"
-    a8s_dir.mkdir(parents=True, exist_ok=True)
-    cfg: dict = {
-        "remotes": {
-            "hub": {
-                "transport": "mqtt",
-                "broker": f"mqtt://127.0.0.1:{port}",
-                "topic": topic,
-                "client_id": client_id,
-            }
-        }
-    }
-    if storage_url is not None:
-        cfg["services"] = {
-            "fake": {"service": "tempfile_org", "url": storage_url},
-        }
-    (a8s_dir / "network.json").write_text(json.dumps(cfg))
 
 
 def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
@@ -97,8 +32,8 @@ def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
     cluster_a_home.mkdir()
     cluster_b_home = tmp_path / "clusterB"
     cluster_b_home.mkdir()
-    _write_network_json(cluster_a_home, mqtt_broker, topic, "a8s-test-clusterA")
-    _write_network_json(cluster_b_home, mqtt_broker, topic, "a8s-test-clusterB")
+    write_network_json(cluster_a_home / ".a8s", mqtt_broker, topic, "a8s-test-clusterA")
+    write_network_json(cluster_b_home / ".a8s", mqtt_broker, topic, "a8s-test-clusterB")
 
     import core
     core.PRINT_LOCK = None
@@ -181,8 +116,20 @@ def test_remote_round_trip_with_file_via_storage(tmp_path, mqtt_broker, monkeypa
         topic = f"a8s/test-storage-{os.getpid()}-{int(time.time() * 1000)}"
         cluster_a_home = tmp_path / "clusterA"; cluster_a_home.mkdir()
         cluster_b_home = tmp_path / "clusterB"; cluster_b_home.mkdir()
-        _write_network_json(cluster_a_home, mqtt_broker, topic, "a8s-test-storage-A", storage_url)
-        _write_network_json(cluster_b_home, mqtt_broker, topic, "a8s-test-storage-B", storage_url)
+        write_network_json(
+            cluster_a_home / ".a8s",
+            mqtt_broker,
+            topic,
+            "a8s-test-storage-A",
+            storage_url=storage_url,
+        )
+        write_network_json(
+            cluster_b_home / ".a8s",
+            mqtt_broker,
+            topic,
+            "a8s-test-storage-B",
+            storage_url=storage_url,
+        )
 
         import core
         core.PRINT_LOCK = None
