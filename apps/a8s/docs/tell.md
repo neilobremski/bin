@@ -14,7 +14,7 @@ Operator documentation for how `tell` works under the hood. Agent-facing usage l
 
 ## Send path (async)
 
-0. **`tell --check`** — optional self-test: resolves send directory, probes writability, reports `send-from` / `via` / `sender`; with a recipient name, validates registry routing. No envelope written.
+0. **`tell --check`** — optional self-test: verifies a writable `.outbox/` is available (walk from CWD / `TELL_DEFAULT_DIR`, or `$TELL_DIR/.outbox` — creating that directory when `TELL_DIR` is set and `.outbox` is missing). Optional recipient name validates registry routing. No envelope written.
 1. If `TELL_DIR` is set, use `$TELL_DIR/.outbox` directly (no CWD or parent walk).
 2. Else walk up from CWD for the first `.outbox/` directory.
 3. If none found, walk up from `TELL_DEFAULT_DIR` (agent root or any path under it).
@@ -57,7 +57,7 @@ export TELL_DIR=/var/mailboxes/agent-one
 cd /anywhere && tell GEMINI "locked to this mailbox"
 ```
 
-If `$TELL_DIR/.outbox` is missing, send fails. Sync session files use `$TELL_DIR/.temp/`.
+If `$TELL_DIR/.outbox` is missing, send fails. `tell --check` creates it when probing a `TELL_DIR` mailbox. Sync session files use `$TELL_DIR/.temp/`.
 
 ### `TELL_DEFAULT_DIR`
 
