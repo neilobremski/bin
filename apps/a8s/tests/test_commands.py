@@ -23,7 +23,7 @@ from commands import (
     cmd_unremote,
     cmd_unstorage,
 )
-from core import Participant, agent_dir, agent_log_path, kill_request_path, outbox_dir, pid_path
+from core import Participant, agent_dir, agent_log_path, files_dir, kill_request_path, outbox_bundle_dir, outbox_dir, pid_path
 from mailbox import ensure_mailboxes
 from network import load_network_config, save_network_config
 from registry import load_aliases, load_registry, save_registry
@@ -622,14 +622,15 @@ class TestCmdTellWithSplitFileArg:
 
         rc = cmd_tell(["alice", "Here is the doc.", "FILE: ./report.pdf"])
         assert rc == 0
-        outbox_files = list(outbox_dir(sender_root).iterdir())
+        outbox_files = list(outbox_dir(sender_root).glob("*.json"))
         assert len(outbox_files) == 1
         import json as _json
         msg = _json.loads(outbox_files[0].read_text())
         assert msg["content"] == "Here is the doc."
-        assert msg["files"] == [
-            {"filename": "report.pdf", "path": str((sender_root / "report.pdf").resolve())}
-        ]
+        assert len(msg["files"]) == 1
+        assert "path" not in msg["files"][0]
+        assert msg["files"][0]["filename"] == "report.pdf"
+        assert (outbox_bundle_dir(outbox_dir(sender_root), msg["id"]) / "report.pdf").is_file()
 
 
 class TestCmdLogs:

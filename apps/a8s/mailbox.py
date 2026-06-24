@@ -33,12 +33,10 @@ fan-out leaves no partial state. Source filename (a ULID) is preserved
 across staging so a recipient whose final inbox already has the file is
 skipped — retries are idempotent.
 
-FILE: payload transfer (issue #62): each `FILE:` entry's bytes are copied
-into `<recipient>/.files/<filename>` and the routed message's path rewritten
-to the recipient-local copy. Sender paths are validated to live inside the
-sender's own root (plus optional `safe_dirs` from the registry) before copy —
-the outbox is agent-writable, so an unvalidated path could be a probe for
-files outside the sandbox.
+FILE: payload transfer (issue #62): tell stages outgoing attachments in
+`.outbox/<msg_id>/` (basename only in the JSON). Ingest moves each bundle
+with its envelope into pending; routing copies into each recipient's
+`.files/<msg_id>/`. Envelope `path` fields are invalid.
 """
 from __future__ import annotations
 
@@ -56,10 +54,13 @@ from core import (
     Participant,
     _preview,
     files_dir,
+    inbound_bundle_dir,
     inbox_dir,
     inbox_tmp_dir,
+    outbox_bundle_dir,
     outbox_dir,
     out_agent,
+    pending_bundle_dir,
     pending_dir,
     retry_sidecar_path,
     trash_dir,
@@ -97,109 +98,86 @@ def ensure_mailboxes(p: Participant) -> None:
     files_dir(p.root).mkdir(parents=True, exist_ok=True)
 
 
-def _recipient_relative_path(files_dir_path: Path, dest: Path) -> str:
-    """Build the path string surfaced into the recipient's `$MESSAGE` as
-    `FILE: <path>`. The wake subprocess runs with `cwd=recipient.root`, so
-    a CWD-relative path resolves correctly even when the agent runs in a
-    container that maps its root to a different host prefix. We never
-    serialize the absolute host path into the routed envelope.
-
-    Returned form: `./.files/<filename>` (POSIX separators, explicit `./`).
-    """
-    return f"./{files_dir_path.name}/{dest.name}"
+def _attached_file_relative_path(msg_id: str, filename: str) -> str:
+    """Recipient-local path for `$MESSAGE` ATTACHED FILE: lines."""
+    return f"./.files/{msg_id}/{filename}"
 
 
-def allowed_file_roots(primary: Path, extra: list[Path] | tuple[Path, ...] = ()) -> list[Path]:
-    roots: list[Path] = []
-    for candidate in (primary, *extra):
-        try:
-            resolved = candidate.expanduser().resolve()
-        except (OSError, RuntimeError):
-            continue
-        if resolved not in roots:
-            roots.append(resolved)
-    return roots
-
-
-def path_under_allowed_roots(path: Path, roots: list[Path]) -> bool:
+def _move_dir(src: Path, dest: Path) -> None:
+    if not src.is_dir():
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
     try:
-        resolved = path.resolve()
-    except (OSError, RuntimeError):
-        return False
-    for root in roots:
-        try:
-            resolved.relative_to(root)
-            return True
-        except ValueError:
-            continue
-    return False
+        os.rename(str(src), str(dest))
+    except OSError:
+        shutil.copytree(src, dest, dirs_exist_ok=True)
+        shutil.rmtree(src, ignore_errors=True)
 
 
-def sender_file_roots(sender: Participant) -> list[Path]:
-    return allowed_file_roots(sender.root, list(sender.safe_dirs))
+def _remove_dir(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _msg_id_from_pending_json(name: str) -> str:
+    return Path(name).stem
+
+
+def _resolve_pending_attachment(sender_name: str, msg_id: str, entry: dict) -> Path | None:
+    if (entry.get("path") or "").strip():
+        return None
+    filename = (entry.get("filename") or "").strip()
+    if not filename or filename != Path(filename).name:
+        return None
+    bundle = pending_bundle_dir(sender_name, msg_id).resolve()
+    try:
+        src = (bundle / filename).resolve()
+        src.relative_to(bundle)
+    except (ValueError, OSError, RuntimeError):
+        return None
+    if not src.is_file():
+        return None
+    try:
+        size = src.stat().st_size
+    except OSError:
+        return None
+    if size > MAX_FILE_BYTES:
+        return None
+    return src
 
 
 def _transfer_file_to_recipient(
     sender_name: str,
-    allowed_roots: list[Path],
+    msg_id: str,
     recipient_root: Path,
     entry: dict,
 ) -> dict | None:
-    """Copy one `FILE:` payload from sender to `<recipient_root>/.files/`.
-    Returns the rewritten file entry (recipient-local path) or None if the
-    file was rejected (logged to sender's per-agent log).
-
-    Defenses:
-      - source must resolve INSIDE one of `allowed_roots` (sender root plus
-        optional registry `safe_dirs`)
-      - source must exist and be a regular file
-      - source size must be <= MAX_FILE_BYTES (large payloads belong on a
-        side-channel; see issue #63)
-
-    On collision in `.files/`, `unique_path` appends `.1`, `.2`, ... — the
-    routed message's `files[i].path` is updated to match.
-    """
-    src_path = Path(entry.get("path") or "").expanduser()
-    try:
-        if src_path.is_absolute():
-            src_resolved = src_path.resolve()
-        else:
-            src_resolved = (allowed_roots[0] / src_path).resolve()
-    except (OSError, RuntimeError) as e:
-        out_agent(sender_name, f"FILE: cannot resolve {src_path!s}: {e}")
-        return None
-    if not path_under_allowed_roots(src_resolved, allowed_roots):
+    """Copy one attachment from pending into `<recipient>/.files/<msg_id>/`."""
+    if (entry.get("path") or "").strip():
         out_agent(
             sender_name,
-            f"FILE: rejected — path outside allowed directories: {src_resolved}",
+            "FILE: rejected — envelope path field invalid (filename-only entries)",
         )
         return None
-    if not src_resolved.is_file():
-        out_agent(sender_name, f"FILE: source missing or not a regular file: {src_resolved}")
+    filename = (entry.get("filename") or "").strip()
+    if not filename:
         return None
-    try:
-        size = src_resolved.stat().st_size
-    except OSError as e:
-        out_agent(sender_name, f"FILE: stat failed for {src_resolved}: {e}")
+    src_resolved = _resolve_pending_attachment(sender_name, msg_id, entry)
+    if src_resolved is None:
+        out_agent(sender_name, f"FILE: staged attachment missing or invalid: {filename!r}")
         return None
-    if size > MAX_FILE_BYTES:
-        out_agent(
-            sender_name,
-            f"FILE: too large ({size} > {MAX_FILE_BYTES}): {src_resolved}",
-        )
-        return None
-    dest_dir = files_dir(recipient_root)
+    dest_dir = inbound_bundle_dir(recipient_root, msg_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = unique_path(dest_dir / src_resolved.name)
+    dest = dest_dir / filename
     try:
         shutil.copyfile(src_resolved, dest)
         os.chmod(dest, 0o644)
     except OSError as e:
         out_agent(sender_name, f"FILE: copy failed {src_resolved} -> {dest}: {e}")
         return None
-    out_agent(sender_name, f"FILE: delivered {src_resolved.name} -> {dest_dir}")
-    txlog.log("FILE_DELIVERED", sender=sender_name, files=[src_resolved.name], detail=str(dest_dir))
-    return {"filename": dest.name, "path": _recipient_relative_path(dest_dir, dest)}
+    out_agent(sender_name, f"FILE: delivered {filename} -> {dest_dir}")
+    txlog.log("FILE_DELIVERED", sender=sender_name, files=[filename], detail=str(dest_dir))
+    return {"filename": filename}
 
 
 def _build_routed_message(
@@ -216,12 +194,13 @@ def _build_routed_message(
     wrote — alias for fanned messages, agent name for direct ones — same as
     a public mailing list's `To:` header."""
     routed = dict(base_msg)
+    msg_id = (base_msg.get("id") or "").strip()
     src_files = base_msg.get("files") or []
-    if src_files:
+    if src_files and msg_id:
         new_files: list[dict] = []
         for entry in src_files:
             rewritten = _transfer_file_to_recipient(
-                sender.name, sender_file_roots(sender), recipient.root, entry
+                sender.name, msg_id, recipient.root, entry
             )
             if rewritten is not None:
                 new_files.append(rewritten)
@@ -243,17 +222,8 @@ def _commit_staged_inboxes(staged: list[tuple[Path, Path]]) -> None:
 # ---------- routing ----------
 
 def _ingest_outboxes(senders: list[Participant]) -> None:
-    """Phase 1: atomically move every `<root>/.outbox/<f>.json` into
-    `~/.a8s/agents/<sender>/pending/<f>.json`. The agent's `.outbox/` is
-    one-way — a8s never opens a file there for read-modify-write, never
-    writes a sidecar there. After this pass the outbox dir is empty and
-    every subsequent step happens under ~/.a8s/.
-
-    Cross-fs fallback uses `shutil.copy2` + `unlink` instead of `os.rename`.
-    Not atomic; if the process dies mid-copy, the file may briefly exist in
-    both places, but ULID-keyed dedup at the receive side tolerates the
-    duplicate. We don't expect this path on a normal install (~/.a8s/ and
-    the agent root are usually on the same filesystem)."""
+    """Phase 1: atomically move every `<root>/.outbox/<id>.json` and its
+    `<root>/.outbox/<id>/` attachment bundle into pending."""
     for sender in senders:
         ensure_mailboxes(sender)
         outbox = outbox_dir(sender.root)
@@ -263,6 +233,7 @@ def _ingest_outboxes(senders: list[Participant]) -> None:
         for f in sorted(outbox.iterdir()):
             if not (f.is_file() and f.name.endswith(".json")):
                 continue
+            msg_id = _msg_id_from_pending_json(f.name)
             dest = dest_dir / f.name
             try:
                 os.rename(str(f), str(dest))
@@ -272,6 +243,13 @@ def _ingest_outboxes(senders: list[Participant]) -> None:
                     f.unlink()
                 except OSError as e:
                     out_agent(sender.name, f"ingest copy failed on {f.name}: {e}")
+                    continue
+            bundle_src = outbox_bundle_dir(outbox, msg_id)
+            bundle_dest = pending_bundle_dir(sender.name, msg_id)
+            try:
+                _move_dir(bundle_src, bundle_dest)
+            except OSError as e:
+                out_agent(sender.name, f"ingest bundle move failed for {msg_id}: {e}")
 
 
 def _load_or_init_sidecar(pending_file: Path) -> dict:
@@ -324,6 +302,18 @@ def _trash_pending(sender: Participant, pending_file: Path) -> None:
         pending_file.rename(bad)
     except OSError:
         pass
+    msg_id = _msg_id_from_pending_json(pending_file.name)
+    _remove_dir(pending_bundle_dir(sender.name, msg_id))
+
+
+def _finalize_pending(sender: Participant, pending_file: Path) -> None:
+    msg_id = _msg_id_from_pending_json(pending_file.name)
+    try:
+        pending_file.unlink()
+    except OSError:
+        pass
+    _drop_sidecar(pending_file)
+    _remove_dir(pending_bundle_dir(sender.name, msg_id))
 
 
 def _schedule_retry(pending_file: Path, sidecar: dict, sender: Participant) -> None:
@@ -341,31 +331,8 @@ def _schedule_retry(pending_file: Path, sidecar: dict, sender: Participant) -> N
     _save_sidecar(pending_file, sidecar)
 
 
-def _resolve_file_source(allowed_roots: list[Path], entry: dict) -> Path | None:
-    """Validate and resolve a `FILE:` entry's source path, returning a
-    sandbox-safe absolute path or None if the path can't be used. Same
-    validation rules as `_transfer_file_to_recipient` (exists, regular file,
-    inside allowed roots, under MAX_FILE_BYTES) — factored out so the upload
-    path can reuse the defenses without copying bytes."""
-    src_path = Path(entry.get("path") or "").expanduser()
-    try:
-        if src_path.is_absolute():
-            src_resolved = src_path.resolve()
-        else:
-            src_resolved = (allowed_roots[0] / src_path).resolve()
-    except (OSError, RuntimeError):
-        return None
-    if not path_under_allowed_roots(src_resolved, allowed_roots):
-        return None
-    if not src_resolved.is_file():
-        return None
-    try:
-        size = src_resolved.stat().st_size
-    except OSError:
-        return None
-    if size > MAX_FILE_BYTES:
-        return None
-    return src_resolved
+def _resolve_file_source(sender_name: str, msg_id: str, entry: dict) -> Path | None:
+    return _resolve_pending_attachment(sender_name, msg_id, entry)
 
 
 def _upload_files_for_remote(
@@ -394,16 +361,13 @@ def _upload_files_for_remote(
 
     uploaded: dict = sidecar.setdefault("uploaded", {})
     all_done = True
-    allowed_roots = sender_file_roots(sender)
+    msg_id = (msg.get("id") or "").strip()
     for entry in files:
         filename = entry.get("filename") or ""
         if not filename:
-            continue  # malformed entry — skip silently
+            continue
         per_file = uploaded.setdefault(filename, {})
-        # We need the source path each pass — even on retry. The sender's
-        # outbox bytes still live at the original location until the message
-        # finalizes (we don't move them).
-        src = _resolve_file_source(allowed_roots, entry)
+        src = _resolve_file_source(sender.name, msg_id, entry) if msg_id else None
         if src is None and any(s.id not in per_file for s in services):
             out_agent(
                 sender.name,
@@ -451,29 +415,23 @@ def _download_files_to_recipient(
     recipient: Participant,
     services: list[StorageService],
 ) -> dict:
-    """Pull `msg["files"][i]["storage"]` URLs into the recipient's
-    `<root>/.files/`. Returns a NEW dict with `files` rewritten to
-    recipient-local shape `{filename, path}`. Files that no configured
-    service can download are dropped + logged on the recipient's per-agent
-    log; the message is delivered with the surviving files (matches local
-    delivery's "rejected file dropped, message survives" semantics).
-
-    Multiple `storage` URLs per file are tried in order until one service
-    successfully downloads — equivalent uploads from the sender's POV, so
-    first wins. Mismatched URLs (no configured service accepts) just fall
-    through; only an actual `StorageError` from a matched service counts
-    as failure for that URL."""
+    """Pull `msg["files"][i]["storage"]` URLs into `<root>/.files/<msg_id>/`.
+    Returns a NEW dict with filename-only `files` entries."""
     out_msg = dict(msg)
+    msg_id = (msg.get("id") or "").strip()
     src_files = msg.get("files") or []
     new_files: list[dict] = []
-    dest_dir = files_dir(recipient.root)
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    if not msg_id:
+        out_msg["files"] = []
+        return out_msg
+    dest_root = inbound_bundle_dir(recipient.root, msg_id)
+    dest_root.mkdir(parents=True, exist_ok=True)
     for entry in src_files:
         filename = entry.get("filename") or ""
         urls = entry.get("storage") or []
         if not filename or not urls:
-            continue  # malformed wire entry; drop
-        dest = unique_path(dest_dir / filename)
+            continue
+        dest = dest_root / filename
         delivered = False
         for url in urls:
             for service in services:
@@ -490,7 +448,7 @@ def _download_files_to_recipient(
             if delivered:
                 break
         if delivered:
-            new_files.append({"filename": dest.name, "path": _recipient_relative_path(dest_dir, dest)})
+            new_files.append({"filename": filename})
         else:
             out_agent(
                 recipient.name,
@@ -692,11 +650,7 @@ def _process_pending(
             and (not local_target_known or sidecar["local_delivered"])
         )
         if all_done:
-            try:
-                f.unlink()
-            except OSError:
-                pass
-            _drop_sidecar(f)
+            _finalize_pending(sender, f)
             continue
         # Still pending — schedule a retry with backoff.
         _schedule_retry(f, sidecar, sender)
@@ -772,11 +726,24 @@ def _split_content_and_files(raw: str) -> tuple[str, list[dict]]:
     return "\n".join(lines).rstrip(), files
 
 
-def _write_outbox(sender_name: str, sender_root: Path, to: str, content: str, files: list[dict]) -> Path:
+def _write_outbox(
+    sender_name: str,
+    sender_root: Path,
+    to: str,
+    content: str,
+    files: list[dict],
+    *,
+    attachment_sources: list[Path] | None = None,
+) -> Path:
     outbox = outbox_dir(sender_root)
     outbox.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
     msg_id = new_ulid()
+    if attachment_sources:
+        from tell import stage_outbox_attachments
+
+        entries = [{"path": str(p)} for p in attachment_sources]
+        files = stage_outbox_attachments(outbox, msg_id, entries)
     msg = {
         "id": msg_id,
         "date": now.isoformat().replace("+00:00", "Z"),
@@ -785,7 +752,7 @@ def _write_outbox(sender_name: str, sender_root: Path, to: str, content: str, fi
         "content": content,
         "files": files,
     }
-    dest = unique_path(outbox / f"{msg_id}.json")
+    dest = outbox / f"{msg_id}.json"
     with dest.open("w", encoding="utf-8") as f:
         json.dump(msg, f, indent=2)
     return dest

@@ -193,7 +193,7 @@ def test_remote_round_trip_with_file_via_storage(tmp_path, mqtt_broker, monkeypa
         monkeypatch.delenv("USERPROFILE", raising=False)
         target_root = cluster_b_home / "target"
         target_root.mkdir()
-        from core import Participant, files_dir, inbox_dir
+        from core import Participant, inbound_bundle_dir, inbox_dir
         from mailbox import ensure_mailboxes
         from registry import save_registry
         save_registry({"TARGET": {"root": str(target_root)}})
@@ -219,9 +219,9 @@ def test_remote_round_trip_with_file_via_storage(tmp_path, mqtt_broker, monkeypa
         payload = sender_root / "report.txt"
         payload.write_text("hello from cluster A\n")
         from mailbox import _write_outbox
-        _write_outbox("SENDER", sender_root, "TARGET", "see attached", [
-            {"filename": "report.txt", "path": str(payload)},
-        ])
+
+        out_path = _write_outbox("SENDER", sender_root, "TARGET", "see attached", [], attachment_sources=[payload])
+        msg_id = out_path.stem
         from daemon import attached_loop
         rc = attached_loop(["SENDER"], 0.2, single_pass=True)
         assert rc == 0
@@ -249,15 +249,8 @@ def test_remote_round_trip_with_file_via_storage(tmp_path, mqtt_broker, monkeypa
             # File materialized into TARGET's .files/, path rewritten to local.
             assert len(body["files"]) == 1
             assert body["files"][0]["filename"] == "report.txt"
-            local_files = list(files_dir(target_root).iterdir())
-            assert len(local_files) == 1
-            assert local_files[0].name == "report.txt"
-            assert local_files[0].read_text() == "hello from cluster A\n"
-            # Path is CWD-relative — the agent's wake subprocess runs with
-            # cwd=target_root, so `./.files/report.txt` resolves whether
-            # target_root is /tmp/clusterB/target on the host or remapped
-            # to /workspace inside a container.
-            assert body["files"][0]["path"] == "./.files/report.txt"
+            local_files = inbound_bundle_dir(target_root, msg_id)
+            assert (local_files / "report.txt").read_text() == "hello from cluster A\n"
         finally:
             stop_remotes(rx_remotes)
     finally:

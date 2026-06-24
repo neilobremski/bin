@@ -240,13 +240,19 @@ def _file_proxy_ttl_cleanup(p: Participant, definition: dict) -> None:
         return
     cutoff = _time.time() - ttl
     removed = 0
-    for f in files_path.iterdir():
-        if not f.is_file():
+    for entry in files_path.iterdir():
+        try:
+            mtime = os.path.getmtime(entry)
+        except OSError:
+            continue
+        if mtime >= cutoff:
             continue
         try:
-            if os.path.getmtime(f) < cutoff:
-                f.unlink()
-                removed += 1
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            elif entry.is_file():
+                entry.unlink()
+            removed += 1
         except OSError:
             pass
     if removed:

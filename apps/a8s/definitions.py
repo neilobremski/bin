@@ -24,6 +24,8 @@ from core import (
 )
 from registry import load_registry
 
+ATTACHED_FILE_PREFIX = "ATTACHED FILE: "
+
 
 def default_definition_path(kind: str) -> Path:
     return DEFINITIONS_DIR / f"{kind}.json"
@@ -68,16 +70,22 @@ def _file_lines(msg: dict) -> list[str]:
     files = msg.get("files") or []
     if not files:
         return []
+    msg_id = (msg.get("id") or "").strip()
+    if not msg_id:
+        return []
     out = [""]
     for entry in files:
-        path = entry.get("path") or entry.get("filename")
-        if path:
-            out.append(f"FILE: {path}")
+        if (entry.get("path") or "").strip():
+            continue
+        filename = (entry.get("filename") or "").strip()
+        if not filename:
+            continue
+        out.append(f"{ATTACHED_FILE_PREFIX}./.files/{msg_id}/{filename}")
     return out
 
 
 def _message_body(msg: dict) -> str:
-    """Compose the `$MESSAGE` body: content plus any FILE: lines."""
+    """Compose the `$MESSAGE` body: content plus any ATTACHED FILE: lines."""
     content = msg.get("content", "")
     lines = _file_lines(msg)
     if not lines:
@@ -132,7 +140,7 @@ def _expand_argv(
     """Expand placeholders in argv:
       - `$SENDER`     sender's canonical name (empty for senderless prompts)
       - `$RECIPIENT`  what the sender wrote in `to` (alias for fanned, agent for direct)
-      - `$MESSAGE`    content + any FILE: lines
+      - `$MESSAGE`    content + any ATTACHED FILE: lines
       - `$TIMESTAMP`  ISO 8601 UTC time the message was queued (e.g.,
                       `2026-04-28T14:30:00.123456Z`); empty for invokeClear
                       and for messages without a `date` field

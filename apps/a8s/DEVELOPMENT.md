@@ -22,7 +22,8 @@ Read `README.md` first for concept and usage.
 - **Cross-cluster `FILE:` payloads ride storage services.** Configured under
   `network.json`'s `services` map (separate from `remotes`).
 - **Storage services are stateless.** No start/stop lifecycle.
-- **Recipient-CWD-relative `FILE:` paths.** Always `./.files/<filename>`.
+- **Recipient-CWD-relative attachment paths.** Delivered messages append `ATTACHED FILE: ./.files/<filename>` lines (not bare `FILE:`).
+- **Outbox attachments are staged.** Tell copies sources into `.outbox/<msg_id>/`; outbox envelopes carry `filename` only. Ingest moves the bundle with the JSON. Routing delivers into `.files/<msg_id>/`. Delivered wakes append `ATTACHED FILE:` lines (not bare `FILE:`).
 - **Persistent MQTT sessions.** `clean_session=False` + QoS 1, hash-derived `client_id`.
 - **`publish` waits for readiness event before raising.** Don't drop the
   disconnect handler.

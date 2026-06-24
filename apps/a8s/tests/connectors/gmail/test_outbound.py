@@ -106,7 +106,7 @@ def test_send_extracts_file_lines_as_bridge_attachments(monkeypatch, tmp_path, c
     src.write_bytes(b"print(2)\n")
     captured: list = []
     fake = _fake_urlopen(captured, {"status": "sent"})
-    body = "Here you go.\nFILE: ./primes.py"
+    body = "Here you go.\nATTACHED FILE: ./primes.py"
     with patch.object(gmail_connector.urllib.request, "urlopen", fake):
         rc = gmail_connector.send("rcpt@example.com", "GERRY", body)
     assert rc == 0
@@ -126,7 +126,7 @@ def test_send_unreadable_file_logs_and_continues(monkeypatch, capsys):
     monkeypatch.setenv("GAS_BRIDGE_KEY", "TESTKEY")
     captured: list = []
     fake = _fake_urlopen(captured, {"status": "sent"})
-    body = "Cover note.\nFILE: ./does-not-exist.bin"
+    body = "Cover note.\nATTACHED FILE: ./does-not-exist.bin"
     with patch.object(gmail_connector.urllib.request, "urlopen", fake):
         rc = gmail_connector.send("rcpt@example.com", "S", body)
     assert rc == 0

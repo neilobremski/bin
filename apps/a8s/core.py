@@ -257,12 +257,24 @@ def outbox_dir(root: Path) -> Path:
     return root / ".outbox"
 
 
+def outbox_bundle_dir(outbox: Path, msg_id: str) -> Path:
+    """Outgoing attachment bundle for one message — lives beside its JSON in
+    `.outbox/<msg_id>/` until ingest moves it to pending."""
+    return outbox / msg_id
+
+
 def files_dir(root: Path) -> Path:
-    """Recipient-side staging dir for `FILE:` payloads. Sender's `FILE:` paths
-    point inside the sender's root; routing copies the bytes here so the
-    recipient can read them under their own sandbox (codex --full-auto, etc.)
-    without knowing the sender's filesystem layout."""
+    """Incoming attachment root. Routing copies delivered files into
+    `.files/<msg_id>/<filename>`; wake prompts reference those paths."""
     return root / ".files"
+
+
+def inbound_bundle_dir(root: Path, msg_id: str) -> Path:
+    return files_dir(root) / msg_id
+
+
+def pending_bundle_dir(name: str, msg_id: str) -> Path:
+    return pending_dir(name) / msg_id
 
 
 def registry_path() -> Path:

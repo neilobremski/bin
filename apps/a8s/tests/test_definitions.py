@@ -79,9 +79,14 @@ class TestMessageBody:
     def test_content_with_files(self):
         msg = {
             "content": "see attached",
-            "files": [{"path": "/tmp/build.log"}, {"path": "/tmp/data.csv"}],
+            "id": "01JTESTATTACH000000000000",
+            "files": [{"filename": "build.log"}, {"filename": "data.csv"}],
         }
-        assert _message_body(msg) == "see attached\n\nFILE: /tmp/build.log\nFILE: /tmp/data.csv"
+        assert _message_body(msg) == (
+            "see attached\n\n"
+            "ATTACHED FILE: ./.files/01JTESTATTACH000000000000/build.log\n"
+            "ATTACHED FILE: ./.files/01JTESTATTACH000000000000/data.csv"
+        )
 
     def test_empty(self):
         assert _message_body({}) == ""
@@ -127,10 +132,11 @@ class TestBuildCommand:
             "from": "GERRY",
             "to": "CLAUDE",
             "content": "review",
-            "files": [{"path": "/tmp/x"}],
+            "id": "01JTESTATTACH000000000000",
+            "files": [{"filename": "x"}],
         }
         argv = build_command(defn, msg)
-        assert argv == ["x", "review\n\nFILE: /tmp/x"]
+        assert argv == ["x", "review\n\nATTACHED FILE: ./.files/01JTESTATTACH000000000000/x"]
 
     def test_timestamp_substitution_from_msg_date(self):
         defn = {"invoke": ["x", "[$TIMESTAMP] $SENDER: $MESSAGE"]}

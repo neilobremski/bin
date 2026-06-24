@@ -6,6 +6,11 @@ mailbox root (`$TELL_DIR/.outbox`, no scan). Falls back to `TELL_DEFAULT_DIR`
 `~/.a8s` is reachable and CWD sits inside a registered agent, validates the
 recipient (with remote fallback), stamps `from`, and logs to the agent log.
 
+Attachments: any path tell can read is copied into `.outbox/<msg_id>/` before
+the envelope is written. The JSON `files` array carries basename only (no
+`path` field). Ingest moves the bundle with the JSON; routing delivers into
+`.files/<msg_id>/` on each recipient.
+
 `--sync` uses a file drop protocol with a8s: control envelopes to `!a8s`, reply
 and ack files under `<agent-root>/.temp/` that both sides poll.
 """
@@ -13,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import sys
 import time
@@ -20,8 +26,8 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core import _preview, out_agent
-from mailbox import _split_content_and_files, allowed_file_roots, path_under_allowed_roots
+from core import _preview, out_agent, outbox_bundle_dir
+from mailbox import _split_content_and_files
 from sync_listen import (
     DEFAULT_SYNC_TIMEOUT_SEC,
     build_cancel_envelope,
@@ -105,25 +111,55 @@ def _normalize_file_entries(entries: list[dict]) -> list[dict]:
     return normalized
 
 
-def _validate_file_entries(entries: list[dict], allowed_roots: list[Path]) -> int:
+def _validate_attachment_sources(entries: list[dict]) -> int:
     if not entries:
         return 0
     for entry in entries:
         raw = (entry.get("path") or "").strip()
         if not raw:
-            continue
+            print("tell: attachment path required", file=sys.stderr)
+            return 1
         try:
             resolved = Path(raw).resolve()
         except (OSError, RuntimeError) as e:
             print(f"tell: attachment path invalid: {raw}: {e}", file=sys.stderr)
             return 1
-        if not path_under_allowed_roots(resolved, allowed_roots):
-            print(f"tell: attachment outside allowed paths: {resolved}", file=sys.stderr)
-            return 1
         if not resolved.is_file():
             print(f"tell: attachment not found: {resolved}", file=sys.stderr)
             return 1
     return 0
+
+
+def stage_outbox_attachments(
+    outbox: Path,
+    msg_id: str,
+    entries: list[dict],
+) -> list[dict]:
+    """Copy sources into `.outbox/<msg_id>/<basename>`; return filename-only
+    envelope entries."""
+    bundle = outbox_bundle_dir(outbox, msg_id)
+    bundle.mkdir(parents=True, exist_ok=True)
+    staged: list[dict] = []
+    for entry in entries:
+        src = Path((entry.get("path") or "").strip()).resolve()
+        name = src.name
+        dest = bundle / name
+        tmp = bundle / f".{name}.tmp"
+        shutil.copyfile(src, tmp)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, dest)
+        staged.append({"filename": name})
+    return staged
+
+
+def stage_sender_attachment(
+    outbox: Path,
+    msg_id: str,
+    source: Path | str,
+) -> dict:
+    """Stage one file for tests simulating outbox traffic."""
+    src = Path(source).expanduser().resolve()
+    return stage_outbox_attachments(outbox, msg_id, [{"path": str(src)}])[0]
 
 
 def join_args(args: list[str]) -> str:
@@ -173,14 +209,10 @@ def parse_tell_argv(
         elif arg in ("-h", "--help"):
             raise TellHelp()
         elif recipient is None:
-            if arg.startswith("-") and arg != "-":
-                raise TellUsageError(f"unknown option: {arg}")
             recipient = arg
         else:
             message_argv.append(arg)
         i += 1
-    if recipient is None and not check:
-        raise TellUsageError("recipient name required")
     return recipient, attachments, message_argv, sync, timeout, check
 
 
@@ -207,10 +239,11 @@ def write_outbox_envelope(
     *,
     from_name: str | None = None,
     extra: dict | None = None,
+    msg_id: str | None = None,
 ) -> dict:
-    msg_id = new_ulid()
+    envelope_id = msg_id or new_ulid()
     msg: dict = {
-        "id": msg_id,
+        "id": envelope_id,
         "date": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "to": to,
         "content": content,
@@ -220,8 +253,8 @@ def write_outbox_envelope(
         msg["from"] = from_name
     if extra:
         msg.update(extra)
-    dest = outbox / f"{msg_id}.json"
-    tmp = outbox / f".{msg_id}.tmp"
+    dest = outbox / f"{envelope_id}.json"
+    tmp = outbox / f".{envelope_id}.tmp"
     tmp.write_text(json.dumps(msg, indent=2), encoding="utf-8")
     os.replace(tmp, dest)
     return msg
@@ -345,13 +378,17 @@ def _run_sync(
     files: list[dict],
     from_name: str | None,
     timeout: float,
+    *,
+    msg_id: str,
 ) -> int:
     session_id = new_ulid()
     paths = sync_paths(agent_root, session_id)
     paths["base"].mkdir(parents=True, exist_ok=True)
     rel = _sync_rel_paths(agent_root, session_id)
 
-    write_outbox_envelope(outbox, to, content, files, from_name=from_name)
+    write_outbox_envelope(
+        outbox, to, content, files, from_name=from_name, msg_id=msg_id,
+    )
     write_outbox_control(
         outbox,
         build_listen_envelope(
@@ -487,7 +524,9 @@ def tell_main(argv: list[str]) -> int:
             return 2
         return run_check(recipient)
 
-    assert recipient is not None
+    if recipient is None:
+        _print_usage()
+        return 2
 
     body = resolve_message_body(message_argv)
     if body is None:
@@ -504,12 +543,17 @@ def tell_main(argv: list[str]) -> int:
         print("tell: cannot send from this directory", file=sys.stderr)
         return 1
 
-    allowed_roots = allowed_file_roots(agent_root_from_outbox(outbox), [Path.cwd()])
-    rc = _validate_file_entries(files, allowed_roots)
+    rc = _validate_attachment_sources(files)
     if rc != 0:
         return rc
 
-    agent_root = agent_root_from_outbox(outbox)
+    msg_id = new_ulid()
+    try:
+        staged_files = stage_outbox_attachments(outbox, msg_id, files) if files else []
+    except OSError as e:
+        print(f"tell: attachment staging failed: {e}", file=sys.stderr)
+        return 1
+
     sender = _optional_sender()
     to = recipient
     kind: str | None = None
@@ -523,13 +567,14 @@ def tell_main(argv: list[str]) -> int:
     if sync:
         rc = _run_sync(
             outbox,
-            agent_root,
+            agent_root_from_outbox(outbox),
             to,
             to,
             content,
-            files,
+            staged_files,
             sender[0] if sender is not None else None,
             timeout,
+            msg_id=msg_id,
         )
         if rc == 0 and sender is not None:
             sender_name, _ = sender
@@ -540,8 +585,9 @@ def tell_main(argv: list[str]) -> int:
         outbox,
         to,
         content,
-        files,
+        staged_files,
         from_name=sender[0] if sender is not None else None,
+        msg_id=msg_id,
     )
 
     preview = _preview(content)
