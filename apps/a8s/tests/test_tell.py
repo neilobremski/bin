@@ -540,3 +540,53 @@ def test_tell_help_omits_check(tmp_path):
     res = _run(tmp_path, "--help")
     assert res.returncode == 0
     assert "--check" not in res.stderr
+
+
+def _strip_tell_outbox_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k != TELL_OUTBOX_DIR_ENV}
+    if extra:
+        env.update(extra)
+    return env
+
+
+def _run_raw(
+    cwd: Path,
+    *args: str,
+    stdin: str | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    kw: dict = {
+        "cwd": str(cwd),
+        "capture_output": True,
+        "text": True,
+        "env": _strip_tell_outbox_env(env),
+    }
+    if stdin is not None:
+        kw["input"] = stdin
+    return subprocess.run([str(TELL), *args], **kw)
+
+
+class TestTellOutboxDirContract:
+    """PR #136 test plan — replaces manual checklist items for tell outbox resolution."""
+
+    def test_without_tell_outbox_dir_fails_clearly(self, tmp_path):
+        res = _run_raw(tmp_path, "bob", "hi")
+        assert res.returncode == 1
+        assert "cannot send from this directory" in res.stderr
+        assert "TELL_OUTBOX_DIR is not set" in res.stderr
+
+    def test_wake_injected_env_sufficient_without_cwd_outbox(self, tmp_path):
+        """Simulates a8s wake: only TELL_OUTBOX_DIR set, CWD has no .outbox."""
+        outbox = tmp_path / "external-outbox"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        res = _run_raw(
+            workspace,
+            "bob",
+            "from wake env",
+            env={TELL_OUTBOX_DIR_ENV: str(outbox)},
+        )
+        assert res.returncode == 0, res.stderr
+        assert outbox.is_dir()
+        _name, msg = _read_outbox(outbox)
+        assert msg["content"] == "from wake env"

@@ -19,6 +19,7 @@ import pytest
 
 from core import (
     Participant,
+    TELL_OUTBOX_DIR_ENV,
     agent_log_path,
     clear_inbox_waiting_since,
     detach_request_path,
@@ -323,6 +324,17 @@ class TestTellOutboxEnv:
 
         run_with_prefix("X", ["true"], agent_root, env=_tell_outbox_env(p))
         assert captured["env"][TELL_OUTBOX_DIR_ENV] == str(external.resolve())
+
+    def test_wake_env_matches_participant_outbox_path(self, tmp_path):
+        from daemon import _tell_outbox_env
+
+        agent_root = tmp_path / "agent"
+        agent_root.mkdir()
+        external = tmp_path / "mail" / ".outbox"
+        p = Participant("X", agent_root, outbox=external)
+        assert _tell_outbox_env(p) == {
+            TELL_OUTBOX_DIR_ENV: str(external.resolve()),
+        }
 
 
 class TestWakeOnce:
