@@ -126,35 +126,6 @@ def _validate_file_entries(entries: list[dict], allowed_roots: list[Path]) -> in
     return 0
 
 
-def _sender_sandbox_root(outbox: Path, sender: tuple[str, dict] | None) -> Path:
-    if sender is not None:
-        root = sender[1].get("root", "")
-        if root:
-            return Path(root).expanduser().resolve()
-    return agent_root_from_outbox(outbox)
-
-
-def _validate_file_attachments(files: list[dict], sandbox_root: Path) -> int:
-    if not files:
-        return 0
-    root = sandbox_root.resolve()
-    for entry in files:
-        raw = (entry.get("path") or "").strip()
-        if not raw:
-            print("tell: attachment path required", file=sys.stderr)
-            return 1
-        try:
-            path = Path(raw).resolve()
-            path.relative_to(root)
-        except (ValueError, OSError, RuntimeError):
-            print(f"tell: attachment outside send root: {raw}", file=sys.stderr)
-            return 1
-        if not path.is_file():
-            print(f"tell: attachment not found: {raw}", file=sys.stderr)
-            return 1
-    return 0
-
-
 def join_args(args: list[str]) -> str:
     parts: list[str] = []
     for a in args:
