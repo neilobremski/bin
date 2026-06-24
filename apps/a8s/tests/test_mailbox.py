@@ -701,6 +701,28 @@ class TestRemotePublishHook:
         # Nothing in trash either.
         assert list(trash_dir("A").iterdir()) == []
 
+    def test_remote_only_records_convo(self, two_agents, fake_home):
+        from convo import load_entries
+
+        a, b = two_agents
+
+        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+            return list(succeeded_so_far) + ["hub"]
+
+        _write_outbox("A", a.root, "GHOST", "remote-only", [])
+        route_outboxes(
+            [a, b],
+            all_agents=[a, b],
+            publish_remotes=stub_publish,
+            configured_remote_ids=["hub"],
+        )
+        rows = load_entries()
+        assert len(rows) == 1
+        assert rows[0]["from"] == "A"
+        assert rows[0]["to"] == "GHOST"
+        assert rows[0]["recipients"] == ["GHOST"]
+        assert rows[0]["content"] == "remote-only"
+
     def test_backoff_exhaustion_trashes(self, two_agents):
         a, b = two_agents
 
