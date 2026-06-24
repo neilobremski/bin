@@ -27,7 +27,7 @@ from mailbox import (
     next_inbox_message,
     route_outboxes,
 )
-from registry import save_aliases, save_registry
+from registry import participants_from_registry, save_aliases, save_registry
 
 
 def _write_staged(sender_name: str, sender_root: Path, to: str, content: str, *sources: Path) -> Path:
@@ -371,25 +371,6 @@ class TestFileTransfer:
         assert delivered["files"] == [{"filename": "report.txt"}]
         assert delivered["id"] == msg_id
 
-    def test_routes_to_custom_files_dir(self, fake_home, tmp_path):
-        a_root = tmp_path / "a"
-        b_root = tmp_path / "b"
-        external = tmp_path / "attachments"
-        a_root.mkdir()
-        b_root.mkdir()
-        save_registry({"A": {"root": str(a_root)}, "B": {"root": str(b_root)}})
-        a = Participant("A", a_root)
-        b = Participant("B", b_root, files=external)
-        ensure_mailboxes(a)
-        ensure_mailboxes(b)
-        payload = a.root / "report.txt"
-        payload.write_text("hello payload")
-        out_path = _write_staged("A", a.root, "B", "see attached", payload)
-        msg_id = out_path.stem
-        route_outboxes([a, b], all_agents=[a, b])
-        assert (external / msg_id / "report.txt").read_text() == "hello payload"
-        assert not files_dir(b.root).exists()
-
     def test_alias_fanout_copies_to_each_recipient(self, fake_home, tmp_path):
         agents = {}
         for n in ("A", "B", "C"):
@@ -465,6 +446,61 @@ class TestFileTransfer:
         assert len(msg_ids) == 2
         for mid, expected in zip(msg_ids, ("v0", "v1"), strict=True):
             assert (b.files_bundle_dir(mid) / "doc.txt").read_text() == expected
+
+
+class TestFilesDirContract:
+    """PR #137 checklist — inbound attachment routing via files_dir."""
+
+    @pytest.fixture
+    def file_agents(self, fake_home, tmp_path):
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        a_root.mkdir()
+        b_root.mkdir()
+        save_registry({"A": {"root": str(a_root)}, "B": {"root": str(b_root)}})
+        a = Participant("A", a_root)
+        b = Participant("B", b_root)
+        ensure_mailboxes(a)
+        ensure_mailboxes(b)
+        return a, b
+
+    def test_default_delivers_under_dot_files_msg_id(self, file_agents):
+        a, b = file_agents
+        payload = a.root / "avatar.jpg"
+        payload.write_text("image bytes")
+        out_path = _write_staged("A", a.root, "B", "here", payload)
+        msg_id = out_path.stem
+        route_outboxes([a, b], all_agents=[a, b])
+        bundle = b.files_bundle_dir(msg_id)
+        assert bundle == (b.root / ".files" / msg_id).resolve()
+        assert (bundle / "avatar.jpg").read_text() == "image bytes"
+
+    def test_definition_files_dir_routes_via_registry(self, fake_home, tmp_path):
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        external = tmp_path / "var" / "attachments" / "bob"
+        a_root.mkdir()
+        b_root.mkdir()
+        defn = tmp_path / "b-def.json"
+        defn.write_text(
+            json.dumps({"invoke": ["echo", "x"], "files_dir": str(external)})
+        )
+        save_registry({
+            "A": {"root": str(a_root)},
+            "B": {"root": str(b_root), "definition": str(defn)},
+        })
+        agents = participants_from_registry()
+        by_name = {p.name: p for p in agents}
+        for p in agents:
+            ensure_mailboxes(p)
+        payload = a_root / "avatar.jpg"
+        payload.write_text("bob avatar")
+        out_path = _write_staged("A", a_root, "B", "see attached", payload)
+        msg_id = out_path.stem
+        route_outboxes(agents, all_agents=agents)
+        assert by_name["B"].files_path() == external.resolve()
+        assert (external / msg_id / "avatar.jpg").read_text() == "bob avatar"
+        assert not files_dir(b_root).exists()
 
 
 class TestNextInboxMessage:
