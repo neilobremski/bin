@@ -113,102 +113,67 @@ def test_tell_help_is_opaque(tmp_path):
     assert ".temp" not in res.stderr
 
 
-def test_tell_uses_tell_default_dir(tmp_path):
-    agent = tmp_path / "agent"
-    (agent / ".outbox").mkdir(parents=True)
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    res = _run(
-        elsewhere,
-        "gerry",
-        "via default dir",
-        env={"TELL_DEFAULT_DIR": str(agent)},
-    )
-    assert res.returncode == 0, res.stderr
-    _name, msg = _read_outbox(agent / ".outbox")
-    assert msg["content"] == "via default dir"
-
-
-def test_tell_cwd_outbox_wins_over_tell_default_dir(tmp_path):
-    cwd_agent = tmp_path / "here"
-    other_agent = tmp_path / "there"
-    (cwd_agent / ".outbox").mkdir(parents=True)
-    (other_agent / ".outbox").mkdir(parents=True)
-    res = _run(
-        cwd_agent,
-        "gerry",
-        "from cwd",
-        env={"TELL_DEFAULT_DIR": str(other_agent)},
-    )
-    assert res.returncode == 0, res.stderr
-    assert list((other_agent / ".outbox").glob("*.json")) == []
-    _name, msg = _read_outbox(cwd_agent / ".outbox")
-    assert msg["content"] == "from cwd"
-
-
-def test_tell_default_dir_walks_up(tmp_path):
-    agent = tmp_path / "agent"
-    (agent / ".outbox").mkdir(parents=True)
-    sub = agent / "src" / "pkg"
-    sub.mkdir(parents=True)
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    res = _run(
-        elsewhere,
-        "gerry",
-        "default subdir",
-        env={"TELL_DEFAULT_DIR": str(sub)},
-    )
-    assert res.returncode == 0, res.stderr
-    _name, msg = _read_outbox(agent / ".outbox")
-    assert msg["content"] == "default subdir"
-
-
-def test_tell_dir_locks_mailbox(tmp_path):
-    locked = tmp_path / "mailbox"
+def test_tell_outbox_dir_locks_over_cwd_outbox(tmp_path):
+    locked = tmp_path / "mailbox" / ".outbox"
+    locked.mkdir(parents=True)
     cwd_agent = tmp_path / "cwd-agent"
-    (locked / ".outbox").mkdir(parents=True)
     (cwd_agent / ".outbox").mkdir(parents=True)
     res = _run(
         cwd_agent,
         "gerry",
         "locked send",
-        env={"TELL_DIR": str(locked)},
+        env={"TELL_OUTBOX_DIR": str(locked)},
     )
     assert res.returncode == 0, res.stderr
     assert list((cwd_agent / ".outbox").glob("*.json")) == []
-    _name, msg = _read_outbox(locked / ".outbox")
+    _name, msg = _read_outbox(locked)
     assert msg["content"] == "locked send"
 
 
-def test_tell_dir_missing_outbox_fails(tmp_path):
-    mailbox = tmp_path / "mailbox"
-    mailbox.mkdir()
+def test_tell_outbox_dir_creates_when_missing(tmp_path):
+    outbox = tmp_path / "mailbox" / ".outbox"
+    assert not outbox.exists()
     res = _run(
         tmp_path,
         "gerry",
-        "nope",
-        env={"TELL_DIR": str(mailbox)},
-    )
-    assert res.returncode != 0
-    assert "cannot send from this directory" in res.stderr
-
-
-def test_tell_dir_overrides_tell_default_dir(tmp_path):
-    locked = tmp_path / "locked"
-    other = tmp_path / "other"
-    (locked / ".outbox").mkdir(parents=True)
-    (other / ".outbox").mkdir(parents=True)
-    res = _run(
-        tmp_path,
-        "gerry",
-        "dir wins",
-        env={"TELL_DIR": str(locked), "TELL_DEFAULT_DIR": str(other)},
+        "created",
+        env={"TELL_OUTBOX_DIR": str(outbox)},
     )
     assert res.returncode == 0, res.stderr
-    assert list((other / ".outbox").glob("*.json")) == []
-    _name, msg = _read_outbox(locked / ".outbox")
-    assert msg["content"] == "dir wins"
+    assert outbox.is_dir()
+    _name, msg = _read_outbox(outbox)
+    assert msg["content"] == "created"
+
+
+def test_tell_skips_non_writable_outbox_in_tree(tmp_path):
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    inner.mkdir(parents=True)
+    bad_outbox = outer / ".outbox"
+    bad_outbox.mkdir()
+    bad_outbox.chmod(0o555)
+    good_outbox = inner / ".outbox"
+    good_outbox.mkdir()
+    try:
+        res = _run(inner, "gerry", "hello")
+        assert res.returncode == 0, res.stderr
+        _name, msg = _read_outbox(good_outbox)
+        assert msg["content"] == "hello"
+        assert list(bad_outbox.glob("*.json")) == []
+    finally:
+        bad_outbox.chmod(0o755)
+
+
+def test_tell_fails_when_outbox_not_writable(tmp_path):
+    outbox = tmp_path / ".outbox"
+    outbox.mkdir()
+    outbox.chmod(0o555)
+    try:
+        res = _run(tmp_path, "gerry", "nope")
+        assert res.returncode != 0
+        assert "cannot send from this directory" in res.stderr
+    finally:
+        outbox.chmod(0o755)
 
 
 def test_tell_lifts_file_lines_into_files_array(tmp_path):
@@ -414,9 +379,9 @@ def test_tell_rejects_missing_attachment(tmp_path):
     assert "not found" in res.stderr
 
 
-def test_tell_stages_attach_from_cwd_when_outbox_via_tell_dir(tmp_path):
-    mailbox = tmp_path / "mailbox"
-    (mailbox / ".outbox").mkdir(parents=True)
+def test_tell_stages_attach_from_cwd_when_outbox_via_tell_outbox_dir(tmp_path):
+    outbox = tmp_path / "mailbox" / ".outbox"
+    outbox.mkdir(parents=True)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     note = workspace / "note.txt"
@@ -427,12 +392,12 @@ def test_tell_stages_attach_from_cwd_when_outbox_via_tell_dir(tmp_path):
         "--attach",
         "./note.txt",
         "hi",
-        env={"TELL_DIR": str(mailbox)},
+        env={"TELL_OUTBOX_DIR": str(outbox)},
     )
     assert res.returncode == 0, res.stderr
-    _name, msg = _read_outbox(mailbox / ".outbox")
-    _assert_staged_files(mailbox / ".outbox", msg, ["note.txt"])
-    assert (outbox_bundle_dir(mailbox / ".outbox", msg["id"]) / "note.txt").read_text() == "x"
+    _name, msg = _read_outbox(outbox)
+    _assert_staged_files(outbox, msg, ["note.txt"])
+    assert (outbox_bundle_dir(outbox, msg["id"]) / "note.txt").read_text() == "x"
 
 
 def test_tell_stdin_dash(tmp_path):
@@ -523,30 +488,29 @@ def test_tell_check_fails_without_outbox(tmp_path):
     assert "cannot send from this directory" in res.stderr
 
 
-def test_tell_check_reports_tell_dir(tmp_path):
-    locked = tmp_path / "mailbox"
-    (locked / ".outbox").mkdir(parents=True)
+def test_tell_check_reports_outbox_dir(tmp_path):
+    outbox = tmp_path / "mailbox" / ".outbox"
+    outbox.mkdir(parents=True)
     res = _run(
         tmp_path,
         "--check",
-        env={"TELL_DIR": str(locked)},
+        env={"TELL_OUTBOX_DIR": str(outbox)},
     )
     assert res.returncode == 0, res.stderr
-    assert f"outbox: {locked.resolve() / '.outbox'}" in res.stdout
+    assert f"outbox: {outbox.resolve()}" in res.stdout
 
 
-def test_tell_check_creates_outbox_when_tell_dir_set(tmp_path):
-    locked = tmp_path / "mailbox"
-    locked.mkdir()
-    assert not (locked / ".outbox").exists()
+def test_tell_check_creates_outbox_when_outbox_dir_set(tmp_path):
+    outbox = tmp_path / "mailbox" / ".outbox"
+    assert not outbox.exists()
     res = _run(
         tmp_path,
         "--check",
-        env={"TELL_DIR": str(locked)},
+        env={"TELL_OUTBOX_DIR": str(outbox)},
     )
     assert res.returncode == 0, res.stderr
-    assert (locked / ".outbox").is_dir()
-    assert list((locked / ".outbox").glob("*.json")) == []
+    assert outbox.is_dir()
+    assert list(outbox.glob("*.json")) == []
 
 
 def test_tell_check_rejects_message_body(tmp_path):
