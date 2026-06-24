@@ -89,6 +89,7 @@ def test_installed_tell_writes_outbox(tmp_path, monkeypatch):
     proc = subprocess.run(
         [str(bin_dir / "tell"), "GEMINI", "hello from client"],
         cwd=str(agent),
+        env={**os.environ, "TELL_OUTBOX_DIR": str(outbox)},
         capture_output=True,
         text=True,
         check=False,

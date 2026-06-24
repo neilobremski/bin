@@ -5,7 +5,7 @@ import json
 import time
 from pathlib import Path
 
-from core import Participant, inbox_dir, outbox_dir
+from core import TELL_OUTBOX_DIR_ENV, Participant, inbox_dir, outbox_dir
 from mailbox import _write_outbox, ensure_mailboxes, route_outboxes
 from registry import save_registry
 from sync_listen import (
@@ -35,6 +35,10 @@ def _setup_agents(fake_home, tmp_path):
     ensure_mailboxes(alice)
     ensure_mailboxes(bob)
     return alice, bob
+
+
+def _bind_tell_outbox(monkeypatch, p: Participant) -> None:
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox_dir(p.root)))
 
 
 class TestSyncListenCommand:
@@ -320,6 +324,7 @@ class TestTellSyncE2E:
     def test_tell_sync_round_trip(self, fake_home, tmp_path, monkeypatch, capsys):
         alice, bob = _setup_agents(fake_home, tmp_path)
         monkeypatch.chdir(alice.root)
+        _bind_tell_outbox(monkeypatch, alice)
 
         import tell as tell_mod
 
@@ -351,6 +356,7 @@ class TestTellSyncE2E:
     def test_tell_sync_timeout_cancels_listener(self, fake_home, tmp_path, monkeypatch, capsys):
         alice, bob = _setup_agents(fake_home, tmp_path)
         monkeypatch.chdir(alice.root)
+        _bind_tell_outbox(monkeypatch, alice)
 
         import tell as tell_mod
 
@@ -376,6 +382,7 @@ class TestTellSyncE2E:
     def test_tell_sync_interrupt_drops_cancel(self, fake_home, tmp_path, monkeypatch, capsys):
         alice, bob = _setup_agents(fake_home, tmp_path)
         monkeypatch.chdir(alice.root)
+        _bind_tell_outbox(monkeypatch, alice)
 
         import signal
         import tell as tell_mod

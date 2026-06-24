@@ -14,11 +14,10 @@ Operator documentation for how `tell` works under the hood. Agent-facing usage l
 
 ## Send path (async)
 
-0. **`tell --check`** — optional self-test: verifies a writable outbox is available (`TELL_OUTBOX_DIR`, or tree walk from CWD). Creates the path when `TELL_OUTBOX_DIR` is set and missing. Optional recipient name validates registry routing. No envelope written.
-1. If `TELL_OUTBOX_DIR` is set, use that path directly as the outbox (no CWD walk). Created when missing.
-2. Else walk up from CWD for the first **writable** `.outbox/` directory.
-3. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`. `--attach` / `--file` append to the same `files` array. Any source path tell can read is attachable. Allocate `msg_id`, copy each file into `.outbox/<msg_id>/<basename>`, then write `.outbox/<msg_id>.json` with **filename-only** `files` entries (no `path` field).
-4. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root.
+0. **`tell --check`** — optional self-test: verifies `TELL_OUTBOX_DIR` points at a writable outbox (creates the path when missing). Optional recipient name validates registry routing. No envelope written.
+1. **`TELL_OUTBOX_DIR` required** — tell writes only to this path. a8s sets it on every wake/idle/batch invoke from the agent definition's `outbox_dir` (default `<agent-root>/.outbox`). Manual use: export it explicitly.
+2. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`. `--attach` / `--file` append to the same `files` array. Any source path tell can read is attachable. Allocate `msg_id`, copy each file into `<outbox>/<msg_id>/<basename>`, then write `<outbox>/<msg_id>.json` with **filename-only** `files` entries (no `path` field).
+3. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root.
 
 Envelope shape:
 
@@ -36,7 +35,7 @@ Envelope shape:
 On disk alongside the JSON:
 
 ```
-.outbox/
+<outbox>/
   01J….json
   01J…/
     avatar.jpg
@@ -44,23 +43,23 @@ On disk alongside the JSON:
 
 `from` is omitted when registry is unreachable; the router **force-overwrites** `from` based on which agent owns the outbox directory.
 
-5. **Ingest** — move `<msg_id>.json` and `.outbox/<msg_id>/` together into `~/.a8s/agents/<SENDER>/pending/`.
-6. **Route** — copy pending bundle bytes into each recipient's `.files/<msg_id>/`. Inbox JSON keeps filename-only `files`. Wake `$MESSAGE` appends `ATTACHED FILE: ./.files/<msg_id>/<filename>` lines.
+4. **Ingest** — move `<msg_id>.json` and `<outbox>/<msg_id>/` together into `~/.a8s/agents/<SENDER>/pending/`.
+5. **Route** — copy pending bundle bytes into each recipient's `.files/<msg_id>/`. Inbox JSON keeps filename-only `files`. Wake `$MESSAGE` appends `ATTACHED FILE: ./.files/<msg_id>/<filename>` lines.
 
 ### `TELL_OUTBOX_DIR`
 
-Hard lock to an explicit outbox directory. When set, `tell` always writes there — no walk from CWD. The path **is** the outbox (typically `…/agent/.outbox`); it is created when missing.
+The outbox path tell writes to. **Required** — no CWD walk or implicit discovery.
 
 ```bash
 export TELL_OUTBOX_DIR=/var/mailboxes/agent-one/.outbox
-cd /anywhere && tell GEMINI "locked to this outbox"
+tell GEMINI "hello"
 ```
 
-Sync session files use `<outbox-parent>/.temp/` (parent of the outbox path).
-
-Does not affect `sender_from_cwd()`; the router still force-stamps `from` from outbox ownership.
+Created when missing. Sync session files use `<outbox-parent>/.temp/`.
 
 When a8s wakes an agent, it sets `TELL_OUTBOX_DIR` in the invoke subprocess environment to the agent definition's resolved `outbox_dir` (default `<agent-root>/.outbox`). Use a separate absolute `outbox_dir` to keep outgoing tell traffic outside the agent workspace.
+
+Does not affect `sender_from_cwd()`; the router still force-stamps `from` from outbox ownership.
 
 ## `--sync`
 

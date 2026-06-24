@@ -23,7 +23,7 @@ from commands import (
     cmd_unremote,
     cmd_unstorage,
 )
-from core import Participant, agent_dir, agent_log_path, files_dir, kill_request_path, outbox_bundle_dir, outbox_dir, pid_path
+from core import Participant, TELL_OUTBOX_DIR_ENV, agent_dir, agent_log_path, files_dir, kill_request_path, outbox_bundle_dir, outbox_dir, pid_path
 from mailbox import ensure_mailboxes
 from network import load_network_config, save_network_config
 from registry import load_aliases, load_registry, save_registry
@@ -427,10 +427,11 @@ class TestCmdTellRemoteRecipient:
     def _setup_sender(self, fake_home, tmp_path, monkeypatch):
         sender_root = tmp_path / "sender"
         sender_root.mkdir()
+        (sender_root / ".outbox").mkdir()
         save_registry({"sender": {"root": str(sender_root)}})
         ensure_mailboxes(Participant("sender", sender_root))
-        # cmd_tell uses sender_from_cwd() — chdir into the sender's root.
         monkeypatch.chdir(sender_root)
+        monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(sender_root / ".outbox"))
         return sender_root
 
     def test_unknown_recipient_with_no_remotes_rejected(self, fake_home, tmp_path, monkeypatch, capsys):
@@ -614,10 +615,12 @@ class TestCmdTellWithSplitFileArg:
     def test_split_file_arg_extracts_attachment(self, fake_home, tmp_path, monkeypatch):
         sender_root = tmp_path / "sender"
         sender_root.mkdir()
+        (sender_root / ".outbox").mkdir()
         save_registry({"sender": {"root": str(sender_root)}, "alice": {"root": str(tmp_path / "alice")}})
         (tmp_path / "alice").mkdir()
         ensure_mailboxes(Participant("sender", sender_root))
         monkeypatch.chdir(sender_root)
+        monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(sender_root / ".outbox"))
         (sender_root / "report.pdf").write_text("doc")
 
         rc = cmd_tell(["alice", "Here is the doc.", "FILE: ./report.pdf"])

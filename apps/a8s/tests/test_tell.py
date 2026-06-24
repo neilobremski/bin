@@ -1,7 +1,7 @@
 """Tests for `tell` — invoked as a subprocess via the ~/bin/tell shim.
 
-The shim delegates to `a8s tell`, which writes JSON envelopes into the
-nearest `.outbox/` without requiring registry access.
+The shim delegates to `a8s tell`, which requires `TELL_OUTBOX_DIR` (a8s sets
+this on wake). Tests pass it explicitly when exercising tell directly.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from core import files_dir, inbound_bundle_dir, outbox_bundle_dir, outbox_dir
+from core import TELL_OUTBOX_DIR_ENV, files_dir, inbound_bundle_dir, outbox_bundle_dir, outbox_dir
 
 TELL = Path(__file__).resolve().parent.parent.parent.parent / "tell"
 A8S_TELL = [
@@ -24,29 +24,52 @@ A8S_TELL = [
 ]
 
 
+def _merge_tell_env(
+    cwd: Path,
+    env: dict[str, str] | None = None,
+    *,
+    outbox: Path | None = None,
+) -> dict[str, str]:
+    merged = dict(os.environ)
+    extra = dict(env or {})
+    if TELL_OUTBOX_DIR_ENV not in extra:
+        target = outbox if outbox is not None else cwd / ".outbox"
+        if outbox is not None or target.is_dir():
+            extra[TELL_OUTBOX_DIR_ENV] = str(target.resolve() if outbox is None else target)
+    merged.update(extra)
+    return merged
+
+
 def _run(
     cwd: Path,
     *args: str,
     stdin: str | None = None,
     env: dict[str, str] | None = None,
+    outbox: Path | None = None,
 ) -> subprocess.CompletedProcess:
     kw: dict = {
         "cwd": str(cwd),
         "capture_output": True,
         "text": True,
+        "env": _merge_tell_env(cwd, env, outbox=outbox),
     }
     if stdin is not None:
         kw["input"] = stdin
-    if env is not None:
-        kw["env"] = {**os.environ, **env}
     return subprocess.run([str(TELL), *args], **kw)
 
 
-def _run_a8s(cwd: Path, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
+def _run_a8s(
+    cwd: Path,
+    *args: str,
+    stdin: str | None = None,
+    env: dict[str, str] | None = None,
+    outbox: Path | None = None,
+) -> subprocess.CompletedProcess:
     kw: dict = {
         "cwd": str(cwd),
         "capture_output": True,
         "text": True,
+        "env": _merge_tell_env(cwd, env, outbox=outbox),
     }
     if stdin is not None:
         kw["input"] = stdin
@@ -89,13 +112,18 @@ def test_a8s_tell_writes_outbox_without_registry(tmp_path):
     assert msg["content"] == "via a8s tell"
 
 
-def test_tell_walks_up_from_subdir(tmp_path):
-    (tmp_path / ".outbox").mkdir()
+def test_tell_requires_tell_outbox_dir_from_subdir(tmp_path):
+    outbox = tmp_path / ".outbox"
+    outbox.mkdir()
     sub = tmp_path / "deep" / "nested"
     sub.mkdir(parents=True)
     res = _run(sub, "codex", "from below")
+    assert res.returncode != 0
+    assert "TELL_OUTBOX_DIR is not set" in res.stderr
+
+    res = _run(sub, "codex", "from below", outbox=outbox)
     assert res.returncode == 0, res.stderr
-    _name, msg = _read_outbox(tmp_path / ".outbox")
+    _name, msg = _read_outbox(outbox)
     assert msg["to"] == "codex"
     assert msg["content"] == "from below"
 
@@ -103,7 +131,7 @@ def test_tell_walks_up_from_subdir(tmp_path):
 def test_tell_errors_when_no_outbox(tmp_path):
     res = _run(tmp_path, "anyone", "should fail")
     assert res.returncode != 0
-    assert "cannot send from this directory" in res.stderr
+    assert "TELL_OUTBOX_DIR is not set" in res.stderr
 
 
 def test_tell_help_is_opaque(tmp_path):
@@ -145,33 +173,14 @@ def test_tell_outbox_dir_creates_when_missing(tmp_path):
     assert msg["content"] == "created"
 
 
-def test_tell_skips_non_writable_outbox_in_tree(tmp_path):
-    outer = tmp_path / "outer"
-    inner = outer / "inner"
-    inner.mkdir(parents=True)
-    bad_outbox = outer / ".outbox"
-    bad_outbox.mkdir()
-    bad_outbox.chmod(0o555)
-    good_outbox = inner / ".outbox"
-    good_outbox.mkdir()
-    try:
-        res = _run(inner, "gerry", "hello")
-        assert res.returncode == 0, res.stderr
-        _name, msg = _read_outbox(good_outbox)
-        assert msg["content"] == "hello"
-        assert list(bad_outbox.glob("*.json")) == []
-    finally:
-        bad_outbox.chmod(0o755)
-
-
 def test_tell_fails_when_outbox_not_writable(tmp_path):
     outbox = tmp_path / ".outbox"
     outbox.mkdir()
     outbox.chmod(0o555)
     try:
-        res = _run(tmp_path, "gerry", "nope")
+        res = _run(tmp_path, "gerry", "nope", outbox=outbox)
         assert res.returncode != 0
-        assert "cannot send from this directory" in res.stderr
+        assert "outbox is unavailable" in res.stderr
     finally:
         outbox.chmod(0o755)
 
@@ -325,7 +334,7 @@ def test_tell_absolutizes_attach_relative_to_cwd_not_outbox_root(tmp_path):
     (agent_root / ".outbox").mkdir()
     payload = work / "report.pdf"
     payload.write_text("payload")
-    res = _run(work, "bob", "--attach", "report.pdf", "see attached")
+    res = _run(work, "bob", "--attach", "report.pdf", "see attached", outbox=agent_root / ".outbox")
     assert res.returncode == 0, res.stderr
     _name, msg = _read_outbox(agent_root / ".outbox")
     _assert_staged_files(agent_root / ".outbox", msg, ["report.pdf"])
@@ -347,7 +356,14 @@ def test_tell_absolutized_attach_delivers_after_routing(fake_home, tmp_path):
     save_registry(
         {"SENDER": {"root": str(sender_root)}, "BOB": {"root": str(recipient_root)}}
     )
-    res = _run_a8s(work, "BOB", "--attach", "data.txt", "see attached")
+    res = _run_a8s(
+        work,
+        "BOB",
+        "--attach",
+        "data.txt",
+        "see attached",
+        outbox=sender_root / ".outbox",
+    )
     assert res.returncode == 0, res.stderr
     _name, out_msg = _read_outbox(sender_root / ".outbox")
     msg_id = out_msg["id"]
@@ -485,7 +501,7 @@ def test_tell_check_unknown_recipient_fails(fake_home, tmp_path, monkeypatch):
 def test_tell_check_fails_without_outbox(tmp_path):
     res = _run(tmp_path, "--check")
     assert res.returncode == 1
-    assert "cannot send from this directory" in res.stderr
+    assert "TELL_OUTBOX_DIR is not set" in res.stderr
 
 
 def test_tell_check_reports_outbox_dir(tmp_path):

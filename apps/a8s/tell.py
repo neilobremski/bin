@@ -1,8 +1,7 @@
-"""tell — drop a JSON envelope in the nearest `.outbox/`.
+"""tell — drop a JSON envelope in the outbox directory.
 
-Walks up from CWD for the first **writable** `.outbox/`; `TELL_OUTBOX_DIR` locks
-to an explicit outbox path (created when missing). No registry required.
-`~/.a8s` is reachable and CWD sits inside a registered agent, validates the
+Requires `TELL_OUTBOX_DIR` (set by a8s on agent wake). No filesystem
+discovery. `~/.a8s` reachable and CWD inside a registered agent validates the
 recipient (with remote fallback), stamps `from`, and logs to the agent log.
 
 Attachments: any path tell can read is copied into `.outbox/<msg_id>/` before
@@ -50,17 +49,6 @@ def _probe_outbox_writable(outbox: Path) -> str | None:
     return None
 
 
-def _walk_writable_outbox_from(start: Path) -> Path | None:
-    cur = start.resolve()
-    for d in (cur, *cur.parents):
-        candidate = d / ".outbox"
-        if not candidate.is_dir():
-            continue
-        if _probe_outbox_writable(candidate) is None:
-            return candidate
-    return None
-
-
 def _outbox_from_env() -> Path | None:
     raw = os.environ.get(TELL_OUTBOX_DIR_ENV, "").strip()
     if not raw:
@@ -76,12 +64,15 @@ def _outbox_from_env() -> Path | None:
 
 
 def find_outbox() -> Path | None:
-    locked = _outbox_from_env()
-    if locked is not None:
-        return locked
+    return _outbox_from_env()
+
+
+def _report_outbox_unavailable() -> None:
+    print("tell: cannot send from this directory", file=sys.stderr)
     if os.environ.get(TELL_OUTBOX_DIR_ENV, "").strip():
-        return None
-    return _walk_writable_outbox_from(Path.cwd())
+        print(f"tell: {TELL_OUTBOX_DIR_ENV} is set but outbox is unavailable", file=sys.stderr)
+    else:
+        print(f"tell: {TELL_OUTBOX_DIR_ENV} is not set", file=sys.stderr)
 
 
 def agent_root_from_outbox(outbox: Path) -> Path:
@@ -454,9 +445,7 @@ def _run_sync(
 def run_check(recipient: str | None) -> int:
     outbox = find_outbox()
     if outbox is None:
-        print("tell: cannot send from this directory", file=sys.stderr)
-        if os.environ.get(TELL_OUTBOX_DIR_ENV, "").strip():
-            print(f"tell: {TELL_OUTBOX_DIR_ENV} is set but outbox is unavailable", file=sys.stderr)
+        _report_outbox_unavailable()
         return 1
 
     lines = ["tell: ok", f"  outbox: {outbox}"]
@@ -512,7 +501,7 @@ def tell_main(argv: list[str]) -> int:
 
     outbox = find_outbox()
     if outbox is None:
-        print("tell: cannot send from this directory", file=sys.stderr)
+        _report_outbox_unavailable()
         return 1
 
     rc = _validate_attachment_sources(files)

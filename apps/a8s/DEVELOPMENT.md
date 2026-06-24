@@ -25,6 +25,7 @@ Read `README.md` first for concept and usage.
 - **Recipient-CWD-relative attachment paths.** Delivered messages append `ATTACHED FILE: ./.files/<filename>` lines (not bare `FILE:`).
 - **Outbox attachments are staged.** Tell copies sources into `.outbox/<msg_id>/`; outbox envelopes carry `filename` only. Ingest moves the bundle with the JSON. Routing delivers into `.files/<msg_id>/`. Delivered wakes append `ATTACHED FILE:` lines (not bare `FILE:`).
 - **Definition `outbox_dir`.** Optional; defaults to `.outbox` under agent root. Absolute paths allowed. Harness ingests from the resolved path; wakes inject `TELL_OUTBOX_DIR` into the invoke subprocess so tell writes there without the agent seeing the outbox in its workspace.
+- **Tell requires `TELL_OUTBOX_DIR`.** No CWD tree walk — a8s sets the env on wake; manual tell must export it explicitly.
 - **Persistent MQTT sessions.** `clean_session=False` + QoS 1, hash-derived `client_id`.
 - **`publish` waits for readiness event before raising.** Don't drop the
   disconnect handler.
