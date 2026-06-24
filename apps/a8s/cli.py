@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+import settings as sm
 from commands import (
     cmd_add,
     cmd_agents,
@@ -12,6 +13,8 @@ from commands import (
     cmd_define,
     cmd_discover,
     cmd_drain,
+    cmd_config,
+    cmd_convo,
     cmd_exit,
     cmd_health,
     cmd_install,
@@ -51,6 +54,8 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("ls",       "",                          "List running agents."),
     ("tell",     "<name> [<message>]",       "Send a message to an agent or alias."),
     ("drain",    "<name>",                   "Move local inbox to trash without invoking."),
+    ("config",   "[get|set|unset ...]",      "List all knobs or edit ~/.a8s/settings.json."),
+    ("convo",    "<name> [--limit N]",       "Show markdown conversation history for an agent."),
     ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
     ("remote",   "[<name> [<broker> <topic> [--<k> <v> ...]]]", "List, show, or set a cross-machine remote."),
     ("unremote", "<name>",                    "Remove a configured remote."),
@@ -111,6 +116,10 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_tell(args)
     if cmd == "drain":
         return cmd_drain(args)
+    if cmd == "config":
+        return cmd_config(args)
+    if cmd == "convo":
+        return cmd_convo(args)
     if cmd == "install":
         return cmd_install(args)
     if cmd == "install-client":
@@ -137,7 +146,12 @@ def main(argv: list[str]) -> int:
         epilog=CLI_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--interval", type=float, default=1.0, help="loop poll interval seconds (default: 1.0)")
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=None,
+        help=f"loop poll interval seconds (default from settings: {sm.DEFAULTS['loop_interval']})",
+    )
     parser.add_argument("command", nargs="?", help=argparse.SUPPRESS)
     parser.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -146,8 +160,10 @@ def main(argv: list[str]) -> int:
         parser.print_help()
         return 0
 
+    interval = args.interval if args.interval is not None else sm.get_float("loop_interval")
+
     if args.command in KNOWN_COMMANDS:
-        return dispatch(args.command, args.rest, args.interval)
+        return dispatch(args.command, args.rest, interval)
 
     print(f"unknown command: {args.command!r}", file=sys.stderr)
     return 2

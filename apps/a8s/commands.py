@@ -992,6 +992,169 @@ def cmd_drain(args: list[str]) -> int:
     return 0
 
 
+# ---------- config ----------
+
+def cmd_config(args: list[str]) -> int:
+    """`a8s config` — read or write `~/.a8s/settings.json`; list all knobs."""
+    import settings as sm
+
+    if not args:
+        machine = {r[0]: r for r in sm.list_settings()}
+        for group_label, knobs in sm.list_catalog():
+            print(f"\n{group_label}")
+            for knob in knobs:
+                if knob.writable:
+                    _key, _stored, effective, default, source = machine[knob.key]
+                    print(f"  {knob.key}: {effective}  ({source}; default {default})")
+                    if knob.note:
+                        print(f"    {knob.note}")
+                else:
+                    default = knob.default if knob.default is not None else "—"
+                    print(f"  {knob.key}: {default}")
+                    if knob.note:
+                        print(f"    {knob.note}")
+        print()
+        return 0
+
+    sub = args[0]
+    if sub == "get":
+        if len(args) != 2:
+            print("usage: a8s config get <key>", file=sys.stderr)
+            return 2
+        key = args[1]
+        if sm.is_writable(key):
+            print(sm.get_setting(key))
+            return 0
+        knob = sm.knob_by_key(key)
+        if knob is not None:
+            val = knob.default if knob.default is not None else ""
+            print(val)
+            if knob.note:
+                print(f"({knob.note})", file=sys.stderr)
+            return 0
+        print(f"unknown setting {key!r}", file=sys.stderr)
+        return 1
+
+    if sub == "set":
+        if len(args) != 3:
+            print("usage: a8s config set <key> <value>", file=sys.stderr)
+            return 2
+        try:
+            sm.set_setting(args[1], args[2])
+        except KeyError:
+            print(f"unknown setting {args[1]!r}", file=sys.stderr)
+            return 1
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 2
+        print(f"{args[1]}={sm.get_setting(args[1])}")
+        return 0
+
+    if sub == "unset":
+        if len(args) != 2:
+            print("usage: a8s config unset <key>", file=sys.stderr)
+            return 2
+        try:
+            removed = sm.unset_setting(args[1])
+        except KeyError:
+            print(f"unknown setting {args[1]!r}", file=sys.stderr)
+            return 1
+        if not removed:
+            print(f"{args[1]}: not set in settings.json")
+        else:
+            print(f"{args[1]} unset (effective {sm.get_setting(args[1])})")
+        return 0
+
+    print(
+        "usage: a8s config [get <key> | set <key> <value> | unset <key>]",
+        file=sys.stderr,
+    )
+    return 2
+
+
+# ---------- convo ----------
+
+def cmd_convo(args: list[str]) -> int:
+    """`a8s convo <name> [--limit N] [--heading-out T] [--heading-in T]` —
+    markdown history of messages to or from an agent."""
+    from convo import (
+        DEFAULT_HEADING_IN,
+        DEFAULT_HEADING_OUT,
+        format_conversation,
+    )
+
+    if not args:
+        print(
+            "usage: a8s convo <name> [--limit N] [--heading-out TEMPLATE] [--heading-in TEMPLATE]",
+            file=sys.stderr,
+        )
+        return 2
+
+    name: str | None = None
+    limit = 10
+    heading_out = DEFAULT_HEADING_OUT
+    heading_in = DEFAULT_HEADING_IN
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--limit":
+            if i + 1 >= len(args):
+                print("--limit requires a number", file=sys.stderr)
+                return 2
+            try:
+                limit = int(args[i + 1])
+            except ValueError:
+                print("--limit requires a number", file=sys.stderr)
+                return 2
+            i += 2
+            continue
+        if a == "--heading-out":
+            if i + 1 >= len(args):
+                print("--heading-out requires a template", file=sys.stderr)
+                return 2
+            heading_out = args[i + 1]
+            i += 2
+            continue
+        if a == "--heading-in":
+            if i + 1 >= len(args):
+                print("--heading-in requires a template", file=sys.stderr)
+                return 2
+            heading_in = args[i + 1]
+            i += 2
+            continue
+        if a.startswith("-"):
+            print(f"unknown convo arg: {a!r}", file=sys.stderr)
+            return 2
+        if name is not None:
+            print(f"unexpected argument: {a!r}", file=sys.stderr)
+            return 2
+        name = a
+        i += 1
+
+    if name is None:
+        print(
+            "usage: a8s convo <name> [--limit N] [--heading-out TEMPLATE] [--heading-in TEMPLATE]",
+            file=sys.stderr,
+        )
+        return 2
+
+    match = resolve_recipient(name)
+    if match is None:
+        print(f"no agent named {name!r}", file=sys.stderr)
+        return 1
+    agent_name = match[0]
+
+    text = format_conversation(
+        agent_name,
+        limit=limit,
+        heading_out=heading_out,
+        heading_in=heading_in,
+    )
+    if text:
+        print(text)
+    return 0
+
+
 # ---------- logs ----------
 
 def _parse_log_line_ts(line: str) -> datetime | None:

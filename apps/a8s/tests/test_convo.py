@@ -1,0 +1,267 @@
+"""Tests for convo.py — conversation archive and `a8s convo` formatting."""
+from __future__ import annotations
+
+import pytest
+
+from convo import (
+    format_conversation,
+    involves_agent,
+    load_entries,
+    record,
+)
+from core import conversations_path
+from commands import cmd_convo
+from settings import DEFAULTS
+
+
+class TestInvolvesAgent:
+    def test_from(self):
+        entry = {"from": "Bob", "to": "Alice", "recipients": ["Alice"]}
+        assert involves_agent(entry, "bob")
+
+    def test_to(self):
+        entry = {"from": "Alice", "to": "Bob", "recipients": ["Bob"]}
+        assert involves_agent(entry, "bob")
+
+    def test_alias_recipient(self):
+        entry = {"from": "Alice", "to": "devs", "recipients": ["Bob", "Carol"]}
+        assert involves_agent(entry, "bob")
+        assert involves_agent(entry, "carol")
+        assert not involves_agent(entry, "dave")
+
+
+class TestRecord:
+    def test_appends_entry(self, fake_home):
+        record(
+            {
+                "id": "01JTEST000000000000000000",
+                "date": "2026-06-18T12:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "hello",
+                "files": [{"filename": "x.txt"}],
+            },
+            recipients=["Bob"],
+        )
+        rows = load_entries()
+        assert len(rows) == 1
+        assert rows[0]["from"] == "Alice"
+        assert rows[0]["to"] == "Bob"
+        assert rows[0]["content"] == "hello"
+        assert rows[0]["files"] == ["x.txt"]
+        assert rows[0]["recipients"] == ["Bob"]
+
+    def test_skips_empty_recipients(self, fake_home):
+        record({"id": "01JTEST000000000000000001", "from": "A", "to": "B", "content": "x"}, recipients=[])
+        assert load_entries() == []
+
+    def test_dedupes_by_msg_id(self, fake_home):
+        msg = {
+            "id": "01JTEST000000000000000002",
+            "from": "A",
+            "to": "B",
+            "content": "once",
+        }
+        record(msg, recipients=["B"])
+        record(msg, recipients=["B"])
+        assert len(load_entries()) == 1
+
+    def test_rotates_to_max_limit(self, fake_home, monkeypatch):
+        monkeypatch.setenv("A8S_CONVO_MAX_LIMIT", "3")
+        for i in range(5):
+            record(
+                {
+                    "id": f"01JTEST00000000000000000{i}",
+                    "date": f"2026-06-18T12:00:0{i}.000000Z",
+                    "from": "A",
+                    "to": "B",
+                    "content": f"m{i}",
+                },
+                recipients=["B"],
+            )
+        rows = load_entries()
+        assert len(rows) == 3
+        assert rows[0]["content"] == "m2"
+        assert rows[-1]["content"] == "m4"
+
+
+class TestFormatConversation:
+    def test_outbound_uses_heading_out(self, fake_home):
+        record(
+            {
+                "id": "01JOUT0000000000000000000",
+                "date": "2026-06-18T14:00:00.000000Z",
+                "from": "Bob",
+                "to": "Alice",
+                "content": "ping",
+            },
+            recipients=["Alice"],
+        )
+        text = format_conversation("Bob", limit=10)
+        assert "## from Bob to Alice at 2026-06-18T14:00:00.000000Z" in text
+        assert "ping" in text
+        assert "###" not in text
+
+    def test_inbound_uses_heading_in(self, fake_home):
+        record(
+            {
+                "id": "01JIN00000000000000000000",
+                "date": "2026-06-18T15:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "pong",
+            },
+            recipients=["Bob"],
+        )
+        text = format_conversation("Bob", limit=10)
+        assert "### from Alice to Bob at 2026-06-18T15:00:00.000000Z" in text
+        assert "pong" in text
+
+    def test_alias_inbound_for_member(self, fake_home):
+        record(
+            {
+                "id": "01JALIAS00000000000000000",
+                "date": "2026-06-18T16:00:00.000000Z",
+                "from": "Alice",
+                "to": "devs",
+                "content": "standup",
+            },
+            recipients=["Bob", "Carol"],
+        )
+        text = format_conversation("Bob", limit=10)
+        assert "### from Alice to devs at 2026-06-18T16:00:00.000000Z" in text
+        assert "standup" in text
+
+    def test_limit_returns_last_n_chronologically(self, fake_home):
+        for i in range(3):
+            record(
+                {
+                    "id": f"01JSEQ00000000000000000{i}",
+                    "date": f"2026-06-18T10:00:0{i}.000000Z",
+                    "from": "Alice",
+                    "to": "Bob",
+                    "content": f"msg{i}",
+                },
+                recipients=["Bob"],
+            )
+        text = format_conversation("Bob", limit=2)
+        assert "msg1" in text
+        assert "msg2" in text
+        assert "msg0" not in text
+
+    def test_custom_headings(self, fake_home):
+        record(
+            {
+                "id": "01JCUST00000000000000000",
+                "date": "2026-06-18T17:00:00.000000Z",
+                "from": "Bob",
+                "to": "Alice",
+                "content": "hi",
+            },
+            recipients=["Alice"],
+        )
+        text = format_conversation(
+            "Bob",
+            limit=10,
+            heading_out="OUT {from}->{to} @ {timestamp}",
+            heading_in="IN",
+        )
+        assert "OUT Bob->Alice @ 2026-06-18T17:00:00.000000Z" in text
+
+
+class TestCmdConvo:
+    def test_unknown_agent(self, fake_home, capsys):
+        assert cmd_convo(["nope"]) == 1
+        assert "no agent named" in capsys.readouterr().err
+
+    def test_prints_formatted_history(self, fake_home, tmp_path, capsys):
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root)}})
+        record(
+            {
+                "id": "01JCMD000000000000000000",
+                "date": "2026-06-18T18:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "for harness",
+            },
+            recipients=["Bob"],
+        )
+        assert cmd_convo(["bob", "--limit", "5"]) == 0
+        out = capsys.readouterr().out
+        assert "for harness" in out
+        assert "Alice" in out
+
+
+class TestConversationsPath:
+    def test_default_under_a8s_home(self, fake_home):
+        assert conversations_path() == fake_home / ".a8s" / "conversations.jsonl"
+
+    def test_respects_a8s_home(self, fake_home, monkeypatch, tmp_path):
+        custom = tmp_path / "custom"
+        monkeypatch.setenv("A8S_HOME", str(custom))
+        custom.mkdir()
+        assert conversations_path() == custom / "conversations.jsonl"
+
+
+class TestRoutingIntegration:
+    """Archive hooks on local route — one logical row per alias fan-out."""
+
+    def test_alias_fanout_records_once(self, fake_home, tmp_path):
+        from core import Participant
+        from mailbox import _write_outbox, ensure_mailboxes, route_outboxes
+        from registry import save_aliases, save_registry
+
+        agents = {}
+        for n in ("A", "B", "C"):
+            d = tmp_path / n.lower()
+            d.mkdir()
+            agents[n] = Participant(n, d)
+        save_registry({n: {"root": str(p.root)} for n, p in agents.items()})
+        save_aliases({"devs": ["B", "C"]})
+        for p in agents.values():
+            ensure_mailboxes(p)
+        payload = agents["A"].root / "x.txt"
+        payload.write_text("x")
+        _write_outbox("A", agents["A"].root, "devs", "team note", [], attachment_sources=[payload])
+        route_outboxes(list(agents.values()), all_agents=list(agents.values()))
+
+        rows = load_entries()
+        assert len(rows) == 1
+        assert rows[0]["to"] == "devs"
+        assert sorted(rows[0]["recipients"]) == ["B", "C"]
+        assert rows[0]["content"] == "team note"
+
+    def test_bob_convo_after_routed_thread(self, fake_home, tmp_path):
+        from core import Participant
+        from mailbox import _write_outbox, ensure_mailboxes, route_outboxes
+        from registry import save_registry
+
+        a_root = tmp_path / "alice"
+        b_root = tmp_path / "bob"
+        a_root.mkdir()
+        b_root.mkdir()
+        save_registry({"Alice": {"root": str(a_root)}, "Bob": {"root": str(b_root)}})
+        alice = Participant("Alice", a_root)
+        bob = Participant("Bob", b_root)
+        ensure_mailboxes(alice)
+        ensure_mailboxes(bob)
+
+        _write_outbox("Alice", a_root, "Bob", "question", [])
+        route_outboxes([alice, bob], all_agents=[alice, bob])
+        _write_outbox("Bob", b_root, "Alice", "answer", [])
+        route_outboxes([alice, bob], all_agents=[alice, bob])
+
+        text = format_conversation("Bob", limit=10)
+        assert "### from Alice to Bob" in text
+        assert "question" in text
+        assert "## from Bob to Alice" in text
+        assert "answer" in text
+        assert text.index("question") < text.index("answer")
+
+
+def test_default_max_limit_is_1000():
+    assert DEFAULTS["convo_max_limit"] == 1000

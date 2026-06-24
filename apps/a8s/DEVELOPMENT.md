@@ -31,6 +31,13 @@ Read `README.md` first for concept and usage.
   disconnect handler.
 - **Per-message backoff retry.** BACKOFF_SCHEDULE drives `.retry` sidecars.
 - **Local routing claims the ULID in `seen-ids`** to prevent MQTT round-trip dupes.
+- **`settings.json` is the stable operator config.** `a8s config set` persists
+  machine-wide keys; `a8s config` (no args) catalogs every knob including
+  definition, registry, and network fields. Env vars apply only when a key
+  is absent from the file. `A8S_HOME` relocates the whole state dir.
+- **`conversations.jsonl` is machine-wide.** One routed row per logical message
+  (alias fan-out is one row). Rotates at `convo_max_limit` (default 1000).
+  Queried by `a8s convo <agent>` — not per-agent storage.
 
 ## Per-tool quirks
 

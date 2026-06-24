@@ -19,17 +19,17 @@ The win at scale: a team of agents that share knowledge through ordinary convers
 
 ```mermaid
 flowchart LR
-    subgraph A["Agent's own dir &nbsp;<i>(~/projects/foo/)</i>"]
+    subgraph A["Agent's own dir  <i>(~/projects/foo/)</i>"]
         direction TB
         marker["CLAUDE.md / GEMINI.md / CODEX.md<br/><i>marker file</i>"]
         outbox[".outbox/<br/><i>agent writes here</i>"]
     end
 
-    subgraph H["~/.a8s/ &nbsp;<i>(a8s-managed state)</i>"]
+    subgraph H["~/.a8s/  <i>(a8s-managed state)</i>"]
         direction TB
         reg["a8s.json<br/><i>registry — agents + aliases</i>"]
         slog["log.txt<br/><i>process-scoped supervisor log</i>"]
-        subgraph AG["agents/&lt;NAME&gt;/"]
+        subgraph AG["agents/<NAME>/"]
             direction TB
             ib["inbox/"]
             tr["trash/"]
@@ -45,6 +45,8 @@ flowchart LR
     pid -.-|"holds attachment"| handler
     handler -.-|"writes"| alog
 ```
+
+
 
 Three concepts:
 
@@ -95,52 +97,85 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 ## Commands
 
 ### Registration
-| | |
-|---|---|
-| `a8s add <name> <dir> [<def>]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given. |
-| `a8s remove <name>` | Unregister an agent. Wipes `~/.a8s/agents/<NAME>/` and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running. |
-| `a8s define <name> [<path>]` | Show or set the agent's definition file. |
-| `a8s discover <path>` | Walk a path for marker files; print suggested `add`+`define` commands. Read-only. |
-| `a8s agents` | List every registered agent and its definition. |
+
+
+|                                |                                                                                                                                                                |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `a8s add <name> <dir> [<def>]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given.                                                                 |
+| `a8s remove <name>`            | Unregister an agent. Wipes `~/.a8s/agents/<NAME>/` and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running. |
+| `a8s define <name> [<path>]`   | Show or set the agent's definition file.                                                                                                                       |
+| `a8s discover <path>`          | Walk a path for marker files; print suggested `add`+`define` commands. Read-only.                                                                              |
+| `a8s agents`                   | List every registered agent and its definition.                                                                                                                |
+
 
 ### Aliases
-| | |
-|---|---|
-| `a8s alias <alias> <member>` | Create or extend an alias. Members can be agents or other aliases (cycles rejected). |
-| `a8s unalias <alias> [<member>]` | Remove a single member, or the whole alias. |
-| `a8s aliases` | List every alias and its resolved members. |
+
+
+|                                  |                                                                                      |
+| -------------------------------- | ------------------------------------------------------------------------------------ |
+| `a8s alias <alias> <member>`     | Create or extend an alias. Members can be agents or other aliases (cycles rejected). |
+| `a8s unalias <alias> [<member>]` | Remove a single member, or the whole alias.                                          |
+| `a8s aliases`                    | List every alias and its resolved members.                                           |
+
 
 ### Handlers
-| | |
-|---|---|
-| `a8s start <name>` | Spawn a detached background process to handle the agent (or every member of an alias, in one process). |
-| `a8s run <name>` | Foreground attached loop. Aliases produce one process with interleaved output. Ctrl+C: graceful detach. 2nd Ctrl+C: kill the wake subprocess group. |
-| `a8s step <name>` | Attach, do one route+drain pass, release. Heavyweight: detaches the current handler if any. |
-| `a8s stop <name>` | SIGTERM the handler. Aliases dedupe by PID — one signal per multi-agent handler. Graceful detach. |
-| `a8s kill <name>` | Per-agent force-detach: writes a kill-request, SIGUSR1s the holder. Holder kills the in-flight wake subprocess iff it's for that agent and releases the attachment; siblings keep running. Falls back to whole-process SIGTERM only if the holder doesn't honor the request in 10s. |
-| `a8s exit` | SIGTERM every running handler. |
-| `a8s ls` | List only running agents and their handler PIDs. |
+
+
+|                    |                                                                                                                                                                                                                                                                                     |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `a8s start <name>` | Spawn a detached background process to handle the agent (or every member of an alias, in one process).                                                                                                                                                                              |
+| `a8s run <name>`   | Foreground attached loop. Aliases produce one process with interleaved output. Ctrl+C: graceful detach. 2nd Ctrl+C: kill the wake subprocess group.                                                                                                                                 |
+| `a8s step <name>`  | Attach, do one route+drain pass, release. Heavyweight: detaches the current handler if any.                                                                                                                                                                                         |
+| `a8s stop <name>`  | SIGTERM the handler. Aliases dedupe by PID — one signal per multi-agent handler. Graceful detach.                                                                                                                                                                                   |
+| `a8s kill <name>`  | Per-agent force-detach: writes a kill-request, SIGUSR1s the holder. Holder kills the in-flight wake subprocess iff it's for that agent and releases the attachment; siblings keep running. Falls back to whole-process SIGTERM only if the holder doesn't honor the request in 10s. |
+| `a8s exit`         | SIGTERM every running handler.                                                                                                                                                                                                                                                      |
+| `a8s ls`           | List only running agents and their handler PIDs.                                                                                                                                                                                                                                    |
+
 
 ### Messaging
+
+
+|                                                                             |                                                                                                                                                                                                                                                                                                                           |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `a8s tell <name> <msg>`                                                     | Routed message via `_write_outbox` into the sender's configured outbox. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose root encloses CWD; router force-stamps `from` from outbox ownership.                                                                                           |
+| `tell <name> <msg>` (top-level shim, `[~/bin/tell](/Users/neilo/bin/tell)`) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Requires `TELL_OUTBOX_DIR` (a8s injects it on wake). Drops a JSON envelope — no `~/.a8s` access required. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: `[docs/tell.md](docs/tell.md)`.          |
+| `a8s logs <name>... [--tail N] [-f]`                                        | Read per-agent log files; one agent in append order, multiple merge by ISO timestamp. `-f` follows.                                                                                                                                                                                                                       |
+| `a8s convo <name> [--limit N]`                                              | Markdown conversation history for an agent (messages to or from). Default `--limit 10`. Outbound headings use `##`, inbound use `###`. Archive: `~/.a8s/conversations.jsonl` (machine-wide; rotates at `convo_max_limit`, default 1000 — `a8s config`). |
+| `a8s drain <name>`                                                          | Move pending inbox JSON to trash without waking the agent.                                                                                                                                                                                                                                                                |
+
+
+### Configuration
+
+
 | | |
 |---|---|
-| `a8s tell <name> <msg>` | Routed message via `_write_outbox` into the sender's configured outbox. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose root encloses CWD; router force-stamps `from` from outbox ownership. |
-| `tell <name> <msg>` (top-level shim, [`~/bin/tell`](/Users/neilo/bin/tell)) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Requires `TELL_OUTBOX_DIR` (a8s injects it on wake). Drops a JSON envelope — no `~/.a8s` access required. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: [`docs/tell.md`](docs/tell.md). |
-| `a8s logs <name>... [--tail N] [-f]` | Read per-agent log files; one agent in append order, multiple merge by ISO timestamp. `-f` follows. |
+| `a8s config` | List settings with effective values and source (`settings.json`, `env`, or default). |
+| `a8s config get <key>` | Print one setting. |
+| `a8s config set <key> <value>` | Persist to `~/.a8s/settings.json`. |
+| `a8s config unset <key>` | Remove key from settings.json; fall back to env then default. |
+
+Env vars apply only when a key is absent from `settings.json` (e.g. `A8S_CONVO_MAX_LIMIT`, `A8S_LOOP_INTERVAL`). `a8s config` with no arguments lists every knob — machine-wide, per-agent definition, registry, network, env, and constants — even read-only ones.
+
 
 ### Skills
-| | |
-|---|---|
-| `a8s install` | Install bundled skills into the current agent dir (or `--global` for user home). |
+
+
+|                      |                                                                                                         |
+| -------------------- | ------------------------------------------------------------------------------------------------------- |
+| `a8s install`        | Install bundled skills into the current agent dir (or `--global` for user home).                        |
 | `a8s install-client` | Copy `apps/a8s` to `/usr/local/lib/a8s/` and install `/usr/local/bin/tell` (`sudo`). Re-run to upgrade. |
 
+
 ### Remotes (issue #63)
-| | |
-|---|---|
-| `a8s remote` | List configured remotes (transport, broker, topic, opts; passwords masked). |
-| `a8s remote <name>` | Show one remote's spec. |
+
+
+|                                                                |                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `a8s remote`                                                   | List configured remotes (transport, broker, topic, opts; passwords masked).                                                                                                                                                                                                                                                                                                                                                            |
+| `a8s remote <name>`                                            | Show one remote's spec.                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `a8s remote <name> <broker-url> <topic> [--<opt> <value> ...]` | Register or overwrite a remote. Broker URL is `mqtt://host[:1883]` or `mqtts://host[:8883]`. Persistent session + QoS 1 are wired automatically so an offline cluster catches up on reconnect. Any `--<opt> <value>` past the broker and topic is forwarded verbatim to the transport — common ones are `--user U --pass P`, `--client_id ID`, `--keepalive N`. The transport rejects unknown options at load time so typos fail loud. |
-| `a8s unremote <name>` | Forget a remote. Running daemons keep using the prior config until restart. |
+| `a8s unremote <name>`                                          | Forget a remote. Running daemons keep using the prior config until restart.                                                                                                                                                                                                                                                                                                                                                            |
+
 
 Remotes are git-shaped: an explicit list of places to fan messages out to. a8s only crosses cluster boundaries on `tell` / `prompt` — everything else (`a8s logs`, `a8s ls`, `a8s agents`) is strictly local. If you want cross-cluster log access, register an a8s connector that turns inbound tells into local `a8s logs` calls; a8s itself just enables the message + invocation path.
 
@@ -164,28 +199,32 @@ Take-over has a 60-second timeout (kill is 10s). If the holder is wedged on a lo
 
 Each agent has a definition file: a JSON document describing how to invoke its CLI for each verb. Built-in defaults ship in `apps/a8s/definitions/`:
 
-| File | Purpose |
-|---|---|
-| `claude.json` | Claude Code with `--permission-mode dontAsk` allowlist + `--continue` |
-| `agy.json` | Antigravity (agy) with `--sandbox` + `--dangerously-skip-permissions` + `--continue` for headless operation |
-| `codex.json` | Codex CLI with `--full-auto` workspace-write sandbox + `resume --last` |
-| `copilot.json` | GitHub Copilot CLI with `--allow-all-tools` (required for non-interactive `-p` mode) + `--continue`. Marker is `.github/copilot-instructions.md` (Copilot's native repo-instructions location). |
-| `cursor.json` | Cursor Agent CLI (`agent`) with `-p --trust --force --approve-mcps --continue` for headless tool use. Marker is `CURSOR.md`. |
+
+| File            | Purpose                                                                                                                                                                                                                                            |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude.json`   | Claude Code with `--permission-mode dontAsk` allowlist + `--continue`                                                                                                                                                                              |
+| `agy.json`      | Antigravity (agy) with `--sandbox` + `--dangerously-skip-permissions` + `--continue` for headless operation                                                                                                                                        |
+| `codex.json`    | Codex CLI with `--full-auto` workspace-write sandbox + `resume --last`                                                                                                                                                                             |
+| `copilot.json`  | GitHub Copilot CLI with `--allow-all-tools` (required for non-interactive `-p` mode) + `--continue`. Marker is `.github/copilot-instructions.md` (Copilot's native repo-instructions location).                                                    |
+| `cursor.json`   | Cursor Agent CLI (`agent`) with `-p --trust --force --approve-mcps --continue` for headless tool use. Marker is `CURSOR.md`.                                                                                                                       |
 | `opencode.json` | [OpenCode](https://opencode.ai/) — BYO model. `opencode run --continue --dangerously-skip-permissions`. Operator picks the provider/model in each agent's own `opencode.json` (e.g. `{"model": "ollama/gpt-oss:20b"}`), not in the a8s definition. |
-| `default.json` | Fallback — runs `dummy-cli` and prints "no real CLI configured" |
+| `default.json`  | Fallback — runs `dummy-cli` and prints "no real CLI configured"                                                                                                                                                                                    |
+
 
 ### Marker files & auto-discovery
 
 `a8s discover <path>` and `a8s add <name> <dir>` (without an explicit definition) figure out which CLI an agent uses by scanning for one of these marker files at the agent's root, in order:
 
-| Marker | Kind | Where the CLI itself looks |
-|---|---|---|
-| `CLAUDE.md` | claude | [Claude Code memory](https://docs.claude.com/en/docs/claude-code/memory) |
-| `GEMINI.md` | agy | [Antigravity (agy) context files](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/configuration.md) |
-| `CODEX.md` | codex | [Codex CLI configuration](https://github.com/openai/codex) |
-| `.github/copilot-instructions.md` | copilot | [Copilot CLI repository custom instructions](https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions) — the same file Copilot itself auto-loads |
-| `CURSOR.md` | cursor | a8s marker for [Cursor Agent CLI](https://cursor.com/docs/cli/using) agents. Cursor also loads `AGENTS.md` and `.cursor/rules/`; use `CURSOR.md` when this directory is a Cursor CLI agent in a8s. |
-| `AGENTS.md` (fallback) | opencode | [The agents.md standard](https://agents.md/) — tool-agnostic instructions stewarded by the [Agentic AI Foundation](https://agentic.foundation/) under the Linux Foundation |
+
+| Marker                            | Kind     | Where the CLI itself looks                                                                                                                                                                         |
+| --------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE.md`                       | claude   | [Claude Code memory](https://docs.claude.com/en/docs/claude-code/memory)                                                                                                                           |
+| `GEMINI.md`                       | agy      | [Antigravity (agy) context files](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/configuration.md)                                                                                 |
+| `CODEX.md`                        | codex    | [Codex CLI configuration](https://github.com/openai/codex)                                                                                                                                         |
+| `.github/copilot-instructions.md` | copilot  | [Copilot CLI repository custom instructions](https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions) — the same file Copilot itself auto-loads       |
+| `CURSOR.md`                       | cursor   | a8s marker for [Cursor Agent CLI](https://cursor.com/docs/cli/using) agents. Cursor also loads `AGENTS.md` and `.cursor/rules/`; use `CURSOR.md` when this directory is a Cursor CLI agent in a8s. |
+| `AGENTS.md` (fallback)            | opencode | [The agents.md standard](https://agents.md/) — tool-agnostic instructions stewarded by the [Agentic AI Foundation](https://agentic.foundation/) under the Linux Foundation                         |
+
 
 The first four are **kind-specific** locations — for the tools that have a distinct native instruction file, a8s uses that location directly. For Copilot we use its repo-instructions location (`.github/copilot-instructions.md`) rather than inventing a `COPILOT.md` — same file serves both a8s discovery and Copilot's own persona loading.
 
@@ -208,6 +247,7 @@ Strict opacity (issues #69, #70) still holds: a routed message looks identical w
 ```
 
 Argv elements run through six substitutions:
+
 - `$SENDER` → sender's canonical name (always non-empty — every message has a force-stamped agent `from`).
 - `$RECIPIENT` → what the sender wrote in `to` (alias name for fanned messages, agent name for direct ones).
 - `$MESSAGE` → the message body (`content`, with any `ATTACHED FILE: <path>` lines appended for inbound attachments).
@@ -266,8 +306,10 @@ The state root is `$HOME/.a8s` by default; set `A8S_HOME` to relocate it. This i
 ```
 ~/.a8s/                       (or wherever A8S_HOME points)
 ├── a8s.json                  registry: { agents: {...}, aliases: {...} }
+├── settings.json             operator settings (`a8s config`; env fills gaps)
 ├── network.json              configured remotes (absent → local-only)
 ├── seen-ids                  cluster-wide ULID ring for receive-side dedup
+├── conversations.jsonl       routed message archive for `a8s convo` (see convo_max_limit)
 ├── log.txt                   process-scoped supervisor log
 └── agents/
     └── <NAME>/
