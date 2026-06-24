@@ -182,6 +182,29 @@ def test_publish_waits_for_reconnect_before_raising(mqtt_broker):
         t.stop()
 
 
+def test_publish_survives_slow_receive_on_same_client(mqtt_broker):
+    """One client publishes and subscribes on the same topic. receive_envelope
+    can do real work; if on_message runs on paho's network thread the broker
+    echo blocks PUBACK and publish fails with 'not acknowledged'."""
+    import time as _time
+
+    def slow_cb(_b: bytes) -> None:
+        _time.sleep(0.3)
+
+    t = MqttTransport(
+        remote_id="hub",
+        broker=mqtt_broker,
+        topic="a8s/test-slow-same-client",
+        client_id="a8s-test-slow-same-client",
+        connect_timeout_s=1.0,
+    )
+    t.start(slow_cb)
+    try:
+        t.publish(b'{"id":"01SLOW","to":"remote","content":"hi"}')
+    finally:
+        t.stop()
+
+
 def test_persistent_session_replays_on_reconnect(mqtt_broker):
     """The whole point of clean_session=False + QoS 1: an offline subscriber
     catches up when it reconnects under the same client_id. We simulate by
@@ -277,3 +300,9 @@ class TestMqttTransportOptions:
     def test_connect_timeout_coerced_from_string(self):
         t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", connect_timeout_s="0.5")
         assert t._connect_timeout_s == 0.5
+
+    def test_publish_qos_must_be_0_or_1(self):
+        with pytest.raises(ValueError, match="publish_qos"):
+            MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", publish_qos=2)
+        t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", publish_qos="0")
+        assert t._publish_qos == 0

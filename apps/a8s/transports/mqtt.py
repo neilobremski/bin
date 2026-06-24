@@ -19,6 +19,7 @@ anything left over so an obvious typo in `network.json` fails loud.
 from __future__ import annotations
 
 import hashlib
+import queue
 import socket
 import threading
 from typing import Any, Optional
@@ -42,6 +43,7 @@ _KNOWN_OPTS: set[str] = {
     "client_id",
     "keepalive",
     "connect_timeout_s",
+    "publish_qos",
 }
 
 
@@ -61,7 +63,11 @@ class MqttTransport(Transport):
         topic: the broadcast topic both publish and subscribe target.
         **opts: per-remote options forwarded from `network.json`. Recognized:
             username / password (aliased from `user` / `pass`), client_id,
-            keepalive (seconds, default 60), connect_timeout_s (default 5.0).
+            keepalive (seconds, default 60), connect_timeout_s (default 5.0),
+            publish_qos (0 or 1, default 1). Subscribe stays at QoS 1.
+            a8s-android (Java Paho) publishes asynchronously and never waits
+            for PUBACK; this client waits, and the broker echo runs through
+            `on_message` on the same connection — see `_worker_loop`.
             Unknown keys raise ValueError so a typo in the config doesn't
             silently produce a broken remote.
     """
@@ -94,11 +100,17 @@ class MqttTransport(Transport):
         client_id: Optional[str] = opts.get("client_id")
         keepalive: int = int(opts.get("keepalive", 60))
         connect_timeout_s: float = float(opts.get("connect_timeout_s", 5.0))
+        publish_qos: int = int(opts.get("publish_qos", 1))
+        if publish_qos not in (0, 1):
+            raise ValueError(
+                f"remote {remote_id!r}: publish_qos must be 0 or 1, got {publish_qos!r}"
+            )
 
         self._remote_id = remote_id
         self._topic = topic
         self._keepalive = keepalive
         self._connect_timeout_s = connect_timeout_s
+        self._publish_qos = publish_qos
         parsed = urlparse(broker)
         if parsed.scheme not in ("mqtt", "mqtts"):
             raise ValueError(
@@ -120,6 +132,9 @@ class MqttTransport(Transport):
             self._client.tls_set()
         self._connected = threading.Event()
         self._on_message: Optional[OnMessage] = None
+        self._msg_queue: queue.SimpleQueue[bytes | None] = queue.SimpleQueue()
+        self._worker_stop = threading.Event()
+        self._worker_thread: threading.Thread | None = None
         self._started = False
 
     @property
@@ -138,20 +153,41 @@ class MqttTransport(Transport):
         self._connected.clear()
 
     def _on_message_cb(self, client, userdata, msg):
-        cb = self._on_message
-        if cb is not None:
+        # Never run the user callback on paho's network thread. a8s uses one
+        # client for both publish and subscribe on the same topic; the broker
+        # echoes our publishes back through on_message, and receive_envelope
+        # can do real work (registry I/O, file downloads, convo archive).
+        # Blocking here delays PUBACK for the in-flight outbound publish and
+        # surfaces as "publish not acknowledged" at the routing layer.
+        self._msg_queue.put(msg.payload)
+
+    def _worker_loop(self) -> None:
+        while not self._worker_stop.is_set():
             try:
-                cb(msg.payload)
+                payload = self._msg_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if payload is None:
+                break
+            cb = self._on_message
+            if cb is None:
+                continue
+            try:
+                cb(payload)
             except Exception:
-                # The user's on_message must not bubble exceptions back into
-                # paho's network thread (it would tear the loop down). Log via
-                # core if needed, but never re-raise here.
                 pass
 
     def start(self, on_message: OnMessage) -> None:
         if self._started:
             raise TransportError(f"{self._remote_id}: already started")
         self._on_message = on_message
+        self._worker_stop.clear()
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop,
+            name=f"a8s-mqtt-{self._remote_id}",
+            daemon=True,
+        )
+        self._worker_thread.start()
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message_cb
@@ -179,6 +215,12 @@ class MqttTransport(Transport):
         except OSError:
             pass
         self._client.loop_stop()
+        self._worker_stop.set()
+        self._msg_queue.put(None)
+        worker = self._worker_thread
+        if worker is not None:
+            worker.join(timeout=5.0)
+            self._worker_thread = None
         self._started = False
 
     def publish(self, envelope: bytes) -> None:
@@ -192,10 +234,12 @@ class MqttTransport(Transport):
             self._connected.wait(timeout=self._connect_timeout_s)
         if not self._client.is_connected():
             raise TransportError(f"{self._remote_id}: broker not connected")
-        info = self._client.publish(self._topic, payload=envelope, qos=1)
+        info = self._client.publish(self._topic, payload=envelope, qos=self._publish_qos)
         rc = info.rc
         if rc != mqtt.MQTT_ERR_SUCCESS:
             raise TransportError(f"{self._remote_id}: publish rc={rc}")
+        if self._publish_qos == 0:
+            return
         try:
             info.wait_for_publish(timeout=self._connect_timeout_s)
         except (RuntimeError, ValueError) as e:
