@@ -341,7 +341,7 @@ def test_tell_absolutizes_attach_relative_to_cwd_not_outbox_root(tmp_path):
 
 
 def test_tell_absolutized_attach_delivers_after_routing(fake_home, tmp_path):
-    from core import Participant, inbound_bundle_dir, inbox_dir
+    from core import Participant, inbox_dir
     from mailbox import ensure_mailboxes, route_outboxes
     from registry import save_registry
 
@@ -372,7 +372,7 @@ def test_tell_absolutized_attach_delivers_after_routing(fake_home, tmp_path):
     ensure_mailboxes(sender)
     ensure_mailboxes(bob)
     route_outboxes([sender, bob], all_agents=[sender, bob])
-    assert (inbound_bundle_dir(bob.root, msg_id) / "data.txt").read_text() == "hello file"
+    assert (bob.files_bundle_dir(msg_id) / "data.txt").read_text() == "hello file"
     delivered = json.loads(next(inbox_dir("BOB").iterdir()).read_text())
     assert delivered["files"] == [{"filename": "data.txt"}]
 

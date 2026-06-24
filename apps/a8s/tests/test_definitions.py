@@ -16,6 +16,7 @@ from definitions import (
     build_command,
     default_definition_path,
     load_definition,
+    resolve_files_dir,
     resolve_outbox_dir,
 )
 
@@ -74,72 +75,104 @@ class TestFormatAge:
 # ---------- _message_body ----------
 
 class TestMessageBody:
-    def test_content_only(self):
-        assert _message_body({"content": "hello"}) == "hello"
+    @pytest.fixture
+    def files_root(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        return root / ".files"
 
-    def test_content_with_files(self):
+    def test_content_only(self, files_root):
+        assert _message_body({"content": "hello"}, files_root) == "hello"
+
+    def test_content_with_files(self, files_root):
         msg = {
             "content": "see attached",
             "id": "01JTESTATTACH000000000000",
             "files": [{"filename": "build.log"}, {"filename": "data.csv"}],
         }
-        assert _message_body(msg) == (
+        base = files_root / "01JTESTATTACH000000000000"
+        assert _message_body(msg, files_root) == (
             "see attached\n\n"
-            "ATTACHED FILE: ./.files/01JTESTATTACH000000000000/build.log\n"
-            "ATTACHED FILE: ./.files/01JTESTATTACH000000000000/data.csv"
+            f"ATTACHED FILE: {(base / 'build.log').resolve()}\n"
+            f"ATTACHED FILE: {(base / 'data.csv').resolve()}"
         )
 
-    def test_empty(self):
-        assert _message_body({}) == ""
+    def test_empty(self, files_root):
+        assert _message_body({}, files_root) == ""
 
 
 # ---------- build_command + _expand_argv ----------
 
 class TestBuildCommand:
-    def test_substitutes_sender_recipient_message(self):
+    @pytest.fixture
+    def agent_root(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        return root
+
+    def test_substitutes_sender_recipient_message(self, agent_root):
         defn = {"invoke": ["claude", "--continue", "-p", "$SENDER tells $RECIPIENT: $MESSAGE"]}
         msg = {"from": "GERRY", "to": "CLAUDE", "content": "fix this"}
-        argv = build_command(defn, msg)
+        argv = build_command(defn, msg, agent_root)
         assert argv == ["claude", "--continue", "-p", "GERRY tells CLAUDE: fix this"]
 
-    def test_alias_routed_keeps_alias_in_recipient(self):
+    def test_alias_routed_keeps_alias_in_recipient(self, agent_root):
         # Strict opacity / mailing-list semantics: when the sender wrote
         # `to: devs`, the recipient's $RECIPIENT resolves to "devs".
         defn = {"invoke": ["claude", "-p", "$SENDER tells $RECIPIENT: $MESSAGE"]}
         msg = {"from": "GERRY", "to": "devs", "content": "standup"}
-        argv = build_command(defn, msg)
+        argv = build_command(defn, msg, agent_root)
         assert argv == ["claude", "-p", "GERRY tells devs: standup"]
 
-    def test_missing_invoke_raises(self):
+    def test_missing_invoke_raises(self, agent_root):
         with pytest.raises(ValueError, match="invoke"):
-            build_command({}, {"from": "G", "to": "C"})
+            build_command({}, {"from": "G", "to": "C"}, agent_root)
 
-    def test_a8s_dir_substitution(self):
+    def test_a8s_dir_substitution(self, agent_root):
         from core import SCRIPT_DIR
         defn = {"invoke": ["$A8S_DIR/dummy-cli", "$MESSAGE"]}
         msg = {"from": "A", "to": "B", "content": "hi"}
-        argv = build_command(defn, msg)
+        argv = build_command(defn, msg, agent_root)
         assert argv == [f"{SCRIPT_DIR}/dummy-cli", "hi"]
 
-    def test_does_not_mutate_original_argv(self):
+    def test_does_not_mutate_original_argv(self, agent_root):
         defn = {"invoke": ["claude", "-p", "$MESSAGE"]}
         original = list(defn["invoke"])
-        build_command(defn, {"from": "A", "to": "B", "content": "hello"})
+        build_command(defn, {"from": "A", "to": "B", "content": "hello"}, agent_root)
         assert defn["invoke"] == original
 
-    def test_message_body_includes_files(self):
+    def test_message_body_includes_files(self, agent_root):
         defn = {"invoke": ["x", "$MESSAGE"]}
+        msg_id = "01JTESTATTACH000000000000"
         msg = {
             "from": "GERRY",
             "to": "CLAUDE",
             "content": "review",
-            "id": "01JTESTATTACH000000000000",
+            "id": msg_id,
             "files": [{"filename": "x"}],
         }
-        argv = build_command(defn, msg)
-        assert argv == ["x", "review\n\nATTACHED FILE: ./.files/01JTESTATTACH000000000000/x"]
+        argv = build_command(defn, msg, agent_root)
+        path = (agent_root / ".files" / msg_id / "x").resolve()
+        assert argv == ["x", f"review\n\nATTACHED FILE: {path}"]
 
-    def test_timestamp_substitution_from_msg_date(self):
+    def test_message_body_uses_custom_files_dir(self, tmp_path):
+        agent_root = tmp_path / "agent"
+        agent_root.mkdir()
+        external = tmp_path / "attachments"
+        msg_id = "01JTESTATTACH000000000000"
+        defn = {"invoke": ["x", "$MESSAGE"], "files_dir": str(external)}
+        msg = {
+            "from": "GERRY",
+            "to": "CLAUDE",
+            "content": "review",
+            "id": msg_id,
+            "files": [{"filename": "x"}],
+        }
+        argv = build_command(defn, msg, agent_root)
+        path = (external / msg_id / "x").resolve()
+        assert argv == ["x", f"review\n\nATTACHED FILE: {path}"]
+
+    def test_timestamp_substitution_from_msg_date(self, agent_root):
         defn = {"invoke": ["x", "[$TIMESTAMP] $SENDER: $MESSAGE"]}
         msg = {
             "from": "GERRY",
@@ -147,10 +180,10 @@ class TestBuildCommand:
             "date": "2026-04-28T14:30:00.000000Z",
             "content": "hi",
         }
-        argv = build_command(defn, msg)
+        argv = build_command(defn, msg, agent_root)
         assert argv == ["x", "[2026-04-28T14:30:00.000000Z] GERRY: hi"]
 
-    def test_age_substitution_relative_to_now(self, monkeypatch):
+    def test_age_substitution_relative_to_now(self, agent_root, monkeypatch):
         from datetime import timedelta
         import definitions as dmod
         frozen = datetime(2026, 4, 28, 14, 35, 0, tzinfo=timezone.utc)
@@ -164,13 +197,13 @@ class TestBuildCommand:
 
         defn = {"invoke": ["x", "($AGE) $MESSAGE"]}
         msg = {"from": "G", "to": "C", "date": msg_date, "content": "hi"}
-        argv = build_command(defn, msg)
+        argv = build_command(defn, msg, agent_root)
         assert argv == ["x", "(5 minutes ago) hi"]
 
-    def test_missing_date_yields_empty_age_and_timestamp(self):
+    def test_missing_date_yields_empty_age_and_timestamp(self, agent_root):
         defn = {"invoke": ["x", "TS:$TIMESTAMP", "AGE:$AGE", "$MESSAGE"]}
         msg = {"from": "G", "to": "C", "content": "hi"}
-        argv = build_command(defn, msg)
+        argv = build_command(defn, msg, agent_root)
         assert argv == ["x", "TS:", "AGE:", "hi"]
 
 
@@ -273,6 +306,37 @@ class TestResolveOutboxDir:
     def test_rejects_empty(self, tmp_path):
         with pytest.raises(ValueError, match="must not be empty"):
             resolve_outbox_dir(tmp_path, {"outbox_dir": "  "})
+
+
+# ---------- resolve_files_dir ----------
+
+class TestResolveFilesDir:
+    def test_default_relative(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        assert resolve_files_dir(root, {}) == (root / ".files").resolve()
+
+    def test_explicit_relative(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        assert resolve_files_dir(root, {"files_dir": "incoming"}) == (
+            root / "incoming"
+        ).resolve()
+
+    def test_absolute(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        external = tmp_path / "attachments"
+        external.mkdir()
+        assert resolve_files_dir(root, {"files_dir": str(external)}) == external.resolve()
+
+    def test_rejects_non_string(self, tmp_path):
+        with pytest.raises(ValueError, match="files_dir must be a string"):
+            resolve_files_dir(tmp_path, {"files_dir": 1})
+
+    def test_rejects_empty(self, tmp_path):
+        with pytest.raises(ValueError, match="must not be empty"):
+            resolve_files_dir(tmp_path, {"files_dir": "  "})
 
 
 # ---------- load_definition ----------

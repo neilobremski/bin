@@ -193,7 +193,7 @@ def test_remote_round_trip_with_file_via_storage(tmp_path, mqtt_broker, monkeypa
         monkeypatch.delenv("USERPROFILE", raising=False)
         target_root = cluster_b_home / "target"
         target_root.mkdir()
-        from core import Participant, inbound_bundle_dir, inbox_dir
+        from core import Participant, files_dir, inbox_dir
         from mailbox import ensure_mailboxes
         from registry import save_registry
         save_registry({"TARGET": {"root": str(target_root)}})
@@ -249,7 +249,7 @@ def test_remote_round_trip_with_file_via_storage(tmp_path, mqtt_broker, monkeypa
             # File materialized into TARGET's .files/, path rewritten to local.
             assert len(body["files"]) == 1
             assert body["files"][0]["filename"] == "report.txt"
-            local_files = inbound_bundle_dir(target_root, msg_id)
+            local_files = files_dir(target_root) / msg_id
             assert (local_files / "report.txt").read_text() == "hello from cluster A\n"
         finally:
             stop_remotes(rx_remotes)

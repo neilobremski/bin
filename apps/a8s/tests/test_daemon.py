@@ -23,6 +23,7 @@ from core import (
     agent_log_path,
     clear_inbox_waiting_since,
     detach_request_path,
+    files_dir,
     inbox_dir,
     kill_request_path,
     pid_path,
@@ -391,6 +392,101 @@ class TestWakeOnce:
             assert "|MSG:all-hands" in log
             assert "OTHERS:" not in log
             assert "ALIAS:" not in log
+
+
+class TestFilesDirContract:
+    """PR #137 checklist — wake prompts and files_dir bootstrap."""
+
+    def _mock_def(self, tmp_path: Path, fixtures_dir: Path, *, files_dir: str | None = None) -> Path:
+        invoke = [
+            "$A8S_DIR/tests/fixtures/mock-cli",
+            "FROM:$SENDER|TO:$RECIPIENT|TS:$TIMESTAMP|AGE:$AGE|MSG:$MESSAGE",
+        ]
+        body: dict = {"invoke": invoke}
+        if files_dir is not None:
+            body["files_dir"] = files_dir
+        path = tmp_path / "mock-def.json"
+        path.write_text(json.dumps(body))
+        return path
+
+    def test_wake_prompt_includes_absolute_attached_file_path(
+        self, fake_home, tmp_path, fixtures_dir
+    ):
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        a_root.mkdir()
+        b_root.mkdir()
+        defn = self._mock_def(tmp_path, fixtures_dir)
+        save_registry({
+            "A": {"root": str(a_root), "definition": str(defn)},
+            "B": {"root": str(b_root), "definition": str(defn)},
+        })
+        a = Participant("A", a_root)
+        b = Participant("B", b_root)
+        ensure_mailboxes(a)
+        ensure_mailboxes(b)
+        payload = a_root / "avatar.jpg"
+        payload.write_text("bytes")
+        out_path = _write_outbox(
+            "A", a_root, "B", "see attached", [],
+            attachment_sources=[payload],
+        )
+        msg_id = out_path.stem
+        rc = attached_loop(["A", "B"], 0.1, single_pass=True)
+        assert rc == 0
+        expected = (b_root / ".files" / msg_id / "avatar.jpg").resolve()
+        log_b = _read_log("B")
+        assert f"ATTACHED FILE: {expected}" in log_b
+        assert "ATTACHED FILE: ./.files" not in log_b
+
+    def test_wake_custom_files_dir_in_attached_file_path(
+        self, fake_home, tmp_path, fixtures_dir
+    ):
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        external = tmp_path / "var" / "attachments" / "bob"
+        a_root.mkdir()
+        b_root.mkdir()
+        defn = self._mock_def(tmp_path, fixtures_dir, files_dir=str(external))
+        save_registry({
+            "A": {"root": str(a_root), "definition": str(defn)},
+            "B": {"root": str(b_root), "definition": str(defn)},
+        })
+        ensure_mailboxes(Participant("A", a_root))
+        ensure_mailboxes(Participant("B", b_root))
+        payload = a_root / "avatar.jpg"
+        payload.write_text("bytes")
+        out_path = _write_outbox(
+            "A", a_root, "B", "see attached", [],
+            attachment_sources=[payload],
+        )
+        msg_id = out_path.stem
+        rc = attached_loop(["A", "B"], 0.1, single_pass=True)
+        assert rc == 0
+        expected = (external / msg_id / "avatar.jpg").resolve()
+        log_b = _read_log("B")
+        assert f"ATTACHED FILE: {expected}" in log_b
+        assert (external / msg_id / "avatar.jpg").is_file()
+
+    def test_wake_creates_files_dir_when_missing(
+        self, fake_home, tmp_path, fixtures_dir
+    ):
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        a_root.mkdir()
+        b_root.mkdir()
+        defn = self._mock_def(tmp_path, fixtures_dir)
+        save_registry({
+            "A": {"root": str(a_root), "definition": str(defn)},
+            "B": {"root": str(b_root), "definition": str(defn)},
+        })
+        ensure_mailboxes(Participant("A", a_root))
+        ensure_mailboxes(Participant("B", b_root))
+        _write_outbox("A", a_root, "B", "text only", [])
+        assert not files_dir(b_root).exists()
+        rc = attached_loop(["A", "B"], 0.1, single_pass=True)
+        assert rc == 0
+        assert files_dir(b_root).is_dir()
 
 
 class TestAttachedLoopLifecycle:

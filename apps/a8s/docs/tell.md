@@ -44,7 +44,7 @@ On disk alongside the JSON:
 `from` is omitted when registry is unreachable; the router **force-overwrites** `from` based on which agent owns the outbox directory.
 
 4. **Ingest** — move `<msg_id>.json` and `<outbox>/<msg_id>/` together into `~/.a8s/agents/<SENDER>/pending/`.
-5. **Route** — copy pending bundle bytes into each recipient's `.files/<msg_id>/`. Inbox JSON keeps filename-only `files`. Wake `$MESSAGE` appends `ATTACHED FILE: ./.files/<msg_id>/<filename>` lines.
+5. **Route** — copy pending bundle bytes into each recipient's `<files_dir>/<msg_id>/` (default `.files`). Inbox JSON keeps filename-only `files`. Wake `$MESSAGE` appends absolute `ATTACHED FILE:` lines.
 
 ### `TELL_OUTBOX_DIR`
 

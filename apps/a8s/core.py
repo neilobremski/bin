@@ -270,13 +270,25 @@ def outbox_bundle_dir(outbox: Path, msg_id: str) -> Path:
 
 
 def files_dir(root: Path) -> Path:
-    """Incoming attachment root. Routing copies delivered files into
-    `.files/<msg_id>/<filename>`; wake prompts reference those paths."""
-    return root / ".files"
+    """Default incoming attachment root: `<agent-root>/.files`."""
+    return resolve_files_path(root)
 
 
-def inbound_bundle_dir(root: Path, msg_id: str) -> Path:
-    return files_dir(root) / msg_id
+def resolve_files_path(agent_root: Path, spec: str | None = None) -> Path:
+    """Resolve an incoming-files directory from a definition `files_dir` value.
+
+    Relative paths are under `agent_root`; absolute paths are used as-is.
+    Default / omitted spec is `.files` under the agent root."""
+    raw = (spec if spec is not None else ".files").strip() or ".files"
+    p = Path(raw).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    return (agent_root / p).resolve()
+
+
+def inbound_bundle_dir(files_root: Path, msg_id: str) -> Path:
+    """`<files_root>/<msg_id>/` — one bundle per message."""
+    return files_root / msg_id
 
 
 def pending_bundle_dir(name: str, msg_id: str) -> Path:
@@ -412,8 +424,17 @@ class Participant:
     root: Path
     safe_dirs: tuple[Path, ...] = ()
     outbox: Path | None = None
+    files: Path | None = None
 
     def outbox_path(self) -> Path:
         if self.outbox is not None:
             return self.outbox
         return outbox_dir(self.root)
+
+    def files_path(self) -> Path:
+        if self.files is not None:
+            return self.files
+        return files_dir(self.root)
+
+    def files_bundle_dir(self, msg_id: str) -> Path:
+        return inbound_bundle_dir(self.files_path(), msg_id)

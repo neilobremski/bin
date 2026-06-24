@@ -21,6 +21,7 @@ from core import (
     DEFINITIONS_DIR,
     MARKER_FILES,
     SCRIPT_DIR,
+    resolve_files_path,
     resolve_outbox_path,
 )
 from registry import load_registry
@@ -63,6 +64,24 @@ def resolve_outbox_dir_for_agent(name: str, agent_root: Path) -> Path:
     return resolve_outbox_dir(agent_root, definition)
 
 
+def resolve_files_dir(agent_root: Path, definition: dict) -> Path:
+    """Incoming attachment root from definition `files_dir` (default `.files`)."""
+    spec = definition.get("files_dir")
+    if spec is not None and not isinstance(spec, str):
+        raise ValueError("definition files_dir must be a string")
+    if isinstance(spec, str) and not spec.strip():
+        raise ValueError("definition files_dir must not be empty")
+    return resolve_files_path(agent_root, spec if isinstance(spec, str) else None)
+
+
+def resolve_files_dir_for_agent(name: str, agent_root: Path) -> Path:
+    try:
+        definition = load_definition(name)
+    except (FileNotFoundError, RuntimeError):
+        definition = {}
+    return resolve_files_dir(agent_root, definition)
+
+
 def load_definition(name: str) -> dict:
     """Load the JSON definition for `name`. Every agent always has one — if
     the registry lacks an explicit `definition` field, falls back to the
@@ -85,7 +104,7 @@ def load_definition(name: str) -> dict:
         raise RuntimeError(f"definition load failed for {path}: {e}") from e
 
 
-def _file_lines(msg: dict) -> list[str]:
+def _file_lines(msg: dict, files_root: Path) -> list[str]:
     files = msg.get("files") or []
     if not files:
         return []
@@ -99,14 +118,15 @@ def _file_lines(msg: dict) -> list[str]:
         filename = (entry.get("filename") or "").strip()
         if not filename:
             continue
-        out.append(f"{ATTACHED_FILE_PREFIX}./.files/{msg_id}/{filename}")
+        path = (files_root / msg_id / filename).resolve()
+        out.append(f"{ATTACHED_FILE_PREFIX}{path}")
     return out
 
 
-def _message_body(msg: dict) -> str:
+def _message_body(msg: dict, files_root: Path) -> str:
     """Compose the `$MESSAGE` body: content plus any ATTACHED FILE: lines."""
     content = msg.get("content", "")
-    lines = _file_lines(msg)
+    lines = _file_lines(msg, files_root)
     if not lines:
         return content
     return "\n".join([content, *lines])
@@ -181,7 +201,7 @@ def _expand_argv(
     return out
 
 
-def build_command(definition: dict, msg: dict) -> list[str]:
+def build_command(definition: dict, msg: dict, agent_root: Path) -> list[str]:
     """Pick the `invoke` argv from `definition` and expand interpolation
     variables. There is one verb — every routed message is a `tell` — so
     no dispatch table is needed.
@@ -194,7 +214,8 @@ def build_command(definition: dict, msg: dict) -> list[str]:
         raise ValueError("definition missing 'invoke'")
     sender = (msg.get("from") or "").strip()
     recipient = (msg.get("to") or "").strip()
-    body = _message_body(msg)
+    files_root = resolve_files_dir(agent_root, definition)
+    body = _message_body(msg, files_root)
     date_str = (msg.get("date") or "").strip()
     age = _format_age(date_str)
     return _expand_argv(list(argv), sender, recipient, body, date_str, age)

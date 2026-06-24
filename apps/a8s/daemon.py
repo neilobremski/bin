@@ -206,7 +206,8 @@ def wake_once(p: Participant, msg_path: Path) -> None:
     trashed = unique_path(trash_dir(p.name) / msg_path.name)
     msg_path.rename(trashed)
     out_agent(p.name, f"[{p.name}] waking from {trashed.name}: {_preview(msg.get('content', ''))}")
-    cmd = build_command(definition, msg)
+    p.files_path().mkdir(parents=True, exist_ok=True)
+    cmd = build_command(definition, msg, p.root)
     out_agent(p.name, f"[{p.name}] exec: {shlex.join(cmd)}")
     run_with_prefix(p.name, cmd, p.root, env=_tell_outbox_env(p))
     # And again after the wake returns — a long-running LLM call shouldn't
@@ -241,6 +242,7 @@ def wake_batch(p: Participant, msg_paths: list[Path], definition: dict) -> None:
         p.name,
         f"[{p.name}] batch waking ({len(trashed)}): {summary}",
     )
+    p.files_path().mkdir(parents=True, exist_ok=True)
     cmd = build_batch_command(definition, p.name, trashed)
     out_agent(p.name, f"[{p.name}] batch exec: {shlex.join(cmd)}")
     run_with_prefix(p.name, cmd, p.root, env=_tell_outbox_env(p))
@@ -248,9 +250,9 @@ def wake_batch(p: Participant, msg_paths: list[Path], definition: dict) -> None:
 
 
 def _file_proxy_ttl_cleanup(p: Participant, definition: dict) -> None:
-    """Delete files in <root>/.files/ older than files_ttl_hours."""
+    """Delete files in the agent files dir older than files_ttl_hours."""
     ttl = files_ttl_seconds(definition)
-    files_path = p.root / ".files"
+    files_path = p.files_path()
     if not files_path.is_dir():
         return
     cutoff = _time.time() - ttl
