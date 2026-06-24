@@ -441,6 +441,7 @@ def test_tell_stamps_from_when_registered(fake_home, tmp_path, monkeypatch):
 
     res = _run_a8s(agent_root, "bob", "registered send")
     assert res.returncode == 0, res.stderr
+    assert res.stdout.count("tell -> bob:") == 1
     _name, msg = _read_outbox(agent_root / ".outbox")
     assert msg["from"] == "SENDER"
     assert msg["to"] == "bob"

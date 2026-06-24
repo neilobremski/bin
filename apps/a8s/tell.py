@@ -573,11 +573,8 @@ def tell_main(argv: list[str]) -> int:
         from_name=sender[0] if sender is not None else None,
     )
 
-    preview = content.replace("\n", " ")[:80]
-    if len(content) > 80:
-        preview += "..."
-    print(f"tell -> {to}: {preview}")
-
+    preview = _preview(content)
+    line = f"tell -> {to}: {preview}"
     if sender is not None:
         sender_name, _ = sender
         if kind == "alias":
@@ -586,9 +583,11 @@ def tell_main(argv: list[str]) -> int:
             _, members = resolve_name(recipient)
             out_agent(
                 sender_name,
-                f"tell -> {to} (alias of {len(members)}): {_preview(content)}",
+                f"tell -> {to} (alias of {len(members)}): {preview}",
             )
         else:
-            out_agent(sender_name, f"tell -> {to}: {_preview(content)}")
+            out_agent(sender_name, line)
+    else:
+        print(line)
 
     return 0
