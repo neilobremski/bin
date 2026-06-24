@@ -155,7 +155,7 @@ class TestSeenIdsRing:
 
     def test_rotation_at_cap(self, fake_home, monkeypatch):
         # Lower the cap so we don't have to write 10k lines.
-        monkeypatch.setattr("network.MAX_SEEN_IDS", 5)
+        monkeypatch.setenv("A8S_MAX_SEEN_IDS", "5")
         ids = [new_ulid() for _ in range(8)]
         for u in ids:
             seen_id_append(u)

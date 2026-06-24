@@ -30,7 +30,6 @@ from pathlib import Path
 from typing import Callable
 
 from core import (
-    MAX_SEEN_IDS,
     Participant,
     _preview,
     inbox_dir,
@@ -221,8 +220,14 @@ def seen_id_contains(ulid: str) -> bool:
     return False
 
 
+def _max_seen_ids() -> int:
+    from settings import get_int
+
+    return get_int("max_seen_ids")
+
+
 def seen_id_append(ulid: str) -> None:
-    """Append a ULID to the ring, rotating to the last MAX_SEEN_IDS entries
+    """Append a ULID to the ring, rotating to the last max_seen_ids entries
     when the file grows past the cap. Best-effort — disk failures don't
     propagate (a missed append just means we might re-deliver a duplicate)."""
     with _SEEN_IDS_LOCK:
@@ -239,11 +244,11 @@ def seen_id_append(ulid: str) -> None:
                 lines = [ln.rstrip("\n") for ln in f if ln.strip()]
         except OSError:
             return
-        if len(lines) > MAX_SEEN_IDS:
+        if len(lines) > _max_seen_ids():
             tmp = p.with_suffix(p.suffix + ".tmp")
             try:
                 with tmp.open("w", encoding="utf-8") as out_f:
-                    for u in lines[-MAX_SEEN_IDS:]:
+                    for u in lines[-_max_seen_ids():]:
                         out_f.write(u + "\n")
                 os.replace(str(tmp), str(p))
             except OSError:
@@ -352,6 +357,7 @@ def receive_envelope(
         msg["files"] = []
     sender_label = msg.get("from") or "?"
     preview = _preview(msg.get("content", ""))
+    delivered_names: list[str] = []
     for recipient in recipients:
         # Per-recipient download: each recipient has its own `.files/`, so
         # the bytes land in the right place even on alias fan-out. Imported
@@ -383,6 +389,7 @@ def receive_envelope(
                 remote="remote",
                 detail=f"sync capture: {preview}",
             )
+            delivered_names.append(recipient.name)
             continue
         # ensure_mailboxes lives in mailbox.py; importing it here would form
         # a cycle. Just create dirs.
@@ -390,7 +397,8 @@ def receive_envelope(
         inbox_tmp_dir(recipient.name).mkdir(parents=True, exist_ok=True)
         final = inbox_dir(recipient.name) / f"{msg_id}.json"
         if final.is_file():
-            continue  # already there
+            delivered_names.append(recipient.name)
+            continue
         staging = inbox_tmp_dir(recipient.name) / f"{msg_id}.json"
         try:
             with staging.open("w", encoding="utf-8") as f:
@@ -402,6 +410,11 @@ def receive_envelope(
         out_agent(recipient.name, f"received from {sender_label} (via remote): {preview}")
         file_names = [e.get("filename", "") for e in (msg_for_recipient.get("files") or []) if e.get("filename")]
         txlog.log("RECEIVED_REMOTE", msg_id=msg_id, sender=sender_label, recipient=recipient.name, files=file_names or None, remote="remote", detail=preview)
+        delivered_names.append(recipient.name)
+    if delivered_names:
+        import convo
+
+        convo.record(msg, recipients=delivered_names)
     seen_id_append(msg_id)
 
 

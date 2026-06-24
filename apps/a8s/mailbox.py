@@ -50,7 +50,6 @@ from typing import Callable, Optional
 from core import (
     BACKOFF_SCHEDULE,
     MAX_ATTEMPTS,
-    MAX_FILE_BYTES,
     Participant,
     _preview,
     inbound_bundle_dir,
@@ -71,6 +70,12 @@ from sync_listen import A8S_CONTROL, expire_stale_listeners_for_participants, ha
 from services import StorageError, StorageService
 import txlog
 from ulid import new as new_ulid
+
+
+def _max_file_bytes() -> int:
+    from settings import get_int
+
+    return get_int("max_file_bytes")
 
 # A function that publishes one routed-and-from-stamped message envelope to
 # every configured remote that hasn't yet accepted it. Returns the updated
@@ -134,7 +139,7 @@ def _resolve_pending_attachment(sender_name: str, msg_id: str, entry: dict) -> P
         size = src.stat().st_size
     except OSError:
         return None
-    if size > MAX_FILE_BYTES:
+    if size > _max_file_bytes():
         return None
     return src
 
@@ -578,6 +583,13 @@ def _process_pending(
                                         out_agent(recipient.name, f"received from {sender.name}: {preview}")
                                     txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
                                     routed += delivered
+                                import convo
+
+                                delivered_names = [
+                                    r.name for r in recipients
+                                    if (inbox_dir(r.name) / f.name).is_file()
+                                ]
+                                convo.record(msg, recipients=delivered_names)
                         except OSError as e:
                             out_agent(sender.name, f"commit failed on {f.name}: {e}")
                             # leave for retry

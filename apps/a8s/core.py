@@ -305,6 +305,16 @@ def network_config_path() -> Path:
     return _a8s_dir() / "network.json"
 
 
+def settings_path() -> Path:
+    """`~/.a8s/settings.json` — operator settings (`a8s config`)."""
+    return _a8s_dir() / "settings.json"
+
+
+def conversations_path() -> Path:
+    """`~/.a8s/conversations.jsonl` — routed message archive for `a8s convo`."""
+    return _a8s_dir() / "conversations.jsonl"
+
+
 def seen_ids_path() -> Path:
     """Single cluster-wide ring file holding the last MAX_SEEN_IDS message
     IDs the receive loops have written into local inboxes. Receive-side dedup
