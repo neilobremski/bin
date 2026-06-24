@@ -365,11 +365,30 @@ class TestFileTransfer:
         out_path = _write_staged("A", a.root, "B", "see attached", payload)
         msg_id = out_path.stem
         route_outboxes([a, b], all_agents=[a, b])
-        bundle = inbound_bundle_dir(b.root, msg_id)
+        bundle = b.files_bundle_dir(msg_id)
         assert (bundle / "report.txt").read_text() == "hello payload"
         delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
         assert delivered["files"] == [{"filename": "report.txt"}]
         assert delivered["id"] == msg_id
+
+    def test_routes_to_custom_files_dir(self, fake_home, tmp_path):
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        external = tmp_path / "attachments"
+        a_root.mkdir()
+        b_root.mkdir()
+        save_registry({"A": {"root": str(a_root)}, "B": {"root": str(b_root)}})
+        a = Participant("A", a_root)
+        b = Participant("B", b_root, files=external)
+        ensure_mailboxes(a)
+        ensure_mailboxes(b)
+        payload = a.root / "report.txt"
+        payload.write_text("hello payload")
+        out_path = _write_staged("A", a.root, "B", "see attached", payload)
+        msg_id = out_path.stem
+        route_outboxes([a, b], all_agents=[a, b])
+        assert (external / msg_id / "report.txt").read_text() == "hello payload"
+        assert not files_dir(b.root).exists()
 
     def test_alias_fanout_copies_to_each_recipient(self, fake_home, tmp_path):
         agents = {}
@@ -387,7 +406,7 @@ class TestFileTransfer:
         msg_id = out_path.stem
         route_outboxes(list(agents.values()), all_agents=list(agents.values()))
         for n in ("B", "C"):
-            assert (inbound_bundle_dir(agents[n].root, msg_id) / "data.csv").read_text() == "col1,col2\n1,2\n"
+            assert (agents[n].files_bundle_dir(msg_id) / "data.csv").read_text() == "col1,col2\n1,2\n"
 
     def test_envelope_path_field_is_rejected(self, fake_home, tmp_path, file_agents):
         a, b = file_agents
@@ -395,7 +414,7 @@ class TestFileTransfer:
             {"filename": "secrets.txt", "path": "/outside/secrets.txt"},
         ])
         route_outboxes([a, b], all_agents=[a, b])
-        assert list(files_dir(b.root).iterdir()) == []
+        assert not files_dir(b.root).exists()
         delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
         assert delivered["files"] == []
 
@@ -416,13 +435,13 @@ class TestFileTransfer:
         out_path = _write_staged("A", a.root, "B", "drop attach", payload)
         msg_id = out_path.stem
         route_outboxes([a, b], all_agents=[a, b])
-        assert (inbound_bundle_dir(b.root, msg_id) / "note.txt").read_text() == "from drop folder"
+        assert (b.files_bundle_dir(msg_id) / "note.txt").read_text() == "from drop folder"
 
     def test_missing_staged_file_is_dropped(self, file_agents):
         a, b = file_agents
         _write_outbox("A", a.root, "B", "ghost", [{"filename": "ghost.txt"}])
         route_outboxes([a, b], all_agents=[a, b])
-        assert list(files_dir(b.root).iterdir()) == []
+        assert not files_dir(b.root).exists()
         delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
         assert delivered["files"] == []
 
@@ -432,7 +451,7 @@ class TestFileTransfer:
         big.write_bytes(b"x" * (MAX_FILE_BYTES + 1))
         _write_staged("A", a.root, "B", "huge", big)
         route_outboxes([a, b], all_agents=[a, b])
-        assert list(files_dir(b.root).iterdir()) == []
+        assert not files_dir(b.root).exists()
 
     def test_same_basename_different_messages_both_deliver(self, file_agents):
         a, b = file_agents
@@ -445,7 +464,7 @@ class TestFileTransfer:
             route_outboxes([a, b], all_agents=[a, b])
         assert len(msg_ids) == 2
         for mid, expected in zip(msg_ids, ("v0", "v1"), strict=True):
-            assert (inbound_bundle_dir(b.root, mid) / "doc.txt").read_text() == expected
+            assert (b.files_bundle_dir(mid) / "doc.txt").read_text() == expected
 
 
 class TestNextInboxMessage:
@@ -900,7 +919,7 @@ class TestStorageDownload:
             }],
         }).encode()
         receive_envelope(envelope, [b], services=[s_first, s_second])
-        assert (inbound_bundle_dir(b_root, msg_id) / "doc.txt").read_bytes() == b"the-payload"
+        assert (b.files_bundle_dir(msg_id) / "doc.txt").read_bytes() == b"the-payload"
         inbox_msg = json.loads(next(inbox_dir("B").iterdir()).read_text())
         assert inbox_msg["files"] == [{"filename": "doc.txt"}]
 

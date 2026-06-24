@@ -22,8 +22,8 @@ Read `README.md` first for concept and usage.
 - **Cross-cluster `FILE:` payloads ride storage services.** Configured under
   `network.json`'s `services` map (separate from `remotes`).
 - **Storage services are stateless.** No start/stop lifecycle.
-- **Recipient-CWD-relative attachment paths.** Delivered messages append `ATTACHED FILE: ./.files/<filename>` lines (not bare `FILE:`).
-- **Outbox attachments are staged.** Tell copies sources into `.outbox/<msg_id>/`; outbox envelopes carry `filename` only. Ingest moves the bundle with the JSON. Routing delivers into `.files/<msg_id>/`. Delivered wakes append `ATTACHED FILE:` lines (not bare `FILE:`).
+- **Absolute attachment paths in wake prompts.** Delivered messages append `ATTACHED FILE: <absolute-path>` lines (not bare `FILE:`). Path comes from definition `files_dir` (default `.files` under agent root) plus `<msg_id>/<filename>`.
+- **Outbox attachments are staged.** Tell copies sources into `.outbox/<msg_id>/`; outbox envelopes carry `filename` only. Ingest moves the bundle with the JSON. Routing delivers into `<files_dir>/<msg_id>/`. Delivered wakes append `ATTACHED FILE:` lines (not bare `FILE:`).
 - **Definition `outbox_dir`.** Optional; defaults to `.outbox` under agent root. Absolute paths allowed. Harness ingests from the resolved path; wakes inject `TELL_OUTBOX_DIR` into the invoke subprocess so tell writes there without the agent seeing the outbox in its workspace.
 - **Tell requires `TELL_OUTBOX_DIR`.** No CWD tree walk — a8s sets the env on wake; manual tell must export it explicitly.
 - **Persistent MQTT sessions.** `clean_session=False` + QoS 1, hash-derived `client_id`.

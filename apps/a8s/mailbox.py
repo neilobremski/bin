@@ -53,7 +53,6 @@ from core import (
     MAX_FILE_BYTES,
     Participant,
     _preview,
-    files_dir,
     inbound_bundle_dir,
     inbox_dir,
     inbox_tmp_dir,
@@ -84,9 +83,9 @@ PublishRemotes = Callable[[dict, str, list[str], int], list[str]]
 
 def ensure_mailboxes(p: Participant) -> None:
     """Create mailbox dirs for `p`. Inbox, inbox.tmp, pending, and trash live
-    under ~/.a8s/ (hidden from the agent); outbox and .files live in the
-    agent's own root (so the agent can write to outbox and read from .files
-    under a workspace sandbox)."""
+    under ~/.a8s/ (hidden from the agent); outbox lives at the resolved
+    `outbox_dir` (default `.outbox` under agent root). Incoming attachments
+    use `files_dir` (default `.files`); that directory is created on wake."""
     for d in (
         inbox_dir(p.name),
         inbox_tmp_dir(p.name),
@@ -95,12 +94,6 @@ def ensure_mailboxes(p: Participant) -> None:
     ):
         d.mkdir(parents=True, exist_ok=True)
     p.outbox_path().mkdir(parents=True, exist_ok=True)
-    files_dir(p.root).mkdir(parents=True, exist_ok=True)
-
-
-def _attached_file_relative_path(msg_id: str, filename: str) -> str:
-    """Recipient-local path for `$MESSAGE` ATTACHED FILE: lines."""
-    return f"./.files/{msg_id}/{filename}"
 
 
 def _move_dir(src: Path, dest: Path) -> None:
@@ -149,10 +142,10 @@ def _resolve_pending_attachment(sender_name: str, msg_id: str, entry: dict) -> P
 def _transfer_file_to_recipient(
     sender_name: str,
     msg_id: str,
-    recipient_root: Path,
+    recipient: Participant,
     entry: dict,
 ) -> dict | None:
-    """Copy one attachment from pending into `<recipient>/.files/<msg_id>/`."""
+    """Copy one attachment from pending into the recipient's files bundle."""
     if (entry.get("path") or "").strip():
         out_agent(
             sender_name,
@@ -166,7 +159,7 @@ def _transfer_file_to_recipient(
     if src_resolved is None:
         out_agent(sender_name, f"FILE: staged attachment missing or invalid: {filename!r}")
         return None
-    dest_dir = inbound_bundle_dir(recipient_root, msg_id)
+    dest_dir = recipient.files_bundle_dir(msg_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / filename
     try:
@@ -200,7 +193,7 @@ def _build_routed_message(
         new_files: list[dict] = []
         for entry in src_files:
             rewritten = _transfer_file_to_recipient(
-                sender.name, msg_id, recipient.root, entry
+                sender.name, msg_id, recipient, entry
             )
             if rewritten is not None:
                 new_files.append(rewritten)
@@ -424,7 +417,7 @@ def _download_files_to_recipient(
     if not msg_id:
         out_msg["files"] = []
         return out_msg
-    dest_root = inbound_bundle_dir(recipient.root, msg_id)
+    dest_root = recipient.files_bundle_dir(msg_id)
     dest_root.mkdir(parents=True, exist_ok=True)
     for entry in src_files:
         filename = entry.get("filename") or ""
