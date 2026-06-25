@@ -22,6 +22,7 @@ from core import (
     MARKER_FILES,
     SCRIPT_DIR,
     resolve_files_path,
+    resolve_inbox_path,
     resolve_outbox_path,
 )
 from registry import load_registry
@@ -80,6 +81,24 @@ def resolve_files_dir_for_agent(name: str, agent_root: Path) -> Path:
     except (FileNotFoundError, RuntimeError):
         definition = {}
     return resolve_files_dir(agent_root, definition)
+
+
+def resolve_inbox_dir(agent_root: Path, definition: dict) -> Path:
+    """File-proxy delivery dir from definition `inbox_dir` (default `.inbox`)."""
+    spec = definition.get("inbox_dir")
+    if spec is not None and not isinstance(spec, str):
+        raise ValueError("definition inbox_dir must be a string")
+    if isinstance(spec, str) and not spec.strip():
+        raise ValueError("definition inbox_dir must not be empty")
+    return resolve_inbox_path(agent_root, spec if isinstance(spec, str) else None)
+
+
+def resolve_inbox_dir_for_agent(name: str, agent_root: Path) -> Path:
+    try:
+        definition = load_definition(name)
+    except (FileNotFoundError, RuntimeError):
+        definition = {}
+    return resolve_inbox_dir(agent_root, definition)
 
 
 def load_definition(name: str) -> dict:

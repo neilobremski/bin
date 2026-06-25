@@ -136,8 +136,8 @@ def _tell_outbox_env(p: Participant) -> dict[str, str]:
 
 
 def _deliver_file_proxy(p: Participant) -> None:
-    """Move ALL inbox files to <root>/.inbox/ for file-proxy agents."""
-    dest = p.root / ".inbox"
+    """Move ALL inbox files to the agent's file-proxy inbox dir."""
+    dest = p.inbox_path()
     dest.mkdir(parents=True, exist_ok=True)
     src = inbox_dir(p.name)
     if not src.is_dir():

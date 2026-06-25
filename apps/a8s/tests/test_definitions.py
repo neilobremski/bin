@@ -17,6 +17,7 @@ from definitions import (
     default_definition_path,
     load_definition,
     resolve_files_dir,
+    resolve_inbox_dir,
     resolve_outbox_dir,
 )
 
@@ -337,6 +338,39 @@ class TestResolveFilesDir:
     def test_rejects_empty(self, tmp_path):
         with pytest.raises(ValueError, match="must not be empty"):
             resolve_files_dir(tmp_path, {"files_dir": "  "})
+
+
+# ---------- resolve_inbox_dir ----------
+
+class TestResolveInboxDir:
+    def test_default_relative(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        assert resolve_inbox_dir(root, {"proxy": "file"}) == (root / ".inbox").resolve()
+
+    def test_explicit_relative(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        assert resolve_inbox_dir(root, {"proxy": "file", "inbox_dir": "sync/in"}) == (
+            root / "sync" / "in"
+        ).resolve()
+
+    def test_absolute(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        external = tmp_path / "external-inbox"
+        external.mkdir()
+        assert resolve_inbox_dir(
+            root, {"proxy": "file", "inbox_dir": str(external)}
+        ) == external.resolve()
+
+    def test_rejects_non_string(self, tmp_path):
+        with pytest.raises(ValueError, match="inbox_dir must be a string"):
+            resolve_inbox_dir(tmp_path, {"inbox_dir": 1})
+
+    def test_rejects_empty(self, tmp_path):
+        with pytest.raises(ValueError, match="must not be empty"):
+            resolve_inbox_dir(tmp_path, {"inbox_dir": "  "})
 
 
 # ---------- load_definition ----------

@@ -274,6 +274,23 @@ def files_dir(root: Path) -> Path:
     return resolve_files_path(root)
 
 
+def resolve_inbox_path(agent_root: Path, spec: str | None = None) -> Path:
+    """Resolve a file-proxy inbox directory from definition `inbox_dir`.
+
+    Relative paths are under `agent_root`; absolute paths are used as-is.
+    Default / omitted spec is `.inbox` under the agent root."""
+    raw = (spec if spec is not None else ".inbox").strip() or ".inbox"
+    p = Path(raw).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    return (agent_root / p).resolve()
+
+
+def inbox_dir(root: Path) -> Path:
+    """Default file-proxy inbox path: `<agent-root>/.inbox`."""
+    return resolve_inbox_path(root)
+
+
 def resolve_files_path(agent_root: Path, spec: str | None = None) -> Path:
     """Resolve an incoming-files directory from a definition `files_dir` value.
 
@@ -435,6 +452,7 @@ class Participant:
     safe_dirs: tuple[Path, ...] = ()
     outbox: Path | None = None
     files: Path | None = None
+    inbox: Path | None = None
 
     def outbox_path(self) -> Path:
         if self.outbox is not None:
@@ -445,6 +463,11 @@ class Participant:
         if self.files is not None:
             return self.files
         return files_dir(self.root)
+
+    def inbox_path(self) -> Path:
+        if self.inbox is not None:
+            return self.inbox
+        return inbox_dir(self.root)
 
     def files_bundle_dir(self, msg_id: str) -> Path:
         return inbound_bundle_dir(self.files_path(), msg_id)

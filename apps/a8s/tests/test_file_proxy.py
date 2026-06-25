@@ -18,18 +18,31 @@ from core import (
 from daemon import attached_loop, maybe_run_idle, wake_once
 from definitions import files_ttl_seconds, is_file_proxy
 from mailbox import _write_outbox, ensure_mailboxes
-from registry import save_registry
+from registry import participants_from_registry, save_registry
 
 
 def _read_log(name: str) -> str:
     return agent_log_path(name).read_text() if agent_log_path(name).is_file() else ""
 
 
-def _write_file_proxy_def(path: Path, *, timeout: int = 30, ttl_hours: int | None = None) -> None:
+def _write_file_proxy_def(
+    path: Path,
+    *,
+    timeout: int = 30,
+    ttl_hours: int | None = None,
+    inbox_dir: str | None = None,
+) -> None:
     defn: dict = {"proxy": "file", "idle": {"timeout": timeout}}
     if ttl_hours is not None:
         defn["files_ttl_hours"] = ttl_hours
+    if inbox_dir is not None:
+        defn["inbox_dir"] = inbox_dir
     path.write_text(json.dumps(defn))
+
+
+def _proxy_participant(name: str, root: Path, defp: Path) -> Participant:
+    save_registry({name: {"root": str(root.resolve()), "definition": str(defp.resolve())}})
+    return next(p for p in participants_from_registry() if p.name == name)
 
 
 class TestIsFileProxy:
@@ -82,6 +95,25 @@ class TestWakeOnceFileProxy:
         assert delivered.is_file()
         assert json.loads(delivered.read_text())["content"] == "hello"
         assert "proxy: delivered test1.json" in _read_log("PROXY")
+
+    def test_delivers_to_custom_inbox_dir(self, fake_home, tmp_path):
+        d = tmp_path / "agent"
+        d.mkdir()
+        external = tmp_path / "sync-inbox"
+        defp = tmp_path / "proxy.json"
+        _write_file_proxy_def(defp, inbox_dir=str(external))
+        p = _proxy_participant("PROXY", d, defp)
+        ensure_mailboxes(p)
+
+        msg = {"id": "test1", "from": "ALICE", "to": "PROXY", "content": "hello", "files": []}
+        msg_file = inbox_dir("PROXY") / "test1.json"
+        msg_file.write_text(json.dumps(msg))
+
+        wake_once(p, msg_file)
+
+        delivered = external / "test1.json"
+        assert delivered.is_file()
+        assert not (d / ".inbox" / "test1.json").exists()
 
     def test_batch_delivers_all_inbox_files(self, fake_home, tmp_path):
         d = tmp_path / "agent"
@@ -189,6 +221,33 @@ class TestIdleFileProxy:
         log = _read_log("PROXY")
         assert "TTL cleanup removed 1 file(s)" in log
 
+    def test_idle_uses_custom_files_dir_for_ttl(self, fake_home, tmp_path):
+        d = tmp_path / "agent"
+        d.mkdir()
+        external_files = tmp_path / "attachment-store"
+        defp = tmp_path / "proxy.json"
+        defp.write_text(
+            json.dumps(
+                {
+                    "proxy": "file",
+                    "idle": {"timeout": 1},
+                    "files_ttl_hours": 1,
+                    "files_dir": str(external_files),
+                }
+            )
+        )
+        p = _proxy_participant("PROXY", d, defp)
+        ensure_mailboxes(p)
+
+        external_files.mkdir(parents=True, exist_ok=True)
+        old_file = external_files / "old.txt"
+        old_file.write_text("expired")
+        os.utime(old_file, (time.time() - 7200, time.time() - 7200))
+
+        touch_last_active("PROXY", datetime.now(timezone.utc) - timedelta(seconds=60))
+        assert maybe_run_idle(p) is True
+        assert not old_file.is_file()
+
     def test_idle_skips_when_not_yet_expired(self, fake_home, tmp_path):
         d = tmp_path / "agent"
         d.mkdir()
@@ -233,3 +292,30 @@ class TestAttachedLoopFileProxy:
         content = json.loads(delivered[0].read_text())
         assert content["content"] == "file-proxy test"
         assert "proxy: delivered" in _read_log("PROXY")
+
+    def test_custom_inbox_dir_via_attached_loop(self, fake_home, tmp_path, fixtures_dir):
+        sender_root = tmp_path / "sender"
+        proxy_root = tmp_path / "proxy"
+        inbox_external = tmp_path / "drive-inbox"
+        sender_root.mkdir()
+        proxy_root.mkdir()
+
+        defp = tmp_path / "proxy.json"
+        _write_file_proxy_def(defp, inbox_dir=str(inbox_external))
+
+        save_registry({
+            "SENDER": {"root": str(sender_root), "definition": str(fixtures_dir / "mock.json")},
+            "PROXY": {"root": str(proxy_root), "definition": str(defp)},
+        })
+        ensure_mailboxes(Participant("SENDER", sender_root))
+        ensure_mailboxes(Participant("PROXY", proxy_root))
+
+        _write_outbox("SENDER", sender_root, "PROXY", "custom inbox", [])
+
+        rc = attached_loop(["SENDER", "PROXY"], 0.1, single_pass=True)
+        assert rc == 0
+
+        delivered = list(inbox_external.glob("*.json"))
+        assert len(delivered) == 1
+        assert json.loads(delivered[0].read_text())["content"] == "custom inbox"
+        assert not (proxy_root / ".inbox").exists()

@@ -72,6 +72,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("definition.invoke", None, "definition", False, note="Required argv template for message wakes"),
     Knob("definition.outbox_dir", ".outbox", "definition", False, note="Tell outbox under agent root (absolute OK); a8s injects TELL_OUTBOX_DIR on wake"),
     Knob("definition.files_dir", ".files", "definition", False, note="Inbound attachment root (absolute OK)"),
+    Knob("definition.inbox_dir", ".inbox", "definition", False, note="File-proxy only: where wake moves inbox JSON for remote polling"),
     Knob("definition.files_ttl_hours", 48, "definition", False, note="Attachment TTL cleanup on idle (hours)"),
     Knob("definition.pause", 0, "definition", False, note="Debounce seconds before waking on a message burst"),
     Knob("definition.batch.invoke", None, "definition", False, note="Argv when 2+ inbox messages waiting"),
