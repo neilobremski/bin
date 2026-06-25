@@ -286,11 +286,6 @@ def resolve_inbox_path(agent_root: Path, spec: str | None = None) -> Path:
     return (agent_root / p).resolve()
 
 
-def inbox_dir(root: Path) -> Path:
-    """Default file-proxy inbox path: `<agent-root>/.inbox`."""
-    return resolve_inbox_path(root)
-
-
 def resolve_files_path(agent_root: Path, spec: str | None = None) -> Path:
     """Resolve an incoming-files directory from a definition `files_dir` value.
 
@@ -467,7 +462,7 @@ class Participant:
     def inbox_path(self) -> Path:
         if self.inbox is not None:
             return self.inbox
-        return inbox_dir(self.root)
+        return resolve_inbox_path(self.root)
 
     def files_bundle_dir(self, msg_id: str) -> Path:
         return inbound_bundle_dir(self.files_path(), msg_id)
