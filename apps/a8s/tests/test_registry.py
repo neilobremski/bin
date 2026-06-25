@@ -279,6 +279,21 @@ class TestParticipantsFromRegistry:
         assert len(parts) == 1
         assert parts[0].files_path() == external.resolve()
 
+    def test_resolves_inbox_dir_from_definition(self, fake_home, tmp_path):
+        import json
+
+        root = tmp_path / "agent"
+        root.mkdir()
+        external = tmp_path / "external-inbox"
+        defn = tmp_path / "def.json"
+        defn.write_text(
+            json.dumps({"proxy": "file", "inbox_dir": str(external)})
+        )
+        save_registry({"A": {"root": str(root), "definition": str(defn)}})
+        parts = participants_from_registry()
+        assert len(parts) == 1
+        assert parts[0].inbox_path() == external.resolve()
+
 
 # ---------- parse_name + _scan_for_markers ----------
 

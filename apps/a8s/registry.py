@@ -193,9 +193,16 @@ def participants_from_registry() -> list[Participant]:
                 safe_dirs=tuple(safe_dirs),
                 outbox=_participant_outbox(name, root),
                 files=_participant_files(name, root),
+                inbox=_participant_inbox(name, root),
             )
         )
     return parts
+
+
+def _participant_inbox(name: str, root: Path) -> Path:
+    from definitions import resolve_inbox_dir_for_agent
+
+    return resolve_inbox_dir_for_agent(name, root)
 
 
 def _participant_files(name: str, root: Path) -> Path:

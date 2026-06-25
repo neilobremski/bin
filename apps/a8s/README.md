@@ -352,15 +352,18 @@ cat > file-proxy.json << 'EOF'
 {"proxy": "file", "idle": {"timeout": 30}, "files_ttl_hours": 48}
 EOF
 
+# Optional: custom dirs (absolute paths OK)
+# {"proxy": "file", "inbox_dir": "/mnt/sync/in", "outbox_dir": "mail/out", "files_dir": ".files", ...}
+
 # Register with a mounted root directory
 a8s add my-email /mnt/gdrive/my-email/ file-proxy.json
 ```
 
 ### How it works
 
-- **On message:** A8S moves inbox JSON files into `<root>/.inbox/` instead of invoking a subprocess. The remote side polls `.inbox/`, processes, deletes.
-- **Outbox:** The remote side writes response envelopes to `<root>/.outbox/`. A8S ingests these on its normal routing pass (no change from regular agents).
-- **Files:** Tell copies attachments into `.outbox/<msg_id>/` before writing the envelope (filename only in JSON). Ingest moves the bundle with the JSON; routing delivers into `<files_dir>/<msg_id>/` on each recipient (default `files_dir` is `.files` under the agent root; absolute paths OK). Wake prompts use absolute `ATTACHED FILE: <path>` lines. A8S creates `files_dir` when waking and cleans up files older than `files_ttl_hours` (default 48) on each idle cycle.
+- **On message:** A8S moves inbox JSON files into the definition's `inbox_dir` (default `<root>/.inbox/`) instead of invoking a subprocess. The remote side polls that directory, processes, deletes.
+- **Outbox:** The remote side writes response envelopes to the definition's `outbox_dir` (default `<root>/.outbox/`). A8S ingests these on its normal routing pass (no change from regular agents).
+- **Files:** Tell copies attachments into `.outbox/<msg_id>/` before writing the envelope (filename only in JSON). Ingest moves the bundle with the JSON; routing delivers into `<files_dir>/<msg_id>/` on each recipient (default `files_dir` is `.files` under the agent root; absolute paths OK). Wake prompts use absolute `ATTACHED FILE: <path>` lines. A8S creates `files_dir` when waking CLI agents and cleans up files older than `files_ttl_hours` (default 48) on each idle cycle.
 - **Idle:** The `idle.timeout` controls how often A8S syncs (moves inbox files + runs TTL cleanup). No CLI is invoked.
 
 ### Filesystem layout (agent root)
