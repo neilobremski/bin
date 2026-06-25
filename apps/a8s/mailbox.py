@@ -121,27 +121,49 @@ def _msg_id_from_pending_json(name: str) -> str:
     return Path(name).stem
 
 
-def _resolve_pending_attachment(sender_name: str, msg_id: str, entry: dict) -> Path | None:
+def _pending_attachment_status(
+    sender_name: str, msg_id: str, entry: dict
+) -> tuple[Path | None, str]:
+    """Resolve a pending-bundle attachment for upload or local delivery.
+
+    Returns `(path, "")` on success or `(None, reason)` with a specific
+    diagnostic when the bytes cannot be read."""
+    if not (msg_id or "").strip():
+        return None, "missing message id"
     if (entry.get("path") or "").strip():
-        return None
+        return None, "files entry has path field (expected filename-only pending shape)"
     filename = (entry.get("filename") or "").strip()
-    if not filename or filename != Path(filename).name:
-        return None
+    if not filename:
+        return None, "missing filename in files entry"
+    if filename != Path(filename).name:
+        return None, f"filename {filename!r} is not a basename"
     bundle = pending_bundle_dir(sender_name, msg_id).resolve()
     try:
         src = (bundle / filename).resolve()
         src.relative_to(bundle)
-    except (ValueError, OSError, RuntimeError):
-        return None
+    except ValueError:
+        return None, f"path escapes pending bundle {bundle}"
+    except (OSError, RuntimeError) as e:
+        return None, f"cannot resolve {bundle / filename}: {e}"
+    if not src.exists():
+        return None, f"not found: {src}"
+    if src.is_dir():
+        return None, f"is a directory, not a file: {src}"
     if not src.is_file():
-        return None
+        return None, f"not a regular file: {src}"
     try:
         size = src.stat().st_size
-    except OSError:
-        return None
-    if size > _max_file_bytes():
-        return None
-    return src
+    except OSError as e:
+        return None, f"cannot stat {src}: {e}"
+    max_bytes = _max_file_bytes()
+    if size > max_bytes:
+        return None, f"size {size} bytes exceeds max_file_bytes ({max_bytes})"
+    return src, ""
+
+
+def _resolve_pending_attachment(sender_name: str, msg_id: str, entry: dict) -> Path | None:
+    path, _ = _pending_attachment_status(sender_name, msg_id, entry)
+    return path
 
 
 def _transfer_file_to_recipient(
@@ -160,9 +182,12 @@ def _transfer_file_to_recipient(
     filename = (entry.get("filename") or "").strip()
     if not filename:
         return None
-    src_resolved = _resolve_pending_attachment(sender_name, msg_id, entry)
+    src_resolved, reason = _pending_attachment_status(sender_name, msg_id, entry)
     if src_resolved is None:
-        out_agent(sender_name, f"FILE: staged attachment missing or invalid: {filename!r}")
+        out_agent(
+            sender_name,
+            f"FILE: staged attachment missing or invalid: {filename!r} ({reason})",
+        )
         return None
     dest_dir = recipient.files_bundle_dir(msg_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -365,13 +390,23 @@ def _upload_files_for_remote(
         if not filename:
             continue
         per_file = uploaded.setdefault(filename, {})
-        src = _resolve_file_source(sender.name, msg_id, entry) if msg_id else None
+        src, src_reason = (
+            _pending_attachment_status(sender.name, msg_id, entry)
+            if msg_id
+            else (None, "missing message id")
+        )
         if src is None and any(s.id not in per_file for s in services):
             out_agent(
                 sender.name,
-                f"FILE: cannot read source for upload (filename={filename!r}); will retry",
+                f"FILE: cannot read source for upload (filename={filename!r}): {src_reason}; will retry",
             )
-            txlog.log("FILE_UPLOAD_FAILED", msg_id=msg.get("id", ""), sender=sender.name, files=[filename], detail="source unreadable")
+            txlog.log(
+                "FILE_UPLOAD_FAILED",
+                msg_id=msg.get("id", ""),
+                sender=sender.name,
+                files=[filename],
+                detail=src_reason,
+            )
             all_done = False
             continue
         for service in services:

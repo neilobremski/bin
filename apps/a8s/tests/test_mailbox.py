@@ -21,13 +21,79 @@ from core import (
     trash_dir,
 )
 from mailbox import (
+    _pending_attachment_status,
     _split_content_and_files,
+    _upload_files_for_remote,
     _write_outbox,
     ensure_mailboxes,
     next_inbox_message,
     route_outboxes,
 )
 from registry import participants_from_registry, save_aliases, save_registry
+
+
+class TestPendingAttachmentStatus:
+    def test_missing_bundle_file(self, fake_home):
+        path, reason = _pending_attachment_status(
+            "A",
+            "01TEST",
+            {"filename": "missing.tif"},
+        )
+        assert path is None
+        assert reason.startswith("not found:")
+
+    def test_oversize_file(self, fake_home, tmp_path, monkeypatch):
+        monkeypatch.setenv("A8S_MAX_FILE_BYTES", "10")
+        bundle = pending_dir("A") / "01TEST"
+        bundle.mkdir(parents=True)
+        big = bundle / "huge.tif"
+        big.write_bytes(b"x" * 20)
+        path, reason = _pending_attachment_status(
+            "A",
+            "01TEST",
+            {"filename": "huge.tif"},
+        )
+        assert path is None
+        assert "exceeds max_file_bytes" in reason
+
+    def test_path_field_rejected(self, fake_home):
+        path, reason = _pending_attachment_status(
+            "A",
+            "01TEST",
+            {"filename": "x.tif", "path": "/tmp/x.tif"},
+        )
+        assert path is None
+        assert "path field" in reason
+
+    def test_upload_logs_specific_reason(self, fake_home, tmp_path):
+        from txlog import _txlog_path
+
+        a_root = tmp_path / "a"
+        a_root.mkdir()
+        save_registry({"A": {"root": str(a_root)}})
+        a = Participant("A", a_root)
+        ensure_mailboxes(a)
+        pending = pending_dir("A") / "01UPLOAD"
+        pending.mkdir(parents=True)
+        (pending / "01UPLOAD.json").write_text(
+            json.dumps(
+                {
+                    "id": "01UPLOAD",
+                    "from": "A",
+                    "to": "REMOTE",
+                    "content": "see file",
+                    "files": [{"filename": "Scan.TIF"}],
+                }
+            )
+        )
+        sidecar = {"attempts": 0, "uploaded": {}}
+        msg = json.loads((pending / "01UPLOAD.json").read_text())
+        ok = _upload_files_for_remote(msg, a, [_StubStorage("svc")], sidecar)
+        assert ok is False
+        lines = _txlog_path().read_text().splitlines()
+        failed = [ln for ln in lines if "\tFILE_UPLOAD_FAILED\t" in ln]
+        assert len(failed) == 1
+        assert "not found:" in failed[0].split("\t")[-1]
 
 
 def _write_staged(sender_name: str, sender_root: Path, to: str, content: str, *sources: Path) -> Path:
