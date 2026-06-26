@@ -17,11 +17,9 @@ LIVE_ENDPOINTS = {
     "userStatus": "/exa.language_server_pb.LanguageServerService/GetUserStatus",
     "commandModelConfigs": "/exa.language_server_pb.LanguageServerService/GetCommandModelConfigs",
     "userQuotaSummary": "/exa.language_server_pb.LanguageServerService/GetUserQuotaSummary",
-    "unleash": "/exa.language_server_pb.LanguageServerService/GetUnleashData",
 }
 
 REQUEST_TIMEOUT_S = 8
-PROBE_TIMEOUT_S = 1.5
 
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
@@ -112,23 +110,28 @@ def detect_antigravity_process() -> dict[str, Any]:
     return candidates[0][1]
 
 
-def _cli_log_ports_for_pid(pid: int) -> list[int]:
+def _cli_log_port_map(pid: int) -> dict[str, int]:
     log_dir = Path.home() / ".gemini" / "antigravity-cli" / "log"
     if not log_dir.is_dir():
-        return []
+        return {}
 
-    ports: list[int] = []
     for log_path in sorted(log_dir.glob("cli-*.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
         text = log_path.read_text(encoding="utf-8", errors="replace")
         if f"language server process with pid {pid}" not in text:
             continue
-        ports.extend(int(m.group(1)) for m in re.finditer(r"listening on random port at (\d+)", text))
+        ports: dict[str, int] = {}
+        for match in re.finditer(r"listening on random port at (\d+) for (HTTPS \(gRPC\)|HTTP)", text):
+            port = int(match.group(1))
+            if "HTTPS" in match.group(2):
+                ports["https"] = port
+            else:
+                ports["http"] = port
         if ports:
-            break
-    return sorted({p for p in ports if p > 0}, reverse=True)
+            return ports
+    return {}
 
 
-def get_listening_ports(pid: int) -> list[int]:
+def _lsof_listen_ports(pid: int) -> list[int]:
     lsof = next((p for p in ("/usr/bin/lsof", "/usr/sbin/lsof") if shutil.which(p)), None)
     if not lsof:
         raise RuntimeError("lsof is required to discover Antigravity's local API port.")
@@ -139,14 +142,38 @@ def get_listening_ports(pid: int) -> list[int]:
         text=True,
         check=False,
     )
-    ports = [int(m.group(1)) for m in re.finditer(r":(\d+)\s+\(LISTEN\)", proc.stdout)]
-    merged = sorted({p for p in ports if p > 0} | set(_cli_log_ports_for_pid(pid)), reverse=True)
-    if not merged:
+    return sorted(
+        {int(m.group(1)) for m in re.finditer(r":(\d+)\s+\(LISTEN\)", proc.stdout) if int(m.group(1)) > 0}
+    )
+
+
+def resolve_api_ports(process_info: dict[str, Any]) -> dict[str, int | None]:
+    pid = process_info["pid"]
+    port_map = _cli_log_port_map(pid)
+    lsof_ports = _lsof_listen_ports(pid)
+    https_port = port_map.get("https")
+    http_port = port_map.get("http") or process_info.get("extension_port")
+
+    if len(lsof_ports) >= 2:
+        lower, upper = lsof_ports[0], lsof_ports[-1]
+        https_port = https_port or lower
+        http_port = http_port or upper
+    elif len(lsof_ports) == 1:
+        only = lsof_ports[0]
+        https_port = https_port or only
+        http_port = http_port or only
+
+    if not https_port and not http_port:
         raise RuntimeError(
             f"Antigravity pid {pid} has no local quota API listeners. "
             "agy --print exits too quickly; use a persistent agy --continue or interactive session."
         )
-    return merged
+    return {"https": https_port, "http": http_port}
+
+
+def get_listening_ports(pid: int) -> list[int]:
+    ports = resolve_api_ports({"pid": pid, "extension_port": None})
+    return sorted({p for p in (ports["https"], ports["http"]) if p}, reverse=True)
 
 
 def _default_request_body() -> dict[str, Any]:
@@ -156,26 +183,6 @@ def _default_request_body() -> dict[str, Any]:
             "extensionName": "n0b-quota",
             "ideVersion": "unknown",
             "locale": "en",
-        }
-    }
-
-
-def _unleash_request_body() -> dict[str, Any]:
-    import platform
-
-    return {
-        "context": {
-            "properties": {
-                "devMode": "false",
-                "extensionVersion": "0.1.0",
-                "hasAnthropicModelAccess": "true",
-                "ide": "antigravity",
-                "ideVersion": "unknown",
-                "installationId": "n0b-quota",
-                "language": "UNSPECIFIED",
-                "os": platform.system().lower(),
-                "requestedModelId": "MODEL_UNSPECIFIED",
-            }
         }
     }
 
@@ -218,7 +225,7 @@ def _post_local(
 
 
 def _make_request(
-    https_port: int,
+    https_port: int | None,
     http_port: int | None,
     csrf_token: str,
     path: str,
@@ -226,46 +233,31 @@ def _make_request(
     *,
     timeout: float = REQUEST_TIMEOUT_S,
 ) -> str:
-    try:
-        return _post_local(https_port, csrf_token, path, body, use_ssl=True, timeout=timeout)
-    except RuntimeError:
-        if http_port and http_port != https_port:
+    last_error: RuntimeError | None = None
+    if https_port:
+        try:
+            return _post_local(https_port, csrf_token, path, body, use_ssl=True, timeout=timeout)
+        except RuntimeError as exc:
+            last_error = exc
+    if http_port and http_port != https_port:
+        try:
             return _post_local(http_port, csrf_token, path, body, use_ssl=False, timeout=timeout)
-        raise
-
-
-def find_working_port(ports: list[int], csrf_token: str, http_port: int | None = None) -> int:
-    if csrf_token:
-        for port in ports:
-            try:
-                _make_request(port, http_port, csrf_token, LIVE_ENDPOINTS["unleash"], _unleash_request_body(), timeout=PROBE_TIMEOUT_S)
-                return port
-            except RuntimeError:
-                continue
-    else:
-        for port in ports:
-            try:
-                _post_local(port, "", LIVE_ENDPOINTS["unleash"], _unleash_request_body(), use_ssl=False, timeout=PROBE_TIMEOUT_S)
-                return port
-            except RuntimeError:
-                try:
-                    _post_local(port, "", LIVE_ENDPOINTS["unleash"], _unleash_request_body(), use_ssl=True, timeout=PROBE_TIMEOUT_S)
-                    return port
-                except RuntimeError:
-                    continue
-    raise RuntimeError("Could not find Antigravity's local quota API port.")
+        except RuntimeError as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    raise RuntimeError("No Antigravity API port available.")
 
 
 def fetch_raw_agy_quota() -> dict[str, Any]:
     process_info = detect_antigravity_process()
-    ports = get_listening_ports(process_info["pid"])
-    api_port = find_working_port(ports, process_info["csrf_token"], process_info["extension_port"])
-    extension_port = process_info["extension_port"]
+    api_ports = resolve_api_ports(process_info)
+    api_port = api_ports["https"] or api_ports["http"]
 
     try:
         raw = _make_request(
-            api_port,
-            extension_port,
+            api_ports["https"],
+            api_ports["http"],
             process_info["csrf_token"],
             LIVE_ENDPOINTS["userQuotaSummary"],
             _default_request_body(),
@@ -279,8 +271,8 @@ def fetch_raw_agy_quota() -> dict[str, Any]:
 
     try:
         raw = _make_request(
-            api_port,
-            extension_port,
+            api_ports["https"],
+            api_ports["http"],
             process_info["csrf_token"],
             LIVE_ENDPOINTS["userStatus"],
             _default_request_body(),
@@ -288,8 +280,8 @@ def fetch_raw_agy_quota() -> dict[str, Any]:
         return {"json": json.loads(raw), "shape": "userStatus", "api_port": api_port}
     except (RuntimeError, json.JSONDecodeError):
         raw = _make_request(
-            api_port,
-            extension_port,
+            api_ports["https"],
+            api_ports["http"],
             process_info["csrf_token"],
             LIVE_ENDPOINTS["commandModelConfigs"],
             _default_request_body(),
