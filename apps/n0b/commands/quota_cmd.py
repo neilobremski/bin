@@ -17,6 +17,7 @@ LIVE_ENDPOINTS = {
     "userStatus": "/exa.language_server_pb.LanguageServerService/GetUserStatus",
     "commandModelConfigs": "/exa.language_server_pb.LanguageServerService/GetCommandModelConfigs",
     "userQuotaSummary": "/exa.language_server_pb.LanguageServerService/GetUserQuotaSummary",
+    "cascadeModelConfig": "/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigData",
 }
 
 REQUEST_TIMEOUT_S = 8
@@ -253,6 +254,44 @@ def fetch_raw_agy_quota() -> dict[str, Any]:
     process_info = detect_antigravity_process()
     api_ports = resolve_api_ports(process_info)
     api_port = api_ports["https"] or api_ports["http"]
+
+    try:
+        raw = _make_request(
+            api_ports["https"],
+            api_ports["http"],
+            process_info["csrf_token"],
+            LIVE_ENDPOINTS["userStatus"],
+            _default_request_body(),
+        )
+        payload = json.loads(raw)
+        parsed = parse_quota_response(payload, "userStatus")
+        if parsed["models"]:
+            return {"json": payload, "shape": "userStatus", "api_port": api_port}
+    except (RuntimeError, json.JSONDecodeError):
+        pass
+
+    try:
+        raw = _make_request(
+            api_ports["https"],
+            api_ports["http"],
+            process_info["csrf_token"],
+            LIVE_ENDPOINTS["cascadeModelConfig"],
+            _default_request_body(),
+        )
+        status_raw = _make_request(
+            api_ports["https"],
+            api_ports["http"],
+            process_info["csrf_token"],
+            LIVE_ENDPOINTS["userStatus"],
+            _default_request_body(),
+        )
+        payload = json.loads(raw)
+        payload["userStatus"] = json.loads(status_raw).get("userStatus", {})
+        parsed = parse_quota_response(payload, "cascadeModelConfig")
+        if parsed["models"]:
+            return {"json": payload, "shape": "cascadeModelConfig", "api_port": api_port}
+    except (RuntimeError, json.JSONDecodeError):
+        pass
 
     try:
         raw = _make_request(
@@ -525,28 +564,99 @@ def _parse_model_quota(config: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+QUOTA_GROUPS = [
+    {
+        "name": "GEMINI MODELS",
+        "description": "Gemini Flash, Gemini Pro",
+        "match": lambda label: "gemini" in label.lower(),
+    },
+    {
+        "name": "CLAUDE AND GPT MODELS",
+        "description": "Claude Opus, Claude Sonnet, GPT-OSS",
+        "match": lambda label: "claude" in label.lower() or "gpt" in label.lower(),
+    },
+]
+
+
+def _quota_window_for_label(label: str) -> str:
+    lower = label.lower()
+    if "gemini" in lower:
+        return "weekly"
+    return "five_hour"
+
+
+def group_model_quotas(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: list[dict[str, Any]] = []
+    for grp in QUOTA_GROUPS:
+        matched = [model for model in models if grp["match"](model["label"])]
+        if not matched:
+            continue
+
+        buckets: list[dict[str, Any]] = []
+        for window, display in (("weekly", "Weekly Limit"), ("five_hour", "Five Hour Limit")):
+            candidates: list[dict[str, Any]] = []
+            for model in matched:
+                if _quota_window_for_label(model["label"]) != window:
+                    continue
+                for bucket in model.get("buckets") or []:
+                    candidates.append({**bucket, "label": display})
+            if not candidates:
+                buckets.append({"label": display, "remaining_fraction": None, "reset_time": None})
+                continue
+            best = min(
+                candidates,
+                key=lambda bucket: bucket["remaining_fraction"]
+                if isinstance(bucket.get("remaining_fraction"), (int, float))
+                else 1.0,
+            )
+            buckets.append(
+                {
+                    "label": display,
+                    "remaining_fraction": best.get("remaining_fraction"),
+                    "reset_time": best.get("reset_time"),
+                    "used": best.get("used"),
+                    "limit": best.get("limit"),
+                }
+            )
+
+        grouped.append(
+            {
+                "name": grp["name"],
+                "description": grp["description"],
+                "buckets": buckets,
+            }
+        )
+    return grouped
+
+
 def parse_quota_response(response: dict[str, Any], shape: str) -> dict[str, Any]:
     if not _is_ok_code(response.get("code")):
         raise RuntimeError("Antigravity quota API returned a non-OK response.")
 
-    status = response.get("userStatus", response) if shape == "userStatus" else response
+    if shape == "userStatus":
+        status = response.get("userStatus", response)
+    else:
+        status = response
     configs = _find_model_configs(status)
     models = sorted(
         (m for m in (_parse_model_quota(cfg) for cfg in configs) if m),
         key=lambda item: item["label"].lower(),
     )
-    plan_info = (status.get("planStatus") or {}).get("planInfo") or {}
+    account_root = response.get("userStatus", status)
+    plan_status = account_root.get("planStatus") or {}
+    plan_info = plan_status.get("planInfo") or {}
     return {
         "error": None,
         "account": {
-            "email": status.get("email"),
+            "email": account_root.get("email"),
             "plan": plan_info.get("planDisplayName")
             or plan_info.get("displayName")
             or plan_info.get("productName")
             or plan_info.get("planName"),
         },
-        "available_prompt_credits": (status.get("planStatus") or {}).get("availablePromptCredits"),
+        "available_prompt_credits": plan_status.get("availablePromptCredits"),
         "models": models,
+        "groups": group_model_quotas(models),
     }
 
 
@@ -570,11 +680,14 @@ def _format_bucket(bucket: dict[str, Any]) -> str:
     fraction = bucket.get("remaining_fraction")
     if not isinstance(fraction, (int, float)):
         return "unknown"
-    percent = round(fraction * 100)
+    if fraction >= 0.9999 and bucket.get("label") == "Five Hour Limit":
+        return "Quota available"
+    percent = fraction * 100
+    percent_text = f"{round(percent)}%" if abs(percent - round(percent)) < 0.05 else f"{percent:.2f}%"
     reset = _format_duration_until(bucket.get("reset_time"))
     if reset:
-        return f"{percent}% remaining · refreshes in {reset}"
-    return f"{percent}% remaining"
+        return f"{percent_text} remaining · refreshes in {reset}"
+    return f"{percent_text} remaining"
 
 
 def format_agy_quota_text(payload: dict[str, Any]) -> str:
@@ -587,19 +700,15 @@ def format_agy_quota_text(payload: dict[str, Any]) -> str:
         lines.append(f"Error: {payload['error']}")
         return "\n".join(lines)
 
-    models = payload.get("models") or []
-    if not models:
+    groups = payload.get("groups") or []
+    if not groups:
         lines.append("No model quota data returned.")
         return "\n".join(lines)
 
-    for model in models:
-        lines.append("")
-        lines.append(model["label"])
-        for bucket in model.get("buckets") or []:
-            label = bucket.get("label") or "Quota"
-            if label in {"Hourly", "Quota"}:
-                label = "5h limit"
-            lines.append(f"  {label}: {_format_bucket(bucket)}")
+    for group in groups:
+        lines.extend(["", group["name"], f"({group['description']})"])
+        for bucket in group.get("buckets") or []:
+            lines.append(f"  {bucket.get('label', 'Quota')}: {_format_bucket(bucket)}")
 
     credits = payload.get("available_prompt_credits")
     if credits is not None:

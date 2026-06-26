@@ -16,6 +16,7 @@ from commands.quota_cmd import (  # noqa: E402
     cmd_quota,
     detect_antigravity_process,
     get_listening_ports,
+    group_model_quotas,
     parse_quota_response,
     resolve_api_ports,
 )
@@ -39,7 +40,15 @@ SAMPLE_USER_STATUS = {
                         "resetTime": "2099-01-01T12:00:00Z",
                     }
                 },
-            }
+            },
+            {
+                "label": "Claude Sonnet 4.6 (Thinking)",
+                "model": "claude-sonnet",
+                "quotaInfo": {
+                    "remainingFraction": 1.0,
+                    "resetTime": "2099-01-01T15:00:00Z",
+                },
+            },
         ],
     },
 }
@@ -49,9 +58,9 @@ def test_parse_quota_response_user_status():
     parsed = parse_quota_response(SAMPLE_USER_STATUS, "userStatus")
     assert parsed["account"]["plan"] == "Pro"
     assert parsed["available_prompt_credits"] == 42
-    assert len(parsed["models"]) == 1
-    assert parsed["models"][0]["label"] == "Gemini Flash"
-    assert parsed["models"][0]["buckets"][0]["remaining_fraction"] == pytest.approx(0.56)
+    assert len(parsed["models"]) == 2
+    gemini = next(m for m in parsed["models"] if "Gemini" in m["label"])
+    assert gemini["buckets"][0]["remaining_fraction"] == pytest.approx(0.56)
 
 
 def test_detect_antigravity_process_from_ps():
@@ -116,6 +125,17 @@ def test_detect_antigravity_process_missing():
             detect_antigravity_process()
 
 
+def test_group_model_quotas_matches_agy_pools():
+    parsed = parse_quota_response(SAMPLE_USER_STATUS, "userStatus")
+    assert len(parsed["groups"]) == 2
+    gemini = parsed["groups"][0]
+    assert gemini["name"] == "GEMINI MODELS"
+    weekly = next(b for b in gemini["buckets"] if b["label"] == "Weekly Limit")
+    five_hour = next(b for b in gemini["buckets"] if b["label"] == "Five Hour Limit")
+    assert weekly["remaining_fraction"] == pytest.approx(0.56)
+    assert five_hour["remaining_fraction"] is None
+
+
 def test_cmd_quota_agy_success(capsys):
     sample = {
         "tool": "agy",
@@ -129,7 +149,8 @@ def test_cmd_quota_agy_success(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "Antigravity (agy)" in out
-    assert "Gemini Flash" in out
+    assert "GEMINI MODELS" in out
+    assert "Weekly Limit" in out
 
 
 def test_cmd_quota_json(capsys):
@@ -145,7 +166,7 @@ def test_cmd_quota_json(capsys):
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["tool"] == "agy"
-    assert payload["models"][0]["label"] == "Gemini Flash"
+    assert payload["groups"][0]["name"] == "GEMINI MODELS"
 
 
 def test_cmd_quota_unknown_tool(capsys):
