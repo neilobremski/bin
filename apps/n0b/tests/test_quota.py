@@ -17,6 +17,7 @@ from commands.quota_cmd import (  # noqa: E402
     detect_antigravity_process,
     get_listening_ports,
     parse_quota_response,
+    resolve_api_ports,
 )
 
 
@@ -86,19 +87,25 @@ def test_get_listening_ports_uses_lsof_and_flag(monkeypatch):
         "commands.quota_cmd.shutil.which",
         lambda path: path if path.endswith("lsof") else None,
     )
-    monkeypatch.setattr("commands.quota_cmd._cli_log_ports_for_pid", lambda pid: [])
+    monkeypatch.setattr(
+        "commands.quota_cmd._cli_log_port_map",
+        lambda pid: {"https": 62154, "http": 62155},
+    )
 
     def fake_run(argv, **kwargs):
         assert "-a" in argv
         return subprocess.CompletedProcess(
             argv,
             0,
-            stdout="agy 12345 neilo  12u  IPv4 0x0  0t0  TCP 127.0.0.1:61030 (LISTEN)\n",
+            stdout="agy 12345 neilo  12u  IPv4 0x0  0t0  TCP 127.0.0.1:62154 (LISTEN)\n"
+            "agy 12345 neilo  13u  IPv4 0x0  0t0  TCP 127.0.0.1:62155 (LISTEN)\n",
             stderr="",
         )
 
     monkeypatch.setattr("commands.quota_cmd.subprocess.run", fake_run)
-    assert get_listening_ports(12345) == [61030]
+    ports = resolve_api_ports({"pid": 12345, "extension_port": None})
+    assert ports == {"https": 62154, "http": 62155}
+    assert get_listening_ports(12345) == [62155, 62154]
 
 
 def test_detect_antigravity_process_missing():
