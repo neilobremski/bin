@@ -10,6 +10,7 @@ from commands.gpu_cmd import cmd_cuda, cmd_mb_free, cmd_mlx, cmd_mps
 from commands.json_cmd import cmd_json
 from commands.mqtt_cmd import cmd_pub, cmd_sub
 from commands.ports_cmd import cmd_free, cmd_listen
+from commands.quota_cmd import cmd_quota
 from commands.secrets_cmd import cmd_get
 from commands.video_cmd import cmd_last_frame
 
@@ -90,6 +91,20 @@ def build_parser() -> argparse.ArgumentParser:
     last_frame.add_argument("video")
     last_frame.add_argument("-o", "--output")
 
+    quota_p = sub.add_parser("quota", help="Check AI tool usage quotas")
+    quota_p.add_argument(
+        "tools",
+        nargs="*",
+        metavar="TOOL",
+        help="Tool id(s) to query (default: all installed). Supported: agy",
+    )
+    quota_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    quota_p.add_argument(
+        "--raw",
+        action="store_true",
+        help="Include raw Antigravity API payload in JSON output",
+    )
+
     return parser
 
 
@@ -138,6 +153,8 @@ def dispatch(args: argparse.Namespace) -> int:
     if group == "video":
         if args.video_cmd == "last-frame":
             return cmd_last_frame(args.video, args.output)
+    if group == "quota":
+        return cmd_quota(args.tools, as_json=args.json, raw=args.raw)
     print(f"n0b: unhandled command group {group!r}", file=sys.stderr)
     return 2
 
