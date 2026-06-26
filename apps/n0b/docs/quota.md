@@ -36,36 +36,44 @@ No cloud calls. No credential file reads. Localhost only.
 | Interactive `agy` / `agy --continue` (persistent session) | Yes — includes a8s headless agents using `--continue` |
 | Ephemeral `agy --print` / `agy -p` | **No** — language server starts and exits with the one-shot command |
 
-For programmatic model switching, keep a **persistent** `agy --continue` session alive (as a8s does), then poll:
+For programmatic model switching, keep a **persistent** `agy --continue` session alive (as a8s does), then poll pool limits (same grouping as `agy /usage`):
 
 ```bash
 n0b quota agy --json | jq -r '
-  .models[]
+  .groups[]
+  | .name as $g
+  | .buckets[]
   | select(.remaining_fraction != null)
-  | "\(.label)\t\(.remaining_fraction)"
+  | "\($g)\t\(.label)\t\(.remaining_fraction)"
 '
 ```
 
-Pick a model whose `remaining_fraction` is still above your threshold, or fall back to another provider when the lowest bucket hits zero.
+### Output shape
+
+Human output mirrors `agy /usage`: **GEMINI MODELS** and **CLAUDE AND GPT MODELS** pools, each with **Weekly Limit** and **Five Hour Limit**.
+
+The local API exposes one `quotaInfo` per model. We map it by pool the way agy presents it:
+
+- Gemini `quotaInfo` → **Weekly Limit** (matches agy’s ~4% weekly row)
+- Claude/GPT `quotaInfo` → **Five Hour Limit** (matches agy’s “Quota available” row)
+
+Cloud-backed pool values that agy shows but the local API omits (Gemini five-hour ~90%, Claude weekly ~98%) appear as `unknown`.
 
 ### JSON shape (scripting)
 
-Key fields:
+Prefer `groups` for automation; `models` remains for per-model debug.
 
-- `models[].label` — display name (e.g. `Gemini 3.5 Flash`)
-- `models[].model_id` — backend id when present
-- `models[].remaining_fraction` — 0.0–1.0 aggregate across buckets
-- `models[].buckets[]` — per-window limits (`Hourly` / 5h, `Weekly` when exposed)
-- `models[].buckets[].remaining_fraction` — fraction left in that window
-- `models[].buckets[].reset_time` — ISO timestamp for next reset
+- `groups[].name` — `GEMINI MODELS`, `CLAUDE AND GPT MODELS`
+- `groups[].buckets[]` — `Weekly Limit`, `Five Hour Limit`
+- `groups[].buckets[].remaining_fraction` — 0.0–1.0 when known
+- `models[]` — raw per-model API data
 
 Exit code `0` when quota data is returned; `1` on error or unavailable server.
 
 ### Limits
 
-- **Weekly quotas** are often not exposed by the local API (same limitation as the reference VS Code extension).
+- Local API returns one `quotaInfo` per model; agy `/usage` also shows cloud-backed pool quotas (e.g. Gemini five-hour ~90%, Claude weekly ~98%) that appear as `unknown` here today.
 - Requires `lsof` on macOS/Linux.
-- IDE sessions expose `--csrf_token` on the `language_server` command line; CLI-embedded servers use HTTP localhost without that flag.
 
 ## Supported tools
 
