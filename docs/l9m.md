@@ -41,18 +41,24 @@ l9m -p "summarize" -c document.md
 ## Model Resolution
 
 Order of precedence:
-1. `MODEL` env var — explicit override
+1. `L9M_MODEL` env var — explicit override
 2. `~/.cache/l9m.env` — cached default from last detection
 3. Best installed qwen model from `ollama list` (version-sorted, largest wins)
 4. Fallback: pull `qwen3:0.6b` (smallest, works everywhere)
 
 ```bash
 # Override for one call
-MODEL=qwen3:0.6b l9m -p "fast answer"
+L9M_MODEL=qwen3:0.6b l9m -p "fast answer"
 
 # Clear cache to re-detect
 rm ~/.cache/l9m.env
+
+# Larger ollama context window (tokens) for this invocation
+L9M_NUM_CTX=32768 l9m -p "summarize this long doc" -c bigfile.md
 ```
+
+`L9M_NUM_CTX` is passed to ollama as `options.num_ctx` and also drives the
+rolling context window size (unless `L9M_CONTEXT_LIMIT` overrides in chars).
 
 ## Flags
 

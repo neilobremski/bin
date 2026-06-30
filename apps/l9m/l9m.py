@@ -1,7 +1,7 @@
 """l9m — Local LLM interface. Auto-detects ollama model, streams responses.
 
 Model resolution (precedence):
-  1. MODEL env var
+  1. L9M_MODEL env var
   2. Cached default (~/.cache/l9m.env)
   3. Best installed qwen model (ollama list, version-sorted)
   4. Fallback: pull qwen3:0.6b
@@ -122,6 +122,30 @@ def _model_num_ctx(model: str) -> int | None:
     return None
 
 
+def _l9m_num_ctx_override() -> int | None:
+    raw = os.environ.get("L9M_NUM_CTX", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def resolve_num_ctx(model: str) -> int | None:
+    num_ctx = _l9m_num_ctx_override()
+    if num_ctx:
+        return num_ctx
+
+    cache = _read_cache()
+    if cache.get("MODEL") == model and "NUM_CTX" in cache:
+        try:
+            return int(cache["NUM_CTX"])
+        except ValueError:
+            pass
+    return _model_num_ctx(model)
+
+
 def resolve_context_limit(model: str) -> int:
     """Derive rolling context char limit from model's context window."""
     if CONTEXT_LIMIT_OVERRIDE:
@@ -130,22 +154,14 @@ def resolve_context_limit(model: str) -> int:
         except ValueError:
             pass
 
-    cache = _read_cache()
-    if cache.get("MODEL") == model and "NUM_CTX" in cache:
-        try:
-            num_ctx = int(cache["NUM_CTX"])
-        except ValueError:
-            num_ctx = _model_num_ctx(model) or 0
-    else:
-        num_ctx = _model_num_ctx(model) or 0
-
+    num_ctx = resolve_num_ctx(model)
     if num_ctx:
         return int(num_ctx * CONTEXT_FRACTION * CHARS_PER_TOKEN)
     return 10000
 
 
 def resolve_model() -> str:
-    env = os.environ.get("MODEL", "").strip()
+    env = os.environ.get("L9M_MODEL", "").strip()
     if env:
         return env
 
@@ -460,6 +476,14 @@ class GlowStream:
 _STREAM_DEFAULT = object()
 
 
+def _generate_options(model: str) -> dict:
+    opts: dict = {"num_predict": -1}
+    num_ctx = _l9m_num_ctx_override()
+    if num_ctx:
+        opts["num_ctx"] = num_ctx
+    return opts
+
+
 def generate(model: str, prompt: str, stream: object | None = _STREAM_DEFAULT) -> str:
     """Generate text from ollama. Streams to `stream` if provided, returns full text.
     Raises L9mError on failure (never calls sys.exit)."""
@@ -473,7 +497,7 @@ def generate(model: str, prompt: str, stream: object | None = _STREAM_DEFAULT) -
         "model": model,
         "prompt": prompt,
         "stream": True,
-        "options": {"num_predict": -1},
+        "options": _generate_options(model),
         "think": False,
     }).encode()
 
@@ -640,14 +664,17 @@ options:
 
 rolling context: prompt+response pairs are kept in ~/.cache/l9m/context.txt
   as a sliding window. Size is auto-derived from the model's context window
-  (25% * ~3 chars/token). Override with L9M_CONTEXT_LIMIT env var.
+  (25% * ~3 chars/token). Override with L9M_CONTEXT_LIMIT (chars) or L9M_NUM_CTX
+  (tokens, also passed to ollama).
 
 env vars:
+  L9M_MODEL           Override ollama model for this invocation
+  L9M_NUM_CTX         Ollama context window in tokens (also sizes rolling context)
   L9M_CONTEXT_DIR     Directory for context storage (default: ~/.cache/l9m)
-  L9M_CONTEXT_LIMIT   Override auto-derived context size (chars)
+  L9M_CONTEXT_LIMIT   Override rolling context size in chars
   L9M_GLOW=<theme>    Enable glow rendering with the given theme (auto detects light/dark)
 
-model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen3:0.6b""")
+model resolution: L9M_MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen3:0.6b""")
         return 0
 
     prompt = ""
