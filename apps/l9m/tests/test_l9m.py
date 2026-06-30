@@ -350,6 +350,177 @@ class TestMain:
         assert captured["prompt"] == "hello world"
 
 
+# ---------- safe markdown flush / glow streaming ----------
+
+class TestSafeMarkdownFlushEnd:
+    def test_empty(self):
+        assert l9m.safe_markdown_flush_end("") == 0
+
+    def test_paragraph_boundary(self):
+        text = "hello\n\nworld"
+        assert l9m.safe_markdown_flush_end(text) == 7
+
+    def test_waits_inside_code_fence(self):
+        text = "intro\n\n```python\nprint('hi')"
+        assert l9m.safe_markdown_flush_end(text) == 7
+        assert l9m.safe_markdown_flush_end(text[7:]) == 0
+
+    def test_flushes_closed_code_fence(self):
+        text = "intro\n\n```python\nprint('hi')\n```\n\n"
+        assert l9m.safe_markdown_flush_end(text) == len(text)
+
+    def test_multiple_paragraphs(self):
+        text = "a\n\nb\n\nc"
+        assert l9m.safe_markdown_flush_end(text) == 6
+
+
+class TestResolveGlowStyle:
+    def test_explicit_theme(self):
+        assert l9m.resolve_glow_style("dracula") == "dracula"
+
+    def test_auto_uses_clitheme(self, monkeypatch):
+        monkeypatch.setenv("CLITHEME", "light")
+        monkeypatch.setattr(l9m, "_query_terminal_background_luminance", lambda: None)
+        assert l9m.resolve_glow_style("auto") == "light"
+
+    def test_auto_uses_osc11_dark(self, monkeypatch):
+        monkeypatch.delenv("CLITHEME", raising=False)
+        monkeypatch.setattr(l9m, "_query_terminal_background_luminance", lambda: 10000)
+        assert l9m.resolve_glow_style("auto") == "dark"
+
+    def test_auto_uses_osc11_light(self, monkeypatch):
+        monkeypatch.delenv("CLITHEME", raising=False)
+        monkeypatch.setattr(l9m, "_query_terminal_background_luminance", lambda: 50000)
+        assert l9m.resolve_glow_style("auto") == "light"
+
+    def test_auto_falls_back_to_colorfgbg(self, monkeypatch):
+        monkeypatch.delenv("CLITHEME", raising=False)
+        monkeypatch.setattr(l9m, "_query_terminal_background_luminance", lambda: None)
+        monkeypatch.setenv("COLORFGBG", "15;0")
+        assert l9m.resolve_glow_style("auto") == "dark"
+
+    def test_parse_osc11_rgb(self):
+        reply = b"\x1b]11;rgb:1e1e/1e1e/2e2e\x07"
+        assert l9m._parse_osc11_rgb(reply) == (0x1e1e, 0x1e1e, 0x2e2e)
+
+
+class TestGlowFlag:
+    @pytest.fixture(autouse=True)
+    def _isolate_context(self, tmp_path, monkeypatch):
+        ctx_dir = tmp_path / "l9m"
+        monkeypatch.setattr(l9m, "CONTEXT_DIR", ctx_dir)
+        monkeypatch.setattr(l9m, "CONTEXT_FILE", ctx_dir / "context.txt")
+        monkeypatch.setattr(l9m, "resolve_context_limit", lambda m: 10000)
+
+    def test_glow_missing_errors(self, monkeypatch, capsys):
+        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "")
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
+        monkeypatch.setattr(l9m.shutil, "which", lambda name: None if name == "glow" else "/usr/bin/false")
+        result = l9m.main(["--glow", "auto", "-p", "hi"])
+        assert result == 1
+        assert "glow not found" in capsys.readouterr().err
+
+    def test_glow_theme_from_flag(self, monkeypatch):
+        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        monkeypatch.setattr(l9m.shutil, "which", lambda name: "/opt/homebrew/bin/glow")
+        captured = {}
+
+        def mock_generate(model, prompt, stream=None):
+            captured["stream"] = stream
+            return "ok"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
+        l9m.main(["--glow", "dracula", "-p", "hi"])
+        assert isinstance(captured["stream"], l9m.GlowStream)
+        assert captured["stream"]._style == "dracula"
+
+    def test_glow_theme_from_env(self, monkeypatch):
+        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_GLOW", "tokyo-night")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        monkeypatch.setattr(l9m.shutil, "which", lambda name: "/opt/homebrew/bin/glow")
+        captured = {}
+
+        def mock_generate(model, prompt, stream=None):
+            captured["stream"] = stream
+            return "ok"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
+        l9m.main(["-p", "hi"])
+        assert isinstance(captured["stream"], l9m.GlowStream)
+        assert captured["stream"]._style == "tokyo-night"
+
+    def test_flag_overrides_env_glow_theme(self, monkeypatch):
+        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_GLOW", "dark")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        monkeypatch.setattr(l9m.shutil, "which", lambda name: "/opt/homebrew/bin/glow")
+        captured = {}
+
+        def mock_generate(model, prompt, stream=None):
+            captured["stream"] = stream
+            return "ok"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
+        l9m.main(["--glow", "light", "-p", "hi"])
+        assert captured["stream"]._style == "light"
+
+    def test_glow_uses_explicit_style(self, monkeypatch):
+        import subprocess
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["env"] = kwargs.get("env", {})
+            return subprocess.CompletedProcess(cmd, 0, stdout="\x1b[1mbold\x1b[0m\n", stderr="")
+
+        monkeypatch.setattr(l9m.subprocess, "run", fake_run)
+        gs = l9m.GlowStream(None, "/usr/bin/glow", "dracula")
+        gs.write("**bold**")
+        gs.finalize()
+        assert captured["cmd"] == ["/usr/bin/glow", "--style", "dracula", "-"]
+        assert captured["env"].get("CLICOLOR_FORCE") == "1"
+
+    def test_flush_does_not_render_partial(self, monkeypatch):
+        import subprocess
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(kwargs["input"])
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"G:{kwargs['input']}\n", stderr="")
+
+        monkeypatch.setattr(l9m.subprocess, "run", fake_run)
+        gs = l9m.GlowStream(None, "/usr/bin/glow")
+        gs.write("hello")
+        gs.write(" world")
+        assert calls == []
+        gs.flush()
+        assert calls == []
+        gs.finalize()
+        assert calls == ["hello world"]
+
+    def test_glow_skipped_for_structured_type(self, monkeypatch):
+        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        monkeypatch.setattr(l9m.shutil, "which", lambda name: "/opt/homebrew/bin/glow")
+        captured = {}
+
+        def mock_generate(model, prompt, stream=None):
+            captured["stream"] = stream
+            return "ls -la"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
+        l9m.main(["--glow", "auto", "-t", "bash", "-p", "list files"])
+        assert captured["stream"] is l9m.sys.stdout
+
+
 # ---------- _installed_qwen_models filtering ----------
 
 class TestInstalledQwenModels:

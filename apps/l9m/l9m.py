@@ -223,6 +223,240 @@ class L9mError(RuntimeError):
     pass
 
 
+def _in_fenced_code_block(text: str) -> bool:
+    return text.count("```") % 2 == 1
+
+
+def _paragraph_flush_end(text: str) -> int:
+    best = 0
+    start = 0
+    while True:
+        idx = text.find("\n\n", start)
+        if idx == -1:
+            break
+        best = idx + 2
+        start = idx + 2
+    return best
+
+
+def safe_markdown_flush_end(text: str) -> int:
+    """Bytes safe to render without waiting for more input."""
+    if not text:
+        return 0
+
+    if _in_fenced_code_block(text):
+        fence_start = text.rfind("```")
+        before = text[:fence_start]
+        if before.count("```") % 2 == 0:
+            prose_flush = _paragraph_flush_end(before)
+            if prose_flush:
+                return prose_flush
+        return 0
+
+    best = _paragraph_flush_end(text)
+    if best < len(text):
+        tail = text[best:]
+        if tail.rstrip().endswith("```") and tail.count("```") >= 2:
+            return len(text)
+    return best
+
+
+def resolve_glow_style(theme: str = "auto") -> str:
+    if theme != "auto":
+        return theme
+
+    cli_theme = os.environ.get("CLITHEME", "").strip().split(":")[0]
+    if cli_theme in ("dark", "light"):
+        return cli_theme
+
+    lum = _query_terminal_background_luminance()
+    if lum is not None:
+        return "light" if lum >= 32768 else "dark"
+
+    colorfgbg = os.environ.get("COLORFGBG", "")
+    if colorfgbg:
+        bg = colorfgbg.rsplit(";", 1)[-1]
+        if bg.isdigit():
+            n = int(bg)
+            if n in (0, 1, 2, 3, 4, 5, 6, 8):
+                return "dark"
+            if n in (7, 9, 10, 11, 12, 13, 14, 15):
+                return "light"
+
+    return "dark"
+
+
+def _parse_osc11_rgb(data: bytes) -> tuple[int, int, int] | None:
+    text = data.decode("latin-1", errors="replace")
+    match = re.search(r"11;(?:rgb:)?([^\\a\x1b]+)", text)
+    if not match:
+        return None
+    spec = match.group(1).strip()
+    if spec.startswith("#"):
+        hex_rgb = spec[1:]
+        if len(hex_rgb) < 6:
+            return None
+        parts = [hex_rgb[i:i + 2] for i in (0, 2, 4)]
+    else:
+        parts = spec.split("/")
+        if len(parts) != 3:
+            return None
+
+    try:
+        rgb = tuple(_osc_color_component(part) for part in parts)
+    except ValueError:
+        return None
+    return rgb
+
+
+def _osc_color_component(part: str) -> int:
+    part = part.strip().lower()
+    if not part:
+        return 0
+    if len(part) == 1:
+        part = part * 4
+    elif len(part) == 2:
+        part = part * 2
+    elif len(part) == 3:
+        part = f"{part[0]}{part[0]}{part[1]}{part[1]}{part[2]}{part[2]}"
+    return int(part[:4], 16)
+
+
+def _query_terminal_background_luminance() -> int | None:
+    if not sys.stdout.isatty() or not sys.stdin.isatty():
+        return None
+    try:
+        import select
+        import termios
+        import tty as tty_mod
+    except ImportError:
+        return None
+
+    fd = sys.stdin.fileno()
+    old = None
+    reply = b""
+    try:
+        old = termios.tcgetattr(fd)
+        tty_mod.setraw(fd, termios.TCSANOW)
+        os.write(sys.stdout.fileno(), b"\033]11;?\007")
+        deadline = time.monotonic() + 0.15
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.02)
+            if not ready:
+                continue
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            reply += chunk
+            if b"\a" in reply or b"\x1b\\" in reply:
+                break
+    except OSError:
+        return None
+    finally:
+        if old is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except OSError:
+                pass
+
+    rgb = _parse_osc11_rgb(reply)
+    if rgb is None:
+        return None
+    r, g, b = rgb
+    return (299 * r + 587 * g + 114 * b) // 1000
+
+
+def _glow_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("CLICOLOR_FORCE", "1")
+    env.setdefault("COLORTERM", "truecolor")
+    return env
+
+
+def _glow_width() -> int | None:
+    if not sys.stdout.isatty():
+        return None
+    try:
+        cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+    except OSError:
+        return None
+    if cols <= 0:
+        return None
+    return min(cols, 120)
+
+
+class GlowStream:
+    """Render markdown incrementally via glow at safe chunk boundaries."""
+
+    def __init__(self, stream, glow_bin: str, theme: str = "auto"):
+        self._stream = stream
+        self._glow = glow_bin
+        self._style = resolve_glow_style(theme)
+        self._width = _glow_width()
+        self._buffer = ""
+        self._rendered = 0
+        self._closed = False
+
+    def write(self, text: str) -> int:
+        if not text or self._closed:
+            return 0
+        self._buffer += text
+        self._flush_safe()
+        return len(text)
+
+    def flush(self) -> None:
+        self._flush_safe(final=False)
+
+    def finalize(self) -> None:
+        self._flush_safe(final=True)
+
+    def _flush_safe(self, final: bool = False) -> None:
+        while True:
+            pending = self._buffer[self._rendered:]
+            end = len(pending) if final else safe_markdown_flush_end(pending)
+            if not end:
+                break
+            chunk = pending[:end]
+            self._rendered += end
+            rendered = self._run_glow(chunk)
+            if rendered and self._stream:
+                try:
+                    self._stream.write(rendered)
+                    if not rendered.endswith("\n"):
+                        self._stream.write("\n")
+                    self._stream.flush()
+                except (BrokenPipeError, OSError):
+                    self._stream = None
+                    self._closed = True
+                    break
+
+    def _run_glow(self, markdown: str) -> str:
+        cmd = [self._glow, "--style", self._style]
+        if self._width:
+            cmd.extend(["-w", str(self._width)])
+        cmd.append("-")
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=markdown,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=_glow_subprocess_env(),
+            )
+        except OSError:
+            return markdown
+        if proc.returncode != 0 or not proc.stdout:
+            return markdown
+        return proc.stdout
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self.finalize()
+        self._closed = True
+
+
 _STREAM_DEFAULT = object()
 
 
@@ -273,6 +507,20 @@ def generate(model: str, prompt: str, stream: object | None = _STREAM_DEFAULT) -
         raise L9mError(str(e)) from e
 
     output = "".join(output_parts)
+    if stream:
+        finalize = getattr(stream, "finalize", None)
+        if callable(finalize):
+            try:
+                finalize()
+            except (BrokenPipeError, OSError):
+                pass
+        else:
+            flush = getattr(stream, "flush", None)
+            if callable(flush):
+                try:
+                    flush()
+                except (BrokenPipeError, OSError):
+                    pass
     if stream and output and not output.endswith("\n"):
         try:
             stream.write("\n")
@@ -308,7 +556,22 @@ def append_context(prompt: str, response: str, limit: int = 0) -> None:
 
 # ---------- chat REPL ----------
 
-def _chat_loop(model: str, response_type: str, instruction: str, context_limit: int = 0) -> int:
+def _output_stream(glow_theme: str | None):
+    if not glow_theme:
+        return sys.stdout
+    glow_bin = shutil.which("glow")
+    if not glow_bin:
+        raise L9mError("glow not found on PATH")
+    return GlowStream(sys.stdout, glow_bin, glow_theme)
+
+
+def _chat_loop(
+    model: str,
+    response_type: str,
+    instruction: str,
+    context_limit: int = 0,
+    glow_theme: str | None = None,
+) -> int:
     """Interactive REPL. Rolling context accumulates across turns."""
     try:
         import readline  # noqa: F401 — enables line editing in input()
@@ -332,14 +595,19 @@ def _chat_loop(model: str, response_type: str, instruction: str, context_limit: 
         context_wrapped = f"<Memories>\n{context}\n</Memories>" if context else ""
         full_prompt = assemble_prompt(prompt, response_type, instruction, context_wrapped)
 
+        stream = None
         try:
-            output = generate(model, full_prompt)
+            stream = _output_stream(glow_theme if not response_type else None)
+            output = generate(model, full_prompt, stream=stream)
         except KeyboardInterrupt:
             print()
             continue
         except L9mError as e:
             print(f"error: {e}", file=sys.stderr)
             continue
+        finally:
+            if isinstance(stream, GlowStream):
+                stream.close()
 
         append_context(prompt, output.strip(), context_limit)
 
@@ -365,6 +633,7 @@ options:
   -e, --echo              Echo assembled prompt before generation
   -s, --silent            Suppress stderr
   --chat                  Interactive REPL (CTRL+D or "quit" to exit)
+  --glow <theme>          Render markdown via glow (theme: auto, dark, light, dracula, …)
   --clear                 Clear rolling context and exit
   --model                 Print resolved model and exit
   --context-size          Print rolling context limit (chars) and exit
@@ -376,6 +645,7 @@ rolling context: prompt+response pairs are kept in ~/.cache/l9m/context.txt
 env vars:
   L9M_CONTEXT_DIR     Directory for context storage (default: ~/.cache/l9m)
   L9M_CONTEXT_LIMIT   Override auto-derived context size (chars)
+  L9M_GLOW=<theme>    Enable glow rendering with the given theme (auto detects light/dark)
 
 model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen3:0.6b""")
         return 0
@@ -391,6 +661,7 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
     show_context_size = False
     clear_context = False
     chat_mode = False
+    glow_theme = os.environ.get("L9M_GLOW", "").strip()
 
     i = 0
     while i < len(argv):
@@ -420,6 +691,9 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
             clear_context = True
         elif arg == "--chat":
             chat_mode = True
+        elif arg == "--glow":
+            i += 1
+            glow_theme = argv[i] if i < len(argv) else "auto"
         elif not arg.startswith("-") and not arg.startswith(".") and not arg.startswith("/"):
             if not prompt:
                 prompt = arg
@@ -448,7 +722,7 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
         return 0
 
     if chat_mode:
-        return _chat_loop(model, response_type, instruction, context_limit)
+        return _chat_loop(model, response_type, instruction, context_limit, glow_theme or None)
 
     # stdin handling
     stdin_content = ""
@@ -493,11 +767,16 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
     if not full_prompt.strip():
         return 0
 
+    stream = None
     try:
-        output = generate(model, full_prompt)
+        stream = _output_stream(glow_theme if not response_type else None)
+        output = generate(model, full_prompt, stream=stream)
     except L9mError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    finally:
+        if isinstance(stream, GlowStream):
+            stream.close()
 
     if use_rolling_context and prompt and (prompt_flag or not stdin_content):
         append_context(prompt, output.strip(), context_limit)

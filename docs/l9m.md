@@ -27,6 +27,13 @@ l9m -s -p "one word answer"
 # Show resolved model
 l9m --model
 
+# Render markdown via glow (auto-detects light/dark terminal)
+l9m --glow auto -p "explain quicksort in markdown"
+
+# Explicit glow theme
+l9m --glow dracula -p "explain quicksort in markdown"
+L9M_GLOW=light l9m --chat
+
 # Context from file
 l9m -p "summarize" -c document.md
 ```
@@ -57,7 +64,11 @@ rm ~/.cache/l9m.env
 | `-c, --context` | Read context from file |
 | `-e, --echo` | Echo assembled prompt before generation |
 | `-s, --silent` | Suppress stderr output |
+| `--glow <theme>` | Render markdown via glow (`auto`, `dark`, `light`, `dracula`, …) |
 | `--model` | Print resolved model name and exit |
+
+`--glow auto` queries the terminal background (OSC 11) and picks `dark` or
+`light`. Override with any glow theme name, or set `L9M_GLOW=<theme>`.
 
 ## Integration
 
