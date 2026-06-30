@@ -78,7 +78,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest
-      - run: python -m pytest apps/l9m/tests/ apps/q3w/tests/ -x -q
+      - run: python -m pytest apps/l9m/tests/ apps/q3w/tests/ -x -q -m "not llm"
 
   llm:
     runs-on: ubuntu-latest
@@ -127,6 +127,11 @@ jobs:
           output=$(L9M_NUM_CTX=4096 l9m -s -p "Reply with exactly: hi" </dev/null)
           echo "output: $output"
           test -n "$output"
+      - name: l9m llm tests
+        run: |
+          export PATH="$PWD:$PATH"
+          pip install pytest
+          python -m pytest apps/l9m/tests/ -x -q -m "llm"
       - name: q3w dry-run
         run: |
           export PATH="$PWD:$PATH"
@@ -146,6 +151,6 @@ jobs:
           {
             echo "### LLM integration timing"
             echo "- Model: \`qwen3:0.6b\` (via \`L9M_MODEL\`)"
-            echo "- Covers: l9m integration, q3w dry-run, k7e \`@llm\` tests"
+            echo "- Covers: l9m integration + compaction, q3w dry-run, k7e \`@llm\` tests"
             echo "- Wall time: **${elapsed}s**"
           } >> "$GITHUB_STEP_SUMMARY"
