@@ -36,7 +36,18 @@ L9M_GLOW=light l9m --chat
 
 # Context from file
 l9m -p "summarize" -c document.md
+
+# Clear rolling context
+l9m --clear
+
+# Summarize rolling context via LLM (also auto-triggers at 80% capacity)
+l9m --compact
 ```
+
+Rolling context (`~/.cache/l9m/context.txt`) stores prompt/response pairs as a
+sliding window. When the log reaches 80% of the limit, l9m summarizes it via the
+LLM and replaces the file with a compact note. Use `--compact` to force that
+summarization. If compaction fails, l9m falls back to tail truncation.
 
 ## Model Resolution
 
@@ -67,7 +78,10 @@ rolling context window size (unless `L9M_CONTEXT_LIMIT` overrides in chars).
 | `-p, --prompt` | Prompt text |
 | `-t, --type` | Response type: `bash`, `bool`, `list` |
 | `-i, --instruction` | Instruction framing for the prompt |
-| `-c, --context` | Read context from file |
+| `-c, --context` | Context from file; pass `""` to disable rolling context |
+| `--compact` | Summarize and replace rolling context, then exit |
+| `--clear` | Clear rolling context and exit |
+| `--chat` | Interactive REPL (`compact` or `/compact` to force summarization) |
 | `-e, --echo` | Echo assembled prompt before generation |
 | `-s, --silent` | Suppress stderr output |
 | `--glow <theme>` | Render markdown via glow (`auto`, `dark`, `light`, `dracula`, …) |

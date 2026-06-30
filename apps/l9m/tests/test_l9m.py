@@ -719,6 +719,23 @@ class TestRollingContext:
         assert "earlier question" in captured["prompt"]
         assert "earlier answer" in captured["prompt"]
 
+    def test_blank_context_skips_rolling(self, monkeypatch):
+        monkeypatch.setenv("L9M_MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        l9m.append_context("earlier question", "earlier answer")
+
+        captured = {}
+
+        def mock_generate(model, prompt, stream=None):
+            captured["prompt"] = prompt
+            return "response"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
+        assert l9m.main(["-c", "", "-p", "new question"]) == 0
+        assert "earlier question" not in captured["prompt"]
+        assert ">>> new question" not in self.ctx_file.read_text()
+
     def test_context_file_overrides_rolling(self, tmp_path, monkeypatch):
         monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
@@ -768,6 +785,100 @@ class TestRollingContext:
         monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
         l9m.main(["-c", str(ctx), "-p", "q"])
         assert not self.ctx_file.exists()
+
+
+# ---------- context compaction ----------
+
+class TestCompaction:
+    @pytest.fixture(autouse=True)
+    def _isolate_context(self, tmp_path, monkeypatch):
+        ctx_dir = tmp_path / "l9m"
+        ctx_dir.mkdir()
+        monkeypatch.setattr(l9m, "CONTEXT_DIR", ctx_dir)
+        monkeypatch.setattr(l9m, "CONTEXT_FILE", ctx_dir / "context.txt")
+        self.ctx_file = ctx_dir / "context.txt"
+
+    def test_trim_context(self):
+        text = "line0\nline1\nline2"
+        trimmed = l9m._trim_context(text, 8)
+        assert len(trimmed) <= 8
+        assert trimmed in text
+
+    def test_should_compact_at_threshold(self):
+        self.ctx_file.write_text("x" * 79)
+        assert not l9m.should_compact(100)
+        self.ctx_file.write_text("x" * 80)
+        assert l9m.should_compact(100)
+
+    def test_should_compact_force(self):
+        assert not l9m.should_compact(100, force=True)
+        self.ctx_file.write_text("data")
+        assert l9m.should_compact(100, force=True)
+
+    def test_compact_context_replaces_log(self, monkeypatch):
+        self.ctx_file.write_text(">>> old\nresponse\n")
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "- fact one\n- fact two")
+        assert l9m.compact_context("fake", 10000)
+        content = self.ctx_file.read_text()
+        assert content.startswith("[compacted ")
+        assert "fact one" in content
+        assert ">>> old" not in content
+
+    def test_compact_context_empty(self):
+        assert not l9m.compact_context("fake", 100)
+
+    def test_compact_context_llm_failure(self, monkeypatch):
+        self.ctx_file.write_text(">>> old\nresponse\n")
+
+        def boom(*a, **kw):
+            raise l9m.L9mError("fail")
+
+        monkeypatch.setattr(l9m, "generate", boom)
+        assert not l9m.compact_context("fake", 100)
+
+    def test_append_triggers_compact_with_model(self, monkeypatch):
+        self.ctx_file.write_text("x" * 70)
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "compressed memory")
+        l9m.append_context("q", "a" * 15, limit=100, model="fake")
+        content = self.ctx_file.read_text()
+        assert "[compacted " in content
+        assert "compressed memory" in content
+
+    def test_append_without_model_truncates_only(self):
+        l9m.append_context("first question", "first answer", limit=50)
+        l9m.append_context("second question", "second answer", limit=50)
+        content = self.ctx_file.read_text()
+        assert len(content) <= 50
+        assert "[compacted " not in content
+
+    def test_maybe_compact_force(self, monkeypatch):
+        self.ctx_file.write_text(">>> q\na\n")
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "summary")
+        assert l9m.maybe_compact("fake", 10000, force=True, silent=True)
+        assert "[compacted " in self.ctx_file.read_text()
+
+    def test_maybe_compact_failure_truncates(self, monkeypatch):
+        self.ctx_file.write_text("x" * 200)
+
+        def boom(*a, **kw):
+            raise l9m.L9mError("fail")
+
+        monkeypatch.setattr(l9m, "generate", boom)
+        assert not l9m.maybe_compact("fake", 100, force=True, silent=True)
+        assert len(self.ctx_file.read_text()) <= 100
+
+    def test_main_compact_flag(self, monkeypatch):
+        monkeypatch.setenv("L9M_MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        self.ctx_file.write_text(">>> q\na\n")
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "summary")
+        assert l9m.main(["--compact"]) == 0
+        assert "[compacted " in self.ctx_file.read_text()
+
+    def test_main_compact_empty_ok(self, monkeypatch):
+        monkeypatch.setenv("L9M_MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        assert l9m.main(["--compact"]) == 0
 
 
 # ---------- chat mode ----------
@@ -834,6 +945,20 @@ class TestChat:
         monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "x")
         result = l9m.main(["--chat"])
         assert result == 0
+
+    def test_compact_command(self, monkeypatch):
+        self.ctx_file.write_text(">>> old\nresponse\n")
+        inputs = iter(["/compact", "quit"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+
+        def mock_generate(model, prompt, stream=None):
+            if l9m.COMPACT_PROMPT in prompt:
+                return "summary"
+            return "hi"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        l9m.main(["--chat"])
+        assert "[compacted " in self.ctx_file.read_text()
 
     def test_eof_terminates_cleanly(self, monkeypatch):
         def raise_eof(prompt=""):
