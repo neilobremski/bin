@@ -36,23 +36,40 @@ L9M_GLOW=light l9m --chat
 
 # Context from file
 l9m -p "summarize" -c document.md
+
+# Clear rolling context
+l9m --clear
+
+# Summarize rolling context via LLM (also auto-triggers at 80% capacity)
+l9m --compact
 ```
+
+Rolling context (`~/.cache/l9m/context.txt`) stores prompt/response pairs as a
+sliding window. When the log reaches 80% of the limit, l9m summarizes it via the
+LLM and replaces the file with a compact note. Use `--compact` to force that
+summarization. If compaction fails, l9m falls back to tail truncation.
 
 ## Model Resolution
 
 Order of precedence:
-1. `MODEL` env var — explicit override
+1. `L9M_MODEL` env var — explicit override
 2. `~/.cache/l9m.env` — cached default from last detection
 3. Best installed qwen model from `ollama list` (version-sorted, largest wins)
 4. Fallback: pull `qwen3:0.6b` (smallest, works everywhere)
 
 ```bash
 # Override for one call
-MODEL=qwen3:0.6b l9m -p "fast answer"
+L9M_MODEL=qwen3:0.6b l9m -p "fast answer"
 
 # Clear cache to re-detect
 rm ~/.cache/l9m.env
+
+# Larger ollama context window (tokens) for this invocation
+L9M_NUM_CTX=32768 l9m -p "summarize this long doc" -c bigfile.md
 ```
+
+`L9M_NUM_CTX` is passed to ollama as `options.num_ctx` and also drives the
+rolling context window size (unless `L9M_CONTEXT_LIMIT` overrides in chars).
 
 ## Flags
 
@@ -61,7 +78,10 @@ rm ~/.cache/l9m.env
 | `-p, --prompt` | Prompt text |
 | `-t, --type` | Response type: `bash`, `bool`, `list` |
 | `-i, --instruction` | Instruction framing for the prompt |
-| `-c, --context` | Read context from file |
+| `-c, --context` | Context from file; pass `""` to disable rolling context |
+| `--compact` | Summarize and replace rolling context, then exit |
+| `--clear` | Clear rolling context and exit |
+| `--chat` | Interactive REPL (`compact` or `/compact` to force summarization) |
 | `-e, --echo` | Echo assembled prompt before generation |
 | `-s, --silent` | Suppress stderr output |
 | `--glow <theme>` | Render markdown via glow (`auto`, `dark`, `light`, `dracula`, …) |

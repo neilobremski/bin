@@ -23,7 +23,7 @@ class TestQ3w:
         monkeypatch.setattr(l9m, "CONTEXT_DIR", ctx_dir)
         monkeypatch.setattr(l9m, "CONTEXT_FILE", ctx_dir / "context.txt")
         monkeypatch.setattr(l9m, "resolve_context_limit", lambda m: 10000)
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         self.ctx_file = ctx_dir / "context.txt"
 

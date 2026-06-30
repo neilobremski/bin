@@ -6,6 +6,30 @@ on:
     branches: [main]
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      l9m: ${{ steps.filter.outputs.l9m }}
+      llm: ${{ steps.filter.outputs.llm }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            l9m:
+              - 'apps/l9m/**'
+              - 'l9m'
+              - 'docs/l9m.md'
+              - 'apps/q3w/**'
+            llm:
+              - 'apps/l9m/**'
+              - 'l9m'
+              - 'docs/l9m.md'
+              - 'apps/q3w/**'
+              - 'apps/k7e/**'
+              - '.github/workflows/test.yml'
+
   pii-check:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
@@ -44,24 +68,34 @@ jobs:
       - run: pip install pytest
       - run: python -m pytest apps/k7e/tests/ -x -q -m "not llm"
 
-  l9m-unit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install pytest
-      - run: python -m pytest apps/l9m/tests/ apps/q3w/tests/ -x -q
-
   l9m:
     runs-on: ubuntu-latest
-    needs: [l9m-unit]
+    needs: changes
+    if: needs.changes.outputs.l9m == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest apps/l9m/tests/ apps/q3w/tests/ -x -q -m "not llm"
+
+  llm:
+    runs-on: ubuntu-latest
+    needs: [changes, l9m]
+    if: |
+      always() &&
+      needs.changes.outputs.llm == 'true' &&
+      (needs.l9m.result == 'success' || needs.l9m.result == 'skipped')
+    env:
+      L9M_MODEL: qwen3:0.6b
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Start timer
+        run: echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
       - name: Install ollama
         run: curl -fsSL https://ollama.com/install.sh | sh
       - name: Start ollama and pull model
@@ -69,41 +103,54 @@ jobs:
           ollama serve &
           sleep 3
           ollama pull qwen3:0.6b
-      - name: Test l9m model resolution
+      - name: l9m model resolution
         run: |
           export PATH="$PWD:$PATH"
-          resolved=$(l9m --model)
+          resolved=$(l9m --model </dev/null)
           echo "resolved model: $resolved"
           test "$resolved" = "qwen3:0.6b"
-      - name: Test l9m generation
+      - name: l9m L9M_NUM_CTX
         run: |
           export PATH="$PWD:$PATH"
-          output=$(l9m -s -p "Reply with exactly: hello")
+          size=$(L9M_NUM_CTX=8192 l9m --context-size </dev/null)
+          echo "context-size: $size"
+          test "$size" = "6144"
+      - name: l9m generation
+        run: |
+          export PATH="$PWD:$PATH"
+          output=$(l9m -s -p "Reply with exactly: hello" </dev/null)
           echo "output: $output"
           test -n "$output"
-      - name: Test q3w dry-run
+      - name: l9m generation with L9M_NUM_CTX
         run: |
           export PATH="$PWD:$PATH"
-          cmd=$(q3w -n list files in current directory)
+          output=$(L9M_NUM_CTX=4096 l9m -s -p "Reply with exactly: hi" </dev/null)
+          echo "output: $output"
+          test -n "$output"
+      - name: l9m llm tests
+        run: |
+          export PATH="$PWD:$PATH"
+          pip install pytest
+          python -m pytest apps/l9m/tests/ -x -q -m "llm"
+      - name: q3w dry-run
+        run: |
+          export PATH="$PWD:$PATH"
+          cmd=$(q3w -n list files in current directory </dev/null)
           echo "generated: $cmd"
           test -n "$cmd"
-
-  k7e-llm:
-    runs-on: ubuntu-latest
-    needs: [l9m]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install ollama
-        run: curl -fsSL https://ollama.com/install.sh | sh
-      - name: Start ollama and pull model
+      - name: k7e llm tests
         run: |
-          ollama serve &
-          sleep 3
-          ollama pull qwen3:0.6b
-      - run: pip install pytest
-      - run: |
           export PATH="$PWD:$PATH"
+          pip install pytest
           python -m pytest apps/k7e/tests/ -x -q -m "llm"
+      - name: Report timing
+        if: always()
+        run: |
+          end=$(date +%s)
+          elapsed=$((end - JOB_START_EPOCH))
+          {
+            echo "### LLM integration timing"
+            echo "- Model: \`qwen3:0.6b\` (via \`L9M_MODEL\`)"
+            echo "- Covers: l9m integration + compaction, q3w dry-run, k7e \`@llm\` tests"
+            echo "- Wall time: **${elapsed}s**"
+          } >> "$GITHUB_STEP_SUMMARY"

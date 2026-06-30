@@ -1,7 +1,7 @@
 """l9m — Local LLM interface. Auto-detects ollama model, streams responses.
 
 Model resolution (precedence):
-  1. MODEL env var
+  1. L9M_MODEL env var
   2. Cached default (~/.cache/l9m.env)
   3. Best installed qwen model (ollama list, version-sorted)
   4. Fallback: pull qwen3:0.6b
@@ -28,6 +28,14 @@ CONTEXT_FILE = CONTEXT_DIR / "context.txt"
 CONTEXT_LIMIT_OVERRIDE = os.environ.get("L9M_CONTEXT_LIMIT", "").strip()
 CHARS_PER_TOKEN = 3
 CONTEXT_FRACTION = 0.25
+COMPACT_THRESHOLD = 0.8
+
+COMPACT_PROMPT = """Summarize this conversation log for reuse as memory in later turns.
+Preserve: decisions, facts, names, paths, commands run, errors, and open tasks.
+Omit filler and repetition. Use concise bullet notes.
+
+Conversation log:
+"""
 
 
 # ---------- model resolution ----------
@@ -122,6 +130,30 @@ def _model_num_ctx(model: str) -> int | None:
     return None
 
 
+def _l9m_num_ctx_override() -> int | None:
+    raw = os.environ.get("L9M_NUM_CTX", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def resolve_num_ctx(model: str) -> int | None:
+    num_ctx = _l9m_num_ctx_override()
+    if num_ctx:
+        return num_ctx
+
+    cache = _read_cache()
+    if cache.get("MODEL") == model and "NUM_CTX" in cache:
+        try:
+            return int(cache["NUM_CTX"])
+        except ValueError:
+            pass
+    return _model_num_ctx(model)
+
+
 def resolve_context_limit(model: str) -> int:
     """Derive rolling context char limit from model's context window."""
     if CONTEXT_LIMIT_OVERRIDE:
@@ -130,22 +162,14 @@ def resolve_context_limit(model: str) -> int:
         except ValueError:
             pass
 
-    cache = _read_cache()
-    if cache.get("MODEL") == model and "NUM_CTX" in cache:
-        try:
-            num_ctx = int(cache["NUM_CTX"])
-        except ValueError:
-            num_ctx = _model_num_ctx(model) or 0
-    else:
-        num_ctx = _model_num_ctx(model) or 0
-
+    num_ctx = resolve_num_ctx(model)
     if num_ctx:
         return int(num_ctx * CONTEXT_FRACTION * CHARS_PER_TOKEN)
     return 10000
 
 
 def resolve_model() -> str:
-    env = os.environ.get("MODEL", "").strip()
+    env = os.environ.get("L9M_MODEL", "").strip()
     if env:
         return env
 
@@ -460,6 +484,14 @@ class GlowStream:
 _STREAM_DEFAULT = object()
 
 
+def _generate_options(model: str) -> dict:
+    opts: dict = {"num_predict": -1}
+    num_ctx = _l9m_num_ctx_override()
+    if num_ctx:
+        opts["num_ctx"] = num_ctx
+    return opts
+
+
 def generate(model: str, prompt: str, stream: object | None = _STREAM_DEFAULT) -> str:
     """Generate text from ollama. Streams to `stream` if provided, returns full text.
     Raises L9mError on failure (never calls sys.exit)."""
@@ -473,7 +505,7 @@ def generate(model: str, prompt: str, stream: object | None = _STREAM_DEFAULT) -
         "model": model,
         "prompt": prompt,
         "stream": True,
-        "options": {"num_predict": -1},
+        "options": _generate_options(model),
         "think": False,
     }).encode()
 
@@ -538,20 +570,80 @@ def read_context() -> str:
         return ""
 
 
-def append_context(prompt: str, response: str, limit: int = 0) -> None:
+def _trim_context(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    trimmed = text[-limit:]
+    nl = trimmed.find("\n")
+    if nl != -1 and nl < len(trimmed) - 1:
+        trimmed = trimmed[nl + 1:]
+    return trimmed
+
+
+def _write_context(text: str) -> None:
+    CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+    CONTEXT_FILE.write_text(text, encoding="utf-8")
+
+
+def compact_context(model: str, limit: int) -> bool:
+    body = read_context().strip()
+    if not body:
+        return False
+    try:
+        summary = generate(model, COMPACT_PROMPT + body, stream=None).strip()
+    except L9mError:
+        return False
+    if not summary:
+        return False
+    stamped = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    compacted = f"[compacted {stamped}]\n{summary}\n"
+    _write_context(_trim_context(compacted, limit))
+    return True
+
+
+def should_compact(limit: int, force: bool = False) -> bool:
+    if force:
+        return bool(read_context().strip())
+    return len(read_context()) >= int(limit * COMPACT_THRESHOLD)
+
+
+def maybe_compact(
+    model: str,
+    limit: int,
+    *,
+    force: bool = False,
+    silent: bool = False,
+) -> bool:
+    if not should_compact(limit, force=force):
+        return False
+    if not silent:
+        print("compacting context...", file=sys.stderr)
+    if compact_context(model, limit):
+        return True
+    if not silent:
+        print("compaction failed, truncating", file=sys.stderr)
+    _write_context(_trim_context(read_context(), limit))
+    return False
+
+
+def append_context(
+    prompt: str,
+    response: str,
+    limit: int = 0,
+    model: str | None = None,
+) -> None:
     ctx_limit = limit or 10000
     entry = f">>> {prompt}\n{response}\n"
-    existing = read_context()
-    combined = existing + entry
+    combined = read_context() + entry
+    _write_context(combined)
+
+    threshold = int(ctx_limit * COMPACT_THRESHOLD)
+    if model and len(combined) >= threshold:
+        if compact_context(model, ctx_limit):
+            return
+
     if len(combined) > ctx_limit:
-        combined = combined[-ctx_limit:]
-        nl = combined.find("\n")
-        if nl != -1 and nl < len(combined) - 1:
-            combined = combined[nl + 1:]
-        else:
-            combined = entry[-ctx_limit:]
-    CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
-    CONTEXT_FILE.write_text(combined, encoding="utf-8")
+        _write_context(_trim_context(combined, ctx_limit))
 
 
 # ---------- chat REPL ----------
@@ -590,6 +682,9 @@ def _chat_loop(
             continue
         if prompt in ("quit", "exit"):
             return 0
+        if prompt in ("compact", "/compact"):
+            maybe_compact(model, context_limit, force=True)
+            continue
 
         context = read_context()
         context_wrapped = f"<Memories>\n{context}\n</Memories>" if context else ""
@@ -609,7 +704,7 @@ def _chat_loop(
             if isinstance(stream, GlowStream):
                 stream.close()
 
-        append_context(prompt, output.strip(), context_limit)
+        append_context(prompt, output.strip(), context_limit, model)
 
 
 # ---------- main ----------
@@ -629,37 +724,43 @@ options:
   -p, --prompt <text>     Prompt text
   -t, --type <type>       Response type: bash, bool, list
   -i, --instruction <text> Instruction framing
-  -c, --context <file>    Context from file (overrides rolling context)
+  -c, --context <file>    Context from file; blank string disables rolling context
   -e, --echo              Echo assembled prompt before generation
   -s, --silent            Suppress stderr
   --chat                  Interactive REPL (CTRL+D or "quit" to exit)
   --glow <theme>          Render markdown via glow (theme: auto, dark, light, dracula, …)
+  --compact               Summarize and replace rolling context, then exit
   --clear                 Clear rolling context and exit
   --model                 Print resolved model and exit
   --context-size          Print rolling context limit (chars) and exit
 
 rolling context: prompt+response pairs are kept in ~/.cache/l9m/context.txt
-  as a sliding window. Size is auto-derived from the model's context window
-  (25% * ~3 chars/token). Override with L9M_CONTEXT_LIMIT env var.
+  as a sliding window. At 80% capacity, l9m summarizes and replaces the log
+  via the LLM (--compact to force). Size is auto-derived from the model's
+  context window (25% * ~3 chars/token). Override with L9M_CONTEXT_LIMIT (chars)
+  or L9M_NUM_CTX (tokens, also passed to ollama).
 
 env vars:
+  L9M_MODEL           Override ollama model for this invocation
+  L9M_NUM_CTX         Ollama context window in tokens (also sizes rolling context)
   L9M_CONTEXT_DIR     Directory for context storage (default: ~/.cache/l9m)
-  L9M_CONTEXT_LIMIT   Override auto-derived context size (chars)
+  L9M_CONTEXT_LIMIT   Override rolling context size in chars
   L9M_GLOW=<theme>    Enable glow rendering with the given theme (auto detects light/dark)
 
-model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen3:0.6b""")
+model resolution: L9M_MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen3:0.6b""")
         return 0
 
     prompt = ""
     prompt_flag = False
     response_type = ""
     instruction = ""
-    context_file = ""
+    context_file: str | None = None
     echo_prompt = False
     silent = False
     show_model = False
     show_context_size = False
     clear_context = False
+    compact_context_flag = False
     chat_mode = False
     glow_theme = os.environ.get("L9M_GLOW", "").strip()
 
@@ -689,6 +790,8 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
             show_context_size = True
         elif arg == "--clear":
             clear_context = True
+        elif arg == "--compact":
+            compact_context_flag = True
         elif arg == "--chat":
             chat_mode = True
         elif arg == "--glow":
@@ -717,6 +820,13 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
 
     context_limit = resolve_context_limit(model)
 
+    if compact_context_flag:
+        if not read_context().strip():
+            return 0
+        if not maybe_compact(model, context_limit, force=True, silent=silent):
+            return 1
+        return 0
+
     if show_context_size:
         print(context_limit)
         return 0
@@ -737,7 +847,7 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
     else:
         context_payload = ""
 
-    use_rolling_context = not context_file
+    use_rolling_context = context_file is None
 
     if context_file:
         path = Path(context_file)
@@ -779,7 +889,7 @@ model resolution: MODEL env > ~/.cache/l9m.env > best installed qwen > pull qwen
             stream.close()
 
     if use_rolling_context and prompt and (prompt_flag or not stdin_content):
-        append_context(prompt, output.strip(), context_limit)
+        append_context(prompt, output.strip(), context_limit, model)
 
     return 0
 

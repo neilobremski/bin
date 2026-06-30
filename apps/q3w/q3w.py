@@ -106,7 +106,7 @@ the LLM must produce a program — it doesn't get to speak directly""")
         print(f"$ {cmd}", file=sys.stderr)
 
     if dry_run:
-        l9m.append_context(prompt, cmd, context_limit)
+        l9m.append_context(prompt, cmd, context_limit, model)
         print(cmd)
         return 0
 
@@ -168,7 +168,7 @@ the LLM must produce a program — it doesn't get to speak directly""")
         context_lines.append(f"STDERR: {line}")
 
     result_text = cmd if not context_lines else cmd + "\n" + "\n".join(context_lines)
-    l9m.append_context(prompt, result_text, context_limit)
+    l9m.append_context(prompt, result_text, context_limit, model)
 
     return proc.returncode
 

@@ -5,6 +5,7 @@ is isolated behind monkeypatches.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -79,26 +80,37 @@ class TestCache:
 
 class TestResolveModel:
     def test_env_var_takes_precedence(self, monkeypatch):
-        monkeypatch.setenv("MODEL", "custom-model")
+        monkeypatch.setenv("L9M_MODEL", "custom-model")
         assert l9m.resolve_model() == "custom-model"
 
     def test_env_var_stripped(self, monkeypatch):
-        monkeypatch.setenv("MODEL", "  spaced-model  ")
+        monkeypatch.setenv("L9M_MODEL", "  spaced-model  ")
         assert l9m.resolve_model() == "spaced-model"
 
     def test_cache_used_when_no_env(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("MODEL", raising=False)
+        monkeypatch.delenv("L9M_MODEL", raising=False)
         cache_file = tmp_path / "l9m.env"
         cache_file.write_text("MODEL=cached-model\n")
         monkeypatch.setattr(l9m, "CACHE_FILE", cache_file)
         assert l9m.resolve_model() == "cached-model"
 
     def test_empty_env_falls_through(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("MODEL", "   ")
+        monkeypatch.setenv("L9M_MODEL", "   ")
         cache_file = tmp_path / "l9m.env"
         cache_file.write_text("MODEL=cached-model\n")
         monkeypatch.setattr(l9m, "CACHE_FILE", cache_file)
         assert l9m.resolve_model() == "cached-model"
+
+    def test_legacy_model_env_ignored(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MODEL", "legacy-model")
+        monkeypatch.delenv("L9M_MODEL", raising=False)
+        cache_file = tmp_path / "l9m.env"
+        monkeypatch.setattr(l9m, "CACHE_FILE", cache_file)
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        monkeypatch.setattr(l9m, "_installed_qwen_models", lambda: ["qwen3:7b"])
+        monkeypatch.setattr(l9m, "_model_num_ctx", lambda m: 32768)
+        monkeypatch.setattr(l9m, "_write_cache", lambda *a, **k: None)
+        assert l9m.resolve_model() == "qwen3:7b"
 
 
 # ---------- _model_num_ctx ----------
@@ -189,7 +201,7 @@ class TestResolveContextLimit:
         assert l9m.resolve_context_limit("test") == 10000
 
     def test_context_size_flag(self, monkeypatch, capsys):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "resolve_context_limit", lambda m: 24576)
         assert l9m.main(["--context-size"]) == 0
         out = capsys.readouterr().out.strip()
@@ -207,6 +219,51 @@ class TestResolveContextLimit:
     def test_clear_flag_no_error_when_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(l9m, "CONTEXT_FILE", tmp_path / "nope.txt")
         assert l9m.main(["--clear"]) == 0
+
+
+class TestResolveNumCtx:
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("L9M_NUM_CTX", "8192")
+        assert l9m.resolve_num_ctx("any") == 8192
+
+    def test_invalid_env_falls_through(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("L9M_NUM_CTX", "nope")
+        cache_file = tmp_path / "l9m.env"
+        cache_file.write_text("MODEL=test\nNUM_CTX=4096\n")
+        monkeypatch.setattr(l9m, "CACHE_FILE", cache_file)
+        assert l9m.resolve_num_ctx("test") == 4096
+
+    def test_generate_options_includes_num_ctx(self, monkeypatch):
+        monkeypatch.setenv("L9M_NUM_CTX", "16384")
+        assert l9m._generate_options("m") == {"num_predict": -1, "num_ctx": 16384}
+
+    def test_generate_options_omits_num_ctx_without_env(self, monkeypatch):
+        monkeypatch.delenv("L9M_NUM_CTX", raising=False)
+        assert l9m._generate_options("m") == {"num_predict": -1}
+
+    def test_context_limit_uses_num_ctx_env(self, monkeypatch):
+        monkeypatch.setattr(l9m, "CONTEXT_LIMIT_OVERRIDE", "")
+        monkeypatch.setenv("L9M_NUM_CTX", "8192")
+        expected = int(8192 * 0.25 * 3)
+        assert l9m.resolve_context_limit("any") == expected
+
+    def test_generate_sends_num_ctx(self, monkeypatch):
+        monkeypatch.setenv("L9M_NUM_CTX", "8192")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        captured = {}
+
+        def fake_urlopen(req, timeout=300):
+            captured["body"] = json.loads(req.data)
+            class Resp:
+                def __enter__(self): return self
+                def __exit__(self, *a): pass
+                def __iter__(self):
+                    yield json.dumps({"response": "ok", "done": True}).encode() + b"\n"
+            return Resp()
+
+        monkeypatch.setattr(l9m.urllib.request, "urlopen", fake_urlopen)
+        l9m.generate("fake", "hi", stream=None)
+        assert captured["body"]["options"]["num_ctx"] == 8192
 
 
 # ---------- assemble_prompt ----------
@@ -282,13 +339,13 @@ class TestMain:
         assert "usage:" in out
 
     def test_model_flag_prints_model(self, monkeypatch, capsys):
-        monkeypatch.setenv("MODEL", "test-model-xyz")
+        monkeypatch.setenv("L9M_MODEL", "test-model-xyz")
         assert l9m.main(["--model"]) == 0
         out = capsys.readouterr().out.strip()
         assert out == "test-model-xyz"
 
     def test_context_file_not_found(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "")
         monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
@@ -296,7 +353,7 @@ class TestMain:
         assert result == 2
 
     def test_prompt_flag(self, monkeypatch):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         captured = {}
 
@@ -311,7 +368,7 @@ class TestMain:
         assert "what is 2+2" in captured["prompt"]
 
     def test_type_and_instruction_reach_prompt(self, monkeypatch):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         captured = {}
 
@@ -327,7 +384,7 @@ class TestMain:
         assert "find big files" in captured["prompt"]
 
     def test_echo_flag_prints_prompt(self, monkeypatch, capsys):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "")
         monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
@@ -336,7 +393,7 @@ class TestMain:
         assert "test prompt" in out
 
     def test_positional_prompt(self, monkeypatch):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         captured = {}
 
@@ -413,7 +470,7 @@ class TestGlowFlag:
         monkeypatch.setattr(l9m, "resolve_context_limit", lambda m: 10000)
 
     def test_glow_missing_errors(self, monkeypatch, capsys):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "")
         monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
@@ -423,7 +480,7 @@ class TestGlowFlag:
         assert "glow not found" in capsys.readouterr().err
 
     def test_glow_theme_from_flag(self, monkeypatch):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         monkeypatch.setattr(l9m.shutil, "which", lambda name: "/opt/homebrew/bin/glow")
         captured = {}
@@ -439,7 +496,7 @@ class TestGlowFlag:
         assert captured["stream"]._style == "dracula"
 
     def test_glow_theme_from_env(self, monkeypatch):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setenv("L9M_GLOW", "tokyo-night")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         monkeypatch.setattr(l9m.shutil, "which", lambda name: "/opt/homebrew/bin/glow")
@@ -456,7 +513,7 @@ class TestGlowFlag:
         assert captured["stream"]._style == "tokyo-night"
 
     def test_flag_overrides_env_glow_theme(self, monkeypatch):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setenv("L9M_GLOW", "dark")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         monkeypatch.setattr(l9m.shutil, "which", lambda name: "/opt/homebrew/bin/glow")
@@ -506,7 +563,7 @@ class TestGlowFlag:
         assert calls == ["hello world"]
 
     def test_glow_skipped_for_structured_type(self, monkeypatch):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         monkeypatch.setattr(l9m.shutil, "which", lambda name: "/opt/homebrew/bin/glow")
         captured = {}
@@ -634,7 +691,7 @@ class TestRollingContext:
         assert l9m.read_context() == ""
 
     def test_stdin_not_stored_in_context(self, monkeypatch):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "resp")
         monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {
@@ -645,7 +702,7 @@ class TestRollingContext:
         assert not self.ctx_file.exists()
 
     def test_context_injected_into_prompt(self, monkeypatch):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         # Pre-populate context
         l9m.append_context("earlier question", "earlier answer")
@@ -662,8 +719,25 @@ class TestRollingContext:
         assert "earlier question" in captured["prompt"]
         assert "earlier answer" in captured["prompt"]
 
+    def test_blank_context_skips_rolling(self, monkeypatch):
+        monkeypatch.setenv("L9M_MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        l9m.append_context("earlier question", "earlier answer")
+
+        captured = {}
+
+        def mock_generate(model, prompt, stream=None):
+            captured["prompt"] = prompt
+            return "response"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
+        assert l9m.main(["-c", "", "-p", "new question"]) == 0
+        assert "earlier question" not in captured["prompt"]
+        assert ">>> new question" not in self.ctx_file.read_text()
+
     def test_context_file_overrides_rolling(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         # Pre-populate rolling context
         l9m.append_context("rolling stuff", "rolling response")
@@ -684,7 +758,7 @@ class TestRollingContext:
         assert "rolling stuff" not in captured["prompt"]
 
     def test_response_appended_after_generation(self, monkeypatch):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
 
         def mock_generate(model, prompt, stream=None):
@@ -698,7 +772,7 @@ class TestRollingContext:
         assert "generated response" in content
 
     def test_no_append_when_context_file_used(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
 
         ctx = tmp_path / "explicit.txt"
@@ -711,6 +785,100 @@ class TestRollingContext:
         monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
         l9m.main(["-c", str(ctx), "-p", "q"])
         assert not self.ctx_file.exists()
+
+
+# ---------- context compaction ----------
+
+class TestCompaction:
+    @pytest.fixture(autouse=True)
+    def _isolate_context(self, tmp_path, monkeypatch):
+        ctx_dir = tmp_path / "l9m"
+        ctx_dir.mkdir()
+        monkeypatch.setattr(l9m, "CONTEXT_DIR", ctx_dir)
+        monkeypatch.setattr(l9m, "CONTEXT_FILE", ctx_dir / "context.txt")
+        self.ctx_file = ctx_dir / "context.txt"
+
+    def test_trim_context(self):
+        text = "line0\nline1\nline2"
+        trimmed = l9m._trim_context(text, 8)
+        assert len(trimmed) <= 8
+        assert trimmed in text
+
+    def test_should_compact_at_threshold(self):
+        self.ctx_file.write_text("x" * 79)
+        assert not l9m.should_compact(100)
+        self.ctx_file.write_text("x" * 80)
+        assert l9m.should_compact(100)
+
+    def test_should_compact_force(self):
+        assert not l9m.should_compact(100, force=True)
+        self.ctx_file.write_text("data")
+        assert l9m.should_compact(100, force=True)
+
+    def test_compact_context_replaces_log(self, monkeypatch):
+        self.ctx_file.write_text(">>> old\nresponse\n")
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "- fact one\n- fact two")
+        assert l9m.compact_context("fake", 10000)
+        content = self.ctx_file.read_text()
+        assert content.startswith("[compacted ")
+        assert "fact one" in content
+        assert ">>> old" not in content
+
+    def test_compact_context_empty(self):
+        assert not l9m.compact_context("fake", 100)
+
+    def test_compact_context_llm_failure(self, monkeypatch):
+        self.ctx_file.write_text(">>> old\nresponse\n")
+
+        def boom(*a, **kw):
+            raise l9m.L9mError("fail")
+
+        monkeypatch.setattr(l9m, "generate", boom)
+        assert not l9m.compact_context("fake", 100)
+
+    def test_append_triggers_compact_with_model(self, monkeypatch):
+        self.ctx_file.write_text("x" * 70)
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "compressed memory")
+        l9m.append_context("q", "a" * 15, limit=100, model="fake")
+        content = self.ctx_file.read_text()
+        assert "[compacted " in content
+        assert "compressed memory" in content
+
+    def test_append_without_model_truncates_only(self):
+        l9m.append_context("first question", "first answer", limit=50)
+        l9m.append_context("second question", "second answer", limit=50)
+        content = self.ctx_file.read_text()
+        assert len(content) <= 50
+        assert "[compacted " not in content
+
+    def test_maybe_compact_force(self, monkeypatch):
+        self.ctx_file.write_text(">>> q\na\n")
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "summary")
+        assert l9m.maybe_compact("fake", 10000, force=True, silent=True)
+        assert "[compacted " in self.ctx_file.read_text()
+
+    def test_maybe_compact_failure_truncates(self, monkeypatch):
+        self.ctx_file.write_text("x" * 200)
+
+        def boom(*a, **kw):
+            raise l9m.L9mError("fail")
+
+        monkeypatch.setattr(l9m, "generate", boom)
+        assert not l9m.maybe_compact("fake", 100, force=True, silent=True)
+        assert len(self.ctx_file.read_text()) <= 100
+
+    def test_main_compact_flag(self, monkeypatch):
+        monkeypatch.setenv("L9M_MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        self.ctx_file.write_text(">>> q\na\n")
+        monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "summary")
+        assert l9m.main(["--compact"]) == 0
+        assert "[compacted " in self.ctx_file.read_text()
+
+    def test_main_compact_empty_ok(self, monkeypatch):
+        monkeypatch.setenv("L9M_MODEL", "fake")
+        monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
+        assert l9m.main(["--compact"]) == 0
 
 
 # ---------- chat mode ----------
@@ -728,7 +896,7 @@ class TestChat:
 
     @pytest.fixture(autouse=True)
     def _isolate_model(self, monkeypatch):
-        monkeypatch.setenv("MODEL", "fake")
+        monkeypatch.setenv("L9M_MODEL", "fake")
         monkeypatch.setattr(l9m, "_ollama_running", lambda: True)
         monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True, "read": lambda self: ""})())
 
@@ -777,6 +945,20 @@ class TestChat:
         monkeypatch.setattr(l9m, "generate", lambda m, p, stream=None: "x")
         result = l9m.main(["--chat"])
         assert result == 0
+
+    def test_compact_command(self, monkeypatch):
+        self.ctx_file.write_text(">>> old\nresponse\n")
+        inputs = iter(["/compact", "quit"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+
+        def mock_generate(model, prompt, stream=None):
+            if l9m.COMPACT_PROMPT in prompt:
+                return "summary"
+            return "hi"
+
+        monkeypatch.setattr(l9m, "generate", mock_generate)
+        l9m.main(["--chat"])
+        assert "[compacted " in self.ctx_file.read_text()
 
     def test_eof_terminates_cleanly(self, monkeypatch):
         def raise_eof(prompt=""):
