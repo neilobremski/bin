@@ -63,8 +63,9 @@ rm -rf /tmp/k7e-demo /tmp/notes.md
 
 ```bash
 k7e store "title" --tags x,y [--content "..." | stdin]
-k7e search "query" [--limit N] [--json] [--ids]
+k7e search "query" [--limit N] [--json] [--ids] [--rerank] [--include-superseded]
 k7e get K7E-000-00001
+k7e supersede K7E-000-00001 K7E-000-00002
 k7e append K7E-000-00001 --section "name" [--content "..." | stdin]
 k7e asset screenshot.png
 k7e recall "topic or conversation" [--limit N]
@@ -120,13 +121,41 @@ ssh -L 8080:target:80 bastion — forwards local:8080 to target:80 via bastion
 ## Configuration
 
 ```bash
-k7e status                  # show what's available + recommendations
-k7e config llm gemini       # set distillation LLM (gemini|claude|codex|ollama|auto)
+k7e status                  # show what's active, incl. the resolved LLM model
+k7e config llm_model qwen3:8b   # pin the ollama model (unset = auto-detect)
+k7e config llm none         # disable the LLM entirely (pattern-only distill)
 k7e config embed_model nomic-embed-text
 k7e config ollama_url http://localhost:11434
+k7e config rerank true      # LLM rerank search results (off by default)
+k7e config decay_scale_days 365   # recency half-life past the flat zone
 ```
 
-Config stored in `$K7E_HOME/config.json`. Env vars override: `K7E_LLM`, `EMBED_MODEL`, `OLLAMA_URL`.
+Config stored in `$K7E_HOME/config.json`. Env vars override: `K7E_LLM`,
+`K7E_LLM_MODEL`, `EMBED_MODEL`, `OLLAMA_URL`, `K7E_RERANK`, `K7E_DECAY_OFFSET`,
+`K7E_DECAY_SCALE`, `K7E_USE_WEIGHT`.
+
+### LLM backend
+
+k7e calls **ollama's HTTP API directly** for generation (distill, recall,
+rerank, compile) — never a CLI like `l9m`/`claude`/`codex`. Those carry their
+own rolling context or agent preamble, which would leak into k7e's prompts;
+talking to ollama keeps every call stateless. When `llm_model` is unset, k7e
+auto-detects the best installed model (qwen family preferred, largest wins) and
+falls back to `qwen3:0.6b`. To see exactly which model is in use:
+
+```bash
+k7e status          # → "LLM: ollama (qwen3:8b, auto-detected) ✓"
+k7e config llm_model  # → resolved model name when unset
+```
+
+### Ranking
+
+Search fuses BM25, metadata, and embeddings via RRF, then multiplies each
+score by confidence, a recency decay (gauss; flat for `decay_offset_days`,
+half at `decay_scale_days` past that), and a use-count boost. Entries earn
+freshness when returned by `recall` or read by `get` (index-only signal, reset
+on `reindex`). `--rerank` adds an LLM cross-encoder pass over the candidate
+pool; it is on by default inside `recall`.
 
 ## Capabilities
 
@@ -134,8 +163,8 @@ Config stored in `$K7E_HOME/config.json`. Env vars override: `K7E_LLM`, `EMBED_M
 |---------|---------|-----------|
 | Keyword search (BM25) | SQLite FTS5 | Always available |
 | Semantic search | ollama embeddings | Optional — `ollama pull nomic-embed-text` |
-| Distillation (LLM) | gemini/claude/codex/ollama | Optional — pattern extraction without |
-| Recall (RAG synthesis) | any LLM | Optional — falls back to raw search results |
+| Distillation (LLM) | ollama | Optional — pattern extraction without |
+| Recall (RAG synthesis) | ollama | Optional — falls back to raw search results |
 | Consolidation (dedup) | title similarity | Always available |
 
 `k7e status` tells you exactly what's active and what to install for full capability.
@@ -155,10 +184,9 @@ tests/run -m "not slow"  # skip slow tests
 Required: Python 3.10+, sqlite3 (bundled).
 
 Optional:
-- **ollama** — local embeddings + fallback LLM (`curl -fsSL https://ollama.com/install.sh | sh`)
-- **LLM CLI** — one of: gemini, claude, codex (for distillation + compilation)
+- **ollama** — local embeddings + LLM for distill/recall/rerank/compile (`curl -fsSL https://ollama.com/install.sh | sh`)
 
-On slim machines without GPU: use a cloud LLM CLI for distillation and skip local embeddings (FTS5-only mode is still effective).
+Without ollama, k7e runs FTS5-only with pattern-based distillation — still effective for keyword recall.
 
 ## Integration
 

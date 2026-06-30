@@ -21,6 +21,7 @@ from engine import (
     append_entry,
     compile_tag,
     process_pending_embeddings,
+    supersede,
 )
 from distill import distill, consolidate
 from hygiene import run_audit
@@ -29,6 +30,7 @@ from hygiene import run_audit
 COMMANDS: list[tuple[str, str, str]] = [
     ("search",      "<query> [--limit N] [--json] [--ids]", "Hybrid search (BM25 + semantic + metadata)."),
     ("get",         "<id>",                            "Read a full knowledge entry."),
+    ("supersede",   "<old_id> <new_id>",               "Mark an entry as superseded by a newer one."),
     ("store",       "<title> [--tags] [--aliases]",    "Create a new entry (content from stdin or --content)."),
     ("append",        "<id> --section <name>",           "Append to an existing entry's section."),
     ("asset",       "<file>",                          "Store binary (content-addressed, deduped). Prints path."),
@@ -62,10 +64,17 @@ def main(argv=None):
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--json", action="store_true")
     p.add_argument("--ids", action="store_true", help="Output IDs only, one per line")
+    p.add_argument("--rerank", action="store_true", help="Rerank results with the LLM")
+    p.add_argument("--include-superseded", action="store_true", help="Include superseded entries")
 
     # get
     p = sub.add_parser("get", help="Read entry")
     p.add_argument("id", help="Entry ID (e.g., KG-00001)")
+
+    # supersede
+    p = sub.add_parser("supersede", help="Mark an entry as superseded by a newer one")
+    p.add_argument("old_id", help="Entry being retired")
+    p.add_argument("new_id", help="Entry that replaces it")
 
     # store
     p = sub.add_parser("store", help="Create new entry")
@@ -145,7 +154,12 @@ def main(argv=None):
     init()
 
     if args.command == "search":
-        results = search(args.query, limit=args.limit)
+        results = search(
+            args.query,
+            limit=args.limit,
+            include_superseded=args.include_superseded,
+            rerank=True if args.rerank else None,
+        )
         if args.ids:
             for r in results:
                 print(r['id'])
@@ -159,9 +173,21 @@ def main(argv=None):
 
     elif args.command == "get":
         try:
-            print(get(args.id))
+            print(get(args.id, track_usage=True))
         except FileNotFoundError as e:
             print(str(e), file=sys.stderr)
+            return 1
+
+    elif args.command == "supersede":
+        try:
+            get(args.new_id)
+        except FileNotFoundError:
+            print(f"Node {args.new_id} not found", file=sys.stderr)
+            return 1
+        if supersede(args.old_id, args.new_id):
+            print(f"{args.old_id} superseded by {args.new_id}")
+        else:
+            print(f"Node {args.old_id} not found", file=sys.stderr)
             return 1
 
     elif args.command == "store":
@@ -283,6 +309,10 @@ def main(argv=None):
             val = config.get(args.key)
             if val is not None:
                 print(val)
+            elif args.key == "llm_model":
+                print(f"{config.resolve_llm_model()} (auto-detected)")
+            elif args.key == "llm":
+                print("ollama (default)")
             else:
                 print(f"{args.key}: not set")
         else:

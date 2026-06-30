@@ -4,17 +4,15 @@ Scans raw files (journals, transcripts, command output, images, audio, video).
 Extracts knowledge candidates. Diffs against existing store. Stores genuine deltas.
 
 Text files: pattern extraction + LLM extraction.
-Media files: multimodal LLM (describe/transcribe) + asset storage.
+Media files: ollama vision (image description) + asset storage.
 
-Uses agy/claude/codex CLI or ollama for LLM extraction. Falls back to
-pattern-based extraction if neither is available.
+Uses ollama directly for LLM extraction. Falls back to pattern-based
+extraction when ollama is unavailable.
 """
 
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
 import urllib.request
 from pathlib import Path
@@ -148,57 +146,47 @@ def extract_from_file(path):
 
 
 def _multimodal_extract(path):
-    """Extract knowledge from media files via multimodal LLM."""
+    """Extract knowledge from media via ollama's multimodal API.
+
+    Images are sent to a vision-capable ollama model as base64. ollama can't
+    transcribe audio/video, so those are skipped — transcribe them with a
+    dedicated tool first, then distill the resulting text."""
+    import base64
     import config
 
-    cmd = config.resolve_llm_command("test")
-    if not cmd:
-        print(f"  [distill] no LLM available — cannot process media file {path}", file=sys.stderr)
+    if config.get("llm", "ollama") == "none":
         return []
 
     kind = _media_type(path)
     abs_path = str(Path(path).resolve())
 
-    if kind == "image":
-        instruction = "Describe this image in detail."
-    elif kind == "audio":
-        instruction = "Transcribe this audio file completely. Include speaker identification if multiple speakers."
-    elif kind == "video":
-        instruction = "Transcribe the audio and describe key visual content of this video."
-    else:
+    if kind != "image":
+        print(f"  [distill] ollama can't transcribe {kind} — skipping {path}", file=sys.stderr)
         return []
 
     prompt = (
-        f"{instruction} File: {abs_path}\n\n"
+        "Describe this image in detail.\n\n"
         "Return a JSON object with:\n"
         '- "title": short descriptive title for this content\n'
-        '- "content": the full transcription or description\n'
+        '- "content": the full description\n'
         '- "tags": list of topic keywords\n'
         "Return ONLY the JSON object, no markdown fencing."
     )
 
-    real_cmd = config.resolve_llm_command(prompt)
-    if not real_cmd:
+    try:
+        b64 = base64.b64encode(Path(path).read_bytes()).decode()
+    except OSError as e:
+        print(f"  [distill] could not read {path}: {e}", file=sys.stderr)
         return []
 
-    try:
-        result = subprocess.run(
-            real_cmd, capture_output=True, text=True, timeout=180,
-            cwd=str(config._k7e_home()),
-        )
-        if result.returncode != 0:
-            print(f"  [llm] non-zero exit ({result.returncode}) for {path}", file=sys.stderr)
-            return []
-        parsed = _parse_multimodal_response(result.stdout, path)
-        if parsed:
-            parsed["_asset_path"] = abs_path
-            parsed["_media_type"] = kind
-            return [parsed]
-    except subprocess.TimeoutExpired:
-        print(f"  [llm] timed out (180s) for {path}", file=sys.stderr)
-    except OSError as e:
-        print(f"  [llm] launch failed: {e}", file=sys.stderr)
-
+    response = engine._call_llm(prompt, timeout=180, images=[b64])
+    if not response:
+        return []
+    parsed = _parse_multimodal_response(response, path)
+    if parsed:
+        parsed["_asset_path"] = abs_path
+        parsed["_media_type"] = kind
+        return [parsed]
     return []
 
 
@@ -471,13 +459,14 @@ def _llm_extract(text):
 
     import config
 
-    if not config.resolve_llm_command("test"):
-        ollama_url = config.get("ollama_url", "http://localhost:11434")
-        try:
-            urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=2)
-        except Exception:
-            print("  [distill] no LLM available — pattern extraction only", file=sys.stderr)
-            return []
+    if config.get("llm", "ollama") == "none":
+        return []
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+    try:
+        urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=2)
+    except Exception:
+        print("  [distill] ollama not available — pattern extraction only", file=sys.stderr)
+        return []
 
     # Chunk the input and extract from each chunk independently
     chunks = _chunk_text(text, size=3000, overlap=200)
