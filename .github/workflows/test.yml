@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       l9m: ${{ steps.filter.outputs.l9m }}
+      llm: ${{ steps.filter.outputs.llm }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -21,6 +22,12 @@ jobs:
               - 'l9m'
               - 'docs/l9m.md'
               - 'apps/q3w/**'
+            llm:
+              - 'apps/l9m/**'
+              - 'l9m'
+              - 'docs/l9m.md'
+              - 'apps/q3w/**'
+              - 'apps/k7e/**'
               - '.github/workflows/test.yml'
 
   pii-check:
@@ -61,7 +68,7 @@ jobs:
       - run: pip install pytest
       - run: python -m pytest apps/k7e/tests/ -x -q -m "not llm"
 
-  l9m-unit:
+  l9m:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.l9m == 'true'
@@ -73,10 +80,13 @@ jobs:
       - run: pip install pytest
       - run: python -m pytest apps/l9m/tests/ apps/q3w/tests/ -x -q
 
-  l9m:
+  llm:
     runs-on: ubuntu-latest
-    needs: [changes, l9m-unit]
-    if: needs.changes.outputs.l9m == 'true'
+    needs: [changes, l9m]
+    if: |
+      always() &&
+      needs.changes.outputs.llm == 'true' &&
+      (needs.l9m.result == 'success' || needs.l9m.result == 'skipped')
     env:
       L9M_MODEL: qwen3:0.6b
     steps:
@@ -93,70 +103,40 @@ jobs:
           ollama serve &
           sleep 3
           ollama pull qwen3:0.6b
-      - name: Test l9m model resolution
+      - name: l9m model resolution
         run: |
           export PATH="$PWD:$PATH"
           resolved=$(l9m --model </dev/null)
           echo "resolved model: $resolved"
           test "$resolved" = "qwen3:0.6b"
-      - name: Test L9M_NUM_CTX
+      - name: l9m L9M_NUM_CTX
         run: |
           export PATH="$PWD:$PATH"
           size=$(L9M_NUM_CTX=8192 l9m --context-size </dev/null)
           echo "context-size: $size"
           test "$size" = "6144"
-      - name: Test l9m generation
+      - name: l9m generation
         run: |
           export PATH="$PWD:$PATH"
           output=$(l9m -s -p "Reply with exactly: hello" </dev/null)
           echo "output: $output"
           test -n "$output"
-      - name: Test l9m generation with L9M_NUM_CTX
+      - name: l9m generation with L9M_NUM_CTX
         run: |
           export PATH="$PWD:$PATH"
           output=$(L9M_NUM_CTX=4096 l9m -s -p "Reply with exactly: hi" </dev/null)
           echo "output: $output"
           test -n "$output"
-      - name: Test q3w dry-run
+      - name: q3w dry-run
         run: |
           export PATH="$PWD:$PATH"
           cmd=$(q3w -n list files in current directory </dev/null)
           echo "generated: $cmd"
           test -n "$cmd"
-      - name: Report timing
-        if: always()
+      - name: k7e llm tests
         run: |
-          end=$(date +%s)
-          elapsed=$((end - JOB_START_EPOCH))
-          {
-            echo "### l9m LLM integration timing"
-            echo "- Model: \`qwen3:0.6b\` (via \`L9M_MODEL\`)"
-            echo "- Wall time: **${elapsed}s**"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  k7e-llm:
-    runs-on: ubuntu-latest
-    needs: [changes, l9m]
-    if: needs.changes.outputs.l9m == 'true'
-    env:
-      L9M_MODEL: qwen3:0.6b
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Start timer
-        run: echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-      - name: Install ollama
-        run: curl -fsSL https://ollama.com/install.sh | sh
-      - name: Start ollama and pull model
-        run: |
-          ollama serve &
-          sleep 3
-          ollama pull qwen3:0.6b
-      - run: pip install pytest
-      - run: |
           export PATH="$PWD:$PATH"
+          pip install pytest
           python -m pytest apps/k7e/tests/ -x -q -m "llm"
       - name: Report timing
         if: always()
@@ -164,7 +144,8 @@ jobs:
           end=$(date +%s)
           elapsed=$((end - JOB_START_EPOCH))
           {
-            echo "### k7e LLM integration timing"
+            echo "### LLM integration timing"
             echo "- Model: \`qwen3:0.6b\` (via \`L9M_MODEL\`)"
+            echo "- Covers: l9m integration, q3w dry-run, k7e \`@llm\` tests"
             echo "- Wall time: **${elapsed}s**"
           } >> "$GITHUB_STEP_SUMMARY"
