@@ -48,6 +48,11 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("config",      "<key> [value]",                   "Get or set configuration (llm, embeddings, etc)."),
 ]
 
+_LLM_REQUIRED = (
+    "k7e {cmd} requires an LLM. Start ollama and pull a chat model, then retry "
+    "(see `k7e status`). To run offline without it, that command is unavailable."
+)
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
@@ -217,20 +222,24 @@ def main(argv=None):
                 print("Usage: k7e recall <text>  or  echo '...' | k7e recall", file=sys.stderr)
                 return 1
             text = sys.stdin.read()
+        if not config.llm_available():
+            print(_LLM_REQUIRED.format(cmd="recall"), file=sys.stderr)
+            return 1
         answer, sources = recall(text, limit=args.limit)
-        if answer:
-            print(answer)
-            if sources:
-                ids = ", ".join(e["id"] for e in sources)
-                print(f"\n---\nSources: {ids}")
-        elif sources:
-            print("No LLM available — raw search results:", file=sys.stderr)
-            for e in sources:
-                print(f"  {e['id']}  {e['title']}")
-        else:
+        if not sources:
             print("No relevant knowledge found.")
+        elif answer:
+            print(answer)
+            ids = ", ".join(e["id"] for e in sources)
+            print(f"\n---\nSources: {ids}")
+        else:
+            print("LLM synthesis failed.", file=sys.stderr)
+            return 1
 
     elif args.command == "distill":
+        if not config.llm_available():
+            print(_LLM_REQUIRED.format(cmd="distill"), file=sys.stderr)
+            return 1
         results = distill(args.paths, dry_run=args.dry_run)
         for r in results:
             action = r["action"]
@@ -255,6 +264,9 @@ def main(argv=None):
             print(f"\nConsolidated: {total_superseded} nodes superseded across {len(results)} groups.")
 
     elif args.command == "compile":
+        if not config.llm_available():
+            print(_LLM_REQUIRED.format(cmd="compile"), file=sys.stderr)
+            return 1
         node_id = compile_tag(args.tag, dry_run=args.dry_run)
         if node_id:
             print(f"Compiled {node_id}: {args.tag} — Compiled Reference")

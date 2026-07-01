@@ -9,13 +9,16 @@ k7e distill ./transcripts/      # a whole directory
 k7e distill notes.md --dry-run  # show candidates, store nothing
 ```
 
+**Distillation requires an LLM (ollama).** The CLI fails fast with an
+actionable message when ollama is unavailable — there is no offline
+pattern-matching fallback. Set `llm=none` to explicitly opt out (extraction
+returns nothing).
+
 ## Pipeline
 
 ```
-raw file ─┬─ text  ─┬─ pattern extraction (regex, always on)
-          │         └─ LLM extraction  (ollama, optional)
+raw file ─┬─ text  ─ LLM extraction (ollama, chunked)
           │              │
-          │              ▼
           │         dedup across chunks
           │              │
           └─ media ─ ollama vision (images only)
@@ -26,15 +29,11 @@ raw file ─┬─ text  ─┬─ pattern extraction (regex, always on)
 
 ### Text extraction
 
-1. **Pattern extraction** — regex heuristics pull obvious knowledge: fixes,
-   commands, "use X to Y" instructions. Zero dependencies, always runs.
-2. **LLM extraction** — if ollama is reachable, the text is chunked
-   (~3000 chars, 200 overlap) and each chunk is sent to the model with a strict
-   "extract only genuinely novel knowledge" prompt (max 3 items/chunk). Output
-   is parsed as a JSON array of `{title, content, tags}`.
-3. **Dedup** — candidates are deduplicated across chunks before storage.
-
-Without ollama, distillation runs pattern-only and prints a notice.
+1. **LLM extraction** — the text is chunked (~3000 chars, 200 overlap) and each
+   chunk is sent to the model with a strict "extract only genuinely novel
+   knowledge" prompt (max 3 items/chunk). Output is parsed as a JSON array of
+   `{title, content, tags}`.
+2. **Dedup** — candidates are deduplicated across chunks before storage.
 
 ### Media extraction
 

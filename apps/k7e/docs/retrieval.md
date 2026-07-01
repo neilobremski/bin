@@ -69,7 +69,7 @@ or the response can't be parsed.
 |---|---|---|
 | Returns | ranked entries | LLM-synthesized answer over retrieved entries (RAG) |
 | Reranker | opt-in (`--rerank`) | on by default |
-| Needs LLM | no | yes (falls back to raw results) |
+| Needs LLM | no | yes (fails fast without it) |
 | Use when | you want the source entries | you want a synthesized answer for a topic/conversation |
 
 ## Tuning

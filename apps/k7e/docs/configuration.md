@@ -61,7 +61,7 @@ k7e config llm
 ### Disabling the LLM
 
 ```bash
-k7e config llm none      # distill falls back to pattern-only; recall to raw search
+k7e config llm none      # explicit opt-out: distill/recall/compile become unavailable
 ```
 
 ## Embeddings
@@ -76,12 +76,16 @@ Without it (or with `embeddings none`), k7e runs FTS5-only — still effective f
 keyword recall. Embeddings are computed via ollama's `/api/embed`, separate from
 the generation model above.
 
-## Graceful degradation
+## What needs what
 
-| Missing | k7e still does | Loses |
-|---------|----------------|-------|
-| ollama entirely | store, FTS5 search, pattern distill | semantic search, LLM distill/recall/rerank |
+k7e's store and keyword search (FTS5) are always available offline. The
+LLM-powered commands **fail fast** with an actionable message rather than
+degrading silently:
+
+| Missing | Still works | Unavailable (fails fast) |
+|---------|-------------|--------------------------|
+| ollama entirely | store, FTS5 search, get, list, stats | semantic search; `distill`, `recall`, `compile` |
 | embed model only | everything except semantic search | vector recall |
-| `llm=none` | store, search, pattern distill | LLM distill/recall/rerank/compile |
+| `llm=none` | store, FTS5 search, get, list, stats | `distill`, `recall`, `compile` |
 
 `k7e status` always reports exactly what's active and what to install.

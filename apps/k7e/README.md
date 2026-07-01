@@ -15,9 +15,10 @@ Three commitments shape every design decision:
 - **Files are truth.** Knowledge lives as flat markdown on your disk. The search
   index (SQLite FTS5 + optional embeddings) is a cache you can delete and
   rebuild anytime. No database lock-in, no opaque blobs, no cloud.
-- **The core is dependency-free.** Storage and keyword retrieval need nothing
-  but Python's standard library. ollama (embeddings + LLM) is *optional*
-  enhancement — k7e degrades gracefully to FTS5 + pattern extraction.
+- **The core is dependency-free.** Storage and keyword search (FTS5) need
+  nothing but Python's standard library and work fully offline. ollama powers
+  the *enhancements*: semantic search, and knowledge *capture*
+  (distill/recall/compile), which require an LLM and fail fast without one.
 - **Relevance is earned, not assumed.** Knowledge you keep using stays fresh;
   knowledge you never touch fades in *ranking* — never in storage. The store
   accumulates; retrieval forgets.
@@ -75,8 +76,8 @@ search + LLM features (`curl -fsSL https://ollama.com/install.sh | sh`, then
 - **Search** fuses BM25 + metadata + embeddings (RRF), then weights by
   confidence, recency decay, and use-count, with an optional LLM reranker.
 - **Recall** is RAG: retrieve + synthesize an answer (reranker on by default).
-- **Distill** extracts knowledge from raw files (pattern + LLM), dedupes, and
-  stores only genuine deltas.
+- **Distill** extracts knowledge from raw files (LLM), dedupes, and stores only
+  genuine deltas. Requires ollama (fails fast without it).
 - The LLM backend is **ollama, called directly** — never a stateful CLI.
 
 ## Documentation

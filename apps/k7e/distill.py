@@ -3,18 +3,17 @@
 Scans raw files (journals, transcripts, command output, images, audio, video).
 Extracts knowledge candidates. Diffs against existing store. Stores genuine deltas.
 
-Text files: pattern extraction + LLM extraction.
+Text files: LLM extraction (ollama).
 Media files: ollama vision (image description) + asset storage.
 
-Uses ollama directly for LLM extraction. Falls back to pattern-based
-extraction when ollama is unavailable.
+Distillation requires an LLM. The CLI fails fast when ollama is unavailable;
+set llm=none to explicitly opt out (extraction returns nothing).
 """
 
 import json
 import os
 import re
 import sys
-import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -138,11 +137,7 @@ def extract_from_file(path):
     if _media_type(path):
         return _multimodal_extract(path)
     text = Path(path).read_text(encoding="utf-8")
-    candidates = _pattern_extract(text)
-    llm_candidates = _llm_extract(text)
-    if llm_candidates:
-        candidates.extend(llm_candidates)
-    return candidates
+    return _llm_extract(text)
 
 
 def _multimodal_extract(path):
@@ -426,46 +421,15 @@ def _dedup_candidates(candidates):
     return deduped
 
 
-def _pattern_extract(text):
-    candidates = []
-
-    # Pattern: "TIL:" or "Today I learned:" lines
-    for match in re.finditer(r"(?:TIL|Today I learned)[:\s]+(.+?)(?:\n\n|\n###|\Z)", text, re.DOTALL):
-        content = match.group(1).strip()
-        if len(content) > 20:
-            title = content[:60].split("\n")[0].rstrip(".")
-            candidates.append({"title": title, "content": content, "tags": ["learned"]})
-
-    # Pattern: "The fix is:" or "Solution:" followed by content
-    for match in re.finditer(r"(?:The fix is|Solution|Fix)[:\s]+(.+?)(?:\n\n|\n###|\Z)", text, re.DOTALL):
-        content = match.group(1).strip()
-        if len(content) > 15:
-            title = f"Fix: {content[:50].split(chr(10))[0].rstrip('.')}"
-            candidates.append({"title": title, "content": content, "tags": ["fix"]})
-
-    # Pattern: Code blocks preceded by instructional context
-    for match in re.finditer(r"(?:use|run|execute|command)[:\s]*\n```[^\n]*\n(.+?)```", text, re.DOTALL | re.IGNORECASE):
-        content = match.group(1).strip()
-        if len(content) > 10:
-            title = f"Command: {content.split(chr(10))[0][:50]}"
-            candidates.append({"title": title, "content": content, "tags": ["command"]})
-
-    return candidates
-
-
 def _llm_extract(text):
     if len(text) < 100:
         return []
 
     import config
 
+    # Explicit opt-out (tests, deliberately-offline use). The CLI fails fast
+    # before reaching here when the LLM is simply unavailable.
     if config.get("llm", "ollama") == "none":
-        return []
-    ollama_url = config.get("ollama_url", "http://localhost:11434")
-    try:
-        urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=2)
-    except Exception:
-        print("  [distill] ollama not available — pattern extraction only", file=sys.stderr)
         return []
 
     # Chunk the input and extract from each chunk independently

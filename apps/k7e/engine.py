@@ -635,8 +635,9 @@ def _rerank(query, results, limit):
 def recall(text, limit=8, include_superseded=False):
     """RAG recall: given arbitrary text, find relevant knowledge and synthesize.
 
-    Returns (answer_text, source_entries) where answer_text may be None if
-    no LLM is available (sources still returned for fallback display).
+    Returns (answer_text, source_entries). The CLI gates this behind an LLM
+    availability check (fail fast); answer_text is None only when nothing was
+    found or the LLM call failed at runtime.
     """
     init()
     text = text.strip()
@@ -710,24 +711,19 @@ def recall(text, limit=8, include_superseded=False):
 
 
 def _decompose_queries(text):
-    """Use LLM to extract search queries from long text. Falls back to splitting."""
+    """Use the LLM to extract search queries from long text. Returns [] if the
+    LLM is unavailable or returns nothing; recall() then searches the raw text."""
     prompt = (
         "Extract 3-5 short search queries (2-4 words each) that capture the "
         "key topics in this text. Return one query per line, nothing else.\n\n"
         f"Text: {text[:2000]}"
     )
     response = _call_llm(prompt, timeout=30)
-    if response:
-        lines = [l.strip().strip("-•*").strip() for l in response.splitlines() if l.strip()]
-        queries = [l for l in lines if 2 <= len(l.split()) <= 8 and len(l) < 80]
-        if queries:
-            return queries[:5]
-
-    # Fallback: split into meaningful chunks by sentence boundaries
-    words = [w for w in text.split() if len(w) > 3]
-    if len(words) > 6:
-        return [" ".join(words[:5]), " ".join(words[-5:])]
-    return [" ".join(words)] if words else []
+    if not response:
+        return []
+    lines = [l.strip().strip("-•*").strip() for l in response.splitlines() if l.strip()]
+    queries = [l for l in lines if 2 <= len(l.split()) <= 8 and len(l) < 80]
+    return queries[:5]
 
 
 # --- Compile (knowledge compounding) ---
@@ -778,7 +774,7 @@ def compile_tag(tag, dry_run=False):
 
     compiled_content = _call_llm(prompt)
     if not compiled_content:
-        print("Error: No LLM available to compile entries. Configure with: k7e config llm <provider>", file=sys.stderr)
+        print("Error: LLM call failed while compiling entries.", file=sys.stderr)
         return None
 
     # Store as a new compiled node

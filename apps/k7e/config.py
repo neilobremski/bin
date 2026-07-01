@@ -113,6 +113,15 @@ def resolve_llm_model(models=None):
     return pool[0]
 
 
+def llm_available():
+    """True when k7e can make an LLM call: not explicitly disabled and ollama
+    is reachable. Used by the LLM-requiring commands (distill/recall/compile)
+    to fail fast with an actionable message instead of degrading silently."""
+    if get("llm", "ollama") == "none":
+        return False
+    return _ollama_reachable()
+
+
 def detect_providers():
     """Check what's available on this system (single ollama probe)."""
     results = {}
