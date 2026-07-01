@@ -32,25 +32,29 @@ class TestDedupStress:
 
 
 class TestDistillDedup:
-    """Test that the distill path actually deduplicates."""
+    """Test that the distill diff path deduplicates candidates against the store.
 
-    def test_distill_skips_known_content(self, store, tmp_path):
+    Exercised at the candidate level (diff_against_store) so it stays
+    deterministic without an LLM; end-to-end extraction is covered in
+    test_llm_distill.py (@llm)."""
+
+    def test_diff_skips_known_content(self, store):
         import distill
-        engine.store_entry("Known Fact", "The sky is blue on clear days", tags=["nature"])
-        journal = tmp_path / "j.md"
-        journal.write_text("TIL: The sky is blue on clear days")
-        results = distill.distill([str(journal)])
-        stored = [r for r in results if r["action"] == "stored"]
-        assert len(stored) == 0, f"Re-stored known fact: {stored}"
+        engine.store_entry("Sky color", "The sky is blue on clear days", tags=["nature"])
+        candidates = [
+            {"title": "Sky is blue", "content": "The sky is blue on clear days", "tags": ["nature"]},
+        ]
+        new = distill.diff_against_store(candidates)
+        assert new == [], f"Known content should be deduped, got: {new}"
 
-    def test_distill_stores_new_content(self, store, tmp_path):
+    def test_diff_keeps_new_content(self, store):
         import distill
         engine.store_entry("Old Fact", "Something unrelated", tags=["misc"])
-        journal = tmp_path / "j.md"
-        journal.write_text("TIL: Quantum entanglement allows instant correlation across any distance")
-        results = distill.distill([str(journal)])
-        stored = [r for r in results if r["action"] in ("stored", "would_store")]
-        assert len(stored) >= 1
+        candidates = [
+            {"title": "Quantum entanglement correlation", "content": "Quantum entanglement allows instant correlation across any distance", "tags": ["physics"]},
+        ]
+        new = distill.diff_against_store(candidates)
+        assert len(new) >= 1
 
 
 class TestTitleDedup:

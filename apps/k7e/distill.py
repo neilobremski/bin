@@ -3,20 +3,17 @@
 Scans raw files (journals, transcripts, command output, images, audio, video).
 Extracts knowledge candidates. Diffs against existing store. Stores genuine deltas.
 
-Text files: pattern extraction + LLM extraction.
-Media files: multimodal LLM (describe/transcribe) + asset storage.
+Text files: LLM extraction (ollama).
+Media files: ollama vision (image description) + asset storage.
 
-Uses agy/claude/codex CLI or ollama for LLM extraction. Falls back to
-pattern-based extraction if neither is available.
+Distillation requires an LLM. The CLI fails fast when ollama is unavailable;
+set llm=none to explicitly opt out (extraction returns nothing).
 """
 
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
-import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -140,65 +137,51 @@ def extract_from_file(path):
     if _media_type(path):
         return _multimodal_extract(path)
     text = Path(path).read_text(encoding="utf-8")
-    candidates = _pattern_extract(text)
-    llm_candidates = _llm_extract(text)
-    if llm_candidates:
-        candidates.extend(llm_candidates)
-    return candidates
+    return _llm_extract(text)
 
 
 def _multimodal_extract(path):
-    """Extract knowledge from media files via multimodal LLM."""
+    """Extract knowledge from media via ollama's multimodal API.
+
+    Images are sent to a vision-capable ollama model as base64. ollama can't
+    transcribe audio/video, so those are skipped — transcribe them with a
+    dedicated tool first, then distill the resulting text."""
+    import base64
     import config
 
-    cmd = config.resolve_llm_command("test")
-    if not cmd:
-        print(f"  [distill] no LLM available — cannot process media file {path}", file=sys.stderr)
+    if config.get("llm", "ollama") == "none":
         return []
 
     kind = _media_type(path)
     abs_path = str(Path(path).resolve())
 
-    if kind == "image":
-        instruction = "Describe this image in detail."
-    elif kind == "audio":
-        instruction = "Transcribe this audio file completely. Include speaker identification if multiple speakers."
-    elif kind == "video":
-        instruction = "Transcribe the audio and describe key visual content of this video."
-    else:
+    if kind != "image":
+        print(f"  [distill] ollama can't transcribe {kind} — skipping {path}", file=sys.stderr)
         return []
 
     prompt = (
-        f"{instruction} File: {abs_path}\n\n"
+        "Describe this image in detail.\n\n"
         "Return a JSON object with:\n"
         '- "title": short descriptive title for this content\n'
-        '- "content": the full transcription or description\n'
+        '- "content": the full description\n'
         '- "tags": list of topic keywords\n'
         "Return ONLY the JSON object, no markdown fencing."
     )
 
-    real_cmd = config.resolve_llm_command(prompt)
-    if not real_cmd:
+    try:
+        b64 = base64.b64encode(Path(path).read_bytes()).decode()
+    except OSError as e:
+        print(f"  [distill] could not read {path}: {e}", file=sys.stderr)
         return []
 
-    try:
-        result = subprocess.run(
-            real_cmd, capture_output=True, text=True, timeout=180,
-            cwd=str(config._k7e_home()),
-        )
-        if result.returncode != 0:
-            print(f"  [llm] non-zero exit ({result.returncode}) for {path}", file=sys.stderr)
-            return []
-        parsed = _parse_multimodal_response(result.stdout, path)
-        if parsed:
-            parsed["_asset_path"] = abs_path
-            parsed["_media_type"] = kind
-            return [parsed]
-    except subprocess.TimeoutExpired:
-        print(f"  [llm] timed out (180s) for {path}", file=sys.stderr)
-    except OSError as e:
-        print(f"  [llm] launch failed: {e}", file=sys.stderr)
-
+    response = engine._call_llm(prompt, timeout=180, images=[b64])
+    if not response:
+        return []
+    parsed = _parse_multimodal_response(response, path)
+    if parsed:
+        parsed["_asset_path"] = abs_path
+        parsed["_media_type"] = kind
+        return [parsed]
     return []
 
 
@@ -438,46 +421,16 @@ def _dedup_candidates(candidates):
     return deduped
 
 
-def _pattern_extract(text):
-    candidates = []
-
-    # Pattern: "TIL:" or "Today I learned:" lines
-    for match in re.finditer(r"(?:TIL|Today I learned)[:\s]+(.+?)(?:\n\n|\n###|\Z)", text, re.DOTALL):
-        content = match.group(1).strip()
-        if len(content) > 20:
-            title = content[:60].split("\n")[0].rstrip(".")
-            candidates.append({"title": title, "content": content, "tags": ["learned"]})
-
-    # Pattern: "The fix is:" or "Solution:" followed by content
-    for match in re.finditer(r"(?:The fix is|Solution|Fix)[:\s]+(.+?)(?:\n\n|\n###|\Z)", text, re.DOTALL):
-        content = match.group(1).strip()
-        if len(content) > 15:
-            title = f"Fix: {content[:50].split(chr(10))[0].rstrip('.')}"
-            candidates.append({"title": title, "content": content, "tags": ["fix"]})
-
-    # Pattern: Code blocks preceded by instructional context
-    for match in re.finditer(r"(?:use|run|execute|command)[:\s]*\n```[^\n]*\n(.+?)```", text, re.DOTALL | re.IGNORECASE):
-        content = match.group(1).strip()
-        if len(content) > 10:
-            title = f"Command: {content.split(chr(10))[0][:50]}"
-            candidates.append({"title": title, "content": content, "tags": ["command"]})
-
-    return candidates
-
-
 def _llm_extract(text):
     if len(text) < 100:
         return []
 
     import config
 
-    if not config.resolve_llm_command("test"):
-        ollama_url = config.get("ollama_url", "http://localhost:11434")
-        try:
-            urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=2)
-        except Exception:
-            print("  [distill] no LLM available — pattern extraction only", file=sys.stderr)
-            return []
+    # Explicit opt-out (tests, deliberately-offline use). The CLI fails fast
+    # before reaching here when the LLM is simply unavailable.
+    if config.get("llm", "ollama") == "none":
+        return []
 
     # Chunk the input and extract from each chunk independently
     chunks = _chunk_text(text, size=3000, overlap=200)
