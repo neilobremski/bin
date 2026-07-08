@@ -75,6 +75,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("definition.inbox_dir", ".inbox", "definition", False, note="File-proxy only: where wake moves inbox JSON for remote polling"),
     Knob("definition.files_ttl_hours", 48, "definition", False, note="Attachment TTL cleanup on idle (hours)"),
     Knob("definition.pause", 0, "definition", False, note="Debounce seconds before waking on a message burst"),
+    Knob("definition.max_wake_seconds", None, "definition", False, note="Kill wake subprocess after N seconds (0 disables)"),
     Knob("definition.batch.invoke", None, "definition", False, note="Argv when 2+ inbox messages waiting"),
     Knob("definition.batch.limit", 5, "definition", False, note="Max messages per batch wake"),
     Knob("definition.idle.timeout", None, "definition", False, note="Seconds idle before idle.invoke (0 disables)"),

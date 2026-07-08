@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,7 +46,7 @@ from daemon import (
     maybe_run_idle,
     release,
 )
-from mailbox import _write_outbox, ensure_mailboxes
+from mailbox import _write_outbox, ensure_mailboxes, route_outboxes
 from registry import save_aliases, save_registry
 
 
@@ -933,3 +934,118 @@ class TestPauseBeforeWake:
         log = _read_log("B")
         assert log.count("batch exec:") == 1
         assert "SINGLE" not in log
+
+
+class TestAsyncAttachedLoop:
+    def test_route_outboxes_runs_during_in_flight_wake(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        import daemon as daemon_mod
+
+        for sub in ("a", "b"):
+            (tmp_path / sub).mkdir()
+        save_registry({
+            "A": {
+                "root": str(tmp_path / "a"),
+                "definition": str(fixtures_dir / "mock-slow.json"),
+            },
+            "B": {
+                "root": str(tmp_path / "b"),
+                "definition": str(fixtures_dir / "mock.json"),
+            },
+        })
+        a = Participant("A", tmp_path / "a")
+        b = Participant("B", tmp_path / "b")
+        ensure_mailboxes(a)
+        ensure_mailboxes(b)
+
+        from ulid import new as new_ulid
+
+        msg_id = new_ulid()
+        (inbox_dir("A") / f"{msg_id}.json").write_text(
+            json.dumps({
+                "id": msg_id,
+                "date": "2026-04-29T12:00:00Z",
+                "from": "Y",
+                "to": "A",
+                "content": "slow-wake",
+                "files": [],
+            })
+        )
+
+        route_counts: list[float] = []
+        orig_route = route_outboxes
+
+        def counting_route(*args, **kwargs):
+            route_counts.append(time.monotonic())
+            return orig_route(*args, **kwargs)
+
+        monkeypatch.setattr("daemon.route_outboxes", counting_route)
+
+        wait_calls = 0
+
+        def stop_after_wake_started(self, timeout=None):
+            nonlocal wait_calls
+            wait_calls += 1
+            if wait_calls >= 2:
+                _write_outbox("A", a.root, "B", "during-wake", [])
+            if wait_calls >= 8 or any(inbox_dir("B").glob("*.json")):
+                if daemon_mod._STOP_EVENT is not None:
+                    daemon_mod._STOP_EVENT.set()
+            return True
+
+        monkeypatch.setattr(threading.Event, "wait", stop_after_wake_started)
+
+        attached_loop(["A", "B"], 0.05, single_pass=False)
+
+        assert len(route_counts) >= 2
+        assert any(inbox_dir("B").glob("*.json"))
+
+    def test_max_wake_seconds_kills_hung_subprocess(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        import daemon as daemon_mod
+
+        monkeypatch.setenv("MOCK_SLEEP", "5")
+        d = tmp_path / "a"
+        d.mkdir()
+        defp = tmp_path / "slow-max.json"
+        defp.write_text(json.dumps({
+            "invoke": [str(fixtures_dir / "mock-slow-cli"), "MSG:$MESSAGE"],
+            "max_wake_seconds": 0.25,
+        }))
+        save_registry({"A": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("A", d))
+
+        from ulid import new as new_ulid
+
+        msg_id = new_ulid()
+        (inbox_dir("A") / f"{msg_id}.json").write_text(
+            json.dumps({
+                "id": msg_id,
+                "date": "2026-04-29T12:00:00Z",
+                "from": "Y",
+                "to": "A",
+                "content": "hang",
+                "files": [],
+            })
+        )
+
+        wait_calls = 0
+
+        def stop_when_killed(self, timeout=None):
+            nonlocal wait_calls
+            wait_calls += 1
+            log = _read_log("A")
+            if "max wake time" in log or wait_calls >= 30:
+                if daemon_mod._STOP_EVENT is not None:
+                    daemon_mod._STOP_EVENT.set()
+            return True
+
+        monkeypatch.setattr(threading.Event, "wait", stop_when_killed)
+
+        attached_loop(["A"], 0.05, single_pass=False)
+
+        log = _read_log("A")
+        assert "max wake time" in log
+        assert "0.25" in log

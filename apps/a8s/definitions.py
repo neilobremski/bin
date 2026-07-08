@@ -269,6 +269,19 @@ def pause_seconds(definition: dict) -> float:
     return v if v > 0 else 0.0
 
 
+def max_wake_seconds(definition: dict) -> float | None:
+    """Returns `definition.max_wake_seconds` as a positive float, or None if
+    not configured / not a positive number."""
+    raw = definition.get("max_wake_seconds")
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
 def has_batch_invoke(definition: dict) -> bool:
     batch = definition.get("batch")
     if not isinstance(batch, dict):

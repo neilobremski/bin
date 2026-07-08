@@ -11,6 +11,7 @@ Module-level mutable state used by signal handlers:
   _STOP_EVENT          — set on 1st signal; checked in the loop body
   _SIGNAL_COUNT        — incremented per signal; 2 triggers force-kill
   _CURRENT_WAKE_PROC   — the currently-running wake subprocess (or None)
+  _WAKE_*              — in-flight wake timing / completion callback
 
 `attached_loop` also sets `core.PRINT_LOCK` to a fresh Lock so `core.out` /
 `core.out_agent` serialize log writes across threads.
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import shlex
 import shutil
 import signal
@@ -26,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time as _time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,6 +62,7 @@ from definitions import (
     idle_timeout_seconds,
     is_file_proxy,
     load_definition,
+    max_wake_seconds,
     pause_seconds,
 )
 from mailbox import ensure_mailboxes, next_inbox_message, peek_inbox_messages, route_outboxes
@@ -75,26 +79,125 @@ import txlog
 
 # ---------- subprocess execution ----------
 
-# Set by run_with_prefix; read by _kill_wake_subprocess_group via the signal
-# handler. _CURRENT_WAKE_NAME pairs with _CURRENT_WAKE_PROC so the SIGUSR1
-# kill-request handler can decide whether the in-flight wake is the one
+# Set by wake subprocess helpers; read by _kill_wake_subprocess_group via the
+# signal handler. _CURRENT_WAKE_NAME pairs with _CURRENT_WAKE_PROC so the
+# SIGUSR1 kill-request handler can decide whether the in-flight wake is the one
 # being killed (per-agent kill, issue #68 follow-up).
 _CURRENT_WAKE_PROC: subprocess.Popen | None = None
 _CURRENT_WAKE_NAME: str | None = None
+_WAKE_STARTED_MONO: float | None = None
+_WAKE_MAX_SECONDS: float | None = None
+_WAKE_ON_COMPLETE: Callable[[], None] | None = None
 
 
-def run_with_prefix(
+def _wake_in_flight() -> bool:
+    proc = _CURRENT_WAKE_PROC
+    return proc is not None and proc.poll() is None
+
+
+def _clear_wake_state() -> None:
+    global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME
+    global _WAKE_STARTED_MONO, _WAKE_MAX_SECONDS, _WAKE_ON_COMPLETE
+    _CURRENT_WAKE_PROC = None
+    _CURRENT_WAKE_NAME = None
+    _WAKE_STARTED_MONO = None
+    _WAKE_MAX_SECONDS = None
+    on_complete = _WAKE_ON_COMPLETE
+    _WAKE_ON_COMPLETE = None
+    if on_complete is not None:
+        on_complete()
+
+
+def _log_wake_line(name: str, line: str) -> None:
+    ts = datetime.now().strftime("%H:%M:%S")
+    out_agent(name, f"{name}> [{ts}] {line.rstrip(chr(10))}")
+
+
+def _pump_wake_stdout_once() -> None:
+    proc = _CURRENT_WAKE_PROC
+    name = _CURRENT_WAKE_NAME
+    if proc is None or name is None or proc.stdout is None:
+        return
+    while True:
+        try:
+            ready, _, _ = select.select([proc.stdout], [], [], 0)
+        except (ValueError, OSError):
+            break
+        if not ready:
+            break
+        line = proc.stdout.readline()
+        if not line:
+            break
+        _log_wake_line(name, line)
+
+
+def _drain_wake_stdout_rest() -> None:
+    proc = _CURRENT_WAKE_PROC
+    name = _CURRENT_WAKE_NAME
+    if proc is None or name is None or proc.stdout is None:
+        return
+    for line in proc.stdout:
+        _log_wake_line(name, line)
+
+
+def _check_wake_timeout() -> None:
+    if not _wake_in_flight():
+        return
+    if _WAKE_MAX_SECONDS is None or _WAKE_STARTED_MONO is None:
+        return
+    if _time.monotonic() - _WAKE_STARTED_MONO < _WAKE_MAX_SECONDS:
+        return
+    name = _CURRENT_WAKE_NAME or "?"
+    ts = datetime.now().strftime("%H:%M:%S")
+    out_agent(
+        name,
+        f"{name}> [{ts}] max wake time ({_WAKE_MAX_SECONDS:g}s) exceeded — killing",
+    )
+    _kill_wake_subprocess_group()
+
+
+def _finish_wake_if_done() -> None:
+    proc = _CURRENT_WAKE_PROC
+    name = _CURRENT_WAKE_NAME
+    if proc is None or name is None:
+        return
+    _pump_wake_stdout_once()
+    rc = proc.poll()
+    if rc is None:
+        return
+    _drain_wake_stdout_rest()
+    if rc != 0:
+        ts = datetime.now().strftime("%H:%M:%S")
+        out_agent(name, f"{name}> [{ts}] (exit {rc})")
+    try:
+        proc.wait(timeout=0)
+    except subprocess.TimeoutExpired:
+        pass
+    _clear_wake_state()
+
+
+def _service_in_flight_wake() -> None:
+    if _CURRENT_WAKE_PROC is None:
+        return
+    _pump_wake_stdout_once()
+    _check_wake_timeout()
+    _finish_wake_if_done()
+
+
+def _start_wake_subprocess(
     name: str,
     cmd: list[str],
     cwd: Path,
     *,
     env: dict[str, str] | None = None,
-) -> int:
-    """Run the wake subprocess in its own session so SIGKILL can target the
-    whole process group (LLM CLI + any helpers it spawns). Tracks the live
-    process in `_CURRENT_WAKE_PROC` and the agent in `_CURRENT_WAKE_NAME` so
-    signal handlers can identify which agent's wake is in-flight."""
+    max_seconds: float | None = None,
+    on_complete: Callable[[], None] | None = None,
+) -> bool:
+    """Start a wake subprocess. Returns True iff the process was spawned."""
     global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME
+    global _WAKE_STARTED_MONO, _WAKE_MAX_SECONDS, _WAKE_ON_COMPLETE
+    if _wake_in_flight():
+        return False
     proc_env = os.environ.copy()
     if env:
         proc_env.update(env)
@@ -113,22 +216,63 @@ def run_with_prefix(
     except FileNotFoundError:
         ts = datetime.now().strftime("%H:%M:%S")
         out_agent(name, f"{name}> [{ts}] command not found: {cmd[0]}")
-        return 127
+        return False
     _CURRENT_WAKE_PROC = proc
     _CURRENT_WAKE_NAME = name
+    _WAKE_STARTED_MONO = _time.monotonic()
+    _WAKE_MAX_SECONDS = max_seconds
+    _WAKE_ON_COMPLETE = on_complete
+    return True
+
+
+def run_with_prefix(
+    name: str,
+    cmd: list[str],
+    cwd: Path,
+    *,
+    env: dict[str, str] | None = None,
+    max_seconds: float | None = None,
+) -> int:
+    """Run the wake subprocess in its own session so SIGKILL can target the
+    whole process group (LLM CLI + any helpers it spawns). Tracks the live
+    process in `_CURRENT_WAKE_PROC` and the agent in `_CURRENT_WAKE_NAME` so
+    signal handlers can identify which agent's wake is in-flight."""
+    if not _start_wake_subprocess(
+        name, cmd, cwd, env=env, max_seconds=max_seconds
+    ):
+        return 127
+    proc = _CURRENT_WAKE_PROC
+    assert proc is not None and proc.stdout is not None
+    started = _WAKE_STARTED_MONO or _time.monotonic()
     try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            ts = datetime.now().strftime("%H:%M:%S")
-            out_agent(name, f"{name}> [{ts}] {line.rstrip(chr(10))}")
-        proc.wait()
-        if proc.returncode != 0:
-            ts = datetime.now().strftime("%H:%M:%S")
-            out_agent(name, f"{name}> [{ts}] (exit {proc.returncode})")
-        return proc.returncode
+        while True:
+            if max_seconds is not None and _time.monotonic() - started >= max_seconds:
+                ts = datetime.now().strftime("%H:%M:%S")
+                out_agent(
+                    name,
+                    f"{name}> [{ts}] max wake time ({max_seconds:g}s) exceeded — killing",
+                )
+                _kill_wake_subprocess_group()
+            rc = proc.poll()
+            if rc is not None:
+                for line in proc.stdout:
+                    _log_wake_line(name, line)
+                proc.wait()
+                if rc != 0:
+                    ts = datetime.now().strftime("%H:%M:%S")
+                    out_agent(name, f"{name}> [{ts}] (exit {rc})")
+                return rc
+            try:
+                ready, _, _ = select.select([proc.stdout], [], [], 0.05)
+            except (ValueError, OSError):
+                ready = []
+            if ready:
+                line = proc.stdout.readline()
+                if line:
+                    _log_wake_line(name, line)
     finally:
-        _CURRENT_WAKE_PROC = None
-        _CURRENT_WAKE_NAME = None
+        if _CURRENT_WAKE_PROC is not None:
+            _clear_wake_state()
 
 
 def _tell_outbox_env(p: Participant) -> dict[str, str]:
@@ -176,7 +320,7 @@ def _pause_ready_for_wake(
     return True
 
 
-def wake_once(p: Participant, msg_path: Path) -> None:
+def wake_once(p: Participant, msg_path: Path, *, async_wake: bool = False) -> bool:
     # Mark activity before any work — covers the parse-error / load-error
     # exits below too. Without this, a bad inbox file in the only handled
     # agent could let an idle invoke fire on the same iteration.
@@ -188,7 +332,7 @@ def wake_once(p: Participant, msg_path: Path) -> None:
         out_agent(p.name, f"[{p.name}] inbox parse error on {msg_path.name}: {e}")
         bad = unique_path(trash_dir(p.name) / msg_path.name)
         msg_path.rename(bad)
-        return
+        return False
 
     try:
         definition = load_definition(p.name)
@@ -196,12 +340,12 @@ def wake_once(p: Participant, msg_path: Path) -> None:
         out_agent(p.name, f"[{p.name}] {e}")
         bad = unique_path(trash_dir(p.name) / msg_path.name)
         msg_path.rename(bad)
-        return
+        return False
 
     if is_file_proxy(definition):
         _deliver_file_proxy(p)
         touch_last_active(p.name)
-        return
+        return False
 
     trashed = unique_path(trash_dir(p.name) / msg_path.name)
     msg_path.rename(trashed)
@@ -209,18 +353,35 @@ def wake_once(p: Participant, msg_path: Path) -> None:
     p.files_path().mkdir(parents=True, exist_ok=True)
     cmd = build_command(definition, msg, p.root)
     out_agent(p.name, f"[{p.name}] exec: {shlex.join(cmd)}")
-    run_with_prefix(p.name, cmd, p.root, env=_tell_outbox_env(p))
-    # And again after the wake returns — a long-running LLM call shouldn't
-    # leave last-active stuck at the pre-wake timestamp.
+    max_sec = max_wake_seconds(definition)
+    if async_wake:
+        return _start_wake_subprocess(
+            p.name,
+            cmd,
+            p.root,
+            env=_tell_outbox_env(p),
+            max_seconds=max_sec,
+            on_complete=lambda: touch_last_active(p.name),
+        )
+    run_with_prefix(
+        p.name, cmd, p.root, env=_tell_outbox_env(p), max_seconds=max_sec
+    )
     touch_last_active(p.name)
+    return False
 
 
-def wake_batch(p: Participant, msg_paths: list[Path], definition: dict) -> None:
+def wake_batch(
+    p: Participant,
+    msg_paths: list[Path],
+    definition: dict,
+    *,
+    async_wake: bool = False,
+) -> bool:
     touch_last_active(p.name)
     if is_file_proxy(definition):
         _deliver_file_proxy(p)
         touch_last_active(p.name)
-        return
+        return False
 
     trashed: list[Path] = []
     previews: list[str] = []
@@ -245,8 +406,21 @@ def wake_batch(p: Participant, msg_paths: list[Path], definition: dict) -> None:
     p.files_path().mkdir(parents=True, exist_ok=True)
     cmd = build_batch_command(definition, p.name, trashed)
     out_agent(p.name, f"[{p.name}] batch exec: {shlex.join(cmd)}")
-    run_with_prefix(p.name, cmd, p.root, env=_tell_outbox_env(p))
+    max_sec = max_wake_seconds(definition)
+    if async_wake:
+        return _start_wake_subprocess(
+            p.name,
+            cmd,
+            p.root,
+            env=_tell_outbox_env(p),
+            max_seconds=max_sec,
+            on_complete=lambda: touch_last_active(p.name),
+        )
+    run_with_prefix(
+        p.name, cmd, p.root, env=_tell_outbox_env(p), max_seconds=max_sec
+    )
     touch_last_active(p.name)
+    return False
 
 
 def _file_proxy_ttl_cleanup(p: Participant, definition: dict) -> None:
@@ -276,11 +450,11 @@ def _file_proxy_ttl_cleanup(p: Participant, definition: dict) -> None:
         out_agent(p.name, f"[{p.name}] proxy: TTL cleanup removed {removed} file(s)")
 
 
-def maybe_run_idle(p: Participant) -> bool:
+def maybe_run_idle(p: Participant, *, async_wake: bool = False) -> bool:
     """If the agent has `definition.idle.invoke` configured AND has been
     idle for at least `definition.idle.timeout` seconds, run the configured
-    argv via `run_with_prefix` and refresh `last-active`. Returns True iff
-    an idle invoke fired this call. Errors loading the definition are
+    argv via the wake subprocess machinery and refresh `last-active`. Returns
+    True iff an idle invoke fired this call. Errors loading the definition are
     logged and swallowed — idle never crashes the loop."""
     try:
         definition = load_definition(p.name)
@@ -320,10 +494,23 @@ def maybe_run_idle(p: Participant) -> bool:
         f"[{p.name}] idle {int(elapsed)}s ≥ {int(timeout)}s — firing idle invoke",
     )
     out_agent(p.name, f"[{p.name}] idle exec: {shlex.join(cmd)}")
+    max_sec = max_wake_seconds(definition)
     try:
-        run_with_prefix(p.name, cmd, p.root, env=_tell_outbox_env(p))
+        if async_wake:
+            return _start_wake_subprocess(
+                p.name,
+                cmd,
+                p.root,
+                env=_tell_outbox_env(p),
+                max_seconds=max_sec,
+                on_complete=lambda: touch_last_active(p.name),
+            )
+        run_with_prefix(
+            p.name, cmd, p.root, env=_tell_outbox_env(p), max_seconds=max_sec
+        )
     finally:
-        touch_last_active(p.name)
+        if not async_wake:
+            touch_last_active(p.name)
     return True
 
 
@@ -609,6 +796,37 @@ def _drain_one(p: Participant, msg_path: Path) -> None:
     msg_path.rename(dest)
 
 
+def _dispatch_agent(p: Participant, definition: dict, *, async_wake: bool) -> bool:
+    """Try to process one inbox unit for `p`. Returns True if a subprocess wake
+    was started (attached_loop should not start another until it finishes)."""
+    if not peek_inbox_messages(p, 1):
+        clear_inbox_waiting_since(p.name)
+        return False
+
+    if is_file_proxy(definition):
+        msg = next_inbox_message(p)
+        if msg is None:
+            clear_inbox_waiting_since(p.name)
+            return False
+        wake_once(p, msg, async_wake=False)
+        return False
+
+    if not _pause_ready_for_wake(p.name, pause_seconds(definition)):
+        return False
+
+    if has_batch_invoke(definition):
+        limit = batch_limit(definition)
+        batch_paths = peek_inbox_messages(p, limit)
+        if len(batch_paths) >= 2:
+            return wake_batch(p, batch_paths, definition, async_wake=async_wake)
+
+    msg = next_inbox_message(p)
+    if msg is None:
+        clear_inbox_waiting_since(p.name)
+        return False
+    return wake_once(p, msg, async_wake=async_wake)
+
+
 def attached_loop(names: list[str], interval: float, *, single_pass: bool = False, drain_seconds: float = 0) -> int:
     """Body of `a8s run` / `a8s start` / `a8s step`. ONE process handles every
     name in `names`; multi-agent handlers share a PID across each member's
@@ -672,8 +890,11 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     publish_remotes = make_publish_remotes(started_remotes) if started_remotes else None
     configured_remote_ids = [r.id for r in started_remotes]
     deadline = _time.monotonic() + drain_seconds if drain_seconds > 0 else 0
+    async_wake = not single_pass
     try:
-        while not _STOP_EVENT.is_set():
+        while True:
+            if _STOP_EVENT.is_set() and not _wake_in_flight():
+                break
             if deadline and _time.monotonic() >= deadline:
                 _STOP_EVENT.set()
                 break
@@ -725,62 +946,59 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                         configured_remote_ids=configured_remote_ids,
                         services=services,
                     )
-                for p in handled:
-                    definition = None
-                    if drain_seconds == 0:
-                        try:
-                            definition = load_definition(p.name)
-                        except (FileNotFoundError, RuntimeError) as e:
-                            out_agent(p.name, f"[{p.name}] {e}")
-                    while not _STOP_EVENT.is_set():
-                        if drain_seconds > 0:
+                _service_in_flight_wake()
+                if drain_seconds > 0:
+                    for p in handled:
+                        while not _STOP_EVENT.is_set():
                             msg = next_inbox_message(p)
                             if msg is None:
                                 clear_inbox_waiting_since(p.name)
                                 break
                             _drain_one(p, msg)
-                            continue
-                        if not peek_inbox_messages(p, 1):
-                            clear_inbox_waiting_since(p.name)
-                            break
-                        if (
-                            definition is not None
-                            and not is_file_proxy(definition)
-                            and not _pause_ready_for_wake(
-                                p.name, pause_seconds(definition)
-                            )
-                        ):
-                            break
-                        if (
-                            definition is not None
-                            and has_batch_invoke(definition)
-                            and not is_file_proxy(definition)
-                        ):
-                            limit = batch_limit(definition)
-                            batch_paths = peek_inbox_messages(p, limit)
-                            if len(batch_paths) >= 2:
-                                wake_batch(p, batch_paths, definition)
-                                continue
-                        msg = next_inbox_message(p)
-                        if msg is None:
-                            clear_inbox_waiting_since(p.name)
-                            break
-                        wake_once(p, msg)
-                # Idle invoke: per-agent, only after the inbox has drained.
-                # Skipped while a wake is in flight automatically — the
-                # drain loop above is the only thing that calls
-                # `run_with_prefix`, so reaching this point means the
-                # agent is genuinely between wakes for this iteration.
-                # Also skipped in drain mode — the goal is to discard, not run.
-                if not _STOP_EVENT.is_set() and drain_seconds == 0:
+                elif not _wake_in_flight():
                     for p in handled:
+                        if _wake_in_flight():
+                            break
                         try:
-                            maybe_run_idle(p)
+                            definition = load_definition(p.name)
+                        except (FileNotFoundError, RuntimeError) as e:
+                            out_agent(p.name, f"[{p.name}] {e}")
+                            continue
+                        while not _STOP_EVENT.is_set():
+                            if _wake_in_flight():
+                                break
+                            started = _dispatch_agent(
+                                p, definition, async_wake=async_wake
+                            )
+                            if started:
+                                break
+                            if async_wake:
+                                break
+                            if not peek_inbox_messages(p, 1):
+                                break
+                            if (
+                                not is_file_proxy(definition)
+                                and not _pause_ready_for_wake(
+                                    p.name, pause_seconds(definition)
+                                )
+                            ):
+                                break
+                if (
+                    not _STOP_EVENT.is_set()
+                    and drain_seconds == 0
+                    and not _wake_in_flight()
+                ):
+                    for p in handled:
+                        if _wake_in_flight():
+                            break
+                        try:
+                            if maybe_run_idle(p, async_wake=async_wake):
+                                break
                         except Exception as e:
                             out_agent(p.name, f"[{p.name}] idle check error: {e}")
             except Exception as e:
                 out_agent(label, f"[a8s] {label}: iteration error: {e}")
-            if single_pass:
+            if single_pass and not _wake_in_flight():
                 break
             _STOP_EVENT.wait(interval)
     finally:
@@ -789,6 +1007,9 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
         # during shutdown could try to write into a directory we're about to
         # forget).
         stop_remotes(started_remotes)
+        while _wake_in_flight():
+            _service_in_flight_wake()
+            _time.sleep(0.05)
         # Release every pid file we still hold.
         for n in acquired:
             holder = _read_handler_pid(n)
