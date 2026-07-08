@@ -421,6 +421,23 @@ class TestPauseSeconds:
         assert pause_seconds({"invoke": ["x"], "pause": "soon"}) == 0.0
 
 
+class TestMaxWakeSeconds:
+    def test_none_when_missing(self):
+        from definitions import max_wake_seconds
+        assert max_wake_seconds({"invoke": ["x"]}) is None
+
+    def test_returns_positive_float(self):
+        from definitions import max_wake_seconds
+        assert max_wake_seconds({"invoke": ["x"], "max_wake_seconds": 600}) == 600.0
+        assert max_wake_seconds({"invoke": ["x"], "max_wake_seconds": "90"}) == 90.0
+
+    def test_zero_or_negative_or_garbage_disables(self):
+        from definitions import max_wake_seconds
+        assert max_wake_seconds({"invoke": ["x"], "max_wake_seconds": 0}) is None
+        assert max_wake_seconds({"invoke": ["x"], "max_wake_seconds": -1}) is None
+        assert max_wake_seconds({"invoke": ["x"], "max_wake_seconds": "soon"}) is None
+
+
 class TestBatchInvoke:
     def test_has_batch_invoke_false_when_missing(self):
         from definitions import has_batch_invoke

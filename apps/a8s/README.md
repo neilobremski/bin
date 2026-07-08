@@ -259,13 +259,19 @@ Argv elements run through six substitutions:
 
 Override per-agent with `a8s define <name> <path>` — point at any JSON. The file isn't moved or copied; the registry stores the path.
 
+### max_wake_seconds (optional)
+
+Top-level numeric field. When set, the attached handler kills the wake subprocess (whole process group) if it runs longer than N seconds. Useful for CLIs that hang instead of exiting (OpenCode, AGY, etc.). Omitted or non-positive = no limit.
+
+While a wake subprocess is running, the handler keeps looping: it still routes every handled agent's outbox each iteration and can deliver tells that arrive mid-wake. Only one wake subprocess runs at a time per handler process; the next inbox message or idle invoke waits until the current wake finishes or is killed.
+
 ### Idle invoke (optional)
 
 A definition's `idle` block fires `idle.invoke` when the agent has gone `idle.timeout` seconds without any wake activity. Update mechanics:
 
 - `~/.a8s/agents/<NAME>/last-active` (ISO timestamp) is touched at every wake start, every wake end, and at the end of every idle invoke.
-- After draining the inbox each iteration, `attached_loop` checks each handled agent: if `now - last_active >= timeout`, run `idle.invoke` via the same `run_with_prefix` machinery that real wakes use.
-- A wake in flight blocks idle naturally — the loop is single-threaded for its handled agents and the inbox drain happens before the idle check.
+- After draining the inbox each iteration, `attached_loop` checks each handled agent: if `now - last_active >= timeout`, run `idle.invoke` via the same wake subprocess machinery that real wakes use.
+- A wake subprocess in flight blocks starting another wake or idle invoke for that handler process; outbox routing still runs each iteration.
 - `timeout: 0` (or negative / non-numeric) disables idle.
 - Argv expansion: `$SENDER`/`$MESSAGE`/`$TIMESTAMP`/`$AGE` are empty (no incoming message); `$RECIPIENT` is the agent's own name; `$A8S_DIR` resolves as usual.
 
