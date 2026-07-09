@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from format import format_room_view, parse_view_args
-from notify import TellFn, ack, error, footer, notify_members, usage_help
+from notify import TellFn, ack, error, notify_agent, notify_members, usage_help
 
 _CMD_ALIASES = {
     "part": "leave",
@@ -188,10 +188,12 @@ def _do_post(
     meta = store.touch_activity(slug, meta)
     store.save_meta(slug, meta)
 
-    msg = store.append_message(slug, sender=sender, content=content, kind="post")
+    store.append_message(slug, sender=sender, content=content, kind="post")
     members = store.member_names(meta)
     notify_members(
         tell_fn=tell_fn,
+        store=store,
+        slug=slug,
         node=node,
         members=members,
         poster=sender,
@@ -200,7 +202,6 @@ def _do_post(
         body=content,
         skip={sender},
     )
-    ack(tell_fn, sender, f"posted to #{slug} (id {msg['id']})")
     return 0
 
 
@@ -294,6 +295,8 @@ def _cmd_invite(
         members = store.member_names(meta)
         notify_members(
             tell_fn=tell_fn,
+            store=store,
+            slug=slug,
             node=node,
             members=members,
             poster=sender,
@@ -303,9 +306,13 @@ def _cmd_invite(
             skip=set(added),
         )
         for agent in added:
-            tell_fn(
-                agent,
-                f"{summary} in #{slug}.{footer(node, slug)}",
+            notify_agent(
+                store=store,
+                slug=slug,
+                tell_fn=tell_fn,
+                node=node,
+                agent=agent,
+                body=f"{summary} in #{slug}.",
             )
 
     parts = []
@@ -336,14 +343,14 @@ def _cmd_view(
     tell_fn: TellFn,
 ) -> int:
     try:
-        slug, limit, before_id, start_n = parse_view_args(args)
+        slug, limit, start_n = parse_view_args(args)
     except ValueError as exc:
         error(
             tell_fn,
             sender,
             node,
             str(exc),
-            hint="/view <room> [[start] limit] [--start N] [--limit N] [--before <id>]",
+            hint="/view <room> [[start] limit] [--start N] [--limit N]",
         )
         return 1
     try:
@@ -358,25 +365,14 @@ def _cmd_view(
         )
         return 1
     messages = store.list_messages(slug)
-    try:
-        text = format_room_view(
-            slug,
-            messages,
-            sender,
-            limit=limit,
-            before_id=before_id,
-            start_n=start_n,
-            node=node,
-        )
-    except KeyError:
-        error(
-            tell_fn,
-            sender,
-            node,
-            f"message id not found in #{slug}",
-            hint="/view <room> [--limit N]",
-        )
-        return 1
+    text = format_room_view(
+        slug,
+        messages,
+        sender,
+        limit=limit,
+        start_n=start_n,
+        node=node,
+    )
     ack(tell_fn, sender, text)
     return 0
 

@@ -106,6 +106,25 @@ class RoomStore:
         meta["members"] = kept
         return meta, True
 
+    def mark_help_seen(self, meta: dict, agent: str) -> dict:
+        agent = normalize_agent(agent)
+        if self.has_seen_help(meta, agent):
+            return meta
+        seen = self.help_seen_names(meta)
+        seen.append(agent)
+        meta["help_seen"] = seen
+        return meta
+
+    def help_seen_names(self, meta: dict) -> list[str]:
+        raw = meta.get("help_seen")
+        if not isinstance(raw, list):
+            return []
+        return [normalize_agent(str(a)) for a in raw if str(a).strip()]
+
+    def has_seen_help(self, meta: dict, agent: str) -> bool:
+        key = agent.lower()
+        return any(a.lower() == key for a in self.help_seen_names(meta))
+
     def append_message(
         self,
         slug: str,

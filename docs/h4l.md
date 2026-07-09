@@ -13,7 +13,7 @@ h4l clear --root <dir> --older-than <seconds>
 # Via a8s (after a8s add + start)
 tell <hall-name> '#<room> <text>'
 tell <hall-name> '/list'
-tell <hall-name> '/view <room> [start limit] [--start N] [--limit N] [--before <id>]'
+tell <hall-name> '/view <room> [start limit] [--start N] [--limit N]'
 tell <hall-name> '/invite <room> AGENT [AGENT...]'
 tell <hall-name> '/join <room>'
 tell <hall-name> '/leave <room>'

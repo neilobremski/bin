@@ -34,7 +34,7 @@ Post: `#<room> <message>` (primary) or `/post <room> <message>`. IRC aliases:
 
 `/view` shows the latest N messages (default 10) as convo-style markdown (`##` for your
 posts, `###` for others). Footer reports viewed range and total count, with `tell`
-hints for older (`--before`), newer/latest (`--start` or bare `/view`), and arbitrary
+hints for older/newer/latest (`--start` or bare `/view`), and arbitrary
 windows (`/view <room> <start> <limit>`).
 
 State: `<root>/.chatrooms/rooms/<slug>/`.
@@ -49,7 +49,7 @@ State: `<root>/.chatrooms/rooms/<slug>/`.
 | Errors | `tell` to sender |
 | Permissions | Open / trusted |
 | Slugs | `[a-z0-9_-]+`, lowercase display |
-| `/view` | Convo-style markdown; default last 10; footer with range/total; `--start`, `--limit`, `--before` |
+| `/view` | Convo-style markdown; default last 10; footer with range/total; `--start`, `--limit` |
 | Notify | Truncated body (~1k) + footer with live node name and room slug |
 | Maintenance | `h4l clear --older-than` / `--all` via idle.invoke when configured |
 

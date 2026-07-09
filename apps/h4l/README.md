@@ -77,14 +77,14 @@ history with cursor hints; open/trusted membership (no channel modes or bans).
 | `/leave` | `/leave war` (`/part` alias) |
 | `/invite` | `/invite war BOB CAROL` |
 | `/list` | `/list` |
-| `/view` | `/view war [start limit] [--start N] [--limit N] [--before <id>]` |
+| `/view` | `/view war [start limit] [--start N] [--limit N]` |
 | `/members` | `/members war` (`/names` alias) |
 | `/help` | `/help` |
 
 `/view` returns a convo-style markdown transcript (latest 10 messages by default).
 A footer reports the viewed message range and total count, with `tell` commands to
-page older (`--before`), newer (`--start`), latest (bare `/view`), or an arbitrary
-window (`--start <n> --limit <m>` or `/view war <start> <limit>`).
+page older/newer (`--start`), latest (bare `/view`), or an arbitrary window
+(`/view war <start> <limit>`).
 
 Room slugs: `[a-z0-9_-]+`, case-insensitive, stored lowercase.
 

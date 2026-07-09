@@ -55,8 +55,8 @@ class TestPost:
         messages = store.list_messages("war")
         assert len(messages) == 1
         assert messages[0]["content"] == "hello everyone"
-        acks = [b for a, b in sent if a == "ALICE"]
-        assert any("posted to #war" in b for b in acks)
+        alice_msgs = [b for a, b in sent if a == "ALICE"]
+        assert not alice_msgs
         assert not any(a == "ALICE" and "hello everyone" in b and "posted in" in b for a, b in sent)
 
     def test_hash_prefix_room_same_as_plain(self, store, tells):
@@ -99,8 +99,7 @@ class TestPost:
         messages = store.list_messages("everyone")
         assert len(messages) == 1
         assert messages[0]["content"] == "hello"
-        acks = [b for a, b in sent if a == "ALICE"]
-        assert any("posted to #everyone" in b for b in acks)
+        assert not [b for a, b in sent if a == "ALICE"]
 
     def test_irc_style_matches_slash_post(self, store, tells):
         sent, tell_fn = tells
@@ -137,7 +136,29 @@ class TestPost:
         assert len(bob_msgs) == 1
         assert "ALICE posted in #war" in bob_msgs[0]
         assert "update" in bob_msgs[0]
-        assert "tell HALL /view war" in bob_msgs[0]
+        assert "Post a message: tell HALL #war" in bob_msgs[0]
+        assert "More commands: tell HALL /help" in bob_msgs[0]
+        assert "tell HALL /view" not in bob_msgs[0]
+
+    def test_onboard_footer_only_once(self, store, tells):
+        sent, tell_fn = tells
+        meta = store.ensure_room("war")
+        meta["members"] = ["ALICE", "BOB"]
+        store.save_meta("war", meta)
+        for msg in ("/post war one", "/post war two"):
+            dispatch_slash(
+                store,
+                sender="ALICE",
+                node="HALL",
+                message=msg,
+                tell_fn=tell_fn,
+            )
+        bob_msgs = [b for a, b in sent if a == "BOB"]
+        assert len(bob_msgs) == 2
+        assert "Post a message:" in bob_msgs[0]
+        assert "Post a message:" not in bob_msgs[1]
+        meta = store.load_meta("war")
+        assert store.has_seen_help(meta, "BOB")
 
 
 class TestInvite:
@@ -154,6 +175,9 @@ class TestInvite:
         meta = store.load_meta("war")
         members = {m.upper() for m in store.member_names(meta)}
         assert members == {"BOB", "CAROL"}
+        bob_invite = [b for a, b in sent if a == "BOB"][0]
+        assert "invited" in bob_invite
+        assert "Post a message: tell HALL #war" in bob_invite
         assert any(a == "BOB" and "invited" in b for a, b in sent)
         system = [m for m in store.list_messages("war") if m["kind"] == "system"]
         assert system
@@ -282,9 +306,8 @@ class TestSimulateTell:
         ])
         assert rc == 0
         captured = capsys.readouterr()
-        assert "posted to #war" in captured.out
-        assert "h4l> tell ALICE:" in captured.err
-        assert "posted to #war" in captured.err
+        assert captured.out == ""
+        assert "h4l> tell ALICE:" not in captured.err
 
     def test_simulate_env_enables_mode(self, tmp_path, capsys, monkeypatch):
         monkeypatch.setenv("H4L_SIMULATE_TELL", "1")
