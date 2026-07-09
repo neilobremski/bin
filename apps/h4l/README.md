@@ -76,6 +76,7 @@ history with cursor hints; open/trusted membership (no channel modes or bans).
 | `/join` | `/join war` |
 | `/leave` | `/leave war` (`/part` alias) |
 | `/invite` | `/invite war BOB CAROL` |
+| `/remove` | `/remove war BOB` (`/kick` alias) |
 | `/list` | `/list` |
 | `/view` | `/view war [start limit] [--start N] [--limit N]` |
 | `/members` | `/members war` (`/names` alias) |

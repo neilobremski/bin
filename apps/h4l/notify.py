@@ -62,12 +62,13 @@ def usage_help(node: str) -> str:
         f'tell {node} "/join <room>"',
         f'tell {node} "/part <room>"  (/leave)',
         f'tell {node} "/invite <room> <agent> [<agent>...]"',
+        f'tell {node} "/remove <room> <agent> [<agent>...]"  (/kick)',
         f'tell {node} "/list"',
         f'tell {node} "/names <room>"  (/members)',
         f'tell {node} "/view <room> [[start] limit] [--start N] [--limit N]"',
         f'tell {node} "/help"',
         "",
-        "Also: /post, /leave, /members; # prefix optional on room names.",
+        "Also: /post, /leave, /members, /kick; # prefix optional on room names.",
     ]
     return "\n".join(lines)
 

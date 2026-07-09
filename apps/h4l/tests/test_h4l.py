@@ -235,6 +235,77 @@ class TestInvite:
         assert "BOB" in system[0]["content"] and "CAROL" in system[0]["content"]
 
 
+class TestRemove:
+    def test_remove_drops_member(self, store, tells):
+        sent, tell_fn = tells
+        meta = store.ensure_room("war")
+        meta["members"] = ["ALICE", "BOB", "CAROL"]
+        store.save_meta("war", meta)
+        dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message="/remove war BOB",
+            tell_fn=tell_fn,
+        )
+        meta = store.load_meta("war")
+        members = {m.upper() for m in store.member_names(meta)}
+        assert members == {"ALICE", "CAROL"}
+        bob_msgs = [b for a, b in sent if a.upper() == "BOB"]
+        assert len(bob_msgs) == 1
+        assert "removed you from #war" in bob_msgs[0]
+        system = [m for m in store.list_messages("war") if m["kind"] == "system"]
+        assert system
+        assert "removed BOB" in system[0]["content"]
+
+    def test_remove_requires_membership(self, store, tells):
+        sent, tell_fn = tells
+        meta = store.ensure_room("war")
+        meta["members"] = ["BOB"]
+        store.save_meta("war", meta)
+        rc = dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message="/remove war BOB",
+            tell_fn=tell_fn,
+        )
+        assert rc == 1
+        assert "not a member" in sent[0][1]
+
+    def test_remove_self_hints_leave(self, store, tells):
+        sent, tell_fn = tells
+        meta = store.ensure_room("war")
+        meta["members"] = ["ALICE", "BOB"]
+        store.save_meta("war", meta)
+        dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message="/remove war ALICE",
+            tell_fn=tell_fn,
+        )
+        meta = store.load_meta("war")
+        assert "ALICE" in store.member_names(meta)
+        ack = [b for a, b in sent if a == "ALICE"][-1]
+        assert "use /leave" in ack
+
+    def test_kick_alias(self, store, tells):
+        sent, tell_fn = tells
+        meta = store.ensure_room("war")
+        meta["members"] = ["ALICE", "BOB"]
+        store.save_meta("war", meta)
+        dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message="/kick war BOB",
+            tell_fn=tell_fn,
+        )
+        meta = store.load_meta("war")
+        assert "BOB" not in {m.upper() for m in store.member_names(meta)}
+
+
 class TestView:
     def test_view_convo_markdown(self, store, tells):
         sent, tell_fn = tells
