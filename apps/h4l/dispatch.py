@@ -64,12 +64,24 @@ def dispatch_slash(
     sender = normalize_agent(sender)
     body = message.strip()
     if not body.startswith("/"):
-        error(tell_fn, sender, "commands must start with / (e.g. /post war hello)")
+        error(
+            tell_fn,
+            sender,
+            node,
+            "commands must start with /",
+            show_commands=True,
+        )
         return 1
 
     parts = body[1:].split()
     if not parts:
-        error(tell_fn, sender, "missing command after /")
+        error(
+            tell_fn,
+            sender,
+            node,
+            "missing command after /",
+            show_commands=True,
+        )
         return 1
 
     cmd = parts[0].lower()
@@ -87,17 +99,29 @@ def dispatch_slash(
         if cmd == "list":
             return _cmd_list(store, sender, tell_fn)
         if cmd == "view":
-            return _cmd_view(store, sender, args, tell_fn)
+            return _cmd_view(store, sender, node, args, tell_fn)
         if cmd == "members":
-            return _cmd_members(store, sender, args, tell_fn)
-        error(tell_fn, sender, f"unknown command /{cmd}")
+            return _cmd_members(store, sender, node, args, tell_fn)
+        error(
+            tell_fn,
+            sender,
+            node,
+            f"unknown command /{cmd}",
+            show_commands=True,
+        )
         return 1
     except ValueError as exc:
-        error(tell_fn, sender, str(exc))
+        error(tell_fn, sender, node, str(exc), show_commands=True)
         return 1
     except KeyError:
         slug = args[0] if args else "?"
-        error(tell_fn, sender, f"room not found: {slug}")
+        error(
+            tell_fn,
+            sender,
+            node,
+            f"room not found: {slug}",
+            hint="/list",
+        )
         return 1
 
 
@@ -109,12 +133,24 @@ def _cmd_post(
     tell_fn: TellFn,
 ) -> int:
     if len(args) < 2:
-        error(tell_fn, sender, "usage: /post <room> <message...>")
+        error(
+            tell_fn,
+            sender,
+            node,
+            "/post requires <room> and <message>",
+            hint="/post <room> <message>",
+        )
         return 1
     slug = normalize_slug(args[0])
     content = " ".join(args[1:]).strip()
     if not content:
-        error(tell_fn, sender, "usage: /post <room> <message...>")
+        error(
+            tell_fn,
+            sender,
+            node,
+            "/post requires <room> and <message>",
+            hint="/post <room> <message>",
+        )
         return 1
 
     meta = store.ensure_room(slug)
@@ -142,12 +178,18 @@ def _cmd_post(
 def _cmd_join(
     store: RoomStore,
     sender: str,
-    _node: str,
+    node: str,
     args: list[str],
     tell_fn: TellFn,
 ) -> int:
     if len(args) != 1:
-        error(tell_fn, sender, "usage: /join <room>")
+        error(
+            tell_fn,
+            sender,
+            node,
+            "/join requires <room>",
+            hint="/join <room>",
+        )
         return 1
     slug = normalize_slug(args[0])
     meta = store.ensure_room(slug)
@@ -162,12 +204,18 @@ def _cmd_join(
 def _cmd_leave(
     store: RoomStore,
     sender: str,
-    _node: str,
+    node: str,
     args: list[str],
     tell_fn: TellFn,
 ) -> int:
     if len(args) != 1:
-        error(tell_fn, sender, "usage: /leave <room>")
+        error(
+            tell_fn,
+            sender,
+            node,
+            "/leave requires <room>",
+            hint="/leave <room>",
+        )
         return 1
     slug = normalize_slug(args[0])
     meta = store.load_meta(slug)
@@ -189,7 +237,13 @@ def _cmd_invite(
     tell_fn: TellFn,
 ) -> int:
     if len(args) < 2:
-        error(tell_fn, sender, "usage: /invite <room> <agent> [<agent>...]")
+        error(
+            tell_fn,
+            sender,
+            node,
+            "/invite requires <room> and at least one <agent>",
+            hint="/invite <room> <agent> [<agent>...]",
+        )
         return 1
     slug = normalize_slug(args[0])
     invitees = [normalize_agent(a) for a in args[1:]]
@@ -243,11 +297,18 @@ def _cmd_list(store: RoomStore, sender: str, tell_fn: TellFn) -> int:
 def _cmd_view(
     store: RoomStore,
     sender: str,
+    node: str,
     args: list[str],
     tell_fn: TellFn,
 ) -> int:
     if len(args) != 1:
-        error(tell_fn, sender, "usage: /view <room>")
+        error(
+            tell_fn,
+            sender,
+            node,
+            "/view requires <room>",
+            hint="/view <room>",
+        )
         return 1
     slug = normalize_slug(args[0])
     text = _format_view(store, slug)
@@ -258,11 +319,18 @@ def _cmd_view(
 def _cmd_members(
     store: RoomStore,
     sender: str,
+    node: str,
     args: list[str],
     tell_fn: TellFn,
 ) -> int:
     if len(args) != 1:
-        error(tell_fn, sender, "usage: /members <room>")
+        error(
+            tell_fn,
+            sender,
+            node,
+            "/members requires <room>",
+            hint="/members <room>",
+        )
         return 1
     slug = normalize_slug(args[0])
     text = _format_members(store, slug)

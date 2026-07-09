@@ -121,12 +121,32 @@ class TestErrors:
         rc = dispatch_slash(
             store,
             sender="ALICE",
-            node="HALL",
-            message="post war hi",
+            node="CHATROOM",
+            message="How do I use you?",
             tell_fn=tell_fn,
         )
         assert rc == 1
-        assert sent == [("ALICE", "h4l error: commands must start with / (e.g. /post war hello)")]
+        assert len(sent) == 1
+        agent, body = sent[0]
+        assert agent == "ALICE"
+        assert body.startswith("Error: commands must start with /")
+        assert "h4l" not in body.lower()
+        assert 'tell CHATROOM "/post <room> <message>"' in body
+        assert 'tell CHATROOM "/list"' in body
+
+    def test_unknown_command_includes_usage(self, store, tells):
+        sent, tell_fn = tells
+        rc = dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message="/frobnicate",
+            tell_fn=tell_fn,
+        )
+        assert rc == 1
+        body = sent[0][1]
+        assert "Error: unknown command /frobnicate" in body
+        assert 'tell HALL "/join <room>"' in body
 
 
 class TestSimulateTell:

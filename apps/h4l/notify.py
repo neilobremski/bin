@@ -50,6 +50,24 @@ def truncate(text: str, limit: int = MAX_NOTIFY_CHARS) -> str:
     return text[: limit - 3] + "..."
 
 
+def usage_help(node: str) -> str:
+    lines = [
+        "Commands (send via tell):",
+        f'tell {node} "/post <room> <message>"',
+        f'tell {node} "/join <room>"',
+        f'tell {node} "/leave <room>"',
+        f'tell {node} "/invite <room> <agent> [<agent>...]"',
+        f'tell {node} "/list"',
+        f'tell {node} "/view <room>"',
+        f'tell {node} "/members <room>"',
+    ]
+    return "\n".join(lines)
+
+
+def command_hint(node: str, slash_cmd: str) -> str:
+    return f'tell {node} "{slash_cmd}"'
+
+
 def footer(node: str, room: str | None = None) -> str:
     room_token = room or "<room>"
     return (
@@ -85,6 +103,21 @@ def ack(tell_fn: TellFn, sender: str, text: str) -> None:
     tell_fn(sender, text)
 
 
-def error(tell_fn: TellFn, sender: str, text: str) -> None:
+def error(
+    tell_fn: TellFn,
+    sender: str,
+    node: str,
+    detail: str,
+    *,
+    show_commands: bool = False,
+    hint: str | None = None,
+) -> None:
+    parts = [f"Error: {detail}"]
+    if hint:
+        parts.append(command_hint(node, hint))
+    if show_commands:
+        parts.append("")
+        parts.append(usage_help(node))
+    text = "\n".join(parts)
     print(text, file=sys.stderr)
-    tell_fn(sender, f"h4l error: {text}")
+    tell_fn(sender, text)
