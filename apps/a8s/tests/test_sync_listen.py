@@ -320,6 +320,21 @@ class TestSyncListenerExpiry:
         assert not list(inbox_dir("ALICE").glob("*.json"))
 
 
+class TestExpectFromNamespace:
+    def test_namespace_address_expects_bound_node(self, fake_home, tmp_path):
+        from registry import save_namespaces
+        from sync_listen import _expect_from_names
+
+        node_root = tmp_path / "node"
+        node_root.mkdir()
+        save_registry({"NODE": {"root": str(node_root)}})
+        save_namespaces({"s1l": "NODE"})
+        # `tell --sync s1l:phil` sets expect_from to the colon address, but
+        # the reply is authored by the bound node agent — the listener must
+        # match on the node's name (#148).
+        assert _expect_from_names("s1l:phil") == {"node"}
+
+
 class TestTellSyncE2E:
     def test_tell_sync_round_trip(self, fake_home, tmp_path, monkeypatch, capsys):
         alice, bob = _setup_agents(fake_home, tmp_path)

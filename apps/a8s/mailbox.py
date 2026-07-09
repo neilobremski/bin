@@ -611,6 +611,13 @@ def _process_pending(
                                         out_agent(recipient.name, f"received from {sender.name} (via {recipient_name} alias): {preview}")
                                         txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
                                     routed += delivered
+                                elif kind == "namespace":
+                                    recipient = recipients[0]
+                                    out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (namespace via {recipient.name}): {preview}")
+                                    if staged:
+                                        out_agent(recipient.name, f"received from {sender.name} (to {recipient_name}): {preview}")
+                                    txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
+                                    routed += delivered
                                 else:
                                     recipient = recipients[0]
                                     out_agent(sender.name, f"routed: {sender.name} -> {recipient.name}: {preview}")

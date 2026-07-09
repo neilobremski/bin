@@ -1,0 +1,29 @@
+{
+  "description": "r4t — Router For Teams. Namespace node: bind a prefix with `a8s namespace <prefix> <node>` and tell <prefix>:<member>. Roster in <root>/ROSTER.md; harness config out-of-repo at ~/.r4t/harnesses.json (append --roster / --harness-config to override).",
+  "invoke": [
+    "python3",
+    "$A8S_DIR/../r4t/r4t.py",
+    "dispatch",
+    "--root",
+    ".",
+    "--from",
+    "$SENDER",
+    "--to",
+    "$RECIPIENT",
+    "--message",
+    "$MESSAGE"
+  ],
+  "max_wake_seconds": 2700,
+  "idle": {
+    "timeout": 1800,
+    "invoke": [
+      "python3",
+      "$A8S_DIR/../r4t/r4t.py",
+      "idle",
+      "--root",
+      ".",
+      "--node",
+      "$RECIPIENT"
+    ]
+  }
+}

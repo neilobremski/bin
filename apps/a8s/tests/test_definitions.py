@@ -125,6 +125,15 @@ class TestBuildCommand:
         argv = build_command(defn, msg, agent_root)
         assert argv == ["claude", "-p", "GERRY tells devs: standup"]
 
+    def test_namespace_routed_keeps_full_address_in_recipient(self, agent_root):
+        # Issue #148: routing preserves the colon address in `to`, so the
+        # bound node's $RECIPIENT carries it verbatim and the node can
+        # self-route internally.
+        defn = {"invoke": ["claude", "-p", "$SENDER tells $RECIPIENT: $MESSAGE"]}
+        msg = {"from": "GERRY", "to": "s1l:team:phil", "content": "ping"}
+        argv = build_command(defn, msg, agent_root)
+        assert argv == ["claude", "-p", "GERRY tells s1l:team:phil: ping"]
+
     def test_missing_invoke_raises(self, agent_root):
         with pytest.raises(ValueError, match="invoke"):
             build_command({}, {"from": "G", "to": "C"}, agent_root)

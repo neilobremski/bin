@@ -293,13 +293,16 @@ def _optional_sender() -> tuple[str, dict] | None:
 
 def _validate_recipient(target_query: str) -> tuple[int, str | None, str | None]:
     from network import configured_remote_ids
-    from registry import load_aliases, resolve_name
+    from registry import load_aliases, resolve_name, split_namespace_address
 
     try:
         kind, members = resolve_name(target_query)
     except KeyError:
         if not configured_remote_ids():
-            print(f"tell: no agent or alias named {target_query!r}", file=sys.stderr)
+            if ":" in target_query:
+                print(f"tell: no namespace bound for {target_query!r}", file=sys.stderr)
+            else:
+                print(f"tell: no agent or alias named {target_query!r}", file=sys.stderr)
             return 1, None, None
         return 0, target_query, None
     except ValueError as e:
@@ -310,6 +313,9 @@ def _validate_recipient(target_query: str) -> tuple[int, str | None, str | None]
         return 1, None, None
     if kind == "agent":
         canonical = members[0]
+    elif kind == "namespace":
+        prefix, sub = split_namespace_address(target_query)
+        canonical = f"{prefix}:{sub}"
     else:
         aliases = load_aliases()
         canonical = next(
@@ -457,6 +463,11 @@ def run_check(recipient: str | None) -> int:
         assert canonical is not None
         if kind == "alias":
             lines.append(f"  recipient {recipient!r}: ok (alias -> {canonical})")
+        elif kind == "namespace":
+            from registry import resolve_name
+
+            _, members = resolve_name(recipient)
+            lines.append(f"  recipient {recipient!r}: ok (namespace -> {members[0]})")
         else:
             lines.append(f"  recipient {recipient!r}: ok")
 

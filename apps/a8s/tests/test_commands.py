@@ -15,18 +15,21 @@ from commands import (
     cmd_alias,
     cmd_kill,
     cmd_logs,
+    cmd_namespace,
+    cmd_namespaces,
     cmd_remote,
     cmd_remove,
     cmd_storage,
     cmd_tell,
     cmd_unalias,
+    cmd_unnamespace,
     cmd_unremote,
     cmd_unstorage,
 )
 from core import Participant, TELL_OUTBOX_DIR_ENV, agent_dir, agent_log_path, files_dir, kill_request_path, outbox_bundle_dir, outbox_dir, pid_path
 from mailbox import ensure_mailboxes
 from network import load_network_config, save_network_config
-from registry import load_aliases, load_registry, save_registry
+from registry import load_aliases, load_namespaces, load_registry, save_namespaces, save_registry
 
 
 @pytest.fixture
@@ -160,6 +163,145 @@ class TestCmdAliasShowOne:
         assert rc == 2
         err = capsys.readouterr().err
         assert "alphanumeric" in err
+
+
+class TestCmdNamespace:
+    """Issue #148 — prefix routing. Mirrors the `alias` surface: list / show /
+    bind, plus `unnamespace` for removal. The bind target must be a registered
+    agent (single delivery — the opposite of alias fan-out)."""
+
+    def test_bind_stores_canonical_lowercase(self, agent_root):
+        cmd_add(["node", str(agent_root)])
+        rc = cmd_namespace(["S1L", "NODE"])
+        assert rc == 0
+        assert load_namespaces() == {"s1l": "node"}
+
+    def test_rebind_overwrites(self, agent_root, tmp_path, capsys):
+        cmd_add(["node", str(agent_root)])
+        other = tmp_path / "y"
+        other.mkdir()
+        cmd_add(["other", str(other)])
+        cmd_namespace(["s1l", "node"])
+        rc = cmd_namespace(["s1l", "other"])
+        assert rc == 0
+        assert load_namespaces() == {"s1l": "other"}
+        assert "rebound" in capsys.readouterr().out
+
+    def test_target_must_be_registered(self, fake_home, capsys):
+        rc = cmd_namespace(["s1l", "ghost"])
+        assert rc == 1
+        assert "unknown agent" in capsys.readouterr().err
+        assert load_namespaces() == {}
+
+    def test_target_must_not_be_alias(self, agent_root, capsys):
+        cmd_add(["node", str(agent_root)])
+        cmd_alias(["devs", "node"])
+        rc = cmd_namespace(["s1l", "devs"])
+        assert rc == 1
+        assert "not an alias" in capsys.readouterr().err
+        assert load_namespaces() == {}
+
+    def test_prefix_collides_with_agent(self, agent_root, capsys):
+        cmd_add(["node", str(agent_root)])
+        rc = cmd_namespace(["node", "node"])
+        assert rc == 1
+        assert "agent already exists" in capsys.readouterr().err
+
+    def test_prefix_collides_with_alias(self, agent_root, capsys):
+        cmd_add(["node", str(agent_root)])
+        cmd_alias(["devs", "node"])
+        rc = cmd_namespace(["devs", "node"])
+        assert rc == 1
+        assert "alias already exists" in capsys.readouterr().err
+
+    def test_invalid_prefix_rejected(self, agent_root, capsys):
+        cmd_add(["node", str(agent_root)])
+        rc = cmd_namespace(["s1l:x", "node"])
+        assert rc == 2
+
+    def test_show_one(self, agent_root, capsys):
+        cmd_add(["node", str(agent_root)])
+        cmd_namespace(["s1l", "node"])
+        capsys.readouterr()
+        rc = cmd_namespace(["s1l"])
+        assert rc == 0
+        assert "s1l: -> node" in capsys.readouterr().out
+
+    def test_show_unknown(self, fake_home, capsys):
+        rc = cmd_namespace(["ghost"])
+        assert rc == 1
+        assert "no namespace named" in capsys.readouterr().err
+
+    def test_list(self, agent_root, capsys):
+        cmd_add(["node", str(agent_root)])
+        cmd_namespace(["s1l", "node"])
+        capsys.readouterr()
+        rc = cmd_namespaces()
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "s1l" in out
+        assert "node" in out
+
+    def test_list_flags_dangling_binding(self, fake_home, capsys):
+        save_namespaces({"s1l": "gone"})
+        rc = cmd_namespaces()
+        assert rc == 0
+        assert "unknown agent" in capsys.readouterr().out
+
+
+class TestCmdUnnamespace:
+    def test_remove_case_insensitive(self, agent_root):
+        cmd_add(["node", str(agent_root)])
+        cmd_namespace(["s1l", "node"])
+        rc = cmd_unnamespace(["S1L"])
+        assert rc == 0
+        assert load_namespaces() == {}
+
+    def test_unknown(self, fake_home, capsys):
+        rc = cmd_unnamespace(["ghost"])
+        assert rc == 1
+        assert "no namespace named" in capsys.readouterr().err
+
+    def test_usage(self, fake_home, capsys):
+        assert cmd_unnamespace([]) == 2
+
+
+class TestNamespaceCollisionsElsewhere:
+    """Disjointness is enforced in both directions: `a8s add` / `a8s alias`
+    refuse names already bound as prefixes, and removing an agent unbinds
+    its prefixes (no orphans)."""
+
+    def test_add_rejects_existing_namespace_prefix(self, fake_home, tmp_path, capsys):
+        node = tmp_path / "node"
+        node.mkdir()
+        cmd_add(["node", str(node)])
+        cmd_namespace(["s1l", "node"])
+        other = tmp_path / "other"
+        other.mkdir()
+        rc = cmd_add(["s1l", str(other)])
+        assert rc == 1
+        assert "namespace already exists" in capsys.readouterr().err
+        assert "s1l" not in load_registry()
+
+    def test_alias_rejects_existing_namespace_prefix(self, fake_home, tmp_path, capsys):
+        node = tmp_path / "node"
+        node.mkdir()
+        cmd_add(["node", str(node)])
+        cmd_namespace(["s1l", "node"])
+        rc = cmd_alias(["s1l", "node"])
+        assert rc == 1
+        assert "namespace already exists" in capsys.readouterr().err
+        assert load_aliases() == {}
+
+    def test_remove_unbinds_namespaces(self, fake_home, tmp_path, capsys):
+        node = tmp_path / "node"
+        node.mkdir()
+        cmd_add(["node", str(node)])
+        cmd_namespace(["s1l", "node"])
+        rc = cmd_remove(["node"])
+        assert rc == 0
+        assert "unbound namespaces: s1l" in capsys.readouterr().out
+        assert load_namespaces() == {}
 
 
 class TestCmdRemove:
@@ -455,6 +597,61 @@ class TestCmdTellRemoteRecipient:
         msg = _json.loads(outbox_files[0].read_text())
         assert msg["to"] == "GHOST"
         assert msg["content"] == "hi from sender"
+
+
+class TestCmdTellNamespace:
+    """Issue #148 — colon recipients validate against the namespaces map,
+    with the same remote fallback as unknown agents (the binding may live
+    on another cluster)."""
+
+    def _setup_sender(self, fake_home, tmp_path, monkeypatch):
+        sender_root = tmp_path / "sender"
+        sender_root.mkdir()
+        (sender_root / ".outbox").mkdir()
+        node_root = tmp_path / "node"
+        node_root.mkdir()
+        save_registry({
+            "sender": {"root": str(sender_root)},
+            "node": {"root": str(node_root)},
+        })
+        ensure_mailboxes(Participant("sender", sender_root))
+        monkeypatch.chdir(sender_root)
+        monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(sender_root / ".outbox"))
+        return sender_root
+
+    def test_bound_prefix_accepted_to_canonicalizes_prefix_only(self, fake_home, tmp_path, monkeypatch):
+        import json as _json
+        sender_root = self._setup_sender(fake_home, tmp_path, monkeypatch)
+        save_namespaces({"s1l": "node"})
+        rc = cmd_tell(["S1L:Team:Phil", "hi"])
+        assert rc == 0
+        outbox_files = list(outbox_dir(sender_root).iterdir())
+        assert len(outbox_files) == 1
+        msg = _json.loads(outbox_files[0].read_text())
+        # The prefix canonicalizes like any name; the sub-address is verbatim.
+        assert msg["to"] == "s1l:Team:Phil"
+
+    def test_unknown_prefix_with_no_remotes_rejected(self, fake_home, tmp_path, monkeypatch, capsys):
+        self._setup_sender(fake_home, tmp_path, monkeypatch)
+        rc = cmd_tell(["ghost:phil", "hi"])
+        assert rc == 1
+        assert "no namespace bound for" in capsys.readouterr().err
+
+    def test_unknown_prefix_with_remotes_accepted(self, fake_home, tmp_path, monkeypatch):
+        import json as _json
+        sender_root = self._setup_sender(fake_home, tmp_path, monkeypatch)
+        save_network_config({"remotes": {"hub": {"transport": "mqtt", "broker": "mqtt://x", "topic": "t"}}})
+        rc = cmd_tell(["ghost:phil", "hi"])
+        assert rc == 0
+        msg = _json.loads(next(outbox_dir(sender_root).iterdir()).read_text())
+        assert msg["to"] == "ghost:phil"
+
+    def test_empty_sub_address_rejected(self, fake_home, tmp_path, monkeypatch, capsys):
+        self._setup_sender(fake_home, tmp_path, monkeypatch)
+        save_namespaces({"s1l": "node"})
+        rc = cmd_tell(["s1l:", "hi"])
+        assert rc == 1
+        assert "empty sub-address" in capsys.readouterr().err
 
 
 # ---------- storage services (issue #90) ----------

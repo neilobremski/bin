@@ -27,7 +27,7 @@ flowchart LR
 
     subgraph H["~/.a8s/  <i>(a8s-managed state)</i>"]
         direction TB
-        reg["a8s.json<br/><i>registry — agents + aliases</i>"]
+        reg["a8s.json<br/><i>registry — agents + aliases + namespaces</i>"]
         slog["log.txt<br/><i>process-scoped supervisor log</i>"]
         subgraph AG["agents/<NAME>/"]
             direction TB
@@ -50,7 +50,7 @@ flowchart LR
 
 Three concepts:
 
-- **Registry** (`~/.a8s/a8s.json`) — the list of agents and aliases. Agents have a name, a directory, and a *definition* (a JSON file describing how to wake them). Optional `safe_dirs` remains in the schema but is unused for attachment routing: tell stages files into `<root>/.files/` and envelopes reference filename only.
+- **Registry** (`~/.a8s/a8s.json`) — the list of agents, aliases, and namespace prefixes. Agents have a name, a directory, and a *definition* (a JSON file describing how to wake them). Optional `safe_dirs` remains in the schema but is unused for attachment routing: tell stages files into `<root>/.files/` and envelopes reference filename only.
 - **Handlers** — a process that holds the attachment for one or more agents. Pid file at `~/.a8s/agents/<NAME>/pid`. One agent is handled by exactly one process at a time, but one process can handle many agents (typically by attaching to an alias).
 - **Mailboxes** — agents write to `<agent-root>/.outbox/`; routing copies into `~/.a8s/agents/<RECIPIENT>/inbox/`; the handler drains the inbox by waking the agent's CLI. Routing is process-agnostic — only waking requires the handler attachment.
 
@@ -117,6 +117,43 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 | `a8s unalias <alias> [<member>]` | Remove a single member, or the whole alias.                                          |
 | `a8s aliases`                    | List every alias and its resolved members.                                           |
 
+
+### Namespaces
+
+
+|                                  |                                                              |
+| -------------------------------- | ------------------------------------------------------------ |
+| `a8s namespace <prefix> <agent>` | Bind an address prefix to one agent. Rebinding overwrites.   |
+| `a8s unnamespace <prefix>`       | Remove a namespace binding.                                  |
+| `a8s namespaces`                 | List every namespace prefix and its bound agent.             |
+
+
+A namespace binds an address **prefix** to a single node agent. Any recipient
+of the form `<prefix>:<sub-address>` routes to that one agent — single
+delivery by design, the opposite of alias fan-out, which is why the bind
+target must be an agent, not an alias. The address splits on the FIRST colon
+and everything after it is opaque to a8s (`s1l:team:phil` still routes on
+prefix `s1l`); the sub-address must be non-empty (`s1l:` is malformed). The
+full recipient string is preserved in the delivered message's `to`, so the
+node's `$RECIPIENT` carries it verbatim and the node can self-route
+internally.
+
+```bash
+# One registered node agent owns every s1l:*-style address.
+# (The registration binds the prefix — wildcards are not address syntax.)
+a8s add s1l-node ~/projects/s1l-hall
+a8s namespace s1l s1l-node
+
+tell s1l:phil "lunch at noon?"      # delivered to s1l-node with to = "s1l:phil"
+tell s1l:team:ops "deploy done"     # same node; sub-address opaque to a8s
+```
+
+Prefixes share the agent/alias name grammar (lowercase canonical form,
+case-insensitive match) and the three name pools are disjoint — a prefix
+can't collide with an agent or alias name and vice versa. An unknown prefix
+behaves like any unknown recipient: published to configured remotes (another
+cluster may own the binding), or trashed when there are none. Removing an
+agent unbinds any prefixes pointing at it.
 
 ### Handlers
 
@@ -311,7 +348,7 @@ The state root is `$HOME/.a8s` by default; set `A8S_HOME` to relocate it. This i
 
 ```
 ~/.a8s/                       (or wherever A8S_HOME points)
-├── a8s.json                  registry: { agents: {...}, aliases: {...} }
+├── a8s.json                  registry: { agents: {...}, aliases: {...}, namespaces: {...} }
 ├── settings.json             operator settings (`a8s config`; env fills gaps)
 ├── network.json              configured remotes (absent → local-only)
 ├── seen-ids                  cluster-wide ULID ring for receive-side dedup
@@ -393,7 +430,7 @@ a8s add my-email /mnt/gdrive/my-email/ file-proxy.json
 apps/a8s/
 ├── a8s.py            entry shim (~30 lines)
 ├── core.py           paths, logging, Participant, helpers, MARKER_FILES
-├── registry.py       ~/.a8s/a8s.json I/O + alias resolution + sender_from_cwd
+├── registry.py       ~/.a8s/a8s.json I/O + alias/namespace resolution + sender_from_cwd
 ├── mailbox.py        ensure_mailboxes, route_outboxes (ingest+process), queue helpers
 ├── definitions.py    invoke* verbs, prompt formatting, definition loading
 ├── daemon.py         wake subprocess, pid attachment, signal handling

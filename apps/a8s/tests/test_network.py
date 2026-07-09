@@ -30,7 +30,7 @@ from network import (
     start_remotes,
     stop_remotes,
 )
-from registry import save_aliases, save_registry
+from registry import save_aliases, save_namespaces, save_registry
 from transports import Transport, TransportError
 from ulid import new as new_ulid
 
@@ -274,6 +274,44 @@ class TestReceiveEnvelope:
         # remotely so isn't in our local registry anyway).
         assert len(list(inbox_dir("A").iterdir())) == 1
         assert len(list(inbox_dir("B").iterdir())) == 1
+
+    def test_namespace_recipient_delivered_to_bound_node(self, two_local_agents):
+        # Issue #148: the receive-side filter resolves colon addresses via
+        # the local namespaces map — this is how a cross-cluster tell to
+        # `s1l:phil` lands on the cluster that owns the `s1l` prefix.
+        save_namespaces({"s1l": "B"})
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "REMOTE_X", "to": "s1l:phil",
+            "content": "cross-cluster prefix", "files": [],
+        }).encode()
+        receive_envelope(envelope, two_local_agents)
+        files = list(inbox_dir("B").iterdir())
+        assert len(files) == 1
+        body = json.loads(files[0].read_text())
+        assert body["to"] == "s1l:phil"
+        d = inbox_dir("A")
+        assert not d.exists() or list(d.iterdir()) == []
+
+    def test_unbound_prefix_dropped_silently(self, two_local_agents):
+        envelope = json.dumps({
+            "id": new_ulid(), "from": "X", "to": "ghost:phil",
+            "content": "not ours", "files": [],
+        }).encode()
+        receive_envelope(envelope, two_local_agents)
+        for n in ("A", "B"):
+            d = inbox_dir(n)
+            assert not d.exists() or list(d.iterdir()) == []
+
+    def test_malformed_namespace_address_dropped_silently(self, two_local_agents):
+        save_namespaces({"s1l": "B"})
+        envelope = json.dumps({
+            "id": new_ulid(), "from": "X", "to": "s1l:",
+            "content": "malformed", "files": [],
+        }).encode()
+        receive_envelope(envelope, two_local_agents)
+        d = inbox_dir("B")
+        assert not d.exists() or list(d.iterdir()) == []
 
     def test_files_stripped(self, two_local_agents):
         msg_id = new_ulid()
