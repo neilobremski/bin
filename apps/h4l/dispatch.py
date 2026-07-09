@@ -119,6 +119,17 @@ def dispatch_slash(
         return 1
 
 
+def _parse_leading_mentions(tokens: list[str]) -> tuple[list[str], str]:
+    mentions: list[str] = []
+    i = 0
+    while i < len(tokens) and tokens[i].startswith("@"):
+        name = tokens[i][1:].strip()
+        if name:
+            mentions.append(normalize_agent(name))
+        i += 1
+    return mentions, " ".join(tokens[i:]).strip()
+
+
 def _dispatch_hash_post(
     store: RoomStore,
     sender: str,
@@ -126,8 +137,8 @@ def _dispatch_hash_post(
     body: str,
     tell_fn: TellFn,
 ) -> int:
-    parts = body.split(None, 1)
-    if len(parts) < 2 or not parts[1].strip():
+    tokens = body.split()
+    if len(tokens) < 2:
         error(
             tell_fn,
             sender,
@@ -137,11 +148,21 @@ def _dispatch_hash_post(
         )
         return 1
     try:
-        slug = normalize_slug(parts[0])
+        slug = normalize_slug(tokens[0])
     except ValueError as exc:
         error(tell_fn, sender, node, str(exc), hint="#<room> <message>")
         return 1
-    return _do_post(store, sender, node, slug, parts[1].strip(), tell_fn)
+    mentions, content = _parse_leading_mentions(tokens[1:])
+    if not content:
+        error(
+            tell_fn,
+            sender,
+            node,
+            "#<room> requires a message",
+            hint="#<room> [@agent...] <message>",
+        )
+        return 1
+    return _do_post(store, sender, node, slug, content, tell_fn, mentions=mentions)
 
 
 def _cmd_post(
@@ -161,17 +182,17 @@ def _cmd_post(
         )
         return 1
     slug = normalize_slug(args[0])
-    content = " ".join(args[1:]).strip()
+    mentions, content = _parse_leading_mentions(args[1:])
     if not content:
         error(
             tell_fn,
             sender,
             node,
             "/post requires <room> and <message>",
-            hint="#<room> <message>",
+            hint="#<room> [@agent...] <message>",
         )
         return 1
-    return _do_post(store, sender, node, slug, content, tell_fn)
+    return _do_post(store, sender, node, slug, content, tell_fn, mentions=mentions)
 
 
 def _do_post(
@@ -181,10 +202,16 @@ def _do_post(
     slug: str,
     content: str,
     tell_fn: TellFn,
+    *,
+    mentions: list[str] | None = None,
 ) -> int:
     meta = store.ensure_room(slug)
     if not store.has_member(meta, sender):
         meta, _ = store.add_member(meta, sender)
+    sender_key = sender.lower()
+    for agent in mentions or []:
+        if agent.lower() != sender_key:
+            meta, _ = store.add_member(meta, agent)
     meta = store.touch_activity(slug, meta)
     store.save_meta(slug, meta)
 

@@ -160,6 +160,57 @@ class TestPost:
         meta = store.load_meta("war")
         assert store.has_seen_help(meta, "BOB")
 
+    def test_at_mention_invites_and_posts_once(self, store, tells):
+        sent, tell_fn = tells
+        dispatch_slash(
+            store,
+            sender="ALICE",
+            node="CHATROOM",
+            message="#everyone @knobert I'm testing out chat rooms.",
+            tell_fn=tell_fn,
+        )
+        meta = store.load_meta("everyone")
+        assert "knobert" in {m.lower() for m in store.member_names(meta)}
+        messages = store.list_messages("everyone")
+        assert len(messages) == 1
+        assert messages[0]["content"] == "I'm testing out chat rooms."
+        assert "@knobert" not in messages[0]["content"]
+        knobert_msgs = [b for a, b in sent if a.lower() == "knobert"]
+        assert len(knobert_msgs) == 1
+        assert "I'm testing out chat rooms." in knobert_msgs[0]
+        assert "posted in #everyone" in knobert_msgs[0]
+        assert "invited" not in knobert_msgs[0]
+
+    def test_multiple_at_mentions(self, store, tells):
+        sent, tell_fn = tells
+        dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message="#war @bob @carol hello team",
+            tell_fn=tell_fn,
+        )
+        meta = store.load_meta("war")
+        members = {m.upper() for m in store.member_names(meta)}
+        assert members >= {"ALICE", "BOB", "CAROL"}
+        assert store.list_messages("war")[0]["content"] == "hello team"
+        assert len([b for a, b in sent if a.upper() == "BOB"]) == 1
+        assert len([b for a, b in sent if a.upper() == "CAROL"]) == 1
+
+    def test_at_mention_only_at_message_start(self, store, tells):
+        sent, tell_fn = tells
+        dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message="#war ping @bob later",
+            tell_fn=tell_fn,
+        )
+        meta = store.load_meta("war")
+        assert "BOB" not in {m.upper() for m in store.member_names(meta)}
+        assert store.list_messages("war")[0]["content"] == "ping @bob later"
+        assert not [b for a, b in sent if a == "BOB"]
+
 
 class TestInvite:
     def test_invite_adds_and_notifies(self, store, tells):
