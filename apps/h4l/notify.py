@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -8,6 +9,7 @@ from typing import TypeAlias
 TellFn: TypeAlias = Callable[[str, str], None]
 
 MAX_NOTIFY_CHARS = 1000
+SIMULATE_ENV = "H4L_SIMULATE_TELL"
 
 
 def default_tell(agent: str, body: str) -> None:
@@ -15,6 +17,31 @@ def default_tell(agent: str, body: str) -> None:
         ["tell", agent, body],
         check=False,
     )
+
+
+def simulate_tell(agent: str, body: str) -> None:
+    print(f"h4l> tell {agent}:", file=sys.stderr)
+    for line in body.splitlines():
+        print(f"h4l>   {line}", file=sys.stderr)
+
+
+def noop_tell(_agent: str, _body: str) -> None:
+    return None
+
+
+def resolve_tell_fn(*, notify: bool, simulate: bool) -> TellFn:
+    if simulate:
+        return simulate_tell
+    if notify:
+        return default_tell
+    return noop_tell
+
+
+def simulate_enabled(flag: bool) -> bool:
+    if flag:
+        return True
+    raw = os.environ.get(SIMULATE_ENV, "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 def truncate(text: str, limit: int = MAX_NOTIFY_CHARS) -> str:

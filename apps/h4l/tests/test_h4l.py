@@ -129,6 +129,43 @@ class TestErrors:
         assert sent == [("ALICE", "h4l error: commands must start with / (e.g. /post war hello)")]
 
 
+class TestSimulateTell:
+    def test_simulate_prints_tell_to_stderr(self, tmp_path, capsys):
+        rc = h4l_main([
+            "dispatch",
+            "--root",
+            str(tmp_path),
+            "--from",
+            "ALICE",
+            "--node",
+            "HALL",
+            "--simulate-tell",
+            "--message",
+            "/post war hello",
+        ])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "posted to #war" in captured.out
+        assert "h4l> tell ALICE:" in captured.err
+        assert "posted to #war" in captured.err
+
+    def test_simulate_env_enables_mode(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setenv("H4L_SIMULATE_TELL", "1")
+        rc = h4l_main([
+            "dispatch",
+            "--root",
+            str(tmp_path),
+            "--from",
+            "ALICE",
+            "--node",
+            "HALL",
+            "--message",
+            "/list",
+        ])
+        assert rc == 0
+        assert "h4l> tell ALICE:" in capsys.readouterr().err
+
+
 class TestClear:
     def test_clear_older_than(self, store, tmp_path):
         store.ensure_room("old")

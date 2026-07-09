@@ -20,7 +20,16 @@ h4l clear --root ~/chat-node --older-than 3600
 
 State: `~/chat-node/.chatrooms/rooms/<slug>/`.
 
-Notifications call `tell` on PATH (skip with `--no-notify` for tests).
+Notifications call `tell` on PATH. For local testing without outbox setup:
+
+```bash
+h4l dispatch --root ~/chat-node --from ALICE --node HALL \
+  --simulate-tell --message '/post war hello'
+# or: H4L_SIMULATE_TELL=1 h4l dispatch ...
+```
+
+Simulated tells print to stderr as `h4l> tell <agent>:` lines. Use `--no-notify`
+to silence tell entirely (pytest).
 
 ## a8s wiring
 

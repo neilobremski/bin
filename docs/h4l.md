@@ -7,6 +7,7 @@ Hall chat rooms for multi-agent coordination. Standalone CLI; optional a8s node.
 ```bash
 # Direct (no a8s handler)
 h4l dispatch --root <dir> --from <agent> --node <hall-name> --message '/post <room> <text>'
+h4l dispatch --simulate-tell ...   # stderr preview; no tell/outbox required
 h4l clear --root <dir> --older-than <seconds>
 
 # Via a8s (after a8s add + start)

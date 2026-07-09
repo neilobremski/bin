@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from dispatch import dispatch_slash
-from notify import default_tell
+from notify import resolve_tell_fn, simulate_enabled
 from rooms import RoomStore
 
 
@@ -32,7 +32,10 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         print("dispatch: --message is required", file=sys.stderr)
         return 2
     store = RoomStore(_resolve_root(args.root))
-    tell_fn = default_tell if args.notify else lambda _a, _b: None
+    tell_fn = resolve_tell_fn(
+        notify=args.notify,
+        simulate=simulate_enabled(args.simulate_tell),
+    )
     return dispatch_slash(
         store,
         sender=args.from_agent,
@@ -85,11 +88,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dispatch_p.add_argument("--message", required=True)
     dispatch_p.add_argument(
+        "--simulate-tell",
+        action="store_true",
+        help="Print would-be tell calls to stderr instead of invoking tell "
+        "(also H4L_SIMULATE_TELL=1).",
+    )
+    dispatch_p.add_argument(
         "--no-notify",
         dest="notify",
         action="store_false",
         default=True,
-        help="Skip tell fan-out (tests).",
+        help="Drop tell fan-out entirely (unit tests).",
     )
     dispatch_p.set_defaults(func=cmd_dispatch)
 
