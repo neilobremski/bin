@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from notify import TellFn, ack, error, footer, notify_members
+from format import format_room_view, parse_view_args
+from notify import TellFn, ack, error, footer, notify_members, usage_help
+
+_CMD_ALIASES = {
+    "part": "leave",
+    "names": "members",
+}
 from rooms import RoomStore, normalize_agent, normalize_slug
 
 
@@ -37,22 +43,6 @@ def _format_members(store: RoomStore, slug: str) -> str:
     return f"#{slug}: {', '.join(members)}"
 
 
-def _format_view(store: RoomStore, slug: str) -> str:
-    meta = store.load_meta(slug)
-    messages = store.list_messages(slug)
-    lines = [f"#{slug} ({len(messages)} message(s))"]
-    for msg in messages:
-        sender = msg.get("from", "?")
-        kind = msg.get("kind", "post")
-        content = str(msg.get("content", "")).replace("\n", " ")
-        msg_id = msg.get("id", "?")
-        lines.append(f"[{kind}] {sender} ({msg_id}): {content}")
-    members = store.member_names(meta)
-    if members:
-        lines.append(f"members: {', '.join(members)}")
-    return "\n".join(lines)
-
-
 def dispatch_slash(
     store: RoomStore,
     *,
@@ -63,12 +53,14 @@ def dispatch_slash(
 ) -> int:
     sender = normalize_agent(sender)
     body = message.strip()
+    if body.startswith("#"):
+        return _dispatch_hash_post(store, sender, node, body, tell_fn)
     if not body.startswith("/"):
         error(
             tell_fn,
             sender,
             node,
-            "commands must start with /",
+            "send #<room> <message> or a /command",
             show_commands=True,
         )
         return 1
@@ -84,7 +76,7 @@ def dispatch_slash(
         )
         return 1
 
-    cmd = parts[0].lower()
+    cmd = _CMD_ALIASES.get(parts[0].lower(), parts[0].lower())
     args = parts[1:]
 
     try:
@@ -102,11 +94,13 @@ def dispatch_slash(
             return _cmd_view(store, sender, node, args, tell_fn)
         if cmd == "members":
             return _cmd_members(store, sender, node, args, tell_fn)
+        if cmd == "help":
+            return _cmd_help(sender, node, tell_fn)
         error(
             tell_fn,
             sender,
             node,
-            f"unknown command /{cmd}",
+            f"unknown command /{parts[0].lower()}",
             show_commands=True,
         )
         return 1
@@ -125,6 +119,31 @@ def dispatch_slash(
         return 1
 
 
+def _dispatch_hash_post(
+    store: RoomStore,
+    sender: str,
+    node: str,
+    body: str,
+    tell_fn: TellFn,
+) -> int:
+    parts = body.split(None, 1)
+    if len(parts) < 2 or not parts[1].strip():
+        error(
+            tell_fn,
+            sender,
+            node,
+            "#<room> requires a message",
+            hint="#<room> <message>",
+        )
+        return 1
+    try:
+        slug = normalize_slug(parts[0])
+    except ValueError as exc:
+        error(tell_fn, sender, node, str(exc), hint="#<room> <message>")
+        return 1
+    return _do_post(store, sender, node, slug, parts[1].strip(), tell_fn)
+
+
 def _cmd_post(
     store: RoomStore,
     sender: str,
@@ -138,7 +157,7 @@ def _cmd_post(
             sender,
             node,
             "/post requires <room> and <message>",
-            hint="/post <room> <message>",
+            hint="#<room> <message>",
         )
         return 1
     slug = normalize_slug(args[0])
@@ -149,10 +168,20 @@ def _cmd_post(
             sender,
             node,
             "/post requires <room> and <message>",
-            hint="/post <room> <message>",
+            hint="#<room> <message>",
         )
         return 1
+    return _do_post(store, sender, node, slug, content, tell_fn)
 
+
+def _do_post(
+    store: RoomStore,
+    sender: str,
+    node: str,
+    slug: str,
+    content: str,
+    tell_fn: TellFn,
+) -> int:
     meta = store.ensure_room(slug)
     if not store.has_member(meta, sender):
         meta, _ = store.add_member(meta, sender)
@@ -294,6 +323,11 @@ def _cmd_list(store: RoomStore, sender: str, tell_fn: TellFn) -> int:
     return 0
 
 
+def _cmd_help(sender: str, node: str, tell_fn: TellFn) -> int:
+    ack(tell_fn, sender, usage_help(node))
+    return 0
+
+
 def _cmd_view(
     store: RoomStore,
     sender: str,
@@ -301,17 +335,48 @@ def _cmd_view(
     args: list[str],
     tell_fn: TellFn,
 ) -> int:
-    if len(args) != 1:
+    try:
+        slug, limit, before_id, start_n = parse_view_args(args)
+    except ValueError as exc:
         error(
             tell_fn,
             sender,
             node,
-            "/view requires <room>",
-            hint="/view <room>",
+            str(exc),
+            hint="/view <room> [[start] limit] [--start N] [--limit N] [--before <id>]",
         )
         return 1
-    slug = normalize_slug(args[0])
-    text = _format_view(store, slug)
+    try:
+        store.load_meta(slug)
+    except KeyError:
+        error(
+            tell_fn,
+            sender,
+            node,
+            f"room not found: {slug}",
+            hint="/list",
+        )
+        return 1
+    messages = store.list_messages(slug)
+    try:
+        text = format_room_view(
+            slug,
+            messages,
+            sender,
+            limit=limit,
+            before_id=before_id,
+            start_n=start_n,
+            node=node,
+        )
+    except KeyError:
+        error(
+            tell_fn,
+            sender,
+            node,
+            f"message id not found in #{slug}",
+            hint="/view <room> [--limit N]",
+        )
+        return 1
     ack(tell_fn, sender, text)
     return 0
 

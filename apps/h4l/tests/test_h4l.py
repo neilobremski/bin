@@ -26,6 +26,10 @@ class TestSlug:
     def test_normalizes_case(self):
         assert normalize_slug("War") == "war"
 
+    def test_strips_hash_prefix(self):
+        assert normalize_slug("#war") == "war"
+        assert normalize_slug("  #War  ") == "war"
+
     def test_rejects_empty(self):
         with pytest.raises(ValueError):
             normalize_slug("")
@@ -54,6 +58,68 @@ class TestPost:
         acks = [b for a, b in sent if a == "ALICE"]
         assert any("posted to #war" in b for b in acks)
         assert not any(a == "ALICE" and "hello everyone" in b and "posted in" in b for a, b in sent)
+
+    def test_hash_prefix_room_same_as_plain(self, store, tells):
+        sent, tell_fn = tells
+        assert (
+            dispatch_slash(
+                store,
+                sender="ALICE",
+                node="HALL",
+                message="/post war first",
+                tell_fn=tell_fn,
+            )
+            == 0
+        )
+        assert (
+            dispatch_slash(
+                store,
+                sender="BOB",
+                node="HALL",
+                message="/post #war second",
+                tell_fn=tell_fn,
+            )
+            == 0
+        )
+        messages = store.list_messages("war")
+        assert len(messages) == 2
+        assert messages[0]["content"] == "first"
+        assert messages[1]["content"] == "second"
+
+    def test_irc_style_hash_post(self, store, tells):
+        sent, tell_fn = tells
+        rc = dispatch_slash(
+            store,
+            sender="ALICE",
+            node="CHATROOM",
+            message="#everyone hello",
+            tell_fn=tell_fn,
+        )
+        assert rc == 0
+        messages = store.list_messages("everyone")
+        assert len(messages) == 1
+        assert messages[0]["content"] == "hello"
+        acks = [b for a, b in sent if a == "ALICE"]
+        assert any("posted to #everyone" in b for b in acks)
+
+    def test_irc_style_matches_slash_post(self, store, tells):
+        sent, tell_fn = tells
+        dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message="#war irc hello",
+            tell_fn=tell_fn,
+        )
+        dispatch_slash(
+            store,
+            sender="BOB",
+            node="HALL",
+            message="/post war slash hello",
+            tell_fn=tell_fn,
+        )
+        messages = store.list_messages("war")
+        assert [m["content"] for m in messages] == ["irc hello", "slash hello"]
 
     def test_notifies_other_members(self, store, tells):
         sent, tell_fn = tells
@@ -94,7 +160,27 @@ class TestInvite:
         assert "BOB" in system[0]["content"] and "CAROL" in system[0]["content"]
 
 
-class TestList:
+class TestView:
+    def test_view_convo_markdown(self, store, tells):
+        sent, tell_fn = tells
+        store.ensure_room("war")
+        store.append_message("war", sender="ALICE", content="hello")
+        store.append_message("war", sender="BOB", content="hi back")
+        dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message="/view war",
+            tell_fn=tell_fn,
+        )
+        ack = [b for a, b in sent if a == "ALICE"][-1]
+        assert "## from ALICE to #war at" in ack
+        assert "hello" in ack
+        assert "### from BOB to #war at" in ack
+        assert "hi back" in ack
+        assert "viewed messages 1–2 of 2" in ack
+
+
     def test_lists_all_rooms_and_members(self, store, tells):
         sent, tell_fn = tells
         m1 = store.ensure_room("war")
@@ -129,10 +215,26 @@ class TestErrors:
         assert len(sent) == 1
         agent, body = sent[0]
         assert agent == "ALICE"
-        assert body.startswith("Error: commands must start with /")
+        assert body.startswith("Error: send #<room> <message> or a /command")
         assert "h4l" not in body.lower()
-        assert 'tell CHATROOM "/post <room> <message>"' in body
+        assert 'tell CHATROOM "#<room> <message>"' in body
         assert 'tell CHATROOM "/list"' in body
+
+    def test_help_outputs_usage(self, store, tells):
+        sent, tell_fn = tells
+        rc = dispatch_slash(
+            store,
+            sender="ALICE",
+            node="CHATROOM",
+            message="/help",
+            tell_fn=tell_fn,
+        )
+        assert rc == 0
+        ack = [b for a, b in sent if a == "ALICE"][-1]
+        assert "Post (IRC style):" in ack
+        assert 'tell CHATROOM "#<room> <message>"' in ack
+        assert 'tell CHATROOM "/help"' in ack
+        assert "Error:" not in ack
 
     def test_unknown_command_includes_usage(self, store, tells):
         sent, tell_fn = tells
@@ -147,6 +249,21 @@ class TestErrors:
         body = sent[0][1]
         assert "Error: unknown command /frobnicate" in body
         assert 'tell HALL "/join <room>"' in body
+
+    def test_part_alias_for_leave(self, store, tells):
+        sent, tell_fn = tells
+        meta = store.ensure_room("war")
+        meta, _ = store.add_member(meta, "ALICE")
+        store.save_meta("war", meta)
+        rc = dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message="/part war",
+            tell_fn=tell_fn,
+        )
+        assert rc == 0
+        assert any("left #war" in b for a, b in sent if a == "ALICE")
 
 
 class TestSimulateTell:

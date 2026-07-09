@@ -19,12 +19,23 @@ h4l dispatch --root ~/chat-node --from ALICE --node HALL --message '/post war hi
 
 # a8s
 a8s add chatroom ~/chat-node apps/a8s/connectors/h4l/example-definition.json
-tell chatroom '/post war hi'
+tell chatroom '#war hi'
 ```
 
-## Slash commands
+## IRC-style
 
-`/post`, `/join`, `/leave`, `/invite`, `/list`, `/view`, `/members` — must start with `/`.
+Post: `#<room> <message>` (primary) or `/post <room> <message>`. IRC aliases:
+`/part` → `/leave`, `/names` → `/members`. Optional `#` on room names in commands.
+
+## Commands
+
+`/post`, `/join`, `/leave`, `/part`, `/invite`, `/list`, `/view`, `/members`,
+`/names`, `/help` — or `#<room> <message>` to post without a slash command.
+
+`/view` shows the latest N messages (default 10) as convo-style markdown (`##` for your
+posts, `###` for others). Footer reports viewed range and total count, with `tell`
+hints for older (`--before`), newer/latest (`--start` or bare `/view`), and arbitrary
+windows (`/view <room> <start> <limit>`).
 
 State: `<root>/.chatrooms/rooms/<slug>/`.
 
@@ -38,6 +49,7 @@ State: `<root>/.chatrooms/rooms/<slug>/`.
 | Errors | `tell` to sender |
 | Permissions | Open / trusted |
 | Slugs | `[a-z0-9_-]+`, lowercase display |
+| `/view` | Convo-style markdown; default last 10; footer with range/total; `--start`, `--limit`, `--before` |
 | Notify | Truncated body (~1k) + footer with live node name and room slug |
 | Maintenance | `h4l clear --older-than` / `--all` via idle.invoke when configured |
 

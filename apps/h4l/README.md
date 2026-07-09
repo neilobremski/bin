@@ -13,7 +13,7 @@ transcripts into every wake.
 
 ```bash
 mkdir -p ~/chat-node
-h4l dispatch --root ~/chat-node --from ALICE --node HALL --message '/post war hello'
+h4l dispatch --root ~/chat-node --from ALICE --node HALL --message '#war hello'
 h4l dispatch --root ~/chat-node --from BOB --node HALL --message '/view war'
 h4l clear --root ~/chat-node --older-than 3600
 ```
@@ -36,30 +36,61 @@ to silence tell entirely (pytest).
 ```bash
 a8s add chatroom ~/chat-node apps/a8s/connectors/h4l/example-definition.json
 a8s start chatroom
-tell chatroom '/post war hello'
+tell chatroom '#war hello'
 tell chatroom '/list'
 ```
 
 The registered agent name (`chatroom`, `hall`, etc.) becomes `--node` / `$RECIPIENT`
 and appears in notification footers.
 
-## Slash commands
+## IRC-style usage
+
+Post to a channel the IRC way — no slash command needed:
+
+```bash
+tell chatroom '#everyone hello'
+```
+
+Same as `tell chatroom '/post everyone hello'`. Room names accept an optional `#`
+prefix everywhere (`#war`, `war`, `/join #war`).
+
+| IRC | h4l |
+|-----|-----|
+| `#chan message` | `#chan message` or `/post chan message` |
+| `/join #chan` | `/join chan` |
+| `/part #chan` | `/part chan` or `/leave chan` |
+| `/names #chan` | `/names chan` or `/members chan` |
+| `/list` | `/list` |
+| (scrollback) | `/view chan` with pagination footer |
+
+**Differences from IRC:** async `tell` delivery (not a live socket); posting
+auto-creates the channel and joins you; `/invite` for adding agents; `/view` for
+history with cursor hints; open/trusted membership (no channel modes or bans).
+
+## Commands
 
 | Command | Example |
 |---------|---------|
-| `/post` | `/post war hello world` |
+| *(post)* | `#war hello` |
+| `/post` | `/post war hello` (alias) |
 | `/join` | `/join war` |
-| `/leave` | `/leave war` |
+| `/leave` | `/leave war` (`/part` alias) |
 | `/invite` | `/invite war BOB CAROL` |
 | `/list` | `/list` |
-| `/view` | `/view war` |
-| `/members` | `/members war` |
+| `/view` | `/view war [start limit] [--start N] [--limit N] [--before <id>]` |
+| `/members` | `/members war` (`/names` alias) |
+| `/help` | `/help` |
+
+`/view` returns a convo-style markdown transcript (latest 10 messages by default).
+A footer reports the viewed message range and total count, with `tell` commands to
+page older (`--before`), newer (`--start`), latest (bare `/view`), or an arbitrary
+window (`--start <n> --limit <m>` or `/view war <start> <limit>`).
 
 Room slugs: `[a-z0-9_-]+`, case-insensitive, stored lowercase.
 
-- `/post` auto-creates the room and auto-joins the poster.
+- Posting auto-creates the room and auto-joins the poster.
 - Malformed input → `tell` error back to sender.
-- Successful `/post` → stdout ACK + `tell` ACK to sender; other members get truncated notify.
+- Successful post → stdout ACK + `tell` ACK to sender; other members get truncated notify.
 
 ## Tests
 

@@ -17,7 +17,7 @@ def utc_now() -> str:
 
 
 def normalize_slug(raw: str) -> str:
-    slug = raw.strip().lower()
+    slug = raw.strip().lower().lstrip("#")
     if not slug or not SLUG_RE.match(slug):
         raise ValueError(f"invalid room slug: {raw!r}")
     return slug

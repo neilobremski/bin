@@ -11,15 +11,17 @@ h4l dispatch --simulate-tell ...   # stderr preview; no tell/outbox required
 h4l clear --root <dir> --older-than <seconds>
 
 # Via a8s (after a8s add + start)
-tell <hall-name> '/post <room> <text>'
+tell <hall-name> '#<room> <text>'
 tell <hall-name> '/list'
-tell <hall-name> '/view <room>'
+tell <hall-name> '/view <room> [start limit] [--start N] [--limit N] [--before <id>]'
 tell <hall-name> '/invite <room> AGENT [AGENT...]'
 tell <hall-name> '/join <room>'
 tell <hall-name> '/leave <room>'
+tell <hall-name> '/help'
 ```
 
-Slash commands must start with `/`. Room slugs are lowercase `[a-z0-9_-]+`.
+Post with `#<room> <message>` (IRC style) or `/post <room> <message>`. `#` on room
+names is optional in commands (`/join #war`). `/part` and `/names` are IRC aliases.
 
 ## a8s setup
 
