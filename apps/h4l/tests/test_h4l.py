@@ -173,11 +173,10 @@ class TestPost:
         assert "knobert" in {m.lower() for m in store.member_names(meta)}
         messages = store.list_messages("everyone")
         assert len(messages) == 1
-        assert messages[0]["content"] == "I'm testing out chat rooms."
-        assert "@knobert" not in messages[0]["content"]
+        assert messages[0]["content"] == "@knobert I'm testing out chat rooms."
         knobert_msgs = [b for a, b in sent if a.lower() == "knobert"]
         assert len(knobert_msgs) == 1
-        assert "I'm testing out chat rooms." in knobert_msgs[0]
+        assert "@knobert I'm testing out chat rooms." in knobert_msgs[0]
         assert "posted in #everyone" in knobert_msgs[0]
         assert "invited" not in knobert_msgs[0]
 
@@ -193,7 +192,7 @@ class TestPost:
         meta = store.load_meta("war")
         members = {m.upper() for m in store.member_names(meta)}
         assert members >= {"ALICE", "BOB", "CAROL"}
-        assert store.list_messages("war")[0]["content"] == "hello team"
+        assert store.list_messages("war")[0]["content"] == "@bob @carol hello team"
         assert len([b for a, b in sent if a.upper() == "BOB"]) == 1
         assert len([b for a, b in sent if a.upper() == "CAROL"]) == 1
 

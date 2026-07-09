@@ -122,15 +122,15 @@ def dispatch_slash(
         return 1
 
 
-def _parse_leading_mentions(tokens: list[str]) -> tuple[list[str], str]:
+def _leading_mention_agents(tokens: list[str]) -> list[str]:
     mentions: list[str] = []
-    i = 0
-    while i < len(tokens) and tokens[i].startswith("@"):
-        name = tokens[i][1:].strip()
+    for token in tokens:
+        if not token.startswith("@"):
+            break
+        name = token[1:].strip()
         if name:
             mentions.append(normalize_agent(name))
-        i += 1
-    return mentions, " ".join(tokens[i:]).strip()
+    return mentions
 
 
 def _dispatch_hash_post(
@@ -155,7 +155,9 @@ def _dispatch_hash_post(
     except ValueError as exc:
         error(tell_fn, sender, node, str(exc), hint="#<room> <message>")
         return 1
-    mentions, content = _parse_leading_mentions(tokens[1:])
+    message_tokens = tokens[1:]
+    mentions = _leading_mention_agents(message_tokens)
+    content = " ".join(message_tokens).strip()
     if not content:
         error(
             tell_fn,
@@ -185,7 +187,9 @@ def _cmd_post(
         )
         return 1
     slug = normalize_slug(args[0])
-    mentions, content = _parse_leading_mentions(args[1:])
+    message_tokens = args[1:]
+    mentions = _leading_mention_agents(message_tokens)
+    content = " ".join(message_tokens).strip()
     if not content:
         error(
             tell_fn,
