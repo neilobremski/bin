@@ -10,6 +10,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   `install.sh` adds the dir to `$PATH` and links docs/skills.
 - **`apps/n0b/`** — Kitchen-sink CLI namespace (`n0b json`, `n0b az`, `n0b ai`, …).
   Docs in [`apps/n0b/docs/`](apps/n0b/docs/); index at [`apps/n0b/README.md`](apps/n0b/README.md).
+- **`apps/h4l/`** — Hall chat rooms (`h4l dispatch`, slash commands, `.chatrooms/` state).
+  See [`apps/h4l/README.md`](apps/h4l/README.md).
 - **`apps/a8s/`** — Agent Infinity System. Filesystem-based message router
   letting independent CLI agents (Claude, Gemini, Codex, scripts) talk to each
   other via `tell`. See [`apps/a8s/README.md`](apps/a8s/README.md) for concept

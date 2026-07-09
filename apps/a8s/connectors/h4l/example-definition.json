@@ -1,0 +1,28 @@
+{
+  "description": "Hall chat rooms (h4l). Send slash commands via tell, e.g. tell chatroom '/post war hello'. State under this agent root in .chatrooms/.",
+  "invoke": [
+    "python3",
+    "$A8S_DIR/../h4l/h4l.py",
+    "dispatch",
+    "--root",
+    ".",
+    "--from",
+    "$SENDER",
+    "--node",
+    "$RECIPIENT",
+    "--message",
+    "$MESSAGE"
+  ],
+  "idle": {
+    "timeout": 86400,
+    "invoke": [
+      "python3",
+      "$A8S_DIR/../h4l/h4l.py",
+      "clear",
+      "--root",
+      ".",
+      "--older-than",
+      "86400"
+    ]
+  }
+}
