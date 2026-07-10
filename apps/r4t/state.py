@@ -1,15 +1,19 @@
-"""Out-of-repo team state under ~/.r4t/teams/<node>/ (relocate with R4T_HOME).
+"""Out-of-repo team state under ~/.r4t/teams/<node>/ (relocate with R4T_HOME,
+mirroring how a8s honors A8S_HOME).
 
     teams/<node>/
     ├── agents/<name>/history.md   rolling conversation memory (messages only), ~8KB cap
     ├── agents/<name>/.lock        PID lockfile — one turn per agent at a time
-    ├── agents/<name>/.turn.json   in-flight turn: task/hop/sender + send quota;
+    ├── agents/<name>/.turn.json   in-flight turn: task/hop/sender;
     │                              a leftover file with no live lock = crashed turn
     ├── agents/<name>/meta.json    last inbound / last completed turn bookkeeping
-    ├── agents/<name>/shim/tell    per-turn tell shim (prepended to harness PATH)
+    ├── agents/<name>/staging/     per-turn $TELL_OUTBOX_DIR — envelopes the agent
+    │                              sent this turn, released by dispatch afterwards
     ├── tasks/<id>.json            task ledger (see tasks.py)
-    ├── tasks/<id>/parked/         messages parked on turn-budget exhaustion
-    ├── pending/                   messages parked on concurrency/throttle limits
+    ├── pending/                   messages deferred on concurrency/throttle limits
+    ├── dead-letter/               suppressed/cut/excess messages, x-death-style records
+    ├── suppression.json           content-keyed pair suppression window
+    ├── buckets.json               per-agent reply-privilege token buckets
     ├── active.json                idle-recovery watch list (agent → ttl)
     ├── rotation.json              per-tier round-robin index for harness pools
     ├── last-turn-start            cadence stamp for the team throttle
@@ -24,6 +28,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -124,10 +130,6 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-class LockHeld(Exception):
-    pass
-
-
 class AgentLock:
     def __init__(self, node: str, name: str) -> None:
         self.path = agent_dir(node, name) / ".lock"
@@ -213,7 +215,7 @@ def prune_stale_locks(node: str) -> int:
     return max(0, before - after)
 
 
-# ---------- pending (concurrency-parked messages) ----------
+# ---------- pending (concurrency/throttle-deferred messages) ----------
 
 def pending_dir(node: str) -> Path:
     return team_dir(node) / "pending"
@@ -283,7 +285,7 @@ def record_velocity(
         f.write(row + "\n")
 
 
-# ---------- per-turn state (tell shim + send quota) ----------
+# ---------- per-turn state (staging outbox + crash evidence) ----------
 
 def turn_path(node: str, name: str) -> Path:
     return agent_dir(node, name) / ".turn.json"
@@ -313,28 +315,158 @@ def clear_turn(node: str, name: str) -> None:
         pass
 
 
-def shim_dir(node: str, name: str) -> Path:
-    return agent_dir(node, name) / "shim"
+def staging_dir(node: str, name: str) -> Path:
+    return agent_dir(node, name) / "staging"
 
 
-def write_tell_shim(
-    node: str, name: str, python: str, r4t_py: Path, turn_file: Path
-) -> Path:
-    """Write an executable `tell` into the agent's shim dir; dispatch
-    prepends this dir to the harness subprocess PATH so every tell the
-    agent runs is intercepted by `r4t tell-proxy` (quota, task header,
-    conversation history) before reaching the real tell."""
-    d = shim_dir(node, name)
+def prepare_staging(node: str, name: str) -> Path:
+    """Fresh per-turn staging outbox. Dispatch points the harness
+    subprocess's $TELL_OUTBOX_DIR here, so the unmodified `tell` writes the
+    agent's envelopes into a dir only this turn owns — attribution for
+    free. Leftovers from a crashed turn are wiped, not released."""
+    d = staging_dir(node, name)
+    shutil.rmtree(d, ignore_errors=True)
     d.mkdir(parents=True, exist_ok=True)
-    script = d / "tell"
-    text = (
-        "#!/bin/sh\n"
-        f'exec "{python}" "{r4t_py}" tell-proxy'
-        f' --team "{node}" --agent "{name.lower()}" --turn "{turn_file}" -- "$@"\n'
-    )
-    _atomic_write_text(script, text)
-    os.chmod(script, 0o755)
     return d
+
+
+def staged_envelopes(node: str, name: str) -> list[Path]:
+    d = staging_dir(node, name)
+    if not d.is_dir():
+        return []
+    return sorted(f for f in d.iterdir() if f.is_file() and f.name.endswith(".json"))
+
+
+# ---------- dead letters ----------
+
+def dead_letter_dir(node: str) -> Path:
+    return team_dir(node) / "dead-letter"
+
+
+def record_dead_letter(
+    node: str,
+    *,
+    reason: str,
+    sender: str,
+    to: str,
+    task: str,
+    content: str,
+    count: int = 1,
+) -> Path:
+    record_id = new_ulid()
+    path = dead_letter_dir(node) / f"{record_id}.json"
+    atomic_write_json(
+        path,
+        {
+            "id": record_id,
+            "time": utc_now(),
+            "reason": reason,
+            "count": count,
+            "from": sender,
+            "to": to,
+            "task": task,
+            "content": content[:2000],
+        },
+    )
+    return path
+
+
+def list_dead_letters(node: str) -> list[dict]:
+    root = dead_letter_dir(node)
+    if not root.is_dir():
+        return []
+    out: list[dict] = []
+    for path in sorted(root.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict):
+            out.append(data)
+    return out
+
+
+# ---------- content-keyed pair suppression ----------
+
+def suppression_path(node: str) -> Path:
+    return team_dir(node) / "suppression.json"
+
+
+def suppression_check(node: str, key: str, window_seconds: float) -> tuple[bool, int]:
+    """Record `key` and report whether it repeated within the window.
+    Returns (suppressed, occurrence_count). Entries outside the window are
+    pruned on every call, so the store stays small."""
+    path = suppression_path(node)
+    data: dict = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, json.JSONDecodeError):
+            pass
+    now = time.time()
+    data = {
+        k: v
+        for k, v in data.items()
+        if isinstance(v, dict) and now - float(v.get("last", 0)) <= window_seconds
+    }
+    entry = data.get(key)
+    if entry is not None:
+        entry["count"] = int(entry.get("count", 1)) + 1
+        entry["last"] = now
+        atomic_write_json(path, data)
+        return True, entry["count"]
+    data[key] = {"count": 1, "first": now, "last": now}
+    atomic_write_json(path, data)
+    return False, 1
+
+
+# ---------- reply-privilege token buckets ----------
+
+def buckets_path(node: str) -> Path:
+    return team_dir(node) / "buckets.json"
+
+
+def read_buckets(node: str) -> dict:
+    path = buckets_path(node)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def bucket_level(node: str, name: str, bucket_max: float) -> float:
+    raw = read_buckets(node).get(name.lower())
+    try:
+        return min(float(raw), bucket_max)
+    except (TypeError, ValueError):
+        return bucket_max
+
+
+def _bucket_set(node: str, name: str, level: float) -> None:
+    data = read_buckets(node)
+    data[name.lower()] = round(level, 4)
+    atomic_write_json(buckets_path(node), data)
+
+
+def bucket_drain(node: str, name: str, amount: float, bucket_max: float) -> float:
+    level = max(0.0, bucket_level(node, name, bucket_max) - amount)
+    _bucket_set(node, name, level)
+    return level
+
+
+def bucket_earn(node: str, name: str, ratio: float, bucket_max: float) -> float:
+    level = min(bucket_max, bucket_level(node, name, bucket_max) + ratio)
+    _bucket_set(node, name, level)
+    return level
+
+
+def bucket_muted(level: float, bucket_max: float) -> bool:
+    return level < bucket_max / 2.0
 
 
 # ---------- per-agent meta (idle recovery bookkeeping) ----------

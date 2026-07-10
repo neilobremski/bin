@@ -5,17 +5,23 @@ config, which lives outside the repo (default `~/.r4t/harnesses.json`,
 overridable per-node with --harness-config), maps a tier to an actual argv.
 A tier missing from the config fails closed: the member does not run.
 
-Top-level keys are tier names, except these reserved keys:
+Top-level keys are tier names, except these reserved governance keys (all
+optional — every knob has a sane default; see README.md for the table):
 
 - `"pins"` — agent name → tier, silently overriding the roster's Harness
   line (an in-repo roster edit can't upgrade a pinned agent).
 - `"throttle"` — team-wide `max_concurrent` + `min_seconds_between_turn_starts`
   gates, enforced before any tier check.
-- `"active_ttl_rotations"` — how many idle passes an agent stays on the
-  active watch list after its last dispatch (default 3).
+- `"active_ttl_rotations"` — idle passes an agent stays on the crash-recovery
+  watch list after its last dispatch.
+- `"suppression_window_seconds"` — content-keyed pair suppression window.
+- `"bucket_max"` / `"bucket_earn_ratio"` — reply-privilege token bucket.
+- `"nudge_cap"` — idle nudges per agent per task before forced synthesis.
+- `"rebroadcast_senders"` — sender names whose inbound traffic is classed
+  bulk (h4l rooms etc.).
 
-Keys starting with `_` anywhere are ignored so the shipped example can
-carry comments.
+Keys starting with `_` anywhere are ignored so shipped examples can carry
+notes.
 """
 from __future__ import annotations
 
@@ -34,6 +40,13 @@ DEFAULT_MAX_TURNS_PER_TASK = 25
 DEFAULT_HOP_LIMIT = 4
 DEFAULT_MAX_SENDS_PER_TURN = 6
 DEFAULT_ACTIVE_TTL_ROTATIONS = 3
+DEFAULT_MAX_CONCURRENT = 1
+DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS = 15.0
+DEFAULT_SUPPRESSION_WINDOW_SECONDS = 600.0
+DEFAULT_BUCKET_MAX = 8.0
+DEFAULT_BUCKET_EARN_RATIO = 0.1
+DEFAULT_NUDGE_CAP = 2
+DEFAULT_REBROADCAST_SENDERS = ("chatroom",)
 
 
 class HarnessError(Exception):
@@ -46,8 +59,8 @@ class Throttle:
     live turns across ALL tiers (0 = unlimited); the cadence field spaces
     turn STARTS so a human can watch and intervene (0 = no gate)."""
 
-    max_concurrent: int = 0
-    min_seconds_between_turn_starts: float = 0.0
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT
+    min_seconds_between_turn_starts: float = DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS
 
 
 @dataclass
@@ -86,6 +99,11 @@ class HarnessConfig:
     pins: dict[str, str] = field(default_factory=dict)
     throttle: Throttle = field(default_factory=Throttle)
     active_ttl_rotations: int = DEFAULT_ACTIVE_TTL_ROTATIONS
+    suppression_window_seconds: float = DEFAULT_SUPPRESSION_WINDOW_SECONDS
+    bucket_max: float = DEFAULT_BUCKET_MAX
+    bucket_earn_ratio: float = DEFAULT_BUCKET_EARN_RATIO
+    nudge_cap: int = DEFAULT_NUDGE_CAP
+    rebroadcast_senders: tuple[str, ...] = DEFAULT_REBROADCAST_SENDERS
     missing: bool = False
 
     def tier_for(self, member: Member) -> tuple[Tier | None, str | None, bool]:
@@ -213,11 +231,15 @@ def _parse_throttle(raw: object) -> Throttle:
         raise HarnessError('"throttle" must be an object')
     return Throttle(
         max_concurrent=int(
-            _non_negative_number(raw.get("max_concurrent"), 0, "throttle.max_concurrent")
+            _non_negative_number(
+                raw.get("max_concurrent"),
+                DEFAULT_MAX_CONCURRENT,
+                "throttle.max_concurrent",
+            )
         ),
         min_seconds_between_turn_starts=_non_negative_number(
             raw.get("min_seconds_between_turn_starts"),
-            0.0,
+            DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS,
             "throttle.min_seconds_between_turn_starts",
         ),
     )
@@ -248,11 +270,42 @@ def load_harness_config(path: Path) -> HarnessConfig:
         if key == "throttle":
             config.throttle = _parse_throttle(value)
             continue
-        if key == "active_ttl_rotations":
-            ttl = _non_negative_number(value, DEFAULT_ACTIVE_TTL_ROTATIONS, key)
-            if ttl <= 0:
+        if key in ("active_ttl_rotations", "nudge_cap"):
+            n = _non_negative_number(value, 0, key)
+            if n <= 0:
                 raise HarnessError(f"{key} must be positive, got {value!r}")
-            config.active_ttl_rotations = int(ttl)
+            setattr(config, key, int(n))
+            continue
+        if key in ("suppression_window_seconds", "bucket_max", "bucket_earn_ratio"):
+            n = _non_negative_number(value, 0, key)
+            if n <= 0:
+                raise HarnessError(f"{key} must be positive, got {value!r}")
+            setattr(config, key, n)
+            continue
+        if key == "rebroadcast_senders":
+            if not isinstance(value, list) or not all(isinstance(s, str) for s in value):
+                raise HarnessError(f"{key} must be a list of sender names")
+            config.rebroadcast_senders = tuple(s.strip().lower() for s in value if s.strip())
             continue
         config.tiers[key.lower()] = _parse_tier(key, value)
     return config
+
+
+def default_config_payload() -> dict:
+    """The `r4t init` starter config: two symbolic tiers on the cheapest
+    common harness, plus notes for swapping in other CLIs. Every governance
+    knob is left to its default."""
+    return {
+        "_notes": [
+            "Generated by `r4t init`. Tier names are SYMBOLIC — the roster's",
+            "Harness lines reference them; only this out-of-repo file says what",
+            "actually runs. Swap invoke for your CLI, e.g.:",
+            '  ["claude", "--permission-mode", "dontAsk", "-p", "{prompt}"]',
+            '  ["agent", "-p", "--yolo", "{prompt}"]',
+            '  ["agy", "-p", "{prompt}"]',
+            "invoke may also be a LIST of argvs (a pool, rotated round-robin).",
+            "All governance knobs default sanely; see apps/r4t/README.md.",
+        ],
+        "leader": {"invoke": ["opencode", "run", "--auto", "{prompt}"]},
+        "member": {"invoke": ["opencode", "run", "--auto", "{prompt}"]},
+    }

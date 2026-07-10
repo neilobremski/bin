@@ -1,0 +1,17 @@
+{
+  "_notes": "Sandbox harness config (live mode). Limits are deliberately tight so a human can watch the run; `r4t sandbox --fake` swaps every invoke for the bundled fake-agent.py and drops the cadence gate.",
+  "throttle": {
+    "max_concurrent": 1,
+    "min_seconds_between_turn_starts": 5
+  },
+  "leader": {
+    "invoke": ["opencode", "run", "--auto", "{prompt}"],
+    "timeout_seconds": 300,
+    "max_turns_per_task": 15
+  },
+  "member": {
+    "invoke": ["opencode", "run", "--auto", "{prompt}"],
+    "timeout_seconds": 300,
+    "max_turns_per_task": 15
+  }
+}

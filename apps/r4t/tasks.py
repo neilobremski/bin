@@ -1,57 +1,74 @@
 """Task envelope + ledger — the governance core.
 
-Every message r4t can influence carries a machine-parsable header line:
+Every message r4t releases carries a machine-stamped header line:
 
-    [r4t task=<ulid> hop=<n>]
+    [r4t task=<ulid> hop=<n> auto]
 
-Incoming: parse + strip, adopt task/hop. Missing header (including on
-intra-namespace messages — defense in depth) → new task ULID, hop 0.
-Outgoing: agents are given the exact next-hop header verbatim and told to
-copy it at the start of every `tell` for the task.
+The header is stamped and stripped by r4t only — agents never see or copy
+it. Incoming: parse + strip, adopt task/hop. Missing header → new task
+ULID, hop 0. The `auto` flag is the message-class mark (RFC 3834's
+Auto-Submitted analog): a header WITHOUT it was written by a deliberate
+hand, which resets the task's turn budget (docs/governance.md §8).
 
 Turn budget is weighted by tier: each dispatch by a tier whose
 `max_turns_per_task` is M consumes 1/M of the task's budget (which starts
 at 1.0). A task run entirely by one tier therefore gets exactly
-`max_turns_per_task` turns; mixed-tier chains pro-rate. `task approve <id>
---turns N` extends the budget by N turns of the tier that hit the limit.
+`max_turns_per_task` turns; mixed-tier chains pro-rate. Exhaustion closes
+the task through one forced-synthesis leader turn — there is no human
+approval gate.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
-import shutil
 from pathlib import Path
 
 from state import atomic_write_json, team_dir, utc_now
 from ulid import new as new_ulid
-import json
 
 HEADER_RE = re.compile(
-    r"^\s*\[r4t\s+task=([0-9A-Za-z]{26})\s+hop=(\d+)\]\s*", re.IGNORECASE
+    r"^\s*\[r4t\s+task=([0-9A-Za-z]{26})\s+hop=(\d+)(\s+auto)?\]\s*",
+    re.IGNORECASE,
 )
 DEFAULT_BUDGET = 1.0
-DEFAULT_APPROVE_TURNS = 5
 _EPSILON = 1e-9
 
 STATUS_OPEN = "open"
-STATUS_PARKED = "parked"
+STATUS_CLOSED = "closed"
 
 
 def new_task_id() -> str:
     return new_ulid()
 
 
-def parse_header(message: str) -> tuple[str | None, int, str]:
-    """Return (task_id, hop, body-with-header-stripped)."""
+def parse_header(message: str) -> tuple[str | None, int, bool, str]:
+    """Return (task_id, hop, auto, body-with-header-stripped)."""
     match = HEADER_RE.match(message or "")
     if not match:
-        return None, 0, (message or "").strip()
+        return None, 0, False, (message or "").strip()
     task_id = match.group(1).upper()
     hop = int(match.group(2))
-    return task_id, hop, message[match.end():].strip()
+    auto = match.group(3) is not None
+    return task_id, hop, auto, message[match.end():].strip()
 
 
-def format_header(task_id: str, hop: int) -> str:
-    return f"[r4t task={task_id} hop={hop}]"
+def format_header(task_id: str, hop: int, *, auto: bool = False) -> str:
+    return f"[r4t task={task_id} hop={hop}{' auto' if auto else ''}]"
+
+
+def normalize_content(text: str) -> str:
+    """Suppression-key normalization: strip the r4t header, lowercase,
+    collapse whitespace."""
+    _, _, _, body = parse_header(text)
+    return " ".join(body.lower().split())
+
+
+def pair_key(sender: str, to: str, content: str, *, kind: str = "pair") -> str:
+    digest = hashlib.sha256(
+        f"{sender.strip().lower()}|{to.strip().lower()}|{normalize_content(content)}".encode()
+    ).hexdigest()[:16]
+    return f"{kind}:{digest}"
 
 
 # ---------- ledger ----------
@@ -62,10 +79,6 @@ def tasks_dir(node: str) -> Path:
 
 def task_path(node: str, task_id: str) -> Path:
     return tasks_dir(node) / f"{task_id}.json"
-
-
-def parked_dir(node: str, task_id: str) -> Path:
-    return tasks_dir(node) / task_id / "parked"
 
 
 def load_task(node: str, task_id: str) -> dict | None:
@@ -95,9 +108,9 @@ def new_task(task_id: str, creator: str) -> dict:
         "used": 0.0,
         "budget": DEFAULT_BUDGET,
         "turns": 0,
-        "parked_tier_max": None,
-        "park_notified": False,
         "cut_notified": False,
+        "synthesized": False,
+        "nudges": {},
     }
 
 
@@ -122,18 +135,18 @@ def charge_turn(task: dict, max_turns_per_task: int) -> bool:
     return True
 
 
-def approve(node: str, task_id: str, turns: int) -> dict:
-    task = load_task(node, task_id)
-    if task is None:
-        raise KeyError(task_id)
-    per_turn_max = int(task.get("parked_tier_max") or 0)
-    if per_turn_max <= 0:
-        per_turn_max = 25
-    task["budget"] = float(task.get("budget", DEFAULT_BUDGET)) + turns / per_turn_max
+def reset_budget(task: dict) -> bool:
+    """The deliberate-decision rule: a human-origin message in the chain
+    re-licenses the task. Returns True when anything actually changed."""
+    changed = (
+        float(task.get("used", 0.0)) > 0.0
+        or task.get("status") != STATUS_OPEN
+        or bool(task.get("synthesized"))
+    )
+    task["used"] = 0.0
     task["status"] = STATUS_OPEN
-    task["park_notified"] = False
-    save_task(node, task)
-    return task
+    task["synthesized"] = False
+    return changed
 
 
 def list_tasks(node: str) -> list[dict]:
@@ -148,33 +161,10 @@ def list_tasks(node: str) -> list[dict]:
     return out
 
 
-# ---------- parked messages (budget) ----------
-
-def park_message(node: str, task_id: str, envelope: dict) -> Path:
-    envelope = dict(envelope)
-    envelope.setdefault("id", new_ulid())
-    envelope.setdefault("queued_at", utc_now())
-    path = parked_dir(node, task_id) / f"{envelope['id']}.json"
-    atomic_write_json(path, envelope)
-    return path
-
-
-def parked_messages(node: str, task_id: str) -> list[Path]:
-    root = parked_dir(node, task_id)
-    if not root.is_dir():
-        return []
-    return sorted(f for f in root.iterdir() if f.is_file() and f.name.endswith(".json"))
-
-
-def parked_count(node: str, task_id: str) -> int:
-    return len(parked_messages(node, task_id))
-
-
 # ---------- expiry (idle maintenance) ----------
 
 def expire_tasks(node: str, older_than_seconds: float) -> list[str]:
-    """Delete task ledgers (and their parked messages) idle longer than
-    `older_than_seconds`. Returns the removed task ids."""
+    """Delete task ledgers idle longer than `older_than_seconds`."""
     from datetime import datetime, timezone
 
     cutoff = datetime.now(timezone.utc).timestamp() - older_than_seconds
@@ -187,11 +177,9 @@ def expire_tasks(node: str, older_than_seconds: float) -> list[str]:
             stamp = 0.0
         if stamp >= cutoff:
             continue
-        task_id = task["id"]
         try:
-            task_path(node, task_id).unlink()
+            task_path(node, task["id"]).unlink()
         except OSError:
             continue
-        shutil.rmtree(tasks_dir(node) / task_id, ignore_errors=True)
-        removed.append(task_id)
+        removed.append(task["id"])
     return removed

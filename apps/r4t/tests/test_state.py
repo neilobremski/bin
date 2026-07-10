@@ -1,19 +1,29 @@
 from __future__ import annotations
 
 import json
+import time
 
 import state
 from state import (
     AgentLock,
     append_history,
+    bucket_drain,
+    bucket_earn,
+    bucket_level,
+    bucket_muted,
     count_tier_locks,
     history_path,
+    list_dead_letters,
+    list_pending,
     live_locks,
     park_pending,
-    list_pending,
+    prepare_staging,
     prune_stale_locks,
     read_history,
+    record_dead_letter,
     record_velocity,
+    staged_envelopes,
+    suppression_check,
     team_dir,
 )
 
@@ -130,3 +140,85 @@ class TestVelocity:
         )
         lines = (team_dir(NODE) / "velocity.csv").read_text().splitlines()
         assert '"we,""ird"' in lines[1]
+
+
+class TestDeadLetters:
+    def test_record_and_list(self, r4t_home):
+        record_dead_letter(
+            NODE, reason="quota", sender="s1l:phil", to="gerry",
+            task="01ABC", content="too chatty",
+        )
+        record_dead_letter(
+            NODE, reason="pair-repeat", sender="s1l:phil", to="gerry",
+            task="01ABC", content="again", count=3,
+        )
+        records = list_dead_letters(NODE)
+        assert len(records) == 2
+        by_reason = {r["reason"]: r for r in records}
+        assert by_reason["quota"]["from"] == "s1l:phil"
+        assert by_reason["quota"]["count"] == 1
+        assert by_reason["pair-repeat"]["count"] == 3
+        assert all(r["time"] for r in records)
+
+    def test_content_capped(self, r4t_home):
+        record_dead_letter(
+            NODE, reason="quota", sender="a", to="b", task="t", content="x" * 5000,
+        )
+        assert len(list_dead_letters(NODE)[0]["content"]) == 2000
+
+
+class TestSuppression:
+    def test_first_passes_repeats_counted(self, r4t_home):
+        suppressed, count = suppression_check(NODE, "pair:abc", 600)
+        assert not suppressed and count == 1
+        suppressed, count = suppression_check(NODE, "pair:abc", 600)
+        assert suppressed and count == 2
+        suppressed, count = suppression_check(NODE, "pair:abc", 600)
+        assert suppressed and count == 3
+
+    def test_different_keys_independent(self, r4t_home):
+        assert suppression_check(NODE, "pair:one", 600) == (False, 1)
+        assert suppression_check(NODE, "pair:two", 600) == (False, 1)
+
+    def test_window_expiry(self, r4t_home):
+        assert suppression_check(NODE, "pair:x", 0.05) == (False, 1)
+        time.sleep(0.1)
+        assert suppression_check(NODE, "pair:x", 0.05) == (False, 1)
+
+
+class TestBuckets:
+    def test_starts_full(self, r4t_home):
+        assert bucket_level(NODE, "phil", 8.0) == 8.0
+
+    def test_drain_and_floor_at_zero(self, r4t_home):
+        assert bucket_drain(NODE, "phil", 3.0, 8.0) == 5.0
+        assert bucket_drain(NODE, "phil", 100.0, 8.0) == 0.0
+
+    def test_earn_caps_at_max(self, r4t_home):
+        bucket_drain(NODE, "phil", 1.0, 8.0)
+        assert bucket_earn(NODE, "phil", 0.1, 8.0) == 7.1
+        for _ in range(20):
+            bucket_earn(NODE, "phil", 0.1, 8.0)
+        assert bucket_level(NODE, "phil", 8.0) == 8.0
+
+    def test_muted_below_half(self):
+        assert not bucket_muted(4.0, 8.0)
+        assert bucket_muted(3.9, 8.0)
+
+
+class TestStaging:
+    def test_prepare_wipes_leftovers(self, r4t_home):
+        d = prepare_staging(NODE, "phil")
+        (d / "stale.json").write_text("{}", encoding="utf-8")
+        d2 = prepare_staging(NODE, "phil")
+        assert d2 == d
+        assert not list(d.iterdir())
+
+    def test_staged_envelopes_sorted_json_only(self, r4t_home):
+        d = prepare_staging(NODE, "phil")
+        (d / "002.json").write_text("{}", encoding="utf-8")
+        (d / "001.json").write_text("{}", encoding="utf-8")
+        (d / "ignore.txt").write_text("", encoding="utf-8")
+        (d / "001").mkdir()
+        names = [p.name for p in staged_envelopes(NODE, "phil")]
+        assert names == ["001.json", "002.json"]

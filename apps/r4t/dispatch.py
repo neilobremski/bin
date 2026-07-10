@@ -1,23 +1,30 @@
 """Dispatch — handle one delivered a8s message for a team node.
 
 Stateless per invocation: load state, govern, run one harness turn, exit.
-Replies happen through the agent's own `tell` calls made during its run
-(intercepted by the tell shim — see tellproxy.py); r4t only tells the
-sender on errors and governance blocks.
+The agent replies with the unmodified `tell` — dispatch points the harness
+subprocess's $TELL_OUTBOX_DIR at a per-turn staging dir and releases the
+staged envelopes afterwards: attribution (only this turn wrote there), the
+task/hop header stamped mechanically, send quota, class marking, pair
+suppression, then move into the node's real outbox (external) or the
+pending queue (intra-team, which a8s would drop as a self-send).
+
+Everything governs autonomously — no human gates. Suppressed, cut, and
+excess messages dead-letter with an audit record; budget exhaustion closes
+the task through one forced-synthesis leader turn. Mechanisms and prior
+art: docs/governance.md.
 
 Requeueing note: a8s trashes the inbox message BEFORE spawning the wake
 subprocess and only logs its exit code (daemon.wake_once), so exiting
-nonzero does NOT redeliver. Messages blocked on concurrency or the team
-throttle are therefore parked in the team's local pending/ dir and drained
-at the start of every dispatch and on every idle/clear pass.
+nonzero does NOT redeliver. Deferred messages (concurrency/throttle) park
+in the team's pending/ dir and drain on later dispatch and idle passes.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +37,13 @@ from roster import Member, Roster, RosterError, load_roster
 
 PROMPT_BODY_MAX = 4000
 HISTORY_BODY_MAX = 2000
-R4T_PY = Path(__file__).resolve().parent / "r4t.py"
+DRAIN_MAX_PASSES = 20
+
+RAN = "ran"
+DEFERRED = "deferred"
+DEAD = "dead-letter"
+SYNTHESIS = "synthesis"
+SKIPPED = "skipped"
 
 
 @dataclass
@@ -40,7 +53,6 @@ class DispatchContext:
     roster_path: Path
     config_path: Path
     tell_fn: TellFn
-    tell_mode: str = "real"  # real | simulate | drop (what the tell shim does)
 
 
 def split_recipient(to: str) -> tuple[str, str]:
@@ -53,9 +65,14 @@ def split_recipient(to: str) -> tuple[str, str]:
     return to, ""
 
 
+def _is_internal(node: str, to: str) -> bool:
+    t = (to or "").strip().lower()
+    return t == node.lower() or t.startswith(node.lower() + ":")
+
+
 def _tell_error(ctx: DispatchContext, recipient: str, text: str) -> None:
     body = f"[r4t {ctx.node}] {text}"
-    state.append_log(ctx.node, f"## {state.utc_now()} error -> {recipient}\n\n{body}")
+    state.append_log(ctx.node, f"r4t: ERROR -> {recipient}: {text}")
     ctx.tell_fn(recipient, body)
 
 
@@ -86,10 +103,10 @@ def _teammate_lines(ctx: DispatchContext, roster: Roster, member: Member) -> lis
             continue
         if m.is_human:
             reach = f"tell {m.address}" if m.address else "(no a8s address)"
-            lines.append(f"  - {m.name} (Human, {reach}) — {m.role}".rstrip(" —"))
+            lines.append(f"    - {m.name} (Human, {reach}) — {m.role}".rstrip(" —"))
         elif not m.errors:
             lines.append(
-                f"  - {m.name} (tell {ctx.node}:{m.name.lower()}) — {m.role}".rstrip(" —")
+                f"    - {m.name} (tell {ctx.node}:{m.name.lower()}) — {m.role}".rstrip(" —")
             )
     return lines
 
@@ -100,7 +117,6 @@ def build_prompt(
     member: Member,
     sender: str,
     body: str,
-    header: str,
 ) -> str:
     history = state.read_history(ctx.node, member.name)
     if len(body) > PROMPT_BODY_MAX:
@@ -121,19 +137,24 @@ def build_prompt(
         "",
         body or "(empty message)",
         "",
-        "## How to communicate",
-        f"- Reply to the sender with the `tell` shell command: tell {sender} \"<message>\"",
-        f"- Message a teammate: tell {ctx.node}:<name> \"<message>\". Teammates:",
-        *(teammates or ["  - (none)"]),
-        "- Group discussion belongs in the chatroom: tell chatroom '#<room> <message>'",
-        "- r4t stamps the task header on tells automatically. If you send a "
-        "message any other way, start it with this exact header line, copied "
-        "verbatim:",
-        f"  {header}",
+        "## How to work",
+        "- This is one turn: you were woken for the message above, and your "
+        "process ends when you finish. You will be woken again when replies "
+        "arrive.",
+        "- Never wait for a reply inside a turn. If you need work from "
+        "teammates, message them and END your turn without answering the "
+        "original request; when their replies wake you later, answer the "
+        "person who asked once you have enough.",
+        "- Send messages with the `tell` shell command (run it via your shell "
+        "tool — printing it as text sends nothing):",
+        f"    - reply to the sender: tell {sender} \"<message>\"",
+        f"    - a teammate: tell {ctx.node}:<name> \"<message>\". Teammates:",
+        *(teammates or ["    - (none)"]),
+        "    - group discussion: tell chatroom '#<room> <message>'",
+        "- Never use `tell --sync` with teammates — it blocks your turn "
+        "waiting for a reply that arrives by waking you instead.",
         "- Do not send acknowledgment-only messages. If you have nothing "
         "substantive to add, send nothing — silence is fine.",
-        "- `tell` is a shell command: invoke it via your shell tool; never just "
-        "print it as text.",
     ]
     return "\n".join(parts)
 
@@ -179,8 +200,6 @@ def run_harness(
 
 
 def _throttle_block(ctx: DispatchContext, config: HarnessConfig) -> str | None:
-    """Team-wide gates, checked before any tier logic. Returns a reason
-    string when the message must be parked."""
     throttle = config.throttle
     if throttle.max_concurrent > 0:
         live = len(state.live_locks(ctx.node))
@@ -202,8 +221,178 @@ def _throttle_block(ctx: DispatchContext, config: HarnessConfig) -> str | None:
     return None
 
 
+# ---------- staging release ----------
+
+def _real_outbox(ctx: DispatchContext) -> Path:
+    raw = os.environ.get("TELL_OUTBOX_DIR", "").strip()
+    if raw:
+        return Path(raw)
+    return ctx.root / ".outbox"
+
+
+def _release_one(
+    ctx: DispatchContext,
+    outbox: Path,
+    staging: Path,
+    envelope: dict,
+    stamped_content: str,
+    sender_addr: str,
+    task_id: str,
+    next_hop: int,
+    body: str,
+) -> None:
+    to = str(envelope.get("to", "")).strip()
+    if _is_internal(ctx.node, to):
+        state.park_pending(
+            ctx.node,
+            {
+                "from": sender_addr,
+                "to": to,
+                "task": task_id,
+                "hop": next_hop,
+                "auto": True,
+                "body": body,
+            },
+        )
+        bundle = staging / str(envelope.get("id", ""))
+        if bundle.is_dir():
+            shutil.rmtree(bundle, ignore_errors=True)
+            state.append_log(
+                ctx.node,
+                f"r4t: WARN attachments dropped on intra-team route {sender_addr} -> {to}",
+            )
+        state.append_log(
+            ctx.node,
+            f"r4t: RELEASED-internal {sender_addr} -> {to} task={task_id} hop={next_hop}",
+        )
+        return
+    envelope["content"] = stamped_content
+    envelope["x_r4t_class"] = "auto"
+    outbox.mkdir(parents=True, exist_ok=True)
+    msg_id = str(envelope.get("id", "")) or tasks.new_task_id()
+    envelope["id"] = msg_id
+    state.atomic_write_json(outbox / f"{msg_id}.json", envelope)
+    bundle = staging / msg_id
+    if bundle.is_dir():
+        os.replace(bundle, outbox / msg_id)
+    state.append_log(
+        ctx.node,
+        f"r4t: RELEASED {sender_addr} -> {to} task={task_id} hop={next_hop}",
+    )
+
+
+def release_staging(
+    ctx: DispatchContext,
+    config: HarnessConfig,
+    member: Member,
+    tier: Tier,
+    task_id: str,
+    hop: int,
+    *,
+    bulk_source: str | None = None,
+) -> dict:
+    """Process the turn's staged envelopes in send order: quota, pair
+    suppression, bulk once-per-window, header stamp + auto class mark,
+    outbound history, then release (real outbox or intra-team pending).
+    Returns {"released": n, "violations": n}."""
+    staging = state.staging_dir(ctx.node, member.name)
+    sender_addr = f"{ctx.node}:{member.name.lower()}"
+    next_hop = hop + 1
+    outbox = _real_outbox(ctx)
+    released = 0
+    violations = 0
+    for i, path in enumerate(state.staged_envelopes(ctx.node, member.name)):
+        try:
+            envelope = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            path.unlink(missing_ok=True)
+            continue
+        path.unlink(missing_ok=True)
+        if not isinstance(envelope, dict):
+            continue
+        to = str(envelope.get("to", "")).strip()
+        _, _, _, body = tasks.parse_header(str(envelope.get("content", "")))
+        if not to or not body.strip():
+            continue
+        if i >= tier.max_sends_per_turn:
+            violations += 1
+            state.record_dead_letter(
+                ctx.node,
+                reason="quota",
+                sender=sender_addr,
+                to=to,
+                task=task_id,
+                content=body,
+            )
+            state.append_log(
+                ctx.node,
+                f"r4t: QUOTA {sender_addr} -> {to} task={task_id} "
+                f"(> max_sends_per_turn {tier.max_sends_per_turn})",
+            )
+            continue
+        repeated, count = state.suppression_check(
+            ctx.node,
+            tasks.pair_key(sender_addr, to, body),
+            config.suppression_window_seconds,
+        )
+        if repeated:
+            violations += 1
+            state.record_dead_letter(
+                ctx.node,
+                reason="pair-repeat",
+                sender=sender_addr,
+                to=to,
+                task=task_id,
+                content=body,
+                count=count,
+            )
+            state.append_log(
+                ctx.node,
+                f"r4t: SUPPRESSED {sender_addr} -> {to} task={task_id} repeat={count}",
+            )
+            continue
+        if bulk_source and to.lower() == bulk_source:
+            repeated, count = state.suppression_check(
+                ctx.node,
+                tasks.pair_key(sender_addr, to, "", kind="bulk"),
+                config.suppression_window_seconds,
+            )
+            if repeated:
+                violations += 1
+                state.record_dead_letter(
+                    ctx.node,
+                    reason="bulk-window",
+                    sender=sender_addr,
+                    to=to,
+                    task=task_id,
+                    content=body,
+                    count=count,
+                )
+                state.append_log(
+                    ctx.node,
+                    f"r4t: BULK-WINDOW {sender_addr} -> {to} task={task_id} repeat={count}",
+                )
+                continue
+        stamped = f"{tasks.format_header(task_id, next_hop, auto=True)} {body}"
+        state.append_history(
+            ctx.node,
+            member.name,
+            f"## {state.utc_now()} to {to}\n\n"
+            + (body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"),
+        )
+        _release_one(
+            ctx, outbox, staging, envelope, stamped, sender_addr, task_id, next_hop, body
+        )
+        released += 1
+    shutil.rmtree(staging, ignore_errors=True)
+    return {"released": released, "violations": violations}
+
+
+# ---------- the turn ----------
+
 def _run_turn(
     ctx: DispatchContext,
+    config: HarnessConfig,
     roster: Roster,
     member: Member,
     tier: Tier,
@@ -212,14 +401,13 @@ def _run_turn(
     task_id: str,
     hop: int,
     run_fn,
+    *,
+    bulk_source: str | None = None,
 ) -> None:
-    """The turn itself — governance already passed, agent lock held."""
-    header = tasks.format_header(task_id, hop + 1)
-    prompt = build_prompt(ctx, roster, member, sender, body, header)
-
+    prompt = build_prompt(ctx, roster, member, sender, body)
     variant = state.take_rotation(ctx.node, tier.name, tier.pool_size)
-    real_tell = shutil.which("tell") or ""
-    turn_file = state.write_turn(
+    staging = state.prepare_staging(ctx.node, member.name)
+    state.write_turn(
         ctx.node,
         member.name,
         {
@@ -228,23 +416,15 @@ def _run_turn(
             "sender": sender,
             "body": body[:HISTORY_BODY_MAX],
             "tier": tier.name,
-            "sends_remaining": tier.max_sends_per_turn,
-            "mode": ctx.tell_mode,
-            "real_tell": real_tell,
             "started": state.utc_now(),
         },
     )
-    shim = state.write_tell_shim(
-        ctx.node, member.name, sys.executable, R4T_PY, turn_file
-    )
     env = dict(os.environ)
-    env["PATH"] = f"{shim}{os.pathsep}{env.get('PATH', '')}"
+    env["TELL_OUTBOX_DIR"] = str(staging)
 
     now = state.utc_now()
     entry_body = body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"
-    state.append_history(
-        ctx.node, member.name, f"## {now} from {sender}\n\n{entry_body}"
-    )
+    state.append_history(ctx.node, member.name, f"## {now} from {sender}\n\n{entry_body}")
     state.update_meta(ctx.node, member.name, last_inbound_at=now)
     state.stamp_last_turn_start(ctx.node)
     state.append_log(
@@ -266,6 +446,22 @@ def _run_turn(
         ctx.node,
         f"### Output ({member.name}, {outcome})\n\n{output.strip() or '(no output)'}",
     )
+
+    release = release_staging(
+        ctx, config, member, tier, task_id, hop, bulk_source=bulk_source
+    )
+    if release["violations"]:
+        level = state.bucket_drain(
+            ctx.node, member.name, float(release["violations"]), config.bucket_max
+        )
+        state.append_log(
+            ctx.node,
+            f"r4t: BUCKET {member.name.lower()} -{release['violations']} "
+            f"-> {level:.1f}/{config.bucket_max:g}",
+        )
+    else:
+        state.bucket_earn(ctx.node, member.name, config.bucket_earn_ratio, config.bucket_max)
+
     state.record_velocity(
         ctx.node,
         agent=member.name.lower(),
@@ -299,19 +495,81 @@ def _run_turn(
         )
 
 
-def handle_message(
+# ---------- forced synthesis ----------
+
+def _forced_synthesis(
+    ctx: DispatchContext,
+    config: HarnessConfig,
+    roster: Roster,
+    task: dict,
+    run_fn,
+    *,
+    why: str,
+) -> str:
+    """Close the task through one leader turn: "respond to the originator
+    with what you have." Replaces every parking/approval path — tasks always
+    terminate in an answer (docs/governance.md §4)."""
+    task["status"] = tasks.STATUS_CLOSED
+    if task.get("synthesized"):
+        tasks.save_task(ctx.node, task)
+        return SKIPPED
+    leader = roster.leader()
+    if leader is None or leader.errors:
+        tasks.save_task(ctx.node, task)
+        state.append_log(
+            ctx.node,
+            f"r4t: SYNTHESIS-SKIPPED task={task['id']} ({why}; no usable leader)",
+        )
+        return SKIPPED
+    tier, err, _pinned = config.tier_for(leader)
+    if tier is None:
+        tasks.save_task(ctx.node, task)
+        state.append_log(
+            ctx.node, f"r4t: SYNTHESIS-SKIPPED task={task['id']} ({why}; {err})"
+        )
+        return SKIPPED
+    lock = state.AgentLock(ctx.node, leader.name)
+    if not lock.acquire(tier.name):
+        tasks.save_task(ctx.node, task)
+        state.park_pending(ctx.node, {"synthesis": True, "task": task["id"], "why": why})
+        return DEFERRED
+    try:
+        task["synthesized"] = True
+        tasks.save_task(ctx.node, task)
+        creator = str(task.get("creator", "")) or "unknown"
+        body = (
+            f"Task {task['id']} is closed: {why}. Respond NOW to {creator} "
+            "with the best answer you can assemble from the conversation so "
+            "far — summarize what was accomplished, what remains, and any "
+            "results. Do not delegate further work."
+        )
+        state.append_log(
+            ctx.node, f"r4t: SYNTHESIS task={task['id']} leader={leader.name.lower()} ({why})"
+        )
+        _run_turn(
+            ctx, config, roster, leader, tier, creator, body,
+            task["id"], int(task.get("turns", 0)), run_fn,
+        )
+        return SYNTHESIS
+    finally:
+        lock.release()
+
+
+# ---------- dispatch ----------
+
+def _handle(
     ctx: DispatchContext,
     sender: str,
     to: str,
     message: str,
     *,
     run_fn=run_harness,
-) -> int:
+) -> str:
     _, sub = split_recipient(to)
 
     roster = _load_roster(ctx, sender)
     if roster is None:
-        return 0
+        return SKIPPED
 
     if sub:
         member = roster.find(sub)
@@ -323,7 +581,7 @@ def handle_message(
                 f"no team member named {sub!r}. Dispatchable members: {names}. "
                 f"Address them as {ctx.node}:<name>.",
             )
-            return 0
+            return SKIPPED
     else:
         member = roster.leader()
         if member is None:
@@ -335,7 +593,7 @@ def handle_message(
                 f"{ctx.node} have no recipient. Address a member directly: "
                 f"{ctx.node}:<name> (members: {names}).",
             )
-            return 0
+            return SKIPPED
 
     if member.is_human:
         reach = (
@@ -348,7 +606,7 @@ def handle_message(
             sender,
             f"{member.name} is Human — r4t never dispatches humans; {reach}.",
         )
-        return 0
+        return SKIPPED
 
     if member.errors:
         _tell_error(
@@ -357,32 +615,72 @@ def handle_message(
             f"{member.name} is disabled by a roster problem: {member.error}. "
             f"Fix {ctx.roster_path.name} and resend.",
         )
-        return 0
+        return SKIPPED
 
     config = _load_config(ctx, sender)
     if config is None:
-        return 0
+        return SKIPPED
     tier, err, _pinned = config.tier_for(member)
     if tier is None:
         _tell_error(ctx, sender, f"{member.name} cannot run: {err}")
-        return 0
+        return SKIPPED
 
     state.refresh_active(ctx.node, member.name, config.active_ttl_rotations)
 
-    task_id, hop, body = tasks.parse_header(message)
+    task_id, hop, auto, body = tasks.parse_header(message)
+    had_header = task_id is not None
     if task_id is None:
         task_id = tasks.new_task_id()
         hop = 0
     task = tasks.ensure_task(ctx.node, task_id, sender)
 
-    envelope = {"from": sender, "to": to, "task": task_id, "hop": hop, "body": body}
-
-    if hop >= tier.hop_limit:
+    if had_header and not auto and tasks.reset_budget(task):
+        tasks.save_task(ctx.node, task)
         state.append_log(
             ctx.node,
-            f"## {state.utc_now()} chain cut: {sender} -> {member.name} "
-            f"(task {task_id} hop {hop} >= hop_limit {tier.hop_limit} of "
-            f"tier {tier.name})",
+            f"r4t: DELIBERATE task={task_id} budget reset (non-auto header from {sender})",
+        )
+
+    if task.get("status") == tasks.STATUS_CLOSED:
+        state.record_dead_letter(
+            ctx.node, reason="task-closed", sender=sender, to=to,
+            task=task_id, content=body,
+        )
+        state.append_log(
+            ctx.node, f"r4t: CLOSED task={task_id} {sender} -> {member.name.lower()}"
+        )
+        return DEAD
+
+    bulk_source = sender.lower() if sender.lower() in config.rebroadcast_senders else None
+
+    # Intra-team traffic was already suppression-checked at release (same
+    # store, same key) — re-checking here would suppress every delivery.
+    if (auto and not _is_internal(ctx.node, sender)) or bulk_source:
+        repeated, count = state.suppression_check(
+            ctx.node,
+            tasks.pair_key(sender, to, body),
+            config.suppression_window_seconds,
+        )
+        if repeated:
+            state.record_dead_letter(
+                ctx.node, reason="pair-repeat", sender=sender, to=to,
+                task=task_id, content=body, count=count,
+            )
+            state.append_log(
+                ctx.node,
+                f"r4t: SUPPRESSED inbound {sender} -> {to} task={task_id} repeat={count}",
+            )
+            return DEAD
+
+    if hop >= tier.hop_limit:
+        state.record_dead_letter(
+            ctx.node, reason="hop-cut", sender=sender, to=to,
+            task=task_id, content=body,
+        )
+        state.append_log(
+            ctx.node,
+            f"r4t: CUT task={task_id} hop={hop} {sender} -> {member.name.lower()} "
+            f"(tier {tier.name} hop_limit {tier.hop_limit})",
         )
         if not task.get("cut_notified"):
             task["cut_notified"] = True
@@ -393,27 +691,50 @@ def handle_message(
                 f"{hop} (tier {tier.name} hop_limit {tier.hop_limit}). The last "
                 f"message was {sender} -> {member.name} and was not dispatched.",
             )
-        return 0
+        return DEAD
+
+    level = state.bucket_level(ctx.node, member.name, config.bucket_max)
+    if state.bucket_muted(level, config.bucket_max):
+        now = state.utc_now()
+        entry_body = body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"
+        state.append_history(ctx.node, member.name, f"## {now} from {sender}\n\n{entry_body}")
+        state.update_meta(ctx.node, member.name, last_inbound_at=now, last_completed_at=now)
+        state.bucket_earn(ctx.node, member.name, config.bucket_earn_ratio, config.bucket_max)
+        state.record_dead_letter(
+            ctx.node, reason="bucket-muted", sender=sender, to=to,
+            task=task_id, content=body,
+        )
+        state.append_log(
+            ctx.node,
+            f"r4t: MUTED {member.name.lower()} (bucket {level:.1f}/{config.bucket_max:g}) "
+            f"— message from {sender} recorded to history only",
+        )
+        return DEAD
+
+    envelope = {
+        "from": sender, "to": to, "task": task_id, "hop": hop,
+        "auto": auto or not had_header, "body": body,
+    }
 
     throttle_reason = _throttle_block(ctx, config)
     if throttle_reason:
         state.park_pending(ctx.node, envelope)
         state.append_log(
             ctx.node,
-            f"## {state.utc_now()} parked ({throttle_reason}): {sender} -> "
-            f"{member.name} (task {task_id} hop {hop})",
+            f"r4t: DEFERRED ({throttle_reason}) {sender} -> {member.name.lower()} "
+            f"task={task_id} hop={hop}",
         )
-        return 0
+        return DEFERRED
 
     lock = state.AgentLock(ctx.node, member.name)
     if not lock.acquire(tier.name):
         state.park_pending(ctx.node, envelope)
         state.append_log(
             ctx.node,
-            f"## {state.utc_now()} parked (agent busy): {sender} -> "
-            f"{member.name} (task {task_id} hop {hop})",
+            f"r4t: DEFERRED (agent busy) {sender} -> {member.name.lower()} "
+            f"task={task_id} hop={hop}",
         )
-        return 0
+        return DEFERRED
 
     try:
         if state.count_tier_locks(ctx.node, tier.name) > tier.concurrency:
@@ -421,51 +742,76 @@ def handle_message(
             state.park_pending(ctx.node, envelope)
             state.append_log(
                 ctx.node,
-                f"## {state.utc_now()} parked (tier {tier.name} at concurrency "
-                f"{tier.concurrency}): {sender} -> {member.name} (task {task_id})",
+                f"r4t: DEFERRED (tier {tier.name} at concurrency {tier.concurrency}) "
+                f"{sender} -> {member.name.lower()} task={task_id}",
             )
-            return 0
+            return DEFERRED
 
         task = tasks.ensure_task(ctx.node, task_id, sender)
         if not tasks.charge_turn(task, tier.max_turns_per_task):
             lock.release()
-            task["status"] = tasks.STATUS_PARKED
-            task["parked_tier_max"] = tier.max_turns_per_task
-            tasks.park_message(ctx.node, task_id, envelope)
-            notify_creator = not task.get("park_notified")
-            if notify_creator:
-                task["park_notified"] = True
-            tasks.save_task(ctx.node, task)
+            state.record_dead_letter(
+                ctx.node, reason="budget-exhausted", sender=sender, to=to,
+                task=task_id, content=body,
+            )
             state.append_log(
                 ctx.node,
-                f"## {state.utc_now()} parked (turn budget exhausted): {sender} "
-                f"-> {member.name} (task {task_id}, used "
-                f"{task.get('used', 0.0):.2f}/{task.get('budget', 1.0):.2f})",
+                f"r4t: BUDGET task={task_id} exhausted (used "
+                f"{task.get('used', 0.0):.2f}/{task.get('budget', 1.0):.2f}) — "
+                "closing through forced synthesis",
             )
-            if notify_creator:
-                ctx.tell_fn(
-                    task.get("creator", sender),
-                    f"[r4t {ctx.node}] task {task_id} has exhausted its turn "
-                    f"budget; further messages are parked. Approve more turns "
-                    f"with: r4t task approve {task_id} --turns N --node {ctx.node}",
-                )
-            return 0
+            return _forced_synthesis(
+                ctx, config, roster, task, run_fn, why="turn budget exhausted"
+            )
         tasks.save_task(ctx.node, task)
 
-        _run_turn(ctx, roster, member, tier, sender, body, task_id, hop, run_fn)
-        return 0
+        _run_turn(
+            ctx, config, roster, member, tier, sender, body, task_id, hop,
+            run_fn, bulk_source=bulk_source,
+        )
+        return RAN
     finally:
         lock.release()
 
 
-# ---------- parked-message drain ----------
+def handle_message(
+    ctx: DispatchContext,
+    sender: str,
+    to: str,
+    message: str,
+    *,
+    run_fn=run_harness,
+) -> int:
+    _handle(ctx, sender, to, message, run_fn=run_fn)
+    return 0
 
-def _redispatch(ctx: DispatchContext, envelope: dict, *, run_fn=run_harness) -> None:
+
+# ---------- deferred-message drain ----------
+
+def _redispatch(ctx: DispatchContext, envelope: dict, *, run_fn=run_harness) -> str:
+    if envelope.get("synthesis"):
+        task = tasks.load_task(ctx.node, str(envelope.get("task", "")))
+        if task is None:
+            return SKIPPED
+        roster = _load_roster(ctx, task.get("creator", "unknown"))
+        config = _load_config(ctx, task.get("creator", "unknown"))
+        if roster is None or config is None:
+            return SKIPPED
+        return _forced_synthesis(
+            ctx, config, roster, task, run_fn,
+            why=str(envelope.get("why", "budget exhausted")),
+        )
     body = envelope.get("body", "")
     task_id = envelope.get("task")
     hop = int(envelope.get("hop", 0) or 0)
-    message = f"{tasks.format_header(task_id, hop)} {body}" if task_id else body
-    handle_message(
+    if task_id:
+        header = tasks.format_header(
+            str(task_id), hop, auto=bool(envelope.get("auto", False))
+        )
+        message = f"{header} {body}"
+    else:
+        message = body
+    return _handle(
         ctx,
         envelope.get("from", "unknown"),
         envelope.get("to", ctx.node),
@@ -475,12 +821,10 @@ def _redispatch(ctx: DispatchContext, envelope: dict, *, run_fn=run_harness) -> 
 
 
 def drain(ctx: DispatchContext, *, run_fn=run_harness) -> int:
-    """Dispatch parked messages: the concurrency/throttle pending/ queue plus
-    the parked/ dir of every open (approved) task. Each file is consumed
-    before redispatch so a re-park creates a fresh entry instead of looping."""
-    import json
-
-    dispatched = 0
+    """One pass over the pending queue. Each file is consumed before
+    redispatch so a re-defer creates a fresh entry instead of looping.
+    Returns the number of turns that actually RAN."""
+    ran = 0
     for path in state.list_pending(ctx.node):
         try:
             envelope = json.loads(path.read_text(encoding="utf-8"))
@@ -489,40 +833,39 @@ def drain(ctx: DispatchContext, *, run_fn=run_harness) -> int:
             continue
         path.unlink(missing_ok=True)
         if isinstance(envelope, dict):
-            _redispatch(ctx, envelope, run_fn=run_fn)
-            dispatched += 1
+            if _redispatch(ctx, envelope, run_fn=run_fn) in (RAN, SYNTHESIS):
+                ran += 1
+    return ran
 
-    for task in tasks.list_tasks(ctx.node):
-        if task.get("status") != tasks.STATUS_OPEN:
-            continue
-        for path in tasks.parked_messages(ctx.node, task["id"]):
-            try:
-                envelope = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                path.unlink(missing_ok=True)
-                continue
-            path.unlink(missing_ok=True)
-            if isinstance(envelope, dict):
-                _redispatch(ctx, envelope, run_fn=run_fn)
-                dispatched += 1
-    return dispatched
+
+def drain_until_quiet(ctx: DispatchContext, *, run_fn=run_harness) -> int:
+    """Drain repeatedly until a pass runs nothing — a released intra-team
+    message can enable the next turn in the same invocation (the cadence
+    throttle still spaces the starts; blocked messages simply re-defer)."""
+    total = 0
+    for _ in range(DRAIN_MAX_PASSES):
+        ran = drain(ctx, run_fn=run_fn)
+        total += ran
+        if ran == 0:
+            break
+    return total
 
 
 def run_clear(ctx: DispatchContext, older_than: float, *, run_fn=run_harness) -> dict:
     pruned = state.prune_stale_locks(ctx.node)
     expired = tasks.expire_tasks(ctx.node, older_than)
-    drained = drain(ctx, run_fn=run_fn)
+    drained = drain_until_quiet(ctx, run_fn=run_fn)
     return {"locks_pruned": pruned, "tasks_expired": expired, "drained": drained}
 
 
-# ---------- idle-driven active list (crash recovery) ----------
+# ---------- idle-driven active list (governed crash recovery) ----------
 
 def _collect_evidence(
     node: str, agent_key: str, active_entry: dict
 ) -> tuple[list[str], dict | None]:
     """Evidence of unfinished business for one active agent. Returns
-    (human-readable lines for the nudge, identity source dict or None).
-    The identity source carries task/hop/sender to re-dispatch under."""
+    (human-readable lines for the nudge, identity dict carrying task/hop/
+    sender to re-dispatch under)."""
     lines: list[str] = []
     identity: dict | None = None
     last_nudge = str(active_entry.get("last_nudge_at", ""))
@@ -563,26 +906,6 @@ def _collect_evidence(
             "check your conversation history above."
         )
 
-    suffix = f":{agent_key}"
-    parked_new = 0
-    for task in tasks.list_tasks(node):
-        for path in tasks.parked_messages(node, task["id"]):
-            try:
-                import json
-
-                envelope = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if not str(envelope.get("to", "")).lower().endswith(suffix):
-                continue
-            if str(envelope.get("queued_at", "")) > last_nudge:
-                parked_new += 1
-    if parked_new:
-        lines.append(
-            f"{parked_new} message(s) addressed to you are parked awaiting "
-            "turn-budget approval; the task creator has been asked to approve."
-        )
-
     return lines, identity
 
 
@@ -596,15 +919,15 @@ def _nudge_body(lines: list[str]) -> str:
 
 
 def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
-    """One idle pass: for every agent on the active list, re-wake it with a
-    nudge if it shows unfinished business (crashed/timed-out turn, stalled
-    inbound, freshly parked messages); decrement ttl; drop at 0. A nudged
-    agent's turn goes through the normal handle_message governance, which
-    also re-refreshes its active entry."""
+    """One idle pass: re-wake active agents that show unfinished business
+    (crashed/timed-out turn, stalled inbound); decrement ttl; drop at 0.
+    Recovery is itself governed: at most `nudge_cap` nudges per agent per
+    task, then the leader closes the task with what exists."""
     try:
         roster = load_roster(ctx.roster_path)
-    except RosterError as e:
-        state.append_log(ctx.node, f"## {state.utc_now()} idle skipped: {e}")
+        config = load_harness_config(ctx.config_path)
+    except (RosterError, HarnessError) as e:
+        state.append_log(ctx.node, f"r4t: IDLE-SKIPPED {e}")
         return {"watched": 0, "nudged": [], "dropped": [], "error": str(e)}
 
     active = state.load_active(ctx.node)
@@ -634,15 +957,31 @@ def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
         task_id = str(identity.get("task", "")) or tasks.new_task_id()
         hop = int(identity.get("hop", 0) or 0)
         sender = str(identity.get("sender", "")) or "r4t"
-        state.clear_turn(ctx.node, agent_key)  # consumed as evidence above
+        state.clear_turn(ctx.node, agent_key)
+        task = tasks.ensure_task(ctx.node, task_id, sender)
+        nudges = task.get("nudges") or {}
+        count = int(nudges.get(agent_key, 0))
+        if count >= config.nudge_cap:
+            state.append_log(
+                ctx.node,
+                f"r4t: NUDGE-CAP task={task_id} agent={agent_key} "
+                f"({count} >= {config.nudge_cap}) — closing through forced synthesis",
+            )
+            _forced_synthesis(
+                ctx, config, roster, task, run_fn,
+                why=f"recovery nudge cap reached for {agent_key}",
+            )
+            continue
+        nudges[agent_key] = count + 1
+        task["nudges"] = nudges
+        tasks.save_task(ctx.node, task)
         state.append_log(
             ctx.node,
-            f"## {state.utc_now()} idle nudge -> {agent_key} "
-            f"(task {task_id} hop {hop}): "
-            + "; ".join(evidence),
+            f"r4t: NUDGE {agent_key} task={task_id} hop={hop} "
+            f"({count + 1}/{config.nudge_cap}): " + "; ".join(evidence),
         )
-        message = f"{tasks.format_header(task_id, hop)} {_nudge_body(evidence)}"
-        handle_message(ctx, sender, f"{ctx.node}:{agent_key}", message, run_fn=run_fn)
+        message = f"{tasks.format_header(task_id, hop, auto=True)} {_nudge_body(evidence)}"
+        _handle(ctx, sender, f"{ctx.node}:{agent_key}", message, run_fn=run_fn)
         state.mark_nudged(ctx.node, agent_key)
         nudged.append(agent_key)
 

@@ -1,48 +1,54 @@
 {
-  "_comment": "r4t harness config — copy to ~/.r4t/harnesses.json and edit. This file is the security boundary: it lives OUTSIDE the repo, and only tiers defined here can run. A roster Harness naming a tier absent from this file fails closed. Keys starting with _ are ignored everywhere.",
-  "_comment_placeholders": "{prompt} is replaced with the built prompt as a single argv element — never through a shell. Defaults when a field is omitted: timeout_seconds=900, concurrency=1, max_turns_per_task=25, hop_limit=4, max_sends_per_turn=6.",
-  "_comment_throttle": "throttle is team-wide, checked before any tier limit: max_concurrent caps live turns across ALL tiers; min_seconds_between_turn_starts spaces turn starts so a human can watch and intervene. active_ttl_rotations is how many idle passes an agent stays on the crash-recovery watch list after its last dispatch.",
+  "_notes": [
+    "r4t harness config — copy to ~/.r4t/harnesses.json and edit (or start from `r4t init`).",
+    "This file is the security boundary: it lives OUTSIDE the repo, and only tiers",
+    "defined here can run. A roster Harness naming a tier absent from this file fails",
+    "closed. Keys starting with _ are ignored everywhere.",
+    "{prompt} is replaced with the built prompt as a single argv element — never a shell.",
+    "Every key below is optional; the values shown for the governance knobs are the",
+    "defaults. See README.md for the knob table and docs/governance.md for why."
+  ],
 
   "throttle": {
-    "max_concurrent": 3,
-    "min_seconds_between_turn_starts": 20
+    "max_concurrent": 1,
+    "min_seconds_between_turn_starts": 15
   },
+  "suppression_window_seconds": 600,
+  "bucket_max": 8,
+  "bucket_earn_ratio": 0.1,
+  "nudge_cap": 2,
   "active_ttl_rotations": 3,
+  "rebroadcast_senders": ["chatroom"],
 
   "leader": {
-    "_comment": "Orchestrator tier — Cursor agent CLI, generous limits.",
+    "_notes": "Orchestrator tier — Cursor agent CLI, generous limits.",
     "invoke": ["agent", "-p", "--yolo", "{prompt}"],
     "timeout_seconds": 1800,
-    "concurrency": 2,
     "max_turns_per_task": 25,
     "hop_limit": 4,
     "max_sends_per_turn": 8
   },
 
   "junior-dev": {
-    "_comment": "Cheap worker tier — OpenCode with whatever model the repo's opencode.json picks. invoke may also be a POOL (list of argvs) rotated round-robin per turn, e.g. across local models — agents never know which variant ran them.",
+    "_notes": "Cheap worker tier — OpenCode with whatever model the repo's opencode.json picks. invoke may also be a POOL (list of argvs) rotated round-robin per turn, e.g. across local models — agents never know which variant ran them.",
     "invoke": [
       ["opencode", "run", "--auto", "{prompt}"],
       ["opencode", "run", "--auto", "--model", "ollama/gpt-oss:20b", "{prompt}"]
     ],
     "timeout_seconds": 900,
-    "concurrency": 1,
     "max_turns_per_task": 50,
     "hop_limit": 3,
     "max_sends_per_turn": 4
   },
 
   "agy": {
-    "_comment": "Antigravity tier.",
+    "_notes": "Antigravity tier.",
     "invoke": ["agy", "-p", "{prompt}"],
-    "timeout_seconds": 1200,
-    "concurrency": 2,
-    "max_turns_per_task": 25,
-    "hop_limit": 4
+    "timeout_seconds": 1200
   },
 
   "pins": {
-    "_comment": "agent name -> tier. A pinned agent's tier comes from HERE, silently overriding the roster's Harness line — an in-repo roster edit can't upgrade a pinned agent.",
+    "_notes": "agent name -> tier. A pinned agent's tier comes from HERE, silently overriding the roster's Harness line — an in-repo roster edit can't upgrade a pinned agent.",
     "gerry": "leader"
   }
 }
