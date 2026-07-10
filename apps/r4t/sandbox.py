@@ -106,20 +106,33 @@ def _write_harness_config(path: Path, fake: bool) -> None:
                 ]
                 value["timeout_seconds"] = 60
         config["throttle"] = {"max_concurrent": 1, "min_seconds_between_turn_starts": 0}
+    else:
+        for value in config.values():
+            if isinstance(value, dict) and "invoke" in value:
+                value["invoke"] = [
+                    sys.executable,
+                    str(SANDBOX_DIR / "live-agent.py"),
+                    "{prompt}",
+                ]
     state.atomic_write_json(path, config)
 
 
-def _kickoff(human_root: Path, goal: str) -> None:
+def _kickoff(human_root: Path, goal: str, repo: Path) -> None:
     outbox = human_root / ".outbox"
     outbox.mkdir(parents=True, exist_ok=True)
     msg_id = f"{time.time_ns():026d}"
+    workspace = repo.resolve()
     state.atomic_write_json(
         outbox / f"{msg_id}.json",
         {
             "id": msg_id,
             "to": f"{TEAM}:lead",
-            "content": "Please build this and report back to me when it is "
-            "done and verified:\n\n" + goal,
+            "content": (
+                "Please build this and report back to me when it is done and "
+                "verified. All project files must live in the team repo root "
+                f"({workspace}) using relative paths only — never ~/ or "
+                "paths outside that directory:\n\n" + goal
+            ),
             "files": [],
         },
     )
@@ -352,6 +365,14 @@ def run_sandbox(*, fake: bool, timeout: float, out: Path) -> int:
         seed_names = {"ROSTER.md", "GOAL.md"}
         for name in seed_names:
             shutil.copy(SANDBOX_DIR / name, repo / name)
+        workspace = repo.resolve()
+        (repo / "WORKSPACE.md").write_text(
+            f"# Workspace\n\nTeam repo root: `{workspace}`\n\n"
+            "Write all project files here using relative paths (e.g. "
+            "`battleship.py`). Do not write to ~/ or any path outside this "
+            "directory.\n",
+            encoding="utf-8",
+        )
         goal = (repo / "GOAL.md").read_text(encoding="utf-8")
 
         _write_harness_config(tmp / "r4t-home" / "harnesses.json", fake)
@@ -367,7 +388,7 @@ def run_sandbox(*, fake: bool, timeout: float, out: Path) -> int:
         _a8s("alias", ALIAS, "human")
         _a8s("start", ALIAS)
 
-        _kickoff(human_root, goal)
+        _kickoff(human_root, goal, repo)
 
         deadline = time.time() + timeout
         quiet_polls = 0

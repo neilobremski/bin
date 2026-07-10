@@ -23,11 +23,13 @@ verified.
 - **Harness:** member
 - **Role:** Developer
 
-Writes the code the Lead asks for, then hands it to Tester for verification.
+Writes the code the Lead asks for in this repo root (relative paths only),
+then tells Tester when `battleship.py` exists here.
 
 ### Tester
 - **Status:** AI
 - **Harness:** member
 - **Role:** Tester
 
-Runs what Dev built and reports VERIFIED or FAILED to the Lead.
+Runs what Dev built and reports VERIFIED or FAILED to the Lead
+(`crew:lead`), never to Dev.

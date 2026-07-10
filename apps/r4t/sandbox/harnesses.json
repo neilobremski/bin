@@ -4,13 +4,15 @@
     "max_concurrent": 1,
     "min_seconds_between_turn_starts": 5
   },
+  "suppression_window_seconds": 30,
   "leader": {
-    "invoke": ["opencode", "run", "--auto", "{prompt}"],
+    "invoke": ["opencode", "run", "--auto", "--dir", ".", "{prompt}"],
     "timeout_seconds": 300,
-    "max_turns_per_task": 15
+    "max_turns_per_task": 15,
+    "hop_limit": 6
   },
   "member": {
-    "invoke": ["opencode", "run", "--auto", "{prompt}"],
+    "invoke": ["opencode", "run", "--auto", "--dir", ".", "{prompt}"],
     "timeout_seconds": 300,
     "max_turns_per_task": 15
   }

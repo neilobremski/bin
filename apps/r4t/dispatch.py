@@ -124,7 +124,8 @@ def build_prompt(
     teammates = _teammate_lines(ctx, roster, member)
     parts = [
         f"You are {member.name}, a member of the {ctx.node} team, working in "
-        f"the team repo (your current directory).",
+        f"the team repo at {ctx.root.resolve()} (your current directory). "
+        "Write files here with relative paths only.",
         "",
         "## Who you are (from the team roster)",
         member.persona or f"### {member.name}",

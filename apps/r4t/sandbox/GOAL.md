@@ -1,7 +1,8 @@
 # Goal: terminal battleship
 
 Build a small terminal battleship game in Python at `battleship.py` in this
-repo:
+repo root (your current working directory). Use a relative path only — never
+`~/`, never an absolute path outside this repo:
 
 - 5x5 grid holding 3 single-cell ships.
 - The player enters guesses on stdin as `row col` (both 0-4), one per line.
