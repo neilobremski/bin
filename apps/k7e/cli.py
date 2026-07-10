@@ -49,8 +49,8 @@ COMMANDS: list[tuple[str, str, str]] = [
 ]
 
 _LLM_REQUIRED = (
-    "k7e {cmd} requires an LLM. Start ollama and pull a chat model, then retry "
-    "(see `k7e status`). To run offline without it, that command is unavailable."
+    "k7e {cmd} requires an LLM command. Set llm_command (or a purpose-specific "
+    "override) — stdin in, stdout out — then retry (see `k7e status`)."
 )
 
 
@@ -147,7 +147,7 @@ def main(argv=None):
 
     # config
     p = sub.add_parser("config", help="Get or set configuration")
-    p.add_argument("key", help="Config key (llm, embeddings, embed_model, ollama_url)")
+    p.add_argument("key", help="Config key (llm_command, summarize_command, embeddings, ...)")
     p.add_argument("value", nargs="?", default=None, help="Value to set (omit to read)")
 
     args = parser.parse_args(argv)
@@ -222,7 +222,7 @@ def main(argv=None):
                 print("Usage: k7e recall <text>  or  echo '...' | k7e recall", file=sys.stderr)
                 return 1
             text = sys.stdin.read()
-        if not config.llm_available():
+        if not config.llm_configured("summarize"):
             print(_LLM_REQUIRED.format(cmd="recall"), file=sys.stderr)
             return 1
         answer, sources = recall(text, limit=args.limit)
@@ -237,7 +237,7 @@ def main(argv=None):
             return 1
 
     elif args.command == "distill":
-        if not config.llm_available():
+        if not config.llm_configured("distill"):
             print(_LLM_REQUIRED.format(cmd="distill"), file=sys.stderr)
             return 1
         results = distill(args.paths, dry_run=args.dry_run)
@@ -264,7 +264,7 @@ def main(argv=None):
             print(f"\nConsolidated: {total_superseded} nodes superseded across {len(results)} groups.")
 
     elif args.command == "compile":
-        if not config.llm_available():
+        if not config.llm_configured("compile"):
             print(_LLM_REQUIRED.format(cmd="compile"), file=sys.stderr)
             return 1
         node_id = compile_tag(args.tag, dry_run=args.dry_run)
@@ -321,10 +321,15 @@ def main(argv=None):
             val = config.get(args.key)
             if val is not None:
                 print(val)
-            elif args.key == "llm_model":
-                print(f"{config.resolve_llm_model()} (auto-detected)")
-            elif args.key == "llm":
-                print("ollama (default)")
+            elif args.key in {v[0] for v in config.LLM_PURPOSES.values()}:
+                purpose = next(
+                    p for p, (k, _) in config.LLM_PURPOSES.items() if k == args.key
+                )
+                cmd, source = config.command_source(purpose)
+                if cmd and source == config.LLM_FALLBACK_KEY:
+                    print(f"{cmd} (via llm_command)")
+                else:
+                    print(f"{args.key}: not set")
             else:
                 print(f"{args.key}: not set")
         else:

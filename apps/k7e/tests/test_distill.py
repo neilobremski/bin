@@ -1,8 +1,8 @@
 """Distill offline contract.
 
 Text distillation requires an LLM — there is no offline pattern-matching
-fallback. With llm=none (the conftest default) extraction yields nothing.
-Real extraction behavior is covered in test_llm_distill.py (@llm)."""
+fallback. With no llm_command configured (the conftest default) extraction
+yields nothing. Real extraction behavior is covered in test_llm_distill.py (@llm)."""
 import distill
 
 

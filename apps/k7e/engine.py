@@ -536,36 +536,33 @@ def stats():
 
 # --- LLM ---
 
-def _call_llm(prompt, timeout=120, images=None):
-    """Call the configured ollama model directly. Returns response text or None.
-
-    k7e talks to ollama's HTTP API rather than shelling out to an LLM CLI so
-    every call is stateless: no rolling context or agent preamble leaks into
-    distill/recall/rerank prompts. `think: false` keeps thinking-model output
-    clean. Pass base64-encoded `images` for multimodal (vision) extraction."""
+def _call_llm(prompt, purpose="summarize", timeout=120):
+    """Invoke the configured stdin→stdout CLI for an LLM purpose."""
     import config
+    import shlex
+    import subprocess
 
-    if config.get("llm", "ollama") == "none":
+    cmd_str = config.resolve_command(purpose)
+    if not cmd_str:
         return None
 
-    ollama_url = config.get("ollama_url", "http://localhost:11434")
-    model = config.resolve_llm_model()
-    payload = {"model": model, "prompt": prompt, "stream": False, "think": False}
-    if images:
-        payload["images"] = images
     try:
-        data = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            f"{ollama_url}/api/generate",
-            data=data, headers={"Content-Type": "application/json"}
+        cmd = shlex.split(cmd_str)
+        result = subprocess.run(
+            cmd, input=prompt, capture_output=True, text=True, timeout=timeout,
+            cwd=str(config._k7e_home()),
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            response = json.loads(resp.read())
-            text = response.get("response", "").strip()
-            return text if text else None
-    except Exception as e:
-        print(f"  [llm] ollama failed: {e}", file=sys.stderr)
-        return None
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        if result.returncode != 0:
+            print(f"  [llm:{purpose}] exit {result.returncode}", file=sys.stderr)
+            if result.stderr.strip():
+                print(f"  [llm:{purpose}] {result.stderr.strip()}", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print(f"  [llm:{purpose}] timed out ({timeout}s)", file=sys.stderr)
+    except OSError as e:
+        print(f"  [llm:{purpose}] launch failed: {e}", file=sys.stderr)
+    return None
 
 
 # --- Reranking ---
@@ -601,7 +598,7 @@ def _rerank(query, results, limit):
         f"Query: {query[:500]}\n\nEntries:\n{listing}"
     )
 
-    response = _call_llm(prompt, timeout=30)
+    response = _call_llm(prompt, purpose="rerank", timeout=30)
     if not response:
         return results[:limit]
 
@@ -706,7 +703,7 @@ def recall(text, limit=8, include_superseded=False):
         f"Knowledge entries:\n{context_text}"
     )
 
-    answer = _call_llm(prompt)
+    answer = _call_llm(prompt, purpose="summarize")
     return answer, entries
 
 
@@ -718,7 +715,7 @@ def _decompose_queries(text):
         "key topics in this text. Return one query per line, nothing else.\n\n"
         f"Text: {text[:2000]}"
     )
-    response = _call_llm(prompt, timeout=30)
+    response = _call_llm(prompt, purpose="decompose", timeout=30)
     if not response:
         return []
     lines = [l.strip().strip("-•*").strip() for l in response.splitlines() if l.strip()]
@@ -772,9 +769,9 @@ def compile_tag(tag, dry_run=False):
             print(f"  {e['id']}  {e['title']}")
         return None
 
-    compiled_content = _call_llm(prompt)
+    compiled_content = _call_llm(prompt, purpose="compile")
     if not compiled_content:
-        print("Error: LLM call failed while compiling entries.", file=sys.stderr)
+        print("Error: compile_command (or llm_command) not configured or call failed.", file=sys.stderr)
         return None
 
     # Store as a new compiled node

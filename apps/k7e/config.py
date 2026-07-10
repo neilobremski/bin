@@ -1,31 +1,46 @@
-"""k7e configuration — LLM model, embedding backend, status reporting.
+"""k7e configuration — LLM commands, embedding backend, status reporting.
 
 Config file: $K7E_HOME/config.json (created by `k7e init` or `k7e config`)
 Falls back to env vars, then sensible defaults.
 
-k7e talks to ollama's HTTP API directly for both generation and embeddings.
-It deliberately does NOT shell out to LLM CLIs (l9m, claude, codex, …): those
-carry their own rolling context / agent preamble, which would contaminate
-k7e's distill, recall, and rerank prompts. Every k7e LLM call is stateless.
+LLM integration is explicit and CLI-based. Each command is a shell string
+invoked with the prompt on stdin; the model response is read from stdout.
+No auto-detection. Embeddings use ollama's HTTP API separately.
 
 Config format:
 {
-  "llm": "ollama",                    # "ollama" (default) or "none" to disable
-  "llm_model": null,                  # pin a model; null = auto-detect installed
-  "embeddings": "ollama",             # embedding backend: ollama|none
-  "embed_model": "nomic-embed-text",  # model for embeddings
-  "ollama_url": "http://localhost:11434"
+  "llm_command": "l9m -s",              # fallback for all LLM purposes
+  "summarize_command": null,            # recall synthesis
+  "decompose_command": null,            # long-text query extraction
+  "distill_command": null,              # knowledge extraction
+  "compile_command": null,              # tag synthesis
+  "rerank_command": null,               # search/recall reranking
+  "embeddings": "ollama",
+  "embed_model": "nomic-embed-text",
+  "ollama_url": "http://localhost:11434",
+  "rerank": false,
+  "decay_offset_days": 30,
+  "decay_scale_days": 365,
+  "use_count_weight": 0.2
 }
 """
 
 import json
 import os
-import re
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-DEFAULT_LLM_MODEL = "qwen3:0.6b"
+LLM_FALLBACK_KEY = "llm_command"
+LLM_FALLBACK_ENV = "K7E_LLM_COMMAND"
+
+LLM_PURPOSES = {
+    "summarize": ("summarize_command", "K7E_SUMMARIZE_COMMAND"),
+    "decompose": ("decompose_command", "K7E_DECOMPOSE_COMMAND"),
+    "distill": ("distill_command", "K7E_DISTILL_COMMAND"),
+    "compile": ("compile_command", "K7E_COMPILE_COMMAND"),
+    "rerank": ("rerank_command", "K7E_RERANK_COMMAND"),
+}
 
 
 def _k7e_home():
@@ -53,11 +68,21 @@ def save_config(cfg):
     path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
 
 
+def _get_raw(key, env_key=None):
+    if env_key and os.environ.get(env_key):
+        return os.environ[env_key]
+    return load_config().get(key)
+
+
 def get(key, default=None):
     """Read config value with env var override."""
     env_map = {
-        "llm": "K7E_LLM",
-        "llm_model": "K7E_LLM_MODEL",
+        LLM_FALLBACK_KEY: LLM_FALLBACK_ENV,
+        "summarize_command": "K7E_SUMMARIZE_COMMAND",
+        "decompose_command": "K7E_DECOMPOSE_COMMAND",
+        "distill_command": "K7E_DISTILL_COMMAND",
+        "compile_command": "K7E_COMPILE_COMMAND",
+        "rerank_command": "K7E_RERANK_COMMAND",
         "embeddings": "K7E_EMBEDDINGS",
         "embed_model": "EMBED_MODEL",
         "ollama_url": "OLLAMA_URL",
@@ -67,106 +92,71 @@ def get(key, default=None):
         "rerank": "K7E_RERANK",
     }
     env_key = env_map.get(key)
-    if env_key and os.environ.get(env_key):
-        return os.environ[env_key]
-    cfg = load_config()
-    return cfg.get(key, default)
+    val = _get_raw(key, env_key)
+    return val if val is not None else default
 
 
-# --- Provider detection ---
+def resolve_command(purpose):
+    """Return the shell command string for an LLM purpose, or None."""
+    cfg_key, env_key = LLM_PURPOSES[purpose]
+    cmd = _get_raw(cfg_key, env_key)
+    if cmd and str(cmd).strip():
+        return str(cmd).strip()
+    fallback = _get_raw(LLM_FALLBACK_KEY, LLM_FALLBACK_ENV)
+    return str(fallback).strip() if fallback else None
 
-def _list_ollama_models():
-    """Return the list of model names installed in ollama, or [] if unreachable."""
+
+def command_source(purpose):
+    """Return (command, source_label) for status/config display."""
+    cfg_key, env_key = LLM_PURPOSES[purpose]
+    cmd = _get_raw(cfg_key, env_key)
+    if cmd and str(cmd).strip():
+        return str(cmd).strip(), cfg_key
+    fallback = _get_raw(LLM_FALLBACK_KEY, LLM_FALLBACK_ENV)
+    if fallback and str(fallback).strip():
+        return str(fallback).strip(), LLM_FALLBACK_KEY
+    return None, "not configured"
+
+
+def llm_configured(purpose):
+    """True when a command is configured for the given LLM purpose."""
+    return resolve_command(purpose) is not None
+
+
+# Back-compat alias used by CLI fail-fast guards.
+llm_available = llm_configured
+
+
+# --- Provider detection (embeddings only) ---
+
+def detect_providers():
+    """Check what's available on this system."""
+    results = {}
+
     ollama_url = get("ollama_url", "http://localhost:11434")
     try:
         req = urllib.request.Request(f"{ollama_url}/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read())
-            return [m["name"] for m in data.get("models", [])]
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError):
-        return []
-
-
-def _model_size(name):
-    """Best-effort parameter count parsed from a model tag (e.g. '8b' -> 8.0)."""
-    m = re.search(r"(\d+(?:\.\d+)?)\s*b\b", name.lower())
-    return float(m.group(1)) if m else 0.0
-
-
-def resolve_llm_model(models=None):
-    """Resolve the ollama model k7e should use for generation.
-
-    Precedence: pinned `llm_model`/`K7E_LLM_MODEL` > best installed model
-    (qwen family preferred, largest wins) > DEFAULT_LLM_MODEL. Pass `models`
-    to reuse an already-fetched `/api/tags` listing."""
-    pinned = get("llm_model")
-    if pinned:
-        return pinned
-    if models is None:
-        models = _list_ollama_models()
-    candidates = [m for m in models if "embed" not in m.lower()]
-    if not candidates:
-        return DEFAULT_LLM_MODEL
-    qwen = [m for m in candidates if m.lower().startswith("qwen")]
-    pool = qwen or candidates
-    pool.sort(key=_model_size, reverse=True)
-    return pool[0]
-
-
-def llm_available():
-    """True when k7e can make an LLM call: not explicitly disabled and ollama
-    is reachable. Used by the LLM-requiring commands (distill/recall/compile)
-    to fail fast with an actionable message instead of degrading silently."""
-    if get("llm", "ollama") == "none":
-        return False
-    return _ollama_reachable()
-
-
-def detect_providers():
-    """Check what's available on this system (single ollama probe)."""
-    results = {}
-
-    models = _list_ollama_models()
-    ollama_up = bool(models) or _ollama_reachable()
-
-    embed_model = get("embed_model", "nomic-embed-text")
-    has_embed = any(embed_model in m for m in models)
-    results["embeddings:ollama"] = {
-        "available": ollama_up,
-        "models": models,
-        "has_embed_model": has_embed,
-        "embed_model": embed_model,
-    }
-
-    llm_enabled = get("llm", "ollama") != "none"
-    results["llm:ollama"] = {
-        "available": ollama_up and llm_enabled,
-        "model": resolve_llm_model(models),
-        "pinned": bool(get("llm_model")),
-        "enabled": llm_enabled,
-    }
-
-    # FTS5 (always available with Python's sqlite3)
-    results["search:fts5"] = {"available": True}
-
-    return results
-
-
-def _ollama_reachable():
-    """True if ollama answers on /api/tags even with zero models installed."""
-    ollama_url = get("ollama_url", "http://localhost:11434")
-    try:
-        req = urllib.request.Request(f"{ollama_url}/api/tags", method="GET")
-        with urllib.request.urlopen(req, timeout=3):
-            return True
+            models = [m["name"] for m in data.get("models", [])]
+            embed_model = get("embed_model", "nomic-embed-text")
+            has_embed = any(embed_model in m for m in models)
+            results["embeddings:ollama"] = {
+                "available": True,
+                "models": models,
+                "has_embed_model": has_embed,
+                "embed_model": embed_model,
+            }
     except (urllib.error.URLError, OSError):
-        return False
+        results["embeddings:ollama"] = {"available": False}
+
+    results["search:fts5"] = {"available": True}
+    return results
 
 
 def status():
     """Human-readable status report."""
     providers = detect_providers()
-    cfg = load_config()
     home = _k7e_home()
     lines = ["k7e status:", ""]
 
@@ -175,20 +165,22 @@ def status():
         lines.append("    → Not initialized. Run any k7e command to create.")
     lines.append("")
 
-    # LLM (ollama, direct HTTP — no CLI shell-out)
-    llm_info = providers.get("llm:ollama", {})
-    if not llm_info.get("enabled", True):
-        lines.append("  LLM: disabled (llm=none) — distill uses pattern-only extraction")
+    fallback = _get_raw(LLM_FALLBACK_KEY, LLM_FALLBACK_ENV)
+    if fallback and str(fallback).strip():
+        lines.append(f"  LLM fallback: {fallback.strip()} ✓")
     else:
-        model = llm_info.get("model", DEFAULT_LLM_MODEL)
-        source = "configured" if llm_info.get("pinned") else "auto-detected"
-        if llm_info.get("available"):
-            lines.append(f"  LLM: ollama ({model}, {source}) ✓")
-        else:
-            lines.append(f"  LLM: ollama ({model}, {source}) ✗ — ollama not running")
+        lines.append("  LLM fallback: not configured")
+        lines.append("    → Set: k7e config llm_command 'your-stdin-stdout-cli'")
 
-    # Embeddings
-    embed_cfg = get("embeddings", "ollama")
+    for purpose, (cfg_key, _) in LLM_PURPOSES.items():
+        cmd, source = command_source(purpose)
+        if source == cfg_key:
+            lines.append(f"  LLM {purpose}: {cmd} ({source})")
+        elif cmd:
+            lines.append(f"  LLM {purpose}: {cmd} (via llm_command)")
+        else:
+            lines.append(f"  LLM {purpose}: unavailable")
+
     embed_status = providers.get("embeddings:ollama", {})
     if embed_status.get("available"):
         if embed_status.get("has_embed_model"):
@@ -202,18 +194,16 @@ def status():
         lines.append("    → Install: curl -fsSL https://ollama.com/install.sh | sh")
         lines.append(f"    → Then: ollama pull {get('embed_model', 'nomic-embed-text')}")
 
-    # Search
     lines.append("  Search: FTS5 (keyword) ✓")
     if embed_status.get("available") and embed_status.get("has_embed_model"):
         lines.append("  Search: Semantic (embeddings) ✓")
     else:
         lines.append("  Search: Semantic (embeddings) ✗ — FTS5-only mode")
 
-    # Recommendations
     lines.append("")
     missing = []
-    if llm_info.get("enabled", True) and not llm_info.get("available"):
-        missing.append("Start ollama (and `ollama pull` a model) for LLM distillation/recall")
+    if not (fallback and str(fallback).strip()):
+        missing.append("Set llm_command (stdin→stdout CLI) for distill/recall/compile")
     if not embed_status.get("has_embed_model"):
         missing.append(f"Run `ollama pull {get('embed_model', 'nomic-embed-text')}` for semantic search")
     if missing:

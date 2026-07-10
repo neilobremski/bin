@@ -58,16 +58,18 @@ class TestRecallNoLLM:
 class TestCallLlm:
     """Test _call_llm graceful failures."""
 
-    def test_returns_none_when_no_provider(self, store, monkeypatch):
-        monkeypatch.setenv("K7E_LLM", "nonexistent_binary_xyz")
-        monkeypatch.setenv("OLLAMA_URL", "http://localhost:99999")
-        result = engine._call_llm("test prompt")
+    def test_returns_none_when_no_command(self, store, monkeypatch):
+        monkeypatch.delenv("K7E_LLM_COMMAND", raising=False)
+        monkeypatch.delenv("K7E_SUMMARIZE_COMMAND", raising=False)
+        result = engine._call_llm("test prompt", purpose="summarize")
         assert result is None
 
-    def test_returns_none_on_timeout(self, store, monkeypatch):
-        monkeypatch.setenv("K7E_LLM", "nonexistent_binary_xyz")
-        monkeypatch.setenv("OLLAMA_URL", "http://localhost:99999")
-        result = engine._call_llm("test", timeout=1)
+    def test_returns_none_on_timeout(self, store, monkeypatch, tmp_path):
+        script = tmp_path / "slow.sh"
+        script.write_text("#!/usr/bin/env bash\nsleep 5\n")
+        script.chmod(0o755)
+        monkeypatch.setenv("K7E_LLM_COMMAND", str(script))
+        result = engine._call_llm("test", purpose="summarize", timeout=1)
         assert result is None
 
 
@@ -85,7 +87,7 @@ class TestDecomposeQueries:
 
 
 class TestRecallCLI:
-    """CLI recall fails fast when no LLM is available (conftest sets llm=none)."""
+    """CLI recall fails fast when no LLM command is configured."""
 
     def test_recall_fails_fast_without_llm(self, store, monkeypatch, capsys):
         import io

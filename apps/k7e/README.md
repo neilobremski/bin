@@ -16,9 +16,9 @@ Three commitments shape every design decision:
   index (SQLite FTS5 + optional embeddings) is a cache you can delete and
   rebuild anytime. No database lock-in, no opaque blobs, no cloud.
 - **The core is dependency-free.** Storage and keyword search (FTS5) need
-  nothing but Python's standard library and work fully offline. ollama powers
-  the *enhancements*: semantic search, and knowledge *capture*
-  (distill/recall/compile), which require an LLM and fail fast without one.
+  nothing but Python's standard library and work fully offline. Semantic search
+  uses ollama embeddings; knowledge *capture* (distill/recall/compile) uses
+  **explicit stdin→stdout CLI commands** you configure — no auto-detection.
 - **Relevance is earned, not assumed.** Knowledge you keep using stays fresh;
   knowledge you never touch fades in *ranking* — never in storage. The store
   accumulates; retrieval forgets.
@@ -52,8 +52,9 @@ k7e compile networking [--dry-run]             # synthesize a tag into a page
 # Maintain / inspect
 k7e reindex [--embeddings]                      # rebuild index from markdown
 k7e check [--fix]                               # audit integrity
-k7e status                                      # capabilities + resolved models
-k7e config llm_model qwen3:8b                   # pin ollama model (unset=auto)
+k7e status                                      # capabilities + LLM commands
+k7e config llm_command 'your-stdin-stdout-cli'  # required for distill/recall/compile
+k7e config summarize_command '...'              # optional recall override
 ```
 
 Full flags and every command: **[docs/cli.md](docs/cli.md)**.
@@ -65,9 +66,8 @@ Full flags and every command: **[docs/cli.md](docs/cli.md)**.
 python3 apps/k7e/k7e.py status
 ```
 
-Required: Python 3.10+ (sqlite3 bundled). Optional: **ollama** for semantic
-search + LLM features (`curl -fsSL https://ollama.com/install.sh | sh`, then
-`ollama pull nomic-embed-text`).
+Required: Python 3.10+ (sqlite3 bundled). Optional: **ollama** for semantic search
+embeddings; an **LLM CLI** you configure via `llm_command` for distill/recall/compile.
 
 ## How it works (30 seconds)
 
@@ -77,8 +77,9 @@ search + LLM features (`curl -fsSL https://ollama.com/install.sh | sh`, then
   confidence, recency decay, and use-count, with an optional LLM reranker.
 - **Recall** is RAG: retrieve + synthesize an answer (reranker on by default).
 - **Distill** extracts knowledge from raw files (LLM), dedupes, and stores only
-  genuine deltas. Requires ollama (fails fast without it).
-- The LLM backend is **ollama, called directly** — never a stateful CLI.
+  genuine deltas. Requires `distill_command` or `llm_command`.
+- **LLM backend** is whatever you configure — stdin in, stdout out. No
+  auto-detection, no bundled ollama generation path.
 
 ## Documentation
 

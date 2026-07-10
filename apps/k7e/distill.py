@@ -3,11 +3,11 @@
 Scans raw files (journals, transcripts, command output, images, audio, video).
 Extracts knowledge candidates. Diffs against existing store. Stores genuine deltas.
 
-Text files: LLM extraction (ollama).
-Media files: ollama vision (image description) + asset storage.
+Text files: LLM extraction via distill_command (stdin→stdout).
+Media files: multimodal via distill_command (prompt includes file path).
 
-Distillation requires an LLM. The CLI fails fast when ollama is unavailable;
-set llm=none to explicitly opt out (extraction returns nothing).
+Distillation requires a configured LLM command. The CLI fails fast when
+distill_command (or llm_command) is unset.
 """
 
 import json
@@ -141,40 +141,35 @@ def extract_from_file(path):
 
 
 def _multimodal_extract(path):
-    """Extract knowledge from media via ollama's multimodal API.
-
-    Images are sent to a vision-capable ollama model as base64. ollama can't
-    transcribe audio/video, so those are skipped — transcribe them with a
-    dedicated tool first, then distill the resulting text."""
-    import base64
+    """Extract knowledge from media via distill_command (prompt on stdin)."""
     import config
 
-    if config.get("llm", "ollama") == "none":
+    if not config.resolve_command("distill"):
+        print(f"  [distill] distill_command not configured — cannot process {path}", file=sys.stderr)
         return []
 
     kind = _media_type(path)
     abs_path = str(Path(path).resolve())
 
-    if kind != "image":
-        print(f"  [distill] ollama can't transcribe {kind} — skipping {path}", file=sys.stderr)
+    if kind == "image":
+        instruction = "Describe this image in detail."
+    elif kind == "audio":
+        instruction = "Transcribe this audio file completely. Include speaker identification if multiple speakers."
+    elif kind == "video":
+        instruction = "Transcribe the audio and describe key visual content of this video."
+    else:
         return []
 
     prompt = (
-        "Describe this image in detail.\n\n"
+        f"{instruction} File: {abs_path}\n\n"
         "Return a JSON object with:\n"
         '- "title": short descriptive title for this content\n'
-        '- "content": the full description\n'
+        '- "content": the full transcription or description\n'
         '- "tags": list of topic keywords\n'
         "Return ONLY the JSON object, no markdown fencing."
     )
 
-    try:
-        b64 = base64.b64encode(Path(path).read_bytes()).decode()
-    except OSError as e:
-        print(f"  [distill] could not read {path}: {e}", file=sys.stderr)
-        return []
-
-    response = engine._call_llm(prompt, timeout=180, images=[b64])
+    response = engine._call_llm(prompt, purpose="distill", timeout=180)
     if not response:
         return []
     parsed = _parse_multimodal_response(response, path)
@@ -427,9 +422,7 @@ def _llm_extract(text):
 
     import config
 
-    # Explicit opt-out (tests, deliberately-offline use). The CLI fails fast
-    # before reaching here when the LLM is simply unavailable.
-    if config.get("llm", "ollama") == "none":
+    if not config.resolve_command("distill"):
         return []
 
     # Chunk the input and extract from each chunk independently
@@ -463,7 +456,7 @@ def _llm_extract(text):
 
 def _run_llm_prompt(prompt):
     """Run a single LLM prompt and return parsed candidates."""
-    response = engine._call_llm(prompt, timeout=180)
+    response = engine._call_llm(prompt, purpose="distill", timeout=180)
     if response:
         return _parse_llm_response(response)
     return []

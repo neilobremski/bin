@@ -9,19 +9,17 @@ k7e distill ./transcripts/      # a whole directory
 k7e distill notes.md --dry-run  # show candidates, store nothing
 ```
 
-**Distillation requires an LLM (ollama).** The CLI fails fast with an
-actionable message when ollama is unavailable — there is no offline
-pattern-matching fallback. Set `llm=none` to explicitly opt out (extraction
-returns nothing).
+**Distillation requires `distill_command` (or `llm_command`).** The CLI fails
+fast when neither is configured. There is no offline pattern-matching fallback.
 
 ## Pipeline
 
 ```
-raw file ─┬─ text  ─ LLM extraction (ollama, chunked)
+raw file ─┬─ text  ─ LLM via distill_command (chunked, stdin→stdout)
           │              │
           │         dedup across chunks
           │              │
-          └─ media ─ ollama vision (images only)
+          └─ media ─ distill_command (prompt includes file path)
                          │
                          ▼
                   diff vs existing store ─► store genuine deltas
@@ -37,12 +35,10 @@ raw file ─┬─ text  ─ LLM extraction (ollama, chunked)
 
 ### Media extraction
 
-- **Images** — base64-encoded and sent to a vision-capable ollama model for
-  description; the binary is stored as a content-addressed asset.
-- **Audio / video** — *not supported via ollama.* Transcribe with a dedicated
-  tool first, then distill the resulting text. (This capability previously
-  relied on cloud LLM CLIs, which were removed — see
-  [configuration.md](configuration.md#llm-backend).)
+Media goes through the same `distill_command`. The prompt includes the absolute
+file path — your CLI must know how to handle images, audio, or video (e.g. a
+multimodal wrapper). The binary is stored as a content-addressed asset when
+extraction succeeds.
 
 ## Delta detection
 
