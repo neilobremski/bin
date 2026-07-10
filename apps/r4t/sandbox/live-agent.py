@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -105,15 +106,39 @@ def run_harness(prompt: str) -> int:
     argv = [a.replace("{prompt}", prompt) for a in harness_invoke()]
     print(f"live-agent: running harness ({argv[0]})", file=sys.stderr, flush=True)
     llm_timeout = int(os.environ.get("R4T_SANDBOX_LLM_TIMEOUT", "480"))
-    proc = subprocess.Popen(argv, text=True)
+    proc = subprocess.Popen(argv, text=True, start_new_session=True)
     try:
         proc.wait(timeout=llm_timeout)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        _kill_process_tree(proc.pid)
         proc.wait()
         print(f"live-agent: harness timed out after {llm_timeout}s", file=sys.stderr, flush=True)
         return -9
     return proc.returncode or 0
+
+
+def _kill_process_tree(pid: int) -> None:
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def protocol_only(name: str, team: str, sender: str, incoming: str) -> bool:
+    """Roles/turns where mechanical staging is enough — skip the LLM."""
+    tester = f"{team}:tester"
+    if name == "tester":
+        return True
+    if (
+        name == "lead"
+        and re.search(r"VERIFIED:", incoming, re.I)
+        and tester in sender.lower()
+    ):
+        return True
+    return False
 
 
 def staged_tos() -> set[str]:
@@ -281,6 +306,15 @@ def main() -> int:
     team = team_name(prompt)
     sender = sender_from(prompt)
     incoming = incoming_block(prompt)
+
+    if protocol_only(name, team, sender, incoming):
+        print(
+            f"live-agent: {name} — mechanical protocol only (skipping LLM)",
+            file=sys.stderr,
+            flush=True,
+        )
+        enforce_protocol(name, team, sender, incoming)
+        return 0
 
     prompt = augment_prompt(prompt, name, team)
     code = run_harness(prompt)

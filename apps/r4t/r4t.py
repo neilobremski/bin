@@ -755,7 +755,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="MODEL",
         help="Model name for presets that need it (e.g. opencode-ollama).",
     )
-    sandbox_p.add_argument("--timeout", type=float, default=900, metavar="SECS")
+    sandbox_p.add_argument("--timeout", type=float, default=1800, metavar="SECS")
     sandbox_p.set_defaults(func=cmd_sandbox)
 
     return p

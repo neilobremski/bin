@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -219,6 +220,37 @@ def _orphans(tmp: Path) -> list[str]:
     )
     needle = str(tmp)
     return [line.strip() for line in result.stdout.splitlines() if needle in line]
+
+
+def _kill_sandbox_processes(tmp: Path) -> int:
+    """Terminate any process still referencing the temp sandbox dir."""
+    lines = _orphans(tmp)
+    pids: list[int] = []
+    for line in lines:
+        try:
+            pids.append(int(line.split(None, 1)[0]))
+        except (ValueError, IndexError):
+            continue
+    if not pids:
+        return 0
+    for pid in pids:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except OSError:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+    time.sleep(2)
+    for pid in pids:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except OSError:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    return len(pids)
 
 
 def _run_program(repo: Path) -> tuple[bool, str]:
@@ -465,7 +497,30 @@ def run_sandbox(
         deadline = time.time() + timeout
         quiet_polls = 0
         final = None
-        while time.time() < deadline:
+        while True:
+            now = time.time()
+            if now >= deadline:
+                if _busy(a8s_home, repo):
+                    _log("timeout with work in flight — killing harness processes")
+                    killed = _kill_sandbox_processes(tmp)
+                    if killed:
+                        _log(f"sent SIGTERM/SIGKILL to {killed} process(es)")
+                    drain_until = now + 45
+                    while time.time() < drain_until:
+                        time.sleep(2)
+                        seen_velocity, seen_gov, seen_locks = _emit_progress(
+                            seen_velocity=seen_velocity,
+                            seen_gov=seen_gov,
+                            seen_locks=seen_locks,
+                        )
+                        final = _final_answer(a8s_home) or final
+                        if not _busy(a8s_home, repo):
+                            _log("drained after timeout kill")
+                            break
+                else:
+                    _log("timeout reached")
+                break
+
             time.sleep(2)
             seen_velocity, seen_gov, seen_locks = _emit_progress(
                 seen_velocity=seen_velocity,
@@ -489,6 +544,7 @@ def run_sandbox(
                 _log("waiting for team to finish…")
 
         _log("stopping handlers")
+        _kill_sandbox_processes(tmp)
         _stop_handlers(a8s_home)
         orphans = _orphans(tmp)
         final = final or _final_answer(a8s_home)
@@ -541,6 +597,10 @@ def run_sandbox(
         _log(str(e))
         return 1
     finally:
+        try:
+            _kill_sandbox_processes(tmp)
+        except Exception:
+            pass
         try:
             _stop_handlers(a8s_home)
         except Exception:
