@@ -42,8 +42,9 @@ class TestRecallNoLLM:
         _, sources = engine.recall("knowledge topic", limit=3)
         assert len(sources) <= 3
 
-    def test_long_input_uses_decomposition_fallback(self, store):
-        """Long input without LLM falls back to word-based splitting."""
+    def test_long_input_searches_raw_text(self, store):
+        """Long input without LLM: decompose returns nothing, so recall searches
+        the raw text directly. Key assertion: no crash, sources is a list."""
         engine.store_entry("SSH Tunneling", "Use ssh -L for local port forwarding", tags=["ssh"])
         long_text = (
             "We were discussing SSH tunneling and port forwarding techniques "
@@ -51,42 +52,34 @@ class TestRecallNoLLM:
             "covered both local and remote forwarding patterns."
         )
         _, sources = engine.recall(long_text)
-        # Should still find SSH-related content via fallback decomposition
-        # (may or may not match depending on FTS5 tokenization)
-        # The key assertion: no crash on long input without LLM
         assert isinstance(sources, list)
 
 
 class TestCallLlm:
     """Test _call_llm graceful failures."""
 
-    def test_returns_none_when_no_provider(self, store, monkeypatch):
-        monkeypatch.setenv("K7E_LLM", "nonexistent_binary_xyz")
-        monkeypatch.setenv("OLLAMA_URL", "http://localhost:99999")
-        result = engine._call_llm("test prompt")
+    def test_returns_none_when_no_command(self, store, monkeypatch):
+        monkeypatch.delenv("K7E_LLM_COMMAND", raising=False)
+        monkeypatch.delenv("K7E_SUMMARIZE_COMMAND", raising=False)
+        result = engine._call_llm("test prompt", purpose="summarize")
         assert result is None
 
-    def test_returns_none_on_timeout(self, store, monkeypatch):
-        monkeypatch.setenv("K7E_LLM", "nonexistent_binary_xyz")
-        monkeypatch.setenv("OLLAMA_URL", "http://localhost:99999")
-        result = engine._call_llm("test", timeout=1)
+    def test_returns_none_on_timeout(self, store, monkeypatch, tmp_path):
+        script = tmp_path / "slow.sh"
+        script.write_text("#!/usr/bin/env bash\nsleep 5\n")
+        script.chmod(0o755)
+        monkeypatch.setenv("K7E_LLM_COMMAND", str(script))
+        result = engine._call_llm("test", purpose="summarize", timeout=1)
         assert result is None
 
 
 class TestDecomposeQueries:
-    """Test _decompose_queries fallback (no LLM)."""
+    """Without an LLM, _decompose_queries returns [] (no word-split fallback);
+    recall() then searches the raw text."""
 
-    def test_short_text_returns_word_chunks(self, store):
+    def test_returns_empty_without_llm(self, store):
         queries = engine._decompose_queries("short text only four words here extra padding needed")
-        assert isinstance(queries, list)
-        assert len(queries) >= 1
-        for q in queries:
-            assert len(q) > 0
-
-    def test_very_short_text_returns_single_query(self, store):
-        queries = engine._decompose_queries("hello world")
-        # Only 2 words, both ≤ 3 chars after filtering — may be empty
-        assert isinstance(queries, list)
+        assert queries == []
 
     def test_empty_returns_empty(self, store):
         queries = engine._decompose_queries("")
@@ -94,20 +87,21 @@ class TestDecomposeQueries:
 
 
 class TestRecallCLI:
-    """Test CLI recall dispatch."""
+    """CLI recall fails fast when no LLM command is configured."""
 
-    def test_recall_no_args_no_tty(self, store, monkeypatch):
+    def test_recall_fails_fast_without_llm(self, store, monkeypatch, capsys):
         import io
         import cli
 
         monkeypatch.setattr("sys.stdin", io.StringIO("redis port forwarding"))
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-        # Should not crash — either finds results or prints "No relevant..."
         exit_code = cli.main(["recall"])
-        assert exit_code in (0, None)
+        assert exit_code == 1
+        assert "requires an LLM" in capsys.readouterr().err
 
-    def test_recall_with_text_arg(self, store):
+    def test_recall_with_text_arg_fails_fast(self, store, capsys):
         import cli
         engine.store_entry("Test Node", "Some test content for recall", tags=["test"])
         exit_code = cli.main(["recall", "test content"])
-        assert exit_code in (0, None)
+        assert exit_code == 1
+        assert "requires an LLM" in capsys.readouterr().err

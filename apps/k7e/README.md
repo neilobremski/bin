@@ -1,166 +1,116 @@
-# k7e — Knowledge
+# k7e — Knowledge accumulation engine
 
-Standalone knowledge accumulation engine. Flat markdown files + hybrid search.
+A durable, local memory for knowledge that compounds. Flat markdown files +
+hybrid search, zero-dependency core.
 
-## Quick Start
+## Mission
 
-Try this in a terminal (uses a temp store so nothing is polluted):
+k7e exists so that an agent — or the human working alongside it — **never has to
+re-learn the same thing twice**. Hard-won facts, corrections, procedures, and
+decisions are captured once, kept as plain markdown you can read and edit by
+hand, and surfaced again at the moment they're relevant.
+
+Three commitments shape every design decision:
+
+- **Files are truth.** Knowledge lives as flat markdown on your disk. The search
+  index (SQLite FTS5 + optional embeddings) is a cache you can delete and
+  rebuild anytime. No database lock-in, no opaque blobs, no cloud.
+- **The core is dependency-free.** Storage and keyword search (FTS5) need
+  nothing but Python's standard library and work fully offline. Semantic search
+  uses ollama embeddings; knowledge *capture* (distill/recall/compile) uses
+  **explicit stdin→stdout CLI commands** you configure — no auto-detection.
+- **Relevance is earned, not assumed.** Knowledge you keep using stays fresh;
+  knowledge you never touch fades in *ranking* — never in storage. The store
+  accumulates; retrieval forgets.
+
+k7e is deliberately **personal, single-user, and local** — the inverse of
+multi-tenant cloud memory layers. It optimizes for one person's (and their
+agents') accumulated expertise, portable as a folder of text files.
+
+## Cheat sheet
 
 ```bash
-export K7E_HOME=/tmp/k7e-demo
-
-# Store some knowledge
-k7e store "SSH Local Forwarding" --tags ssh,networking \
-  --content "ssh -L 8080:target:80 bastion — forwards local:8080 to target:80 via bastion"
-
-k7e store "SSH Remote Forwarding" --tags ssh,networking \
-  --content "ssh -R 9090:localhost:3000 server — exposes local:3000 as server:9090"
-
-k7e store "Docker Port Mapping" --tags docker,networking \
-  --content "docker run -p 8080:80 nginx — maps host:8080 to container:80"
-
-# Search by keyword
-k7e search "forwarding"
-
-# Search by concept
-k7e search "expose local service remotely"
-
-# Read a full entry
-k7e get K7E-000-00002
-
-# Append new information to an existing entry
-k7e append K7E-000-00001 --section "Edge Cases" \
-  --content "Requires SSH key or password auth. Fails silently if port is in use."
-
-# See what you've built
+# Read
+k7e search "expose local service remotely"   # hybrid search (BM25+semantic+meta)
+k7e search "port forwarding" --rerank --ids  # LLM rerank, IDs only
+k7e get K7E-000-00001                         # full entry (counts as a "use")
+k7e recall "SSH bastion access"               # RAG answer over the store
+echo "we were discussing tunnels" | k7e recall
+k7e list --tag ssh --ids
 k7e stats
-k7e list
-k7e check
 
-# Distill knowledge from a raw file
-echo "TIL: Use ssh -J for ProxyJump, cleaner than -L for bastion hopping" > /tmp/notes.md
-k7e distill /tmp/notes.md
+# Write
+k7e store "SSH Local Forwarding" --tags ssh,net --content "ssh -L 8080:host:80 ..."
+echo "..." | k7e store "Title" --tags x,y      # content via stdin
+k7e append K7E-000-00001 --section "Edge Cases" --content "Fails if port in use."
+k7e supersede K7E-000-00001 K7E-000-00009      # retire old, keep audit trail
+k7e asset screenshot.png                       # store binary (deduped)
+k7e distill notes.md [--dry-run]               # extract knowledge from raw files
+k7e consolidate [--dry-run]                    # merge duplicates
+k7e compile networking [--dry-run]             # synthesize a tag into a page
 
-# Search for the distilled knowledge
-k7e search "ProxyJump bastion"
-
-# Recall: ask a question or pass conversation context (requires LLM)
-k7e recall "SSH bastion access"
-echo "We were discussing port forwarding tunnels" | k7e recall
-
-# Consolidate duplicate nodes (dedup by title similarity)
-k7e consolidate --dry-run
-k7e consolidate
-
-# Compile a topic into a reference page (requires LLM)
-k7e compile networking
-
-# Clean up
-rm -rf /tmp/k7e-demo /tmp/notes.md
+# Maintain / inspect
+k7e reindex [--embeddings]                      # rebuild index from markdown
+k7e check [--fix]                               # audit integrity
+k7e status                                      # capabilities + LLM commands
+k7e config llm_command 'your-stdin-stdout-cli'  # required for distill/recall/compile
+k7e config summarize_command '...'              # optional recall override
 ```
 
-## Usage
+Full flags and every command: **[docs/cli.md](docs/cli.md)**.
+
+## Install
 
 ```bash
-k7e store "title" --tags x,y [--content "..." | stdin]
-k7e search "query" [--limit N] [--json] [--ids]
-k7e get K7E-000-00001
-k7e append K7E-000-00001 --section "name" [--content "..." | stdin]
-k7e asset screenshot.png
-k7e recall "topic or conversation" [--limit N]
-k7e distill file.md [--dry-run]
-k7e consolidate [--dry-run]
-k7e compile <tag> [--dry-run]
-k7e reindex [--embeddings]
-k7e embed-pending
-k7e rebuild-mocs
-k7e stats [--json]
-k7e check [--fix]
-k7e list [--tag x] [--status active] [--ids]
-k7e status
-k7e config <key> [value]
+# From ~/bin, k7e is already on PATH via install.sh. Standalone:
+python3 apps/k7e/k7e.py status
 ```
 
-## Storage
+Required: Python 3.10+ (sqlite3 bundled). Optional: **ollama** for semantic search
+embeddings; an **LLM CLI** you configure via `llm_command` for distill/recall/compile.
 
-`K7E_HOME` env var (default: `~/.k7e`):
-```
-$K7E_HOME/
-├── nodes/BBB/   # Bucketed atomic markdown entries (source of truth)
-├── mocs/        # Maps of Content (mutable topic indexes)
-├── assets/XX/   # Bucketed content-addressed binaries (SHA256 deduped)
-└── .index.db    # SQLite FTS5 + embeddings (derived, rebuildable)
-```
+## How it works (30 seconds)
 
-Files are truth. Index is cache. `k7e reindex` rebuilds from scratch.
+- Every fact is a markdown file under `$K7E_HOME/nodes/` (default `~/.k7e`).
+  `.index.db` is a derived cache — delete it and `k7e reindex` rebuilds.
+- **Search** fuses BM25 + metadata + embeddings (RRF), then weights by
+  confidence, recency decay, and use-count, with an optional LLM reranker.
+- **Recall** is RAG: retrieve + synthesize an answer (reranker on by default).
+- **Distill** extracts knowledge from raw files (LLM), dedupes, and stores only
+  genuine deltas. Requires `distill_command` or `llm_command`.
+- **LLM backend** is whatever you configure — stdin in, stdout out. No
+  auto-detection, no bundled ollama generation path.
 
-## Entry format
+## Documentation
 
-```markdown
----
-id: K7E-000-00001
-title: SSH Local Forwarding
-aliases: [ssh-tunnel, port-forward]
-status: active
-confidence: 0.5
-verification_count: 0
-last_updated: 2026-05-20
-tags: [ssh, networking]
----
-
-## Verified Protocol
-ssh -L 8080:target:80 bastion — forwards local:8080 to target:80 via bastion
-
-## Edge Cases
-## False Paths
-## History
-* 2026-05-20: Initial entry.
-```
-
-## Configuration
-
-```bash
-k7e status                  # show what's available + recommendations
-k7e config llm gemini       # set distillation LLM (gemini|claude|codex|ollama|auto)
-k7e config embed_model nomic-embed-text
-k7e config ollama_url http://localhost:11434
-```
-
-Config stored in `$K7E_HOME/config.json`. Env vars override: `K7E_LLM`, `EMBED_MODEL`, `OLLAMA_URL`.
-
-## Capabilities
-
-| Feature | Backend | Required? |
-|---------|---------|-----------|
-| Keyword search (BM25) | SQLite FTS5 | Always available |
-| Semantic search | ollama embeddings | Optional — `ollama pull nomic-embed-text` |
-| Distillation (LLM) | gemini/claude/codex/ollama | Optional — pattern extraction without |
-| Recall (RAG synthesis) | any LLM | Optional — falls back to raw search results |
-| Consolidation (dedup) | title similarity | Always available |
-
-`k7e status` tells you exactly what's active and what to install for full capability.
+| Doc | What's in it |
+|-----|--------------|
+| [docs/architecture.md](docs/architecture.md) | Storage model, entry format, schema, lifecycle |
+| [docs/retrieval.md](docs/retrieval.md) | Search/recall pipeline, ranking, reranker, eval harness |
+| [docs/distillation.md](docs/distillation.md) | Extracting knowledge from raw experience |
+| [docs/configuration.md](docs/configuration.md) | Config keys, env, LLM/embedding backends |
+| [docs/cli.md](docs/cli.md) | Full command + flag reference |
 
 ## Tests
 
 ```bash
 cd ~/bin/apps/k7e
-tests/run           # 69 tests, ~20s
-tests/run -v        # verbose
-tests/run -k dedup  # filter
-tests/run -m "not slow"  # skip slow tests
+tests/run                 # deterministic suite (~15s)
+tests/run -m "not llm"    # skip live-LLM tests
+tests/run -k eval         # the Recall@K harness
 ```
 
-## Dependencies
-
-Required: Python 3.10+, sqlite3 (bundled).
-
-Optional:
-- **ollama** — local embeddings + fallback LLM (`curl -fsSL https://ollama.com/install.sh | sh`)
-- **LLM CLI** — one of: gemini, claude, codex (for distillation + compilation)
-
-On slim machines without GPU: use a cloud LLM CLI for distillation and skip local embeddings (FTS5-only mode is still effective).
+The `@llm` tests need a running ollama; everything else is deterministic.
 
 ## Integration
 
-Any agent or harness can call `k7e search` (read) and `k7e store` (write).
-Separation of concerns: the agent reads, the harness/surgeon writes.
+Any agent or harness can call `k7e search`/`k7e recall` (read) and
+`k7e store`/`k7e distill` (write). Separation of concerns: the agent reads, the
+harness/curator writes.
+
+## Status
+
+Pre-v1. The on-disk format (markdown + frontmatter) is the stable contract; the
+derived index schema may change (just `reindex`). See
+[issue #145](https://github.com/neilobremski/bin/issues/145) for the retrieval
+roadmap.

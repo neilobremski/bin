@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sys
 import time
 import urllib.error
 import urllib.request
 
+from commands.secrets_cmd import resolve
 from paths import BIN_ROOT
 
 
@@ -54,23 +54,10 @@ def _check_status(api_key: str, response_id: str) -> dict:
         return {"error": str(e)}
 
 
-def _resolve_api_key() -> str | None:
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if api_key:
-        return api_key
-    key_file = BIN_ROOT / ".temp" / "openai.env"
-    if key_file.is_file():
-        for line in key_file.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("OPENAI_API_KEY="):
-                return line[len("OPENAI_API_KEY="):]
-    return None
-
-
 def run_research(prompt_parts: list[str]) -> int:
-    api_key = _resolve_api_key()
+    api_key = resolve("OPENAI_API_KEY")
     if not api_key:
-        print(json.dumps({"error": "OPENAI_API_KEY not set and not found in .temp/openai.env"}))
+        print(json.dumps({"error": "OPENAI_API_KEY not found (try: n0b secrets set OPENAI_API_KEY)"}))
         return 1
     if not prompt_parts:
         print(json.dumps({"error": "No prompt provided"}))

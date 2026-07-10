@@ -50,6 +50,87 @@ def _load_config_val(key, default):
 
 RRF_K = 60
 
+# Recency decay + use-count ranking (see issue #145, workstream 1).
+# Defaults tuned for dev-knowledge churn (tighter than the article's 5yr).
+DECAY_OFFSET_DAYS = 30.0   # flat zone: facts younger than this don't decay
+DECAY_SCALE_DAYS = 365.0   # days past the flat zone at which the multiplier hits 0.5
+USE_COUNT_WEIGHT = 0.2     # log10 use-count boost weight
+
+
+def _num_config(key, default):
+    val = _load_config_val(key, default)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _decay_config():
+    return (
+        _num_config("decay_offset_days", DECAY_OFFSET_DAYS),
+        _num_config("decay_scale_days", DECAY_SCALE_DAYS),
+        _num_config("use_count_weight", USE_COUNT_WEIGHT),
+    )
+
+
+def _rerank_enabled():
+    val = _load_config_val("rerank", None)
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _days_since(date_str):
+    if not date_str:
+        return None
+    try:
+        t = time.strptime(str(date_str)[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+    return max(0.0, (time.time() - time.mktime(t)) / 86400.0)
+
+
+def _recency_factor(last_used_at, last_updated, offset, scale):
+    """Gauss-shaped relevance decay. 1.0 inside the flat zone, 0.5 at `scale`
+    days past it. Basis date is last_used_at (recall-time freshness) if present,
+    else the persisted last_updated."""
+    if scale <= 0:
+        return 1.0
+    age = _days_since(last_used_at) if last_used_at else None
+    if age is None:
+        age = _days_since(last_updated)
+    if age is None:
+        return 1.0
+    effective = age - offset
+    if effective <= 0:
+        return 1.0
+    s = scale / math.sqrt(2 * math.log(2))
+    return math.exp(-(effective * effective) / (2 * s * s))
+
+
+def _use_boost(use_count, weight):
+    if not use_count or weight <= 0:
+        return 1.0
+    return 1.0 + math.log10(1 + use_count) * weight
+
+
+def _bump_usage(node_ids):
+    """Increment use_count and refresh last_used_at for the given nodes.
+    Index-only signal; reset on reindex (re-earns ranking from usage)."""
+    if not node_ids:
+        return
+    now = time.strftime("%Y-%m-%d")
+    conn = _connect()
+    for nid in node_ids:
+        conn.execute(
+            "UPDATE nodes SET use_count = COALESCE(use_count, 0) + 1, last_used_at = ? WHERE id = ?",
+            (now, nid),
+        )
+    conn.commit()
+    conn.close()
+
 
 def reset(home=None):
     """Reset store paths. For testing or multi-store usage."""
@@ -241,10 +322,10 @@ def append_entry(node_id, section, content):
 
 
 def supersede(old_id, new_id):
-    """Mark old_id as superseded by new_id."""
+    """Mark old_id as superseded by new_id. Returns True if old_id existed."""
     node_path = _node_path(old_id)
     if not node_path.exists():
-        return
+        return False
     text = node_path.read_text(encoding="utf-8")
     text = re.sub(r"status: active", "status: superseded", text)
     text = re.sub(r"(tags: \[.*?\])", r"\1\nsuperseded_by: " + new_id, text)
@@ -254,17 +335,24 @@ def supersede(old_id, new_id):
     conn.execute("UPDATE nodes SET status = 'superseded', superseded_by = ? WHERE id = ?", (new_id, old_id))
     conn.commit()
     conn.close()
+    return True
 
 
-def search(query, limit=5, json_output=False):
+def search(query, limit=5, json_output=False, include_superseded=False, rerank=None):
     init()
+    if rerank is None:
+        rerank = _rerank_enabled()
+
+    # Over-fetch a wider candidate pool when reranking so the reranker has
+    # something to reorder; otherwise keep the historical limit-sized pool.
+    pool = max(limit, 15) if rerank else limit
+
     conn = _connect()
+    bm25_results = _search_bm25(conn, query, pool * 3, include_superseded)
+    meta_results = _search_metadata(conn, query, pool * 3, include_superseded)
+    embed_results = _search_embeddings(conn, query, pool * 3, include_superseded)
 
-    bm25_results = _search_bm25(conn, query, limit * 3)
-    meta_results = _search_metadata(conn, query, limit * 3)
-    embed_results = _search_embeddings(conn, query, limit * 3)
-
-    fused = _rrf_fuse([bm25_results, meta_results, embed_results], limit)
+    fused = _rrf_fuse([bm25_results, meta_results, embed_results], pool)
     conn.close()
 
     # Filter out noise: require minimum RRF score.
@@ -274,26 +362,39 @@ def search(query, limit=5, json_output=False):
     min_score = 1.0 / (RRF_K + 1) - 0.001  # ~0.0154
     fused = [r for r in fused if r["score"] >= min_score]
 
-    # Apply confidence as a tiebreaker boost
+    # Apply confidence, recency decay, and use-count boost as score multipliers.
     if fused:
+        offset, scale, weight = _decay_config()
         conn2 = _connect()
         for r in fused:
-            conf_row = conn2.execute("SELECT confidence FROM nodes WHERE id = ?", (r["id"],)).fetchone()
-            if conf_row and conf_row[0]:
-                r["score"] = round(r["score"] * (0.7 + 0.3 * conf_row[0]), 4)
+            row = conn2.execute(
+                "SELECT confidence, last_used_at, use_count, last_updated FROM nodes WHERE id = ?",
+                (r["id"],),
+            ).fetchone()
+            if row:
+                conf_factor = 0.7 + 0.3 * (row[0] if row[0] else 0.5)
+                recency = _recency_factor(row[1], row[3], offset, scale)
+                use_boost = _use_boost(row[2], weight)
+                r["score"] = round(r["score"] * conf_factor * recency * use_boost, 4)
         conn2.close()
         fused.sort(key=lambda x: -x["score"])
 
-    if json_output:
-        return fused
+    if rerank and fused:
+        fused = _rerank(query, fused, limit)
+    else:
+        fused = fused[:limit]
+
     return fused
 
 
-def get(node_id):
+def get(node_id, track_usage=False):
     node_path = _node_path(node_id)
     if not node_path.exists():
         raise FileNotFoundError(f"Node {node_id} not found")
-    return node_path.read_text(encoding="utf-8")
+    text = node_path.read_text(encoding="utf-8")
+    if track_usage:
+        _bump_usage([node_id])
+    return text
 
 
 def reindex(embeddings=False):
@@ -435,53 +536,105 @@ def stats():
 
 # --- LLM ---
 
-def _call_llm(prompt, timeout=120):
-    """Call configured LLM with prompt. Returns response text or None."""
+def _call_llm(prompt, purpose="summarize", timeout=120):
+    """Invoke the configured stdin→stdout CLI for an LLM purpose."""
     import config
+    import shlex
     import subprocess
 
-    cmd = config.resolve_llm_command(prompt)
-    if cmd:
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout,
-                cwd=str(config._k7e_home()),
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-            if result.returncode != 0:
-                print(f"  [llm] non-zero exit ({result.returncode})", file=sys.stderr)
-        except subprocess.TimeoutExpired:
-            print(f"  [llm] timed out ({timeout}s)", file=sys.stderr)
-        except OSError as e:
-            print(f"  [llm] launch failed: {e}", file=sys.stderr)
+    cmd_str = config.resolve_command(purpose)
+    if not cmd_str:
         return None
 
-    # Fallback: ollama HTTP API
-    ollama_url = config.get("ollama_url", "http://localhost:11434")
-    model = config.get("llm_model", "qwen3.5:latest")
     try:
-        data = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
-        req = urllib.request.Request(
-            f"{ollama_url}/api/generate",
-            data=data, headers={"Content-Type": "application/json"}
+        cmd = shlex.split(cmd_str)
+        result = subprocess.run(
+            cmd, input=prompt, capture_output=True, text=True, timeout=timeout,
+            cwd=str(config._k7e_home()),
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            response = json.loads(resp.read())
-            text = response.get("response", "").strip()
-            return text if text else None
-    except Exception as e:
-        print(f"  [llm] ollama failed: {e}", file=sys.stderr)
-        return None
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        if result.returncode != 0:
+            print(f"  [llm:{purpose}] exit {result.returncode}", file=sys.stderr)
+            if result.stderr.strip():
+                print(f"  [llm:{purpose}] {result.stderr.strip()}", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print(f"  [llm:{purpose}] timed out ({timeout}s)", file=sys.stderr)
+    except OSError as e:
+        print(f"  [llm:{purpose}] launch failed: {e}", file=sys.stderr)
+    return None
+
+
+# --- Reranking ---
+
+_ID_RE = re.compile(r"K7E-\d{3}-\d{5}")
+
+
+def _snippet(node_id, length=200):
+    try:
+        body = _extract_body(get(node_id))
+    except FileNotFoundError:
+        return ""
+    return " ".join(body.split())[:length]
+
+
+def _rerank(query, results, limit):
+    """Reorder candidates using the LLM as a cross-encoder-style relevance
+    scorer (issue #145, workstream 2). Over-fetch wide, rerank a small pool.
+    Degrades gracefully to the input order when no LLM is available or the
+    response can't be parsed, so callers can always rely on it."""
+    if len(results) <= 1:
+        return results[:limit]
+
+    candidates = results[:15]
+    by_id = {r["id"]: r for r in candidates}
+    listing = "\n".join(
+        f"[{r['id']}] {r['title']}: {_snippet(r['id'])}" for r in candidates
+    )
+    prompt = (
+        "Rank these knowledge entries by how well they answer the query. "
+        "Return ONLY the entry IDs in descending relevance order, one per line, "
+        "with no other text.\n\n"
+        f"Query: {query[:500]}\n\nEntries:\n{listing}"
+    )
+
+    response = _call_llm(prompt, purpose="rerank", timeout=30)
+    if not response:
+        return results[:limit]
+
+    ordered = []
+    seen = set()
+    for line in response.splitlines():
+        m = _ID_RE.search(line)
+        if m and m.group(0) in by_id and m.group(0) not in seen:
+            ordered.append(by_id[m.group(0)])
+            seen.add(m.group(0))
+
+    if not ordered:
+        return results[:limit]
+
+    # Append candidates the LLM dropped (preserve original order), then any
+    # results beyond the rerank window.
+    for r in candidates:
+        if r["id"] not in seen:
+            ordered.append(r)
+            seen.add(r["id"])
+    for r in results[15:]:
+        if r["id"] not in seen:
+            ordered.append(r)
+            seen.add(r["id"])
+
+    return ordered[:limit]
 
 
 # --- Recall (RAG) ---
 
-def recall(text, limit=8):
+def recall(text, limit=8, include_superseded=False):
     """RAG recall: given arbitrary text, find relevant knowledge and synthesize.
 
-    Returns (answer_text, source_entries) where answer_text may be None if
-    no LLM is available (sources still returned for fallback display).
+    Returns (answer_text, source_entries). The CLI gates this behind an LLM
+    availability check (fail fast); answer_text is None only when nothing was
+    found or the LLM call failed at runtime.
     """
     init()
     text = text.strip()
@@ -496,11 +649,12 @@ def recall(text, limit=8):
         if not queries:
             queries = [text[:100]]
 
-    # Search across all queries, merge by node ID (keep max score)
+    # Search across all queries, merge by node ID (keep max score). Subquery
+    # searches don't rerank (one LLM rerank over the merged pool below is enough).
     hit_counts = {}
     hit_info = {}
     for q in queries:
-        results = search(q, limit=limit)
+        results = search(q, limit=limit, include_superseded=include_superseded, rerank=False)
         for r in results:
             hit_counts[r["id"]] = hit_counts.get(r["id"], 0) + 1
             if r["id"] not in hit_info or r.get("score", 0) > hit_info[r["id"]].get("score", 0):
@@ -509,12 +663,17 @@ def recall(text, limit=8):
     if not hit_counts:
         return None, []
 
-    # Rank by frequency across queries, then by score
+    # Rank by frequency across queries, then by score, into a wide pool
+    pool_size = max(limit, 15)
     ranked_ids = sorted(
         hit_counts.keys(),
         key=lambda nid: (hit_counts[nid], hit_info[nid].get("score", 0)),
         reverse=True,
-    )[:limit]
+    )[:pool_size]
+
+    # Rerank the merged pool with the LLM (no-op/fallback when no LLM), then trim.
+    candidates = [{"id": nid, "title": hit_info[nid]["title"]} for nid in ranked_ids]
+    ranked_ids = [r["id"] for r in _rerank(text, candidates, limit)]
 
     # Retrieve full content
     entries = []
@@ -529,6 +688,8 @@ def recall(text, limit=8):
     if not entries:
         return None, []
 
+    _bump_usage([e["id"] for e in entries])
+
     # Synthesize
     context_text = "\n\n---\n\n".join(
         f"[{e['id']}] {e['title']}\n{e['content']}" for e in entries
@@ -542,29 +703,24 @@ def recall(text, limit=8):
         f"Knowledge entries:\n{context_text}"
     )
 
-    answer = _call_llm(prompt)
+    answer = _call_llm(prompt, purpose="summarize")
     return answer, entries
 
 
 def _decompose_queries(text):
-    """Use LLM to extract search queries from long text. Falls back to splitting."""
+    """Use the LLM to extract search queries from long text. Returns [] if the
+    LLM is unavailable or returns nothing; recall() then searches the raw text."""
     prompt = (
         "Extract 3-5 short search queries (2-4 words each) that capture the "
         "key topics in this text. Return one query per line, nothing else.\n\n"
         f"Text: {text[:2000]}"
     )
-    response = _call_llm(prompt, timeout=30)
-    if response:
-        lines = [l.strip().strip("-•*").strip() for l in response.splitlines() if l.strip()]
-        queries = [l for l in lines if 2 <= len(l.split()) <= 8 and len(l) < 80]
-        if queries:
-            return queries[:5]
-
-    # Fallback: split into meaningful chunks by sentence boundaries
-    words = [w for w in text.split() if len(w) > 3]
-    if len(words) > 6:
-        return [" ".join(words[:5]), " ".join(words[-5:])]
-    return [" ".join(words)] if words else []
+    response = _call_llm(prompt, purpose="decompose", timeout=30)
+    if not response:
+        return []
+    lines = [l.strip().strip("-•*").strip() for l in response.splitlines() if l.strip()]
+    queries = [l for l in lines if 2 <= len(l.split()) <= 8 and len(l) < 80]
+    return queries[:5]
 
 
 # --- Compile (knowledge compounding) ---
@@ -613,9 +769,9 @@ def compile_tag(tag, dry_run=False):
             print(f"  {e['id']}  {e['title']}")
         return None
 
-    compiled_content = _call_llm(prompt)
+    compiled_content = _call_llm(prompt, purpose="compile")
     if not compiled_content:
-        print("Error: No LLM available to compile entries. Configure with: k7e config llm <provider>", file=sys.stderr)
+        print("Error: compile_command (or llm_command) not configured or call failed.", file=sys.stderr)
         return None
 
     # Store as a new compiled node
@@ -732,7 +888,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     created_at TEXT,
     updated_at TEXT,
     content_hash TEXT DEFAULT '',
-    superseded_by TEXT DEFAULT ''
+    superseded_by TEXT DEFAULT '',
+    last_used_at TEXT,
+    use_count INTEGER DEFAULT 0
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
@@ -770,6 +928,10 @@ def _migrate(conn):
         conn.execute("ALTER TABLE nodes ADD COLUMN content_hash TEXT DEFAULT ''")
     if "superseded_by" not in cols:
         conn.execute("ALTER TABLE nodes ADD COLUMN superseded_by TEXT DEFAULT ''")
+    if "last_used_at" not in cols:
+        conn.execute("ALTER TABLE nodes ADD COLUMN last_used_at TEXT")
+    if "use_count" not in cols:
+        conn.execute("ALTER TABLE nodes ADD COLUMN use_count INTEGER DEFAULT 0")
     conn.commit()
 
 
@@ -870,7 +1032,7 @@ _STOPWORDS = {"a", "an", "the", "is", "are", "was", "were", "be", "been", "being
               "or", "so", "if", "then", "than", "too", "very", "just"}
 
 
-def _search_bm25(conn, query, limit):
+def _search_bm25(conn, query, limit, include_superseded=False):
     expanded = query.replace("-", " ").replace("_", " ")
     queries_to_try = [query, expanded]
 
@@ -879,12 +1041,13 @@ def _search_bm25(conn, query, limit):
     if meaningful:
         queries_to_try.append(" OR ".join(meaningful))
 
+    status_clause = "" if include_superseded else "AND nodes.status = 'active'"
     for q in queries_to_try:
         try:
             rows = conn.execute(
                 "SELECT nodes.id, nodes.title, bm25(nodes_fts) as score "
                 "FROM nodes_fts JOIN nodes ON nodes_fts.rowid = nodes.rowid "
-                "WHERE nodes_fts MATCH ? AND nodes.status = 'active' ORDER BY score LIMIT ?",
+                f"WHERE nodes_fts MATCH ? {status_clause} ORDER BY score LIMIT ?",
                 (q, limit)
             ).fetchall()
             if rows:
@@ -894,12 +1057,13 @@ def _search_bm25(conn, query, limit):
     return []
 
 
-def _search_metadata(conn, query, limit):
+def _search_metadata(conn, query, limit, include_superseded=False):
     terms = [t for t in query.lower().split() if len(t) > 2]
     if not terms:
         return []
+    status_clause = "" if include_superseded else "WHERE status = 'active'"
     rows = conn.execute(
-        "SELECT id, title, tags, aliases FROM nodes WHERE status = 'active'"
+        f"SELECT id, title, tags, aliases FROM nodes {status_clause}"
     ).fetchall()
     scored = []
     for r in rows:
@@ -912,22 +1076,24 @@ def _search_metadata(conn, query, limit):
     return scored[:limit]
 
 
-def _search_embeddings(conn, query, limit):
+def _search_embeddings(conn, query, limit, include_superseded=False):
     query_vec = embed_text(query)
     if not query_vec:
         return []
     count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
     if count > _EMBED_SCAN_LIMIT:
         return []
-    rows = conn.execute("SELECT node_id, vector FROM embeddings").fetchall()
+    status_clause = "" if include_superseded else "WHERE n.status = 'active'"
+    rows = conn.execute(
+        "SELECT e.node_id, e.vector, n.title FROM embeddings e "
+        f"JOIN nodes n ON e.node_id = n.id {status_clause}"
+    ).fetchall()
     scored = []
-    for node_id, vec_blob in rows:
+    for node_id, vec_blob, title in rows:
         node_vec = _unpack_vector(vec_blob)
         sim = cosine_similarity(query_vec, node_vec)
         if sim > 0.3:
-            title_row = conn.execute("SELECT title FROM nodes WHERE id = ?", (node_id,)).fetchone()
-            title = title_row[0] if title_row else ""
-            scored.append((node_id, title, sim))
+            scored.append((node_id, title or "", sim))
     scored.sort(key=lambda x: -x[2])
     return scored[:limit]
 

@@ -10,7 +10,7 @@ from commands.gpu_cmd import cmd_cuda, cmd_mb_free, cmd_mlx, cmd_mps
 from commands.json_cmd import cmd_json
 from commands.mqtt_cmd import cmd_pub, cmd_sub
 from commands.ports_cmd import cmd_free, cmd_listen
-from commands.secrets_cmd import cmd_get
+from commands.secrets_cmd import cmd_get, cmd_set
 from commands.video_cmd import cmd_last_frame
 
 
@@ -53,10 +53,21 @@ def build_parser() -> argparse.ArgumentParser:
     gpu_mlx.add_argument("-v", "--verbose", action="store_true")
     gpu_sub.add_parser("mb-free", help="Print free GPU memory in MiB")
 
-    secrets_p = sub.add_parser("secrets", help="Resolve secrets from env or ~/lib")
+    secrets_p = sub.add_parser("secrets", help="Resolve secrets from env, ~/lib, or Keychain")
     secrets_sub = secrets_p.add_subparsers(dest="secrets_cmd", required=True)
     secrets_get = secrets_sub.add_parser("get", help="Print a secret value")
     secrets_get.add_argument("name", help="Environment variable name")
+    secrets_set = secrets_sub.add_parser("set", help="Store a secret value")
+    secrets_set.add_argument("name", help="Environment variable name")
+    secrets_set.add_argument("value", nargs="?", help="Value (omit to read from stdin)")
+    secrets_where = secrets_set.add_mutually_exclusive_group()
+    secrets_where.add_argument("--dir", help="Base directory instead of ~/lib")
+    secrets_where.add_argument(
+        "--keychain", action="store_true", help="Store in the macOS Keychain"
+    )
+    secrets_where.add_argument(
+        "--env-file", help="Upsert a NAME=value line in a dotenv file"
+    )
 
     mqtt_p = sub.add_parser("mqtt", help="MQTT via mosquitto clients")
     mqtt_sub = mqtt_p.add_subparsers(dest="mqtt_cmd", required=True)
@@ -120,6 +131,14 @@ def dispatch(args: argparse.Namespace) -> int:
     if group == "secrets":
         if args.secrets_cmd == "get":
             return cmd_get(args.name)
+        if args.secrets_cmd == "set":
+            return cmd_set(
+                args.name,
+                args.value,
+                base_dir=args.dir,
+                keychain=args.keychain,
+                env_file=args.env_file,
+            )
     if group == "mqtt":
         rest = args.args
         if rest[:1] == ["--"]:
