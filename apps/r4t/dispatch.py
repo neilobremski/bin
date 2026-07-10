@@ -20,6 +20,7 @@ in the team's pending/ dir and drain on later dispatch and idle passes.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -241,6 +242,7 @@ def _release_one(
     task_id: str,
     next_hop: int,
     body: str,
+    synthesis_response: bool,
 ) -> None:
     to = str(envelope.get("to", "")).strip()
     if _is_internal(ctx.node, to):
@@ -253,6 +255,7 @@ def _release_one(
                 "hop": next_hop,
                 "auto": True,
                 "body": body,
+                "synthesis_response": synthesis_response,
             },
         )
         bundle = staging / str(envelope.get("id", ""))
@@ -272,10 +275,26 @@ def _release_one(
     outbox.mkdir(parents=True, exist_ok=True)
     msg_id = str(envelope.get("id", "")) or tasks.new_task_id()
     envelope["id"] = msg_id
-    state.atomic_write_json(outbox / f"{msg_id}.json", envelope)
     bundle = staging / msg_id
     if bundle.is_dir():
-        os.replace(bundle, outbox / msg_id)
+        destination = outbox / msg_id
+        if destination.exists():
+            shutil.rmtree(bundle, ignore_errors=True)
+        else:
+            try:
+                os.replace(bundle, destination)
+            except OSError as e:
+                if e.errno != errno.EXDEV:
+                    raise
+                temporary = outbox / f".{msg_id}.{tasks.new_task_id()}.tmp"
+                try:
+                    shutil.copytree(bundle, temporary)
+                    if not destination.exists():
+                        os.replace(temporary, destination)
+                finally:
+                    shutil.rmtree(temporary, ignore_errors=True)
+                shutil.rmtree(bundle, ignore_errors=True)
+    state.atomic_write_json(outbox / f"{msg_id}.json", envelope)
     state.append_log(
         ctx.node,
         f"r4t: RELEASED {sender_addr} -> {to} task={task_id} hop={next_hop}",
@@ -291,6 +310,7 @@ def release_staging(
     hop: int,
     *,
     bulk_source: str | None = None,
+    synthesis_response: bool = False,
 ) -> dict:
     """Process the turn's staged envelopes in send order: quota, pair
     suppression, bulk once-per-window, header stamp + auto class mark,
@@ -302,20 +322,24 @@ def release_staging(
     outbox = _real_outbox(ctx)
     released = 0
     violations = 0
+    synthesis_available = synthesis_response
+    synthesis_creator = str((tasks.load_task(ctx.node, task_id) or {}).get("creator", ""))
     for i, path in enumerate(state.staged_envelopes(ctx.node, member.name)):
         try:
             envelope = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             path.unlink(missing_ok=True)
             continue
-        path.unlink(missing_ok=True)
         if not isinstance(envelope, dict):
+            path.unlink(missing_ok=True)
             continue
         to = str(envelope.get("to", "")).strip()
         _, _, _, body = tasks.parse_header(str(envelope.get("content", "")))
         if not to or not body.strip():
+            path.unlink(missing_ok=True)
             continue
         if i >= tier.max_sends_per_turn:
+            path.unlink(missing_ok=True)
             violations += 1
             state.record_dead_letter(
                 ctx.node,
@@ -337,6 +361,7 @@ def release_staging(
             config.suppression_window_seconds,
         )
         if repeated:
+            path.unlink(missing_ok=True)
             violations += 1
             state.record_dead_letter(
                 ctx.node,
@@ -359,6 +384,7 @@ def release_staging(
                 config.suppression_window_seconds,
             )
             if repeated:
+                path.unlink(missing_ok=True)
                 violations += 1
                 state.record_dead_letter(
                     ctx.node,
@@ -381,9 +407,17 @@ def release_staging(
             f"## {state.utc_now()} to {to}\n\n"
             + (body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"),
         )
-        _release_one(
-            ctx, outbox, staging, envelope, stamped, sender_addr, task_id, next_hop, body
+        final_response = (
+            synthesis_available
+            and _is_internal(ctx.node, to)
+            and to.lower() == synthesis_creator.lower()
         )
+        _release_one(
+            ctx, outbox, staging, envelope, stamped, sender_addr, task_id, next_hop,
+            body, final_response,
+        )
+        path.unlink(missing_ok=True)
+        synthesis_available = synthesis_available and not final_response
         released += 1
     shutil.rmtree(staging, ignore_errors=True)
     return {"released": released, "violations": violations}
@@ -404,6 +438,7 @@ def _run_turn(
     run_fn,
     *,
     bulk_source: str | None = None,
+    synthesis_response: bool = False,
 ) -> None:
     prompt = build_prompt(ctx, roster, member, sender, body)
     variant = state.take_rotation(ctx.node, tier.name, tier.pool_size)
@@ -427,7 +462,6 @@ def _run_turn(
     entry_body = body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"
     state.append_history(ctx.node, member.name, f"## {now} from {sender}\n\n{entry_body}")
     state.update_meta(ctx.node, member.name, last_inbound_at=now)
-    state.stamp_last_turn_start(ctx.node)
     state.append_log(
         ctx.node,
         f"## {state.utc_now()} dispatch {sender} -> {member.name} "
@@ -449,7 +483,8 @@ def _run_turn(
     )
 
     release = release_staging(
-        ctx, config, member, tier, task_id, hop, bulk_source=bulk_source
+        ctx, config, member, tier, task_id, hop, bulk_source=bulk_source,
+        synthesis_response=synthesis_response,
     )
     if release["violations"]:
         level = state.bucket_drain(
@@ -510,33 +545,58 @@ def _forced_synthesis(
     """Close the task through one leader turn: "respond to the originator
     with what you have." Replaces every parking/approval path — tasks always
     terminate in an answer (docs/governance.md §4)."""
-    task["status"] = tasks.STATUS_CLOSED
-    if task.get("synthesized"):
-        tasks.save_task(ctx.node, task)
-        return SKIPPED
+    task_id = str(task["id"])
+    ledger_lock = state.task_lock(ctx.node, task_id)
+    if not ledger_lock.acquire():
+        state.park_pending(ctx.node, {"synthesis": True, "task": task_id, "why": why})
+        return DEFERRED
+    try:
+        task = tasks.load_task(ctx.node, task_id)
+        if task is None:
+            return SKIPPED
+        if (
+            task.get("status") == tasks.STATUS_OPEN
+            and not task.get("synthesis_state")
+        ):
+            task["status"] = tasks.STATUS_CLOSED
+            task["synthesis_state"] = "pending"
+            tasks.save_task(ctx.node, task)
+        if task.get("synthesis_state") != "pending":
+            return SKIPPED
+    finally:
+        ledger_lock.release()
+
     leader = roster.leader()
     if leader is None or leader.errors:
-        tasks.save_task(ctx.node, task)
         state.append_log(
             ctx.node,
-            f"r4t: SYNTHESIS-SKIPPED task={task['id']} ({why}; no usable leader)",
+            f"r4t: SYNTHESIS-SKIPPED task={task_id} ({why}; no usable leader)",
         )
         return SKIPPED
     tier, err, _pinned = config.tier_for(leader)
     if tier is None:
-        tasks.save_task(ctx.node, task)
         state.append_log(
-            ctx.node, f"r4t: SYNTHESIS-SKIPPED task={task['id']} ({why}; {err})"
+            ctx.node, f"r4t: SYNTHESIS-SKIPPED task={task_id} ({why}; {err})"
         )
         return SKIPPED
     lock = state.AgentLock(ctx.node, leader.name)
     if not lock.acquire(tier.name):
-        tasks.save_task(ctx.node, task)
-        state.park_pending(ctx.node, {"synthesis": True, "task": task["id"], "why": why})
+        state.park_pending(ctx.node, {"synthesis": True, "task": task_id, "why": why})
         return DEFERRED
     try:
-        task["synthesized"] = True
-        tasks.save_task(ctx.node, task)
+        ledger_lock = state.task_lock(ctx.node, task_id)
+        if not ledger_lock.acquire():
+            state.park_pending(ctx.node, {"synthesis": True, "task": task_id, "why": why})
+            return DEFERRED
+        try:
+            task = tasks.load_task(ctx.node, task_id)
+            if task is None or task.get("synthesis_state") != "pending":
+                return SKIPPED
+            task["synthesis_state"] = "running"
+            task["synthesized"] = True
+            tasks.save_task(ctx.node, task)
+        finally:
+            ledger_lock.release()
         creator = str(task.get("creator", "")) or "unknown"
         body = (
             f"Task {task['id']} is closed: {why}. Respond NOW to {creator} "
@@ -550,7 +610,17 @@ def _forced_synthesis(
         _run_turn(
             ctx, config, roster, leader, tier, creator, body,
             task["id"], int(task.get("turns", 0)), run_fn,
+            synthesis_response=True,
         )
+        ledger_lock = state.task_lock(ctx.node, task_id)
+        if ledger_lock.acquire():
+            try:
+                completed = tasks.load_task(ctx.node, task_id)
+                if completed is not None and completed.get("synthesis_state") == "running":
+                    completed["synthesis_state"] = "done"
+                    tasks.save_task(ctx.node, completed)
+            finally:
+                ledger_lock.release()
         return SYNTHESIS
     finally:
         lock.release()
@@ -565,6 +635,7 @@ def _handle(
     message: str,
     *,
     run_fn=run_harness,
+    synthesis_response: bool = False,
 ) -> str:
     _, sub = split_recipient(to)
 
@@ -633,16 +704,50 @@ def _handle(
     if task_id is None:
         task_id = tasks.new_task_id()
         hop = 0
-    task = tasks.ensure_task(ctx.node, task_id, sender)
 
-    if had_header and not auto and tasks.reset_budget(task):
+    envelope = {
+        "from": sender, "to": to, "task": task_id, "hop": hop,
+        "auto": auto or not had_header, "body": body,
+        "synthesis_response": synthesis_response,
+    }
+    ledger_lock = state.task_lock(ctx.node, task_id)
+    if not ledger_lock.acquire():
+        state.park_pending(ctx.node, envelope)
+        return DEFERRED
+    deliberate_reset = False
+    cut_recipient = ""
+    try:
+        task = tasks.ensure_task(ctx.node, task_id, sender)
+        if had_header and not auto:
+            deliberate_reset = tasks.reset_budget(task)
+        accepted_synthesis = (
+            synthesis_response
+            and task.get("status") == tasks.STATUS_CLOSED
+            and bool(task.get("synthesized"))
+            and task.get("synthesis_state") in ("running", "done")
+            and _is_internal(ctx.node, sender)
+            and _is_internal(ctx.node, to)
+            and to.strip().lower()
+            == str(task.get("creator", "")).strip().lower()
+        )
+        early_outcome = ""
+        if task.get("status") == tasks.STATUS_CLOSED and not accepted_synthesis:
+            early_outcome = "closed"
+        elif not accepted_synthesis and hop >= tier.hop_limit:
+            early_outcome = "hop-cut"
+            if not task.get("cut_notified"):
+                task["cut_notified"] = True
+                cut_recipient = str(task.get("creator", sender))
         tasks.save_task(ctx.node, task)
+    finally:
+        ledger_lock.release()
+
+    if deliberate_reset:
         state.append_log(
             ctx.node,
             f"r4t: DELIBERATE task={task_id} budget reset (non-auto header from {sender})",
         )
-
-    if task.get("status") == tasks.STATUS_CLOSED:
+    if early_outcome == "closed":
         state.record_dead_letter(
             ctx.node, reason="task-closed", sender=sender, to=to,
             task=task_id, content=body,
@@ -650,6 +755,24 @@ def _handle(
         state.append_log(
             ctx.node, f"r4t: CLOSED task={task_id} {sender} -> {member.name.lower()}"
         )
+        return DEAD
+    if early_outcome == "hop-cut":
+        state.record_dead_letter(
+            ctx.node, reason="hop-cut", sender=sender, to=to,
+            task=task_id, content=body,
+        )
+        state.append_log(
+            ctx.node,
+            f"r4t: CUT task={task_id} hop={hop} {sender} -> {member.name.lower()} "
+            f"(tier {tier.name} hop_limit {tier.hop_limit})",
+        )
+        if cut_recipient:
+            ctx.tell_fn(
+                cut_recipient,
+                f"[r4t {ctx.node}] task {task_id}: message chain cut at hop "
+                f"{hop} (tier {tier.name} hop_limit {tier.hop_limit}). The last "
+                f"message was {sender} -> {member.name} and was not dispatched.",
+            )
         return DEAD
 
     bulk_source = sender.lower() if sender.lower() in config.rebroadcast_senders else None
@@ -673,27 +796,6 @@ def _handle(
             )
             return DEAD
 
-    if hop >= tier.hop_limit:
-        state.record_dead_letter(
-            ctx.node, reason="hop-cut", sender=sender, to=to,
-            task=task_id, content=body,
-        )
-        state.append_log(
-            ctx.node,
-            f"r4t: CUT task={task_id} hop={hop} {sender} -> {member.name.lower()} "
-            f"(tier {tier.name} hop_limit {tier.hop_limit})",
-        )
-        if not task.get("cut_notified"):
-            task["cut_notified"] = True
-            tasks.save_task(ctx.node, task)
-            ctx.tell_fn(
-                task.get("creator", sender),
-                f"[r4t {ctx.node}] task {task_id}: message chain cut at hop "
-                f"{hop} (tier {tier.name} hop_limit {tier.hop_limit}). The last "
-                f"message was {sender} -> {member.name} and was not dispatched.",
-            )
-        return DEAD
-
     level = state.bucket_level(ctx.node, member.name, config.bucket_max)
     if state.bucket_muted(level, config.bucket_max):
         now = state.utc_now()
@@ -712,12 +814,87 @@ def _handle(
         )
         return DEAD
 
-    envelope = {
-        "from": sender, "to": to, "task": task_id, "hop": hop,
-        "auto": auto or not had_header, "body": body,
-    }
+    lock = state.AgentLock(ctx.node, member.name)
+    admission = state.admission_lock(ctx.node)
+    if not admission.acquire():
+        state.park_pending(ctx.node, envelope)
+        return DEFERRED
+    task = None
+    task_outcome = ""
+    try:
+        throttle_reason = _throttle_block(ctx, config)
+        acquired = throttle_reason is None and lock.acquire(tier.name)
+        tier_blocked = acquired and state.count_tier_locks(
+            ctx.node, tier.name
+        ) > tier.concurrency
+        if tier_blocked:
+            lock.release()
+            acquired = False
+        if acquired:
+            ledger_lock = state.task_lock(ctx.node, task_id)
+            if not ledger_lock.acquire():
+                lock.release()
+                acquired = False
+                task_outcome = "task-busy"
+            else:
+                try:
+                    task = tasks.ensure_task(ctx.node, task_id, sender)
+                    accepted_synthesis = (
+                        synthesis_response
+                        and task.get("status") == tasks.STATUS_CLOSED
+                        and bool(task.get("synthesized"))
+                        and task.get("synthesis_state") in ("running", "done")
+                        and _is_internal(ctx.node, sender)
+                        and _is_internal(ctx.node, to)
+                        and to.strip().lower()
+                        == str(task.get("creator", "")).strip().lower()
+                    )
+                    if task.get("status") == tasks.STATUS_CLOSED and not accepted_synthesis:
+                        task_outcome = "closed"
+                    elif accepted_synthesis or tasks.charge_turn(
+                        task, tier.max_turns_per_task
+                    ):
+                        task_outcome = "admitted"
+                    else:
+                        task_outcome = "exhausted"
+                        task["status"] = tasks.STATUS_CLOSED
+                        task["synthesis_state"] = "pending"
+                    tasks.save_task(ctx.node, task)
+                finally:
+                    ledger_lock.release()
+                if task_outcome == "admitted":
+                    state.stamp_last_turn_start(ctx.node)
+                else:
+                    lock.release()
+                    acquired = False
+    finally:
+        admission.release()
 
-    throttle_reason = _throttle_block(ctx, config)
+    if task_outcome == "closed":
+        state.record_dead_letter(
+            ctx.node, reason="task-closed", sender=sender, to=to,
+            task=task_id, content=body,
+        )
+        state.append_log(
+            ctx.node, f"r4t: CLOSED task={task_id} {sender} -> {member.name.lower()}"
+        )
+        return DEAD
+
+    if task_outcome == "exhausted":
+        state.record_dead_letter(
+            ctx.node, reason="budget-exhausted", sender=sender, to=to,
+            task=task_id, content=body,
+        )
+        state.append_log(
+            ctx.node,
+            f"r4t: BUDGET task={task_id} exhausted (used "
+            f"{task.get('used', 0.0):.2f}/{task.get('budget', 1.0):.2f}) — "
+            "closing through forced synthesis",
+        )
+        return _forced_synthesis(
+            ctx, config, roster, task, run_fn, why="turn budget exhausted"
+        )
+
     if throttle_reason:
         state.park_pending(ctx.node, envelope)
         state.append_log(
@@ -727,8 +904,25 @@ def _handle(
         )
         return DEFERRED
 
-    lock = state.AgentLock(ctx.node, member.name)
-    if not lock.acquire(tier.name):
+    if tier_blocked:
+        state.park_pending(ctx.node, envelope)
+        state.append_log(
+            ctx.node,
+            f"r4t: DEFERRED (tier {tier.name} at concurrency {tier.concurrency}) "
+            f"{sender} -> {member.name.lower()} task={task_id}",
+        )
+        return DEFERRED
+
+    if task_outcome == "task-busy":
+        state.park_pending(ctx.node, envelope)
+        state.append_log(
+            ctx.node,
+            f"r4t: DEFERRED (task ledger busy) {sender} -> {member.name.lower()} "
+            f"task={task_id} hop={hop}",
+        )
+        return DEFERRED
+
+    if not acquired:
         state.park_pending(ctx.node, envelope)
         state.append_log(
             ctx.node,
@@ -738,34 +932,6 @@ def _handle(
         return DEFERRED
 
     try:
-        if state.count_tier_locks(ctx.node, tier.name) > tier.concurrency:
-            lock.release()
-            state.park_pending(ctx.node, envelope)
-            state.append_log(
-                ctx.node,
-                f"r4t: DEFERRED (tier {tier.name} at concurrency {tier.concurrency}) "
-                f"{sender} -> {member.name.lower()} task={task_id}",
-            )
-            return DEFERRED
-
-        task = tasks.ensure_task(ctx.node, task_id, sender)
-        if not tasks.charge_turn(task, tier.max_turns_per_task):
-            lock.release()
-            state.record_dead_letter(
-                ctx.node, reason="budget-exhausted", sender=sender, to=to,
-                task=task_id, content=body,
-            )
-            state.append_log(
-                ctx.node,
-                f"r4t: BUDGET task={task_id} exhausted (used "
-                f"{task.get('used', 0.0):.2f}/{task.get('budget', 1.0):.2f}) — "
-                "closing through forced synthesis",
-            )
-            return _forced_synthesis(
-                ctx, config, roster, task, run_fn, why="turn budget exhausted"
-            )
-        tasks.save_task(ctx.node, task)
-
         _run_turn(
             ctx, config, roster, member, tier, sender, body, task_id, hop,
             run_fn, bulk_source=bulk_source,
@@ -818,6 +984,7 @@ def _redispatch(ctx: DispatchContext, envelope: dict, *, run_fn=run_harness) -> 
         envelope.get("to", ctx.node),
         message,
         run_fn=run_fn,
+        synthesis_response=bool(envelope.get("synthesis_response", False)),
     )
 
 
@@ -958,11 +1125,41 @@ def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
         task_id = str(identity.get("task", "")) or tasks.new_task_id()
         hop = int(identity.get("hop", 0) or 0)
         sender = str(identity.get("sender", "")) or "r4t"
-        state.clear_turn(ctx.node, agent_key)
-        task = tasks.ensure_task(ctx.node, task_id, sender)
-        nudges = task.get("nudges") or {}
-        count = int(nudges.get(agent_key, 0))
-        if count >= config.nudge_cap:
+        evidence_key = tasks.pair_key(
+            agent_key,
+            task_id,
+            json.dumps({"evidence": evidence, "identity": identity}, sort_keys=True),
+            kind="nudge",
+        )
+        ledger_lock = state.task_lock(ctx.node, task_id)
+        if not ledger_lock.acquire():
+            continue
+        action = ""
+        count = 0
+        try:
+            task = tasks.ensure_task(ctx.node, task_id, sender)
+            nudges = task.get("nudges") or {}
+            inflight = task.get("nudge_inflight") or {}
+            count = int(nudges.get(agent_key, 0))
+            if inflight.get(agent_key) == evidence_key:
+                action = "duplicate"
+            elif task.get("status") == tasks.STATUS_CLOSED:
+                action = "closed"
+            elif count >= config.nudge_cap:
+                task["status"] = tasks.STATUS_CLOSED
+                task["synthesis_state"] = "pending"
+                action = "synthesis"
+            else:
+                nudges[agent_key] = count + 1
+                inflight[agent_key] = evidence_key
+                task["nudges"] = nudges
+                task["nudge_inflight"] = inflight
+                action = "nudge"
+            tasks.save_task(ctx.node, task)
+        finally:
+            ledger_lock.release()
+
+        if action == "synthesis":
             state.append_log(
                 ctx.node,
                 f"r4t: NUDGE-CAP task={task_id} agent={agent_key} "
@@ -973,17 +1170,31 @@ def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
                 why=f"recovery nudge cap reached for {agent_key}",
             )
             continue
-        nudges[agent_key] = count + 1
-        task["nudges"] = nudges
-        tasks.save_task(ctx.node, task)
+        if action != "nudge":
+            continue
+        state.clear_turn(ctx.node, agent_key)
         state.append_log(
             ctx.node,
             f"r4t: NUDGE {agent_key} task={task_id} hop={hop} "
             f"({count + 1}/{config.nudge_cap}): " + "; ".join(evidence),
         )
         message = f"{tasks.format_header(task_id, hop, auto=True)} {_nudge_body(evidence)}"
-        _handle(ctx, sender, f"{ctx.node}:{agent_key}", message, run_fn=run_fn)
-        state.mark_nudged(ctx.node, agent_key)
+        try:
+            _handle(ctx, sender, f"{ctx.node}:{agent_key}", message, run_fn=run_fn)
+            state.mark_nudged(ctx.node, agent_key)
+        finally:
+            ledger_lock = state.task_lock(ctx.node, task_id)
+            if ledger_lock.acquire():
+                try:
+                    current = tasks.load_task(ctx.node, task_id)
+                    if current is not None:
+                        inflight = current.get("nudge_inflight") or {}
+                        if inflight.get(agent_key) == evidence_key:
+                            del inflight[agent_key]
+                            current["nudge_inflight"] = inflight
+                            tasks.save_task(ctx.node, current)
+                finally:
+                    ledger_lock.release()
         nudged.append(agent_key)
 
     return {"watched": len(active) + len(dropped), "nudged": nudged, "dropped": dropped}

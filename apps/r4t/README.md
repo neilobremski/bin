@@ -10,30 +10,22 @@ nothing ever waits on a human.
 Why each governance layer exists, with prior art:
 [docs/governance.md](docs/governance.md).
 
-## Quickstart (any repo)
+**New here?** Step-by-step setup, harness tiers, and fail-closed behavior:
+[docs/tutorial.md](docs/tutorial.md).
+
+## Quick start
 
 ```bash
 cd /path/to/your/repo
-r4t init
+r4t init                              # ROSTER.md + ~/.r4t/harnesses.json
+r4t harness add worker opencode       # when roster members need extra tiers
+r4t roster check                      # lint roster ↔ harness mappings
+# register with a8s (exact commands printed by r4t init)
 ```
 
-`r4t init` writes a starter `ROSTER.md` (a Human owner, an AI `Lead` on the
-`leader` tier, a `Dev` on the `member` tier) if the repo has none, writes
-`~/.r4t/harnesses.json` from built-in defaults if you have none (both tiers
-run `opencode run --auto`; the `_notes` key documents swapping in `claude`,
-`agent`, `agy`, ...), and prints the exact registration sequence:
-
-```bash
-a8s add myrepo-node /path/to/your/repo ~/bin/apps/r4t/example-definition.json
-a8s namespace myrepo myrepo-node
-a8s start myrepo-node
-tell myrepo-node "hello"       # bare node -> the roster leader
-tell myrepo:dev "hello"        # namespace -> a specific member
-```
-
-Edit the roster (names, personas, tiers), run `r4t roster check`, and go.
-A config with nothing but tiers gets every protection below at its default —
-zero governance configuration is a fully governed team.
+The roster (`ROSTER.md`) names members and symbolic tiers; the harness
+config (`~/.r4t/harnesses.json`) maps those tiers to CLIs. Unknown tiers
+fail closed — see the [tutorial](docs/tutorial.md#missing-tier-no-default--fail-closed).
 
 ### How a message flows
 
@@ -54,10 +46,16 @@ zero governance configuration is a fully governed team.
    there is enough. `tell --sync` to teammates is prohibited by prompt and
    pointless by design.
 
+Governance defaults apply with no extra configuration — a harness config
+with only tier invoke lines is a fully governed team.
+
 ## Example: the s1l team
 
+See [docs/tutorial.md](docs/tutorial.md#example-existing-repo) for the full
+sequence. Short version:
+
 ```bash
-r4t init --root ~/repos/s1l           # keeps the existing ROSTER.md if present
+r4t init --root ~/repos/s1l
 a8s add s1l-node ~/repos/s1l ~/bin/apps/r4t/example-definition.json
 a8s namespace s1l s1l-node
 a8s start s1l-node

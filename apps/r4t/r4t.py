@@ -25,9 +25,13 @@ from dispatch import (
 )
 from harness import (
     HarnessError,
+    HARNESS_PRESETS,
+    add_preset_tier,
     default_config_path,
     default_config_payload,
+    format_preset_invoke,
     load_harness_config,
+    preset_names,
     resolve_config_path,
 )
 from notify import resolve_tell_fn, simulate_enabled
@@ -40,6 +44,8 @@ COMMAND_HELP = [
     ("init", "Write starter ROSTER.md and ~/.r4t/harnesses.json; print a8s registration"),
     ("status", "Locks, buckets, open tasks, dead letters for one team"),
     ("harness list", "Tier invoke lines, limits, and roster tier resolution"),
+    ("harness presets", "Named CLI presets aligned with a8s definitions"),
+    ("harness add <tier> <preset>", "Add a tier to ~/.r4t/harnesses.json from a preset"),
     ("roster check", "Lint ROSTER.md against the harness config"),
     ("task list", "List open tasks for a team"),
     ("task show <id>", "Show one task ledger record as JSON"),
@@ -207,7 +213,8 @@ def _next_steps(
         steps.append("`r4t init` — write a starter ROSTER.md in the current repo")
     else:
         steps.append("`r4t roster check` — lint the roster and harness mapping")
-        steps.append("`r4t harness list` — full tier invoke and limit detail")
+        steps.append("`r4t harness presets` — named CLI tiers aligned with a8s definitions")
+        steps.append("`r4t harness add <tier> <preset>` — add a tier to the harness config")
     if not teams:
         steps.append("`r4t init` — prints the a8s add / namespace / start sequence")
     elif len(teams) == 1:
@@ -403,6 +410,38 @@ def cmd_harness_list(args: argparse.Namespace) -> int:
     print(f"harness config: {config_path}" + (" (missing)" if not config_path.is_file() else ""))
     roster_path = resolve_roster_path(_resolve_root(args.root), args.roster)
     _print_harness_summary(config_path, roster_path if roster_path.is_file() else None)
+    return 0
+
+
+def cmd_harness_presets(_args: argparse.Namespace) -> int:
+    print("Named harness presets (from apps/a8s/definitions/):")
+    width = max(len(name) for name in preset_names())
+    for name in preset_names():
+        entry = HARNESS_PRESETS[name]
+        print(f"  {name:<{width}}  {entry['description']}")
+        print(f"  {'':<{width}}  headless: {entry['headless']}")
+        print(f"  {'':<{width}}  invoke: {format_preset_invoke(name)}")
+    print()
+    print("Add one: r4t harness add <tier-name> <preset>")
+    print("Example: r4t harness add worker opencode")
+    return 0
+
+
+def cmd_harness_add(args: argparse.Namespace) -> int:
+    config_path = resolve_config_path(args.harness_config)
+    try:
+        tier_key = add_preset_tier(
+            config_path,
+            args.tier,
+            args.preset,
+            force=args.force,
+        )
+    except HarnessError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    print(f"added tier {tier_key!r} ({args.preset}) to {config_path}")
+    print(f"  invoke: {format_preset_invoke(args.preset.strip().lower())}")
+    print(f"Reference it from ROSTER.md: `- **Harness:** {tier_key}`")
     return 0
 
 
@@ -632,6 +671,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common(harness_list_p)
     harness_list_p.set_defaults(func=cmd_harness_list)
+
+    harness_presets_p = harness_sub.add_parser(
+        "presets",
+        help="List named CLI presets aligned with a8s definitions.",
+    )
+    harness_presets_p.set_defaults(func=cmd_harness_presets)
+
+    harness_add_p = harness_sub.add_parser(
+        "add",
+        help="Add a symbolic tier from a named CLI preset.",
+    )
+    harness_add_p.add_argument(
+        "tier",
+        help="Symbolic tier name (referenced from ROSTER.md Harness lines).",
+    )
+    harness_add_p.add_argument(
+        "preset",
+        choices=preset_names(),
+        help="CLI preset name (see `r4t harness presets`).",
+    )
+    harness_add_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing tier with the same name.",
+    )
+    harness_add_p.add_argument(
+        "--harness-config",
+        help="Harness config path (default: ~/.r4t/harnesses.json).",
+    )
+    harness_add_p.set_defaults(func=cmd_harness_add)
 
     task_p = sub.add_parser("task", help="Task ledger commands.")
     task_p.add_argument("action", choices=["list", "show"])

@@ -72,9 +72,15 @@ def known_teams() -> list[str]:
 
 def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.with_name(f".{path.name}.{new_ulid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def atomic_write_json(path: Path, payload: dict) -> None:
@@ -166,6 +172,52 @@ class AgentLock:
         except OSError:
             pass
         self.acquired = False
+
+
+class ProcessLock:
+    """Exclusive PID lock for short cross-process state transactions."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.acquired = False
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({"pid": os.getpid(), "started": utc_now()})
+        for _ in range(2):
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                holder = read_lock(self.path)
+                if holder is not None and _pid_alive(int(holder.get("pid", 0) or 0)):
+                    return False
+                try:
+                    self.path.unlink()
+                except OSError:
+                    return False
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+            self.acquired = True
+            return True
+        return False
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+        self.acquired = False
+
+
+def admission_lock(node: str) -> ProcessLock:
+    return ProcessLock(team_dir(node) / ".admission.lock")
+
+
+def task_lock(node: str, task_id: str) -> ProcessLock:
+    return ProcessLock(team_dir(node) / "tasks" / f".{task_id}.lock")
 
 
 def read_lock(path: Path) -> dict | None:

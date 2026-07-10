@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import errno
 import json
 import sys
 import textwrap
+import threading
 
+import dispatch
 import state
 import tasks
 from dispatch import (
@@ -387,6 +390,135 @@ class TestForcedSynthesis:
         assert task["status"] == tasks.STATUS_CLOSED
         assert len(harness_calls(fake_harness)) == 2
 
+    def test_internal_synthesis_response_ignores_closed_budget_and_hop_limit(
+        self, chatty_ctx, chatty_config, chatty_harness, monkeypatch
+    ):
+        config = json.loads(chatty_config.read_text(encoding="utf-8"))
+        config["junior-dev"]["hop_limit"] = 2
+        chatty_config.write_text(json.dumps(config), encoding="utf-8")
+        monkeypatch.setenv("CHATTY_TO", f"{NODE}:phil")
+        monkeypatch.setenv("CHATTY_BODY", "final answer")
+        task_id = new_ulid()
+        task = tasks.ensure_task(NODE, task_id, f"{NODE}:phil")
+        task.update(used=1.0, turns=2)
+        tasks.save_task(NODE, task)
+        header = tasks.format_header(task_id, 2, auto=True)
+
+        assert _handle(
+            chatty_ctx, f"{NODE}:phil", f"{NODE}:gerry", f"{header} overflow"
+        ) == SYNTHESIS
+        assert tasks.load_task(NODE, task_id)["status"] == tasks.STATUS_CLOSED
+        assert drain(chatty_ctx) == 1
+        assert len(harness_calls(chatty_harness)) == 2
+        assert tasks.load_task(NODE, task_id)["used"] == 1.0
+        assert tasks.load_task(NODE, task_id)["turns"] == 2
+        assert "final answer" in read_prompt(harness_calls(chatty_harness)[1])
+        assert "task-closed" not in dead_reasons()
+        assert "hop-cut" not in dead_reasons()
+
+    def test_only_first_exact_creator_reply_gets_synthesis_privilege(
+        self, chatty_ctx, chatty_harness, monkeypatch
+    ):
+        monkeypatch.setenv("CHATTY_TO", f"{NODE}:phil,{NODE}:gerry")
+        monkeypatch.setenv("CHATTY_SENDS", "2")
+        monkeypatch.setenv("CHATTY_BODY", "synthesis {i}")
+        task_id = new_ulid()
+        task = tasks.ensure_task(NODE, task_id, f"{NODE}:phil")
+        task.update(used=1.0, turns=2)
+        tasks.save_task(NODE, task)
+        header = tasks.format_header(task_id, 2, auto=True)
+
+        assert _handle(
+            chatty_ctx, f"{NODE}:phil", f"{NODE}:gerry", f"{header} overflow"
+        ) == SYNTHESIS
+        pending = [json.loads(path.read_text()) for path in state.list_pending(NODE)]
+        privileged = [e for e in pending if e.get("synthesis_response")]
+        assert len(privileged) == 1
+        assert privileged[0]["to"] == f"{NODE}:phil"
+        assert [e["to"] for e in pending if not e.get("synthesis_response")] == [
+            f"{NODE}:gerry"
+        ]
+
+        quick = lambda *a, **k: (0, "ok", 0.0, False)
+        assert drain(chatty_ctx, run_fn=quick) == 1
+        assert "task-closed" in dead_reasons()
+
+    def test_concurrent_exhausted_arrivals_reserve_one_synthesis(self, ctx):
+        task_id = new_ulid()
+        task = tasks.ensure_task(NODE, task_id, f"{NODE}:phil")
+        task.update(used=1.0, turns=2)
+        tasks.save_task(NODE, task)
+        header = tasks.format_header(task_id, 1, auto=True)
+        synthesis_entered = threading.Event()
+        release_synthesis = threading.Event()
+        harness_calls_count = []
+        results = []
+
+        def blocking_synthesis(*args, **kwargs):
+            harness_calls_count.append(1)
+            synthesis_entered.set()
+            assert release_synthesis.wait(timeout=5)
+            return 0, "ok", 0.0, False
+
+        first = threading.Thread(
+            target=lambda: results.append(
+                _handle(
+                    ctx, f"{NODE}:marcus", f"{NODE}:phil",
+                    f"{header} first overflow", run_fn=blocking_synthesis,
+                )
+            )
+        )
+        first.start()
+        assert synthesis_entered.wait(timeout=5)
+        results.append(
+            _handle(
+                ctx, f"{NODE}:marcus", f"{NODE}:phil",
+                f"{header} second overflow", run_fn=blocking_synthesis,
+            )
+        )
+        release_synthesis.set()
+        first.join(timeout=5)
+        assert not first.is_alive()
+
+        assert sorted(results) == [DEAD, SYNTHESIS]
+        assert len(harness_calls_count) == 1
+        task = tasks.load_task(NODE, task_id)
+        assert task["status"] == tasks.STATUS_CLOSED
+        assert task["synthesis_state"] == "done"
+        assert task["synthesized"] is True
+        assert task["used"] == 1.0
+        assert task["turns"] == 2
+
+    def test_parked_synthesis_retry_keeps_single_owner(self, ctx):
+        task_id = new_ulid()
+        task = tasks.ensure_task(NODE, task_id, f"{NODE}:phil")
+        task.update(used=1.0, turns=2)
+        tasks.save_task(NODE, task)
+        header = tasks.format_header(task_id, 1, auto=True)
+        leader = state.AgentLock(NODE, "gerry")
+        assert leader.acquire("leader")
+        try:
+            assert _handle(
+                ctx, f"{NODE}:marcus", f"{NODE}:phil", f"{header} overflow"
+            ) == DEFERRED
+            assert _handle(
+                ctx, f"{NODE}:marcus", f"{NODE}:phil", f"{header} duplicate"
+            ) == DEAD
+        finally:
+            leader.release()
+
+        calls = []
+
+        def quick(*args, **kwargs):
+            calls.append(1)
+            return 0, "ok", 0.0, False
+
+        assert drain(ctx, run_fn=quick) == 1
+        assert len(calls) == 1
+        task = tasks.load_task(NODE, task_id)
+        assert task["synthesis_state"] == "done"
+        assert task["turns"] == 2
+
 
 class TestDeliberateDecision:
     def test_non_auto_header_resets_budget(self, ctx, fake_harness):
@@ -420,6 +552,83 @@ class TestDeliberateDecision:
         assert _handle(ctx, "neil", f"{NODE}:phil", f"{human_header} more please") == RAN
         assert tasks.load_task(NODE, task_id)["status"] == tasks.STATUS_OPEN
 
+    def test_first_creation_and_deliberate_reset_are_serialized(
+        self, ctx, monkeypatch
+    ):
+        task_id = new_ulid()
+        auto_header = tasks.format_header(task_id, 0, auto=True)
+        deliberate_header = tasks.format_header(task_id, 0)
+        entered = threading.Event()
+        release = threading.Event()
+        results = []
+        original_ensure = tasks.ensure_task
+
+        def pause_creation(node, incoming_task_id, creator):
+            task = original_ensure(node, incoming_task_id, creator)
+            if threading.current_thread().name == "task-creator":
+                entered.set()
+                assert release.wait(timeout=5)
+            return task
+
+        monkeypatch.setattr(tasks, "ensure_task", pause_creation)
+        quick = lambda *a, **k: (0, "ok", 0.0, False)
+        first = threading.Thread(
+            name="task-creator",
+            target=lambda: results.append(
+                _handle(
+                    ctx, f"{NODE}:marcus", f"{NODE}:gerry",
+                    f"{auto_header} initial", run_fn=quick,
+                )
+            ),
+        )
+        first.start()
+        assert entered.wait(timeout=5)
+        results.append(
+            _handle(
+                ctx, "neil", f"{NODE}:phil", f"{deliberate_header} reconsider",
+                run_fn=quick,
+            )
+        )
+        assert results == [DEFERRED]
+        release.set()
+        first.join(timeout=5)
+        assert not first.is_alive()
+        assert drain(ctx, run_fn=quick) == 1
+
+        task = tasks.load_task(NODE, task_id)
+        assert task["creator"] == f"{NODE}:marcus"
+        assert task["turns"] == 2
+        assert task["used"] == 0.5
+
+    def test_deliberate_reset_precedes_later_suppression(
+        self, ctx, fake_harness
+    ):
+        task_id = new_ulid()
+        header = tasks.format_header(task_id, 0)
+        task = tasks.ensure_task(NODE, task_id, "chatroom")
+        task["used"] = 1.0
+        tasks.save_task(NODE, task)
+        assert _handle(ctx, "chatroom", f"{NODE}:phil", f"{header} repeated") == RAN
+        task = tasks.load_task(NODE, task_id)
+        task["used"] = 1.0
+        tasks.save_task(NODE, task)
+
+        assert _handle(ctx, "chatroom", f"{NODE}:phil", f"{header} repeated") == DEAD
+        assert "pair-repeat" in dead_reasons()
+        assert tasks.load_task(NODE, task_id)["used"] == 0.0
+
+    def test_deliberate_reset_precedes_later_bucket_mute(self, ctx, fake_harness):
+        task_id = new_ulid()
+        task = tasks.ensure_task(NODE, task_id, "neil")
+        task["used"] = 1.0
+        tasks.save_task(NODE, task)
+        state.bucket_drain(NODE, "phil", 4.5, 8.0)
+        header = tasks.format_header(task_id, 0)
+
+        assert _handle(ctx, "neil", f"{NODE}:phil", f"{header} reconsider") == DEAD
+        assert "bucket-muted" in dead_reasons()
+        assert tasks.load_task(NODE, task_id)["used"] == 0.0
+
 
 class TestHopLimit:
     def test_chain_cut_dead_letters_and_notifies_creator_once(
@@ -444,6 +653,30 @@ class TestHopLimit:
         header = tasks.format_header(new_ulid(), 1, auto=True)
         _handle(ctx, "gerry", f"{NODE}:phil", f"{header} ok")
         assert len(harness_calls(fake_harness)) == 1
+
+    def test_hop_cut_wins_before_bucket_mute(self, ctx, fake_harness):
+        task_id = new_ulid()
+        tasks.ensure_task(NODE, task_id, "gerry")
+        state.bucket_drain(NODE, "phil", 4.5, 8.0)
+        header = tasks.format_header(task_id, 2, auto=True)
+
+        assert _handle(ctx, "gerry", f"{NODE}:phil", f"{header} too far") == DEAD
+        assert dead_reasons() == ["hop-cut"]
+        assert "too far" not in state.read_history(NODE, "phil")
+
+
+class TestClassificationOrdering:
+    def test_closed_task_wins_before_bucket_mute(self, ctx, fake_harness):
+        task_id = new_ulid()
+        task = tasks.ensure_task(NODE, task_id, "gerry")
+        task["status"] = tasks.STATUS_CLOSED
+        tasks.save_task(NODE, task)
+        state.bucket_drain(NODE, "phil", 4.5, 8.0)
+        header = tasks.format_header(task_id, 0, auto=True)
+
+        assert _handle(ctx, "gerry", f"{NODE}:phil", f"{header} already done") == DEAD
+        assert dead_reasons() == ["task-closed"]
+        assert "already done" not in state.read_history(NODE, "phil")
 
 
 class TestConcurrency:
@@ -473,6 +706,56 @@ class TestConcurrency:
         assert not state.live_locks(NODE)
         handle_message(ctx, "gerry", f"{NODE}:phil", "two")
         assert len(harness_calls(fake_harness)) == 2
+
+    def test_different_agents_cannot_lose_concurrent_task_charges(
+        self, ctx, monkeypatch
+    ):
+        task_id = new_ulid()
+        header = tasks.format_header(task_id, 0, auto=True)
+        transaction_entered = threading.Event()
+        release_transaction = threading.Event()
+        results = []
+        original_ensure = tasks.ensure_task
+
+        def pause_first_transaction(node, incoming_task_id, creator):
+            task = original_ensure(node, incoming_task_id, creator)
+            if threading.current_thread().name == "first-charge":
+                transaction_entered.set()
+                assert release_transaction.wait(timeout=5)
+            return task
+
+        monkeypatch.setattr(tasks, "ensure_task", pause_first_transaction)
+
+        def quick_harness(*args, **kwargs):
+            return 0, "ok", 0.0, False
+
+        first = threading.Thread(
+            name="first-charge",
+            target=lambda: results.append(
+                _handle(
+                    ctx, f"{NODE}:marcus", f"{NODE}:gerry", f"{header} leader work",
+                    run_fn=quick_harness,
+                )
+            )
+        )
+        first.start()
+        assert transaction_entered.wait(timeout=5)
+        results.append(
+            _handle(
+                ctx, f"{NODE}:marcus", f"{NODE}:phil", f"{header} junior work",
+                run_fn=quick_harness,
+            )
+        )
+        assert results == [DEFERRED]
+        release_transaction.set()
+        first.join(timeout=5)
+        assert not first.is_alive()
+
+        assert sorted(results) == [DEFERRED, RAN]
+        assert drain(ctx, run_fn=quick_harness) == 1
+        task = tasks.load_task(NODE, task_id)
+        assert task["turns"] == 2
+        assert task["used"] == 0.75
 
 
 def _set_throttle(config_path, **throttle):
@@ -518,6 +801,184 @@ class TestTeamThrottle:
         )
         assert _handle(ctx, "gerry", f"{NODE}:phil", "late enough") == RAN
 
+    def test_simultaneous_admissions_reserve_team_slot_and_cadence(
+        self, ctx, harness_config
+    ):
+        _set_throttle(
+            harness_config, max_concurrent=1, min_seconds_between_turn_starts=3600
+        )
+        entered = threading.Event()
+        release = threading.Event()
+        results = []
+
+        def blocking_harness(*args, **kwargs):
+            entered.set()
+            assert release.wait(timeout=5)
+            return 0, "ok", 0.0, False
+
+        first = threading.Thread(
+            target=lambda: results.append(
+                _handle(ctx, "neil", f"{NODE}:gerry", "first", run_fn=blocking_harness)
+            )
+        )
+        first.start()
+        assert entered.wait(timeout=5)
+        results.append(_handle(ctx, "neil", f"{NODE}:phil", "second"))
+        release.set()
+        first.join(timeout=5)
+        assert not first.is_alive()
+
+        assert sorted(results) == [DEFERRED, RAN]
+        assert len(state.list_pending(NODE)) == 1
+        assert state.read_last_turn_start(NODE) is not None
+
+    def test_task_lock_deferral_does_not_consume_cadence(self, ctx):
+        task_id = new_ulid()
+        held = state.task_lock(NODE, task_id)
+        assert held.acquire()
+        try:
+            header = tasks.format_header(task_id, 0, auto=True)
+            assert _handle(ctx, f"{NODE}:gerry", f"{NODE}:phil", header + " wait") == DEFERRED
+        finally:
+            held.release()
+
+        assert state.read_last_turn_start(NODE) is None
+        assert len(state.list_pending(NODE)) == 1
+
+
+class TestAttachmentRelease:
+    def test_bundle_is_visible_before_envelope(self, ctx, tmp_path, monkeypatch):
+        staging = tmp_path / "staging"
+        bundle = staging / "message-1"
+        bundle.mkdir(parents=True)
+        (bundle / "report.txt").write_text("result", encoding="utf-8")
+        outbox = tmp_path / "outbox"
+        real_write = state.atomic_write_json
+
+        def observing_write(path, payload):
+            released = outbox / "message-1"
+            assert released.is_dir()
+            assert (released / "report.txt").read_text(encoding="utf-8") == "result"
+            real_write(path, payload)
+
+        monkeypatch.setattr(state, "atomic_write_json", observing_write)
+        dispatch._release_one(
+            ctx, outbox, staging,
+            {"id": "message-1", "to": "outside", "files": ["report.txt"]},
+            "stamped", f"{NODE}:phil", new_ulid(), 1, "result", False,
+        )
+
+        assert (outbox / "message-1.json").is_file()
+
+    def test_cross_filesystem_bundle_fallback_still_publishes_last(
+        self, ctx, tmp_path, monkeypatch
+    ):
+        staging = tmp_path / "staging"
+        bundle = staging / "message-2"
+        bundle.mkdir(parents=True)
+        (bundle / "report.txt").write_text("result", encoding="utf-8")
+        outbox = tmp_path / "outbox"
+        real_replace = dispatch.os.replace
+        attempted = False
+
+        def exdev_once(source, destination):
+            nonlocal attempted
+            if source == bundle and not attempted:
+                attempted = True
+                raise OSError(errno.EXDEV, "cross-device link")
+            return real_replace(source, destination)
+
+        monkeypatch.setattr(dispatch.os, "replace", exdev_once)
+        dispatch._release_one(
+            ctx, outbox, staging,
+            {"id": "message-2", "to": "outside", "files": ["report.txt"]},
+            "stamped", f"{NODE}:phil", new_ulid(), 1, "result", False,
+        )
+
+        assert attempted
+        assert not bundle.exists()
+        assert (outbox / "message-2" / "report.txt").read_text() == "result"
+        assert (outbox / "message-2.json").is_file()
+
+    def test_failed_cross_filesystem_copy_is_clean_and_retryable(
+        self, ctx, tmp_path, monkeypatch
+    ):
+        staging = tmp_path / "staging"
+        bundle = staging / "message-3"
+        bundle.mkdir(parents=True)
+        (bundle / "report.txt").write_text("result", encoding="utf-8")
+        outbox = tmp_path / "outbox"
+        real_replace = dispatch.os.replace
+        real_copytree = dispatch.shutil.copytree
+
+        def force_exdev(source, destination):
+            if source == bundle:
+                raise OSError(errno.EXDEV, "cross-device link")
+            return real_replace(source, destination)
+
+        def partial_copy(source, destination):
+            destination.mkdir(parents=True)
+            (destination / "partial.txt").write_text("partial", encoding="utf-8")
+            raise OSError("copy failed")
+
+        monkeypatch.setattr(dispatch.os, "replace", force_exdev)
+        monkeypatch.setattr(dispatch.shutil, "copytree", partial_copy)
+        envelope = {"id": "message-3", "to": "outside", "files": ["report.txt"]}
+        try:
+            dispatch._release_one(
+                ctx, outbox, staging, envelope, "stamped", f"{NODE}:phil",
+                new_ulid(), 1, "result", False,
+            )
+        except OSError as exc:
+            assert str(exc) == "copy failed"
+        else:
+            raise AssertionError("partial copy unexpectedly succeeded")
+
+        assert bundle.is_dir()
+        assert not (outbox / "message-3.json").exists()
+        assert not list(outbox.glob(".message-3.*.tmp"))
+
+        monkeypatch.setattr(dispatch.shutil, "copytree", real_copytree)
+        dispatch._release_one(
+            ctx, outbox, staging, envelope, "stamped", f"{NODE}:phil",
+            new_ulid(), 1, "result", False,
+        )
+        assert (outbox / "message-3" / "report.txt").read_text() == "result"
+        assert (outbox / "message-3.json").is_file()
+
+    def test_staging_cleanup_failure_does_not_hide_published_envelope(
+        self, ctx, tmp_path, monkeypatch
+    ):
+        staging = tmp_path / "staging"
+        bundle = staging / "message-4"
+        bundle.mkdir(parents=True)
+        (bundle / "report.txt").write_text("result", encoding="utf-8")
+        outbox = tmp_path / "outbox"
+        real_replace = dispatch.os.replace
+        real_rmtree = dispatch.shutil.rmtree
+
+        def force_exdev(source, destination):
+            if source == bundle:
+                raise OSError(errno.EXDEV, "cross-device link")
+            return real_replace(source, destination)
+
+        def fail_source_cleanup(path, *args, **kwargs):
+            if path == bundle:
+                return None
+            return real_rmtree(path, *args, **kwargs)
+
+        monkeypatch.setattr(dispatch.os, "replace", force_exdev)
+        monkeypatch.setattr(dispatch.shutil, "rmtree", fail_source_cleanup)
+        dispatch._release_one(
+            ctx, outbox, staging,
+            {"id": "message-4", "to": "outside", "files": ["report.txt"]},
+            "stamped", f"{NODE}:phil", new_ulid(), 1, "result", False,
+        )
+
+        assert bundle.is_dir()
+        assert (outbox / "message-4" / "report.txt").is_file()
+        assert (outbox / "message-4.json").is_file()
+
 
 class TestGovernedRecovery:
     def _crash_evidence(self, task_id):
@@ -552,6 +1013,60 @@ class TestGovernedRecovery:
         prompt = read_prompt(harness_calls(fake_harness)[-1])
         assert "You are Gerry" in prompt
         assert "Respond NOW" in prompt
+
+    def test_concurrent_idle_passes_reserve_one_nudge(self, ctx, monkeypatch):
+        task_id = new_ulid()
+        state.refresh_active(NODE, "phil", ttl=5)
+        identity = {
+            "task": task_id,
+            "hop": 0,
+            "sender": f"{NODE}:gerry",
+            "body": "recover once",
+        }
+        collection_barrier = threading.Barrier(2)
+        handle_entered = threading.Event()
+        release_handle = threading.Event()
+        one_finished = threading.Event()
+        results = []
+        handle_calls = []
+        original_handle = dispatch._handle
+
+        def simultaneous_evidence(node, agent_key, active_entry):
+            collection_barrier.wait(timeout=5)
+            return ["same unfinished turn"], dict(identity)
+
+        def blocking_handle(*args, **kwargs):
+            handle_calls.append(1)
+            handle_entered.set()
+            assert release_handle.wait(timeout=5)
+            return original_handle(*args, **kwargs)
+
+        monkeypatch.setattr(dispatch, "_collect_evidence", simultaneous_evidence)
+        monkeypatch.setattr(dispatch, "_handle", blocking_handle)
+        quick = lambda *a, **k: (0, "ok", 0.0, False)
+
+        def idle_pass():
+            results.append(run_idle(ctx, run_fn=quick))
+            one_finished.set()
+
+        workers = [threading.Thread(target=idle_pass) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        assert handle_entered.wait(timeout=5)
+        assert one_finished.wait(timeout=5)
+        release_handle.set()
+        for worker in workers:
+            worker.join(timeout=5)
+            assert not worker.is_alive()
+
+        assert len(handle_calls) == 1
+        assert sum(summary["nudged"] == ["phil"] for summary in results) == 1
+        task = tasks.load_task(NODE, task_id)
+        assert task["nudges"] == {"phil": 1}
+        assert task.get("nudge_inflight") == {}
+        assert task["status"] == tasks.STATUS_OPEN
+        assert not task.get("synthesized")
+        assert "synthesis_state" not in task
 
     def test_quiet_agent_ages_off_watch_list(self, ctx, fake_harness):
         state.refresh_active(NODE, "phil", ttl=1)
@@ -660,6 +1175,42 @@ class TestCli:
         assert "gerry -> leader" in out
         assert "Phil: junior-dev" in out
         assert "Neil: Human" in out
+
+    def test_harness_presets(self, capsys):
+        rc = self.run("harness", "presets")
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "claude" in out
+        assert "opencode" in out
+        assert "cursor" in out
+        assert "headless:" in out
+        assert "r4t harness add" in out
+
+    def test_harness_add(self, tmp_path, capsys):
+        config_path = tmp_path / "harnesses.json"
+        rc = self.run(
+            "harness", "add", "reviewer", "claude",
+            "--harness-config", str(config_path),
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "added tier 'reviewer'" in out
+        assert "Harness:** reviewer" in out
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data["reviewer"]["invoke"][0] == "claude"
+
+    def test_harness_add_duplicate_fails(self, tmp_path, capsys):
+        config_path = tmp_path / "harnesses.json"
+        config_path.write_text(
+            json.dumps({"worker": {"invoke": ["x", "{prompt}"]}}),
+            encoding="utf-8",
+        )
+        rc = self.run(
+            "harness", "add", "worker", "opencode",
+            "--harness-config", str(config_path),
+        )
+        assert rc == 1
+        assert "already exists" in capsys.readouterr().err
 
     def test_task_list_and_show(self, r4t_home, capsys):
         task = tasks.ensure_task(NODE, new_ulid(), "gerry")

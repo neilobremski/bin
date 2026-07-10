@@ -107,6 +107,15 @@ does not park or error: the *leader* is woken one final time with
 "budget exhausted — respond to the originator with what you have." Tasks
 always terminate in an answer.
 
+Implementation tracks `synthesis_state` on the task ledger:
+`pending` → `running` → `done`. The task closes when synthesis is
+queued; exactly one leader turn may run while `pending`; concurrent
+overflow arrivals defer or dead-letter rather than spawning a second
+synthesis. When the leader's reply to the *task creator* is staged,
+that envelope bypasses closed-task, hop-cut, and budget gates — otherwise
+the final answer could never reach the originator. Only the first such
+reply in a multi-recipient release gets the bypass.
+
 Prior art: the multi-agent framework consensus band is 10–100 automated
 exchanges before forced stop — OpenAI Agents SDK `max_turns=10`, LangGraph
 `recursion_limit=25`, CrewAI `max_iter=20`, AutoGen

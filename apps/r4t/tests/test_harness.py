@@ -17,9 +17,13 @@ from harness import (
     DEFAULT_NUDGE_CAP,
     DEFAULT_SUPPRESSION_WINDOW_SECONDS,
     DEFAULT_TIMEOUT_SECONDS,
+    HARNESS_PRESETS,
     HarnessError,
+    add_preset_tier,
     default_config_payload,
+    format_preset_invoke,
     load_harness_config,
+    preset_names,
 )
 from roster import Member
 
@@ -261,3 +265,51 @@ class TestDefaultPayload:
         for tier in config.tiers.values():
             assert tier.error is None
             assert any("{prompt}" in a for a in tier.pool()[0])
+
+
+class TestHarnessPresets:
+    def test_preset_names_match_a8s_kinds(self):
+        assert preset_names() == ["agy", "claude", "codex", "copilot", "cursor", "opencode"]
+
+    def test_every_preset_invoke_is_valid(self, tmp_path):
+        for name in preset_names():
+            config = load_harness_config(
+                write_config(tmp_path, {name: {"invoke": HARNESS_PRESETS[name]["invoke"]}})
+            )
+            tier = config.tiers[name]
+            assert tier.error is None
+            assert "{prompt}" in format_preset_invoke(name)
+
+    def test_add_preset_tier_writes_new_config(self, tmp_path):
+        path = tmp_path / "harnesses.json"
+        tier_key = add_preset_tier(path, "worker", "claude")
+        assert tier_key == "worker"
+        config = load_harness_config(path)
+        assert config.tiers["worker"].error is None
+        assert config.tiers["worker"].argv("hi")[0] == "claude"
+
+    def test_add_preset_tier_refuses_duplicate(self, tmp_path):
+        path = write_config(tmp_path, {"worker": {"invoke": ["x", "{prompt}"]}})
+        with pytest.raises(HarnessError, match="already exists"):
+            add_preset_tier(path, "worker", "opencode")
+
+    def test_add_preset_tier_force_replaces(self, tmp_path):
+        path = write_config(tmp_path, {"worker": {"invoke": ["x", "{prompt}"]}})
+        add_preset_tier(path, "worker", "opencode", force=True)
+        config = load_harness_config(path)
+        assert config.tiers["worker"].argv("hi")[0] == "opencode"
+
+    def test_add_unknown_preset(self, tmp_path):
+        path = tmp_path / "harnesses.json"
+        with pytest.raises(HarnessError, match="unknown preset"):
+            add_preset_tier(path, "worker", "gemini")
+
+    def test_opencode_and_agy_presets_avoid_skip_permissions(self):
+        opencode = " ".join(HARNESS_PRESETS["opencode"]["invoke"])
+        agy = " ".join(HARNESS_PRESETS["agy"]["invoke"])
+        assert "dangerously-skip-permissions" not in opencode
+        assert "dangerously-skip-permissions" not in agy
+        assert "--auto" in opencode
+        assert "--mode" in agy and "accept-edits" in agy
+        assert "--print" in agy
+        assert "-i" not in opencode

@@ -146,6 +146,7 @@ def reset_budget(task: dict) -> bool:
     task["used"] = 0.0
     task["status"] = STATUS_OPEN
     task["synthesized"] = False
+    task.pop("synthesis_state", None)
     return changed
 
 

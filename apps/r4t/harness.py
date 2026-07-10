@@ -30,9 +30,104 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from roster import Member
-from state import r4t_home
+from state import atomic_write_json, r4t_home
 
 PROMPT_PLACEHOLDER = "{prompt}"
+
+RESERVED_CONFIG_KEYS = frozenset({
+    "pins",
+    "throttle",
+    "active_ttl_rotations",
+    "suppression_window_seconds",
+    "bucket_max",
+    "bucket_earn_ratio",
+    "nudge_cap",
+    "rebroadcast_senders",
+})
+
+HARNESS_PRESETS: dict[str, dict] = {
+    "claude": {
+        "description": "Claude Code — matches apps/a8s/definitions/claude.json",
+        "a8s_definition": "claude.json",
+        "headless": "-p",
+        "invoke": [
+            "claude",
+            "--permission-mode",
+            "dontAsk",
+            "--allowedTools",
+            "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
+            "-p",
+            "{prompt}",
+        ],
+    },
+    "codex": {
+        "description": "OpenAI Codex CLI — matches apps/a8s/definitions/codex.json",
+        "a8s_definition": "codex.json",
+        "headless": "exec (positional prompt)",
+        "invoke": [
+            "codex",
+            "exec",
+            "--full-auto",
+            "--skip-git-repo-check",
+            "{prompt}",
+        ],
+    },
+    "cursor": {
+        "description": "Cursor Agent CLI (`agent`) — matches apps/a8s/definitions/cursor.json",
+        "a8s_definition": "cursor.json",
+        "headless": "-p",
+        "invoke": [
+            "agent",
+            "-p",
+            "--trust",
+            "--force",
+            "--approve-mcps",
+            "{prompt}",
+        ],
+    },
+    "opencode": {
+        "description": (
+            "OpenCode 1.17+ — `run` (not `-i`) with --auto for headless repo tools"
+        ),
+        "a8s_definition": "opencode.json",
+        "headless": "run --auto (positional prompt)",
+        "invoke": [
+            "opencode",
+            "run",
+            "--auto",
+            "--dir",
+            ".",
+            "{prompt}",
+        ],
+    },
+    "agy": {
+        "description": (
+            "Antigravity 1.1+ — --print for headless turns; --sandbox + "
+            "--mode accept-edits for repo writes"
+        ),
+        "a8s_definition": "agy.json",
+        "headless": "--print",
+        "invoke": [
+            "agy",
+            "--sandbox",
+            "--mode",
+            "accept-edits",
+            "--print",
+            "{prompt}",
+        ],
+    },
+    "copilot": {
+        "description": "GitHub Copilot CLI — matches apps/a8s/definitions/copilot.json",
+        "a8s_definition": "copilot.json",
+        "headless": "-p",
+        "invoke": [
+            "copilot",
+            "--allow-all-tools",
+            "-p",
+            "{prompt}",
+        ],
+    },
+}
 
 DEFAULT_TIMEOUT_SECONDS = 900
 DEFAULT_CONCURRENCY = 1
@@ -136,6 +231,66 @@ class HarnessConfig:
 
 def default_config_path() -> Path:
     return r4t_home() / "harnesses.json"
+
+
+def preset_names() -> list[str]:
+    return sorted(HARNESS_PRESETS)
+
+
+def format_preset_invoke(preset: str) -> str:
+    entry = HARNESS_PRESETS[preset]
+    return " ".join(entry["invoke"])
+
+
+def _validate_tier_name(name: str) -> str:
+    key = name.strip().lower()
+    if not key:
+        raise HarnessError("tier name is required")
+    if key in RESERVED_CONFIG_KEYS:
+        raise HarnessError(f"{key!r} is a reserved harness config key, not a tier name")
+    return key
+
+
+def _load_config_payload(path: Path) -> dict:
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            raise HarnessError(f"cannot load harness config {path}: {e}") from e
+        if not isinstance(data, dict):
+            raise HarnessError(f"harness config {path} must be a JSON object")
+        return data
+    return default_config_payload()
+
+
+def add_preset_tier(
+    path: Path,
+    tier_name: str,
+    preset: str,
+    *,
+    force: bool = False,
+) -> str:
+    """Add or replace a symbolic tier from a named CLI preset. Returns tier key."""
+    tier_key = _validate_tier_name(tier_name)
+    preset_key = preset.strip().lower()
+    if preset_key not in HARNESS_PRESETS:
+        known = ", ".join(preset_names())
+        raise HarnessError(f"unknown preset {preset!r}; choose one of: {known}")
+    payload = _load_config_payload(path)
+    if tier_key in payload and not tier_key.startswith("_") and not force:
+        raise HarnessError(
+            f"tier {tier_key!r} already exists in {path} (pass --force to replace)"
+        )
+    entry = HARNESS_PRESETS[preset_key]
+    payload[tier_key] = {
+        "_notes": (
+            f"Added by `r4t harness add` from preset {preset_key!r} "
+            f"({entry['description']})."
+        ),
+        "invoke": list(entry["invoke"]),
+    }
+    atomic_write_json(path, payload)
+    return tier_key
 
 
 def resolve_config_path(raw: str | None) -> Path:
@@ -299,13 +454,17 @@ def default_config_payload() -> dict:
         "_notes": [
             "Generated by `r4t init`. Tier names are SYMBOLIC — the roster's",
             "Harness lines reference them; only this out-of-repo file says what",
-            "actually runs. Swap invoke for your CLI, e.g.:",
-            '  ["claude", "--permission-mode", "dontAsk", "-p", "{prompt}"]',
-            '  ["agent", "-p", "--yolo", "{prompt}"]',
-            '  ["agy", "-p", "{prompt}"]',
+            "actually runs. Swap invoke for your CLI, or run:",
+            "  r4t harness presets",
+            "  r4t harness add <tier> <preset>",
+            "Presets mirror apps/a8s/definitions/ (claude, codex, cursor, ...).",
             "invoke may also be a LIST of argvs (a pool, rotated round-robin).",
             "All governance knobs default sanely; see apps/r4t/README.md.",
         ],
-        "leader": {"invoke": ["opencode", "run", "--auto", "{prompt}"]},
-        "member": {"invoke": ["opencode", "run", "--auto", "{prompt}"]},
+        "leader": {
+            "invoke": ["opencode", "run", "--auto", "--dir", ".", "{prompt}"],
+        },
+        "member": {
+            "invoke": ["opencode", "run", "--auto", "--dir", ".", "{prompt}"],
+        },
     }
