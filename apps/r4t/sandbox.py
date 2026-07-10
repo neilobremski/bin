@@ -11,9 +11,10 @@ needs nothing but the report.
 
 `--fake` swaps every tier's invoke for sandbox/fake-agent.py: scripted
 role-play that exercises dispatch, staging release, header stamping,
-delegation, and the final leader answer with zero LLM calls. Live mode is
-the acceptance/eval harness for governance tuning and is never run from
-pytest.
+delegation, and the final leader answer with zero LLM calls. Live mode uses
+`--preset` (any `r4t harness presets` entry; default `opencode`) and
+optional `--model` for presets like `opencode-ollama`. The chosen argv is
+passed to live-agent.py via R4T_SANDBOX_INVOKE.
 """
 from __future__ import annotations
 
@@ -28,6 +29,8 @@ import time
 from pathlib import Path
 
 import state
+
+from harness import HarnessError, build_preset_invoke, format_preset_invoke, preset_names
 
 R4T_DIR = Path(__file__).resolve().parent
 SANDBOX_DIR = R4T_DIR / "sandbox"
@@ -297,6 +300,7 @@ def _build_report(
     checks: list[tuple[str, object, str]],
     goal: str,
     repo_files: dict[str, str],
+    harness: str = "",
 ) -> str:
     lines = [
         f"# r4t sandbox report — {mode} run",
@@ -321,6 +325,10 @@ def _build_report(
         "## Run",
         "",
         f"- mode: {mode}",
+    ]
+    if harness:
+        lines.append(f"- harness: {harness}")
+    lines += [
         f"- wall clock: {wall_clock:.1f}s",
         "",
         "### Turns (velocity)",
@@ -351,15 +359,38 @@ def _build_report(
     return "\n".join(lines) + "\n"
 
 
-def run_sandbox(*, fake: bool, timeout: float, out: Path) -> int:
+def run_sandbox(
+    *,
+    fake: bool,
+    timeout: float,
+    out: Path,
+    preset: str = "opencode",
+    model: str | None = None,
+) -> int:
     start = time.time()
     tmp = Path(tempfile.mkdtemp(prefix="r4t-sandbox-"))
-    saved_env = {k: os.environ.get(k) for k in ("A8S_HOME", "R4T_HOME")}
+    saved_env = {k: os.environ.get(k) for k in ("A8S_HOME", "R4T_HOME", "R4T_SANDBOX_INVOKE")}
     a8s_home = tmp / "a8s-home"
     os.environ["A8S_HOME"] = str(a8s_home)
     os.environ["R4T_HOME"] = str(tmp / "r4t-home")
     mode = "fake" if fake else "live"
+    harness_line = ""
     try:
+        if fake:
+            os.environ.pop("R4T_SANDBOX_INVOKE", None)
+        else:
+            try:
+                invoke = build_preset_invoke(preset, model=model)
+            except HarnessError as e:
+                print(f"sandbox: {e}", file=sys.stderr)
+                return 1
+            os.environ["R4T_SANDBOX_INVOKE"] = json.dumps(invoke)
+            harness_line = format_preset_invoke(preset.strip().lower())
+            if model:
+                harness_line = f"{preset} (model={model}) — {harness_line}"
+            else:
+                harness_line = f"{preset} — {harness_line}"
+            print(f"sandbox: harness {harness_line}", file=sys.stderr)
         repo = tmp / "repo"
         repo.mkdir(parents=True)
         seed_names = {"ROSTER.md", "GOAL.md"}
@@ -443,6 +474,7 @@ def run_sandbox(*, fake: bool, timeout: float, out: Path) -> int:
             checks=checks,
             goal=goal,
             repo_files=repo_files,
+            harness=harness_line,
         )
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(report, encoding="utf-8")

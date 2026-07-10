@@ -1313,6 +1313,7 @@ class TestDefault:
         assert "Commands" in out
         assert "init" in out
         assert "sandbox --fake" in out
+        assert "opencode-ollama" in out or "sandbox --preset" in out
         assert "Next steps" in out
         assert f"{NODE}:" in out
         assert "ROSTER.md" in out

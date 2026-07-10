@@ -121,12 +121,16 @@ each becomes one JSON record (reason, count, from, to, task, time) in
   leader answered the originator, turns within budget, zero orphan
   processes, dead-letter counts). The pytest suite runs it end to end.
 - **Live sandbox (acceptance / eval):** `r4t sandbox` (no `--fake`) runs
-  the same scenario with the real harnesses from
-  [sandbox/harnesses.json](sandbox/harnesses.json) under tight limits.
-  Use it to grade prompt and governance changes against real models; it is
-  never run from pytest. The report (default `./r4t-sandbox-report.md`) is
-  written for an external judge — mechanical checks first, then the turn
-  table, full conversation, governance events, and produced source.
+  the same scenario with a real harness. Pick any named preset:
+  `r4t sandbox --preset opencode` (default), or local models via Ollama:
+  `r4t sandbox --preset opencode-ollama --model qwen2.5-coder:7b`.
+  Other presets (`claude`, `codex`, `cursor`, …) work the same way — see
+  `r4t harness presets`. Limits come from
+  [sandbox/harnesses.json](sandbox/harnesses.json). Use it to grade prompt
+  and governance changes against real models; it is never run from pytest.
+  The report (default `./r4t-sandbox-report.md`) is written for an external
+  judge — mechanical checks first, then the turn table, full conversation,
+  governance events, and produced source.
 
 ## Development
 

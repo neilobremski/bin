@@ -20,6 +20,7 @@ from harness import (
     HARNESS_PRESETS,
     HarnessError,
     add_preset_tier,
+    build_preset_invoke,
     default_config_payload,
     format_preset_invoke,
     load_harness_config,
@@ -269,7 +270,9 @@ class TestDefaultPayload:
 
 class TestHarnessPresets:
     def test_preset_names_match_a8s_kinds(self):
-        assert preset_names() == ["agy", "claude", "codex", "copilot", "cursor", "opencode"]
+        assert preset_names() == [
+            "agy", "claude", "codex", "copilot", "cursor", "opencode", "opencode-ollama",
+        ]
 
     def test_every_preset_invoke_is_valid(self, tmp_path):
         for name in preset_names():
@@ -299,6 +302,22 @@ class TestHarnessPresets:
         config = load_harness_config(path)
         assert config.tiers["worker"].argv("hi")[0] == "opencode"
 
+    def test_add_preset_tier_opencode_ollama_requires_model(self, tmp_path):
+        path = tmp_path / "harnesses.json"
+        with pytest.raises(HarnessError, match="requires --model"):
+            add_preset_tier(path, "worker", "opencode-ollama")
+
+    def test_add_preset_tier_opencode_ollama_materializes_model(self, tmp_path):
+        path = tmp_path / "harnesses.json"
+        tier_key = add_preset_tier(
+            path, "worker", "opencode-ollama", model="qwen2.5-coder:7b"
+        )
+        assert tier_key == "worker"
+        config = load_harness_config(path)
+        argv = config.tiers["worker"].argv("hi")
+        assert argv[4] == "qwen2.5-coder:7b"
+        assert "{model}" not in argv
+
     def test_add_unknown_preset(self, tmp_path):
         path = tmp_path / "harnesses.json"
         with pytest.raises(HarnessError, match="unknown preset"):
@@ -313,3 +332,21 @@ class TestHarnessPresets:
         assert "--mode" in agy and "accept-edits" in agy
         assert "--print" in agy
         assert "-i" not in opencode
+
+    def test_build_preset_invoke_opencode(self):
+        argv = build_preset_invoke("opencode")
+        assert argv[0] == "opencode"
+        assert "{prompt}" in argv
+
+    def test_build_preset_invoke_opencode_ollama_requires_model(self):
+        with pytest.raises(HarnessError, match="requires --model"):
+            build_preset_invoke("opencode-ollama")
+        argv = build_preset_invoke("opencode-ollama", model="qwen2.5-coder:7b")
+        assert argv[:4] == ["ollama", "launch", "opencode", "--model"]
+        assert argv[4] == "qwen2.5-coder:7b"
+        assert argv[5:8] == ["--", "run", "--auto"]
+        assert "{prompt}" in argv
+
+    def test_build_preset_invoke_unknown(self):
+        with pytest.raises(HarnessError, match="unknown preset"):
+            build_preset_invoke("gemini")

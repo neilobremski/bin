@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Live sandbox harness wrapper around opencode.
+"""Live sandbox harness wrapper.
 
-Runs the real LLM harness, then enforces sandbox mechanical invariants:
-Dev must leave battleship.py in cwd; Tester must mechanically verify it and
-tell the Lead (not Dev). Staged tells use $TELL_OUTBOX_DIR like real agents.
+Runs the configured LLM harness (see R4T_SANDBOX_INVOKE), then enforces
+sandbox mechanical invariants: Dev must leave battleship.py in cwd; Tester
+must mechanically verify it and tell the Lead (not Dev). Staged tells use
+$TELL_OUTBOX_DIR like real agents.
 """
 from __future__ import annotations
 
@@ -69,11 +70,24 @@ def team_name(prompt: str) -> str:
     return match.group(1)
 
 
-def run_opencode(prompt: str) -> int:
-    proc = subprocess.run(
-        ["opencode", "run", "--auto", "--dir", ".", prompt],
-        text=True,
-    )
+def harness_invoke() -> list[str]:
+    raw = os.environ.get("R4T_SANDBOX_INVOKE", "").strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"live-agent: invalid R4T_SANDBOX_INVOKE JSON: {e}") from e
+        if not isinstance(data, list) or not data or not all(isinstance(a, str) for a in data):
+            raise SystemExit("live-agent: R4T_SANDBOX_INVOKE must be a JSON string array")
+        if not any("{prompt}" in a for a in data):
+            raise SystemExit("live-agent: R4T_SANDBOX_INVOKE has no {prompt} placeholder")
+        return data
+    return ["opencode", "run", "--auto", "--dir", ".", "{prompt}"]
+
+
+def run_harness(prompt: str) -> int:
+    argv = [a.replace("{prompt}", prompt) for a in harness_invoke()]
+    proc = subprocess.run(argv, text=True)
     return proc.returncode
 
 
@@ -108,9 +122,9 @@ def stage_tell(to: str, content: str) -> None:
 def ensure_battleship() -> None:
     if Path("battleship.py").is_file():
         return
-    code = run_opencode(DEV_RETRY)
+    code = run_harness(DEV_RETRY)
     if code != 0:
-        print(f"live-agent: dev retry opencode exited {code}", file=sys.stderr)
+        print(f"live-agent: dev retry harness exited {code}", file=sys.stderr)
     if Path("battleship.py").is_file():
         return
     Path("battleship.py").write_text(BATTLESHIP, encoding="utf-8")
@@ -165,7 +179,7 @@ def main() -> int:
     if name == "lead":
         prompt = augment_lead_prompt(prompt, team)
 
-    code = run_opencode(prompt)
+    code = run_harness(prompt)
     if code != 0:
         return code
 

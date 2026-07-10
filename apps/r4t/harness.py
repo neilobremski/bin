@@ -100,6 +100,27 @@ HARNESS_PRESETS: dict[str, dict] = {
             "{prompt}",
         ],
     },
+    "opencode-ollama": {
+        "description": (
+            "OpenCode via `ollama launch` — local models, no cloud quota; "
+            "requires --model"
+        ),
+        "a8s_definition": "opencode.json",
+        "headless": "ollama launch opencode --model MODEL -- run --auto",
+        "invoke": [
+            "ollama",
+            "launch",
+            "opencode",
+            "--model",
+            "{model}",
+            "--",
+            "run",
+            "--auto",
+            "--dir",
+            ".",
+            "{prompt}",
+        ],
+    },
     "agy": {
         "description": (
             "Antigravity 1.1+ — --print for headless turns; --sandbox + "
@@ -242,6 +263,25 @@ def format_preset_invoke(preset: str) -> str:
     return " ".join(entry["invoke"])
 
 
+def build_preset_invoke(preset: str, *, model: str | None = None) -> list[str]:
+    """Materialize a preset argv, substituting {model} when the preset needs it."""
+    preset_key = preset.strip().lower()
+    if preset_key not in HARNESS_PRESETS:
+        known = ", ".join(preset_names())
+        raise HarnessError(f"unknown preset {preset!r}; choose one of: {known}")
+    needs_model = any("{model}" in arg for arg in HARNESS_PRESETS[preset_key]["invoke"])
+    if needs_model and not (model or "").strip():
+        raise HarnessError(f"preset {preset_key!r} requires --model")
+    model_value = (model or "").strip()
+    argv: list[str] = []
+    for arg in HARNESS_PRESETS[preset_key]["invoke"]:
+        if arg == "{model}":
+            argv.append(model_value)
+        else:
+            argv.append(arg)
+    return argv
+
+
 def _validate_tier_name(name: str) -> str:
     key = name.strip().lower()
     if not key:
@@ -268,6 +308,7 @@ def add_preset_tier(
     tier_name: str,
     preset: str,
     *,
+    model: str | None = None,
     force: bool = False,
 ) -> str:
     """Add or replace a symbolic tier from a named CLI preset. Returns tier key."""
@@ -282,12 +323,16 @@ def add_preset_tier(
             f"tier {tier_key!r} already exists in {path} (pass --force to replace)"
         )
     entry = HARNESS_PRESETS[preset_key]
+    invoke = build_preset_invoke(preset_key, model=model)
+    note = (
+        f"Added by `r4t harness add` from preset {preset_key!r} "
+        f"({entry['description']})."
+    )
+    if model:
+        note += f" model={model.strip()}."
     payload[tier_key] = {
-        "_notes": (
-            f"Added by `r4t harness add` from preset {preset_key!r} "
-            f"({entry['description']})."
-        ),
-        "invoke": list(entry["invoke"]),
+        "_notes": note,
+        "invoke": invoke,
     }
     atomic_write_json(path, payload)
     return tier_key

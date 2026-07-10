@@ -69,6 +69,7 @@ Tier **names** are yours (`leader`, `member`, `reviewer`, `worker`, …).
 r4t harness presets                              # list presets + invoke lines
 r4t harness add reviewer claude                # add tier "reviewer" from preset
 r4t harness add worker opencode
+r4t harness add local opencode-ollama --model qwen2.5-coder:7b
 r4t harness add lead cursor --force            # replace an existing tier
 ```
 
@@ -193,6 +194,7 @@ r4t harness add junior-dev opencode
 | `r4t roster check` | Lint roster and tier mappings |
 | `r4t status --node <team>` | Live locks, buckets, tasks, dead letters |
 | `r4t sandbox --fake` | End-to-end plumbing test without LLM calls |
+| `r4t sandbox --preset opencode-ollama --model M` | Live sandbox via local Ollama + OpenCode |
 
 ## Example: existing repo
 

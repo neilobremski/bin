@@ -27,6 +27,7 @@ from harness import (
     HarnessError,
     HARNESS_PRESETS,
     add_preset_tier,
+    build_preset_invoke,
     default_config_path,
     default_config_payload,
     format_preset_invoke,
@@ -53,6 +54,8 @@ COMMAND_HELP = [
     ("idle", "Nudge agents with unfinished work, then clear"),
     ("sandbox", "Disposable end-to-end run with graded report"),
     ("sandbox --fake", "Same pipeline with deterministic fake agents (no LLM)"),
+    ("sandbox --preset NAME", "Live sandbox harness (see `r4t harness presets`)"),
+    ("sandbox --preset opencode-ollama --model M", "Live sandbox via Ollama-local OpenCode"),
     ("dispatch", "Handle one delivered message (a8s invoke entry)"),
 ]
 
@@ -429,18 +432,21 @@ def cmd_harness_presets(_args: argparse.Namespace) -> int:
 
 def cmd_harness_add(args: argparse.Namespace) -> int:
     config_path = resolve_config_path(args.harness_config)
+    preset_key = args.preset.strip().lower()
     try:
         tier_key = add_preset_tier(
             config_path,
             args.tier,
             args.preset,
+            model=args.model,
             force=args.force,
         )
+        invoke = build_preset_invoke(preset_key, model=args.model)
     except HarnessError as e:
         print(str(e), file=sys.stderr)
         return 1
     print(f"added tier {tier_key!r} ({args.preset}) to {config_path}")
-    print(f"  invoke: {format_preset_invoke(args.preset.strip().lower())}")
+    print(f"  invoke: {' '.join(invoke)}")
     print(f"Reference it from ROSTER.md: `- **Harness:** {tier_key}`")
     return 0
 
@@ -572,6 +578,8 @@ def cmd_sandbox(args: argparse.Namespace) -> int:
         fake=args.fake,
         timeout=args.timeout,
         out=Path(args.out).expanduser().resolve(),
+        preset=args.preset,
+        model=args.model,
     )
 
 
@@ -697,6 +705,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replace an existing tier with the same name.",
     )
     harness_add_p.add_argument(
+        "--model",
+        metavar="MODEL",
+        help="Model name for presets that need it (e.g. opencode-ollama).",
+    )
+    harness_add_p.add_argument(
         "--harness-config",
         help="Harness config path (default: ~/.r4t/harnesses.json).",
     )
@@ -731,6 +744,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--fake",
         action="store_true",
         help="Use the bundled deterministic fake agents (no LLM calls).",
+    )
+    sandbox_p.add_argument(
+        "--preset",
+        default="opencode",
+        metavar="NAME",
+        help="Live-mode harness preset (default: opencode). See `r4t harness presets`.",
+    )
+    sandbox_p.add_argument(
+        "--model",
+        metavar="MODEL",
+        help="Model name for presets that need it (e.g. opencode-ollama).",
     )
     sandbox_p.add_argument("--timeout", type=float, default=900, metavar="SECS")
     sandbox_p.add_argument(
