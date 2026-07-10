@@ -3,20 +3,17 @@
 Scans raw files (journals, transcripts, command output, images, audio, video).
 Extracts knowledge candidates. Diffs against existing store. Stores genuine deltas.
 
-Text files: pattern extraction + LLM extraction.
-Media files: multimodal LLM (describe/transcribe) + asset storage.
+Text files: LLM extraction via distill_command (stdin→stdout).
+Media files: multimodal via distill_command (prompt includes file path).
 
-Uses agy/claude/codex CLI or ollama for LLM extraction. Falls back to
-pattern-based extraction if neither is available.
+Distillation requires a configured LLM command. The CLI fails fast when
+distill_command (or llm_command) is unset.
 """
 
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
-import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -140,20 +137,15 @@ def extract_from_file(path):
     if _media_type(path):
         return _multimodal_extract(path)
     text = Path(path).read_text(encoding="utf-8")
-    candidates = _pattern_extract(text)
-    llm_candidates = _llm_extract(text)
-    if llm_candidates:
-        candidates.extend(llm_candidates)
-    return candidates
+    return _llm_extract(text)
 
 
 def _multimodal_extract(path):
-    """Extract knowledge from media files via multimodal LLM."""
+    """Extract knowledge from media via distill_command (prompt on stdin)."""
     import config
 
-    cmd = config.resolve_llm_command("test")
-    if not cmd:
-        print(f"  [distill] no LLM available — cannot process media file {path}", file=sys.stderr)
+    if not config.resolve_command("distill"):
+        print(f"  [distill] distill_command not configured — cannot process {path}", file=sys.stderr)
         return []
 
     kind = _media_type(path)
@@ -177,28 +169,14 @@ def _multimodal_extract(path):
         "Return ONLY the JSON object, no markdown fencing."
     )
 
-    real_cmd = config.resolve_llm_command(prompt)
-    if not real_cmd:
+    response = engine._call_llm(prompt, purpose="distill", timeout=180)
+    if not response:
         return []
-
-    try:
-        result = subprocess.run(
-            real_cmd, capture_output=True, text=True, timeout=180,
-            cwd=str(config._k7e_home()),
-        )
-        if result.returncode != 0:
-            print(f"  [llm] non-zero exit ({result.returncode}) for {path}", file=sys.stderr)
-            return []
-        parsed = _parse_multimodal_response(result.stdout, path)
-        if parsed:
-            parsed["_asset_path"] = abs_path
-            parsed["_media_type"] = kind
-            return [parsed]
-    except subprocess.TimeoutExpired:
-        print(f"  [llm] timed out (180s) for {path}", file=sys.stderr)
-    except OSError as e:
-        print(f"  [llm] launch failed: {e}", file=sys.stderr)
-
+    parsed = _parse_multimodal_response(response, path)
+    if parsed:
+        parsed["_asset_path"] = abs_path
+        parsed["_media_type"] = kind
+        return [parsed]
     return []
 
 
@@ -438,46 +416,14 @@ def _dedup_candidates(candidates):
     return deduped
 
 
-def _pattern_extract(text):
-    candidates = []
-
-    # Pattern: "TIL:" or "Today I learned:" lines
-    for match in re.finditer(r"(?:TIL|Today I learned)[:\s]+(.+?)(?:\n\n|\n###|\Z)", text, re.DOTALL):
-        content = match.group(1).strip()
-        if len(content) > 20:
-            title = content[:60].split("\n")[0].rstrip(".")
-            candidates.append({"title": title, "content": content, "tags": ["learned"]})
-
-    # Pattern: "The fix is:" or "Solution:" followed by content
-    for match in re.finditer(r"(?:The fix is|Solution|Fix)[:\s]+(.+?)(?:\n\n|\n###|\Z)", text, re.DOTALL):
-        content = match.group(1).strip()
-        if len(content) > 15:
-            title = f"Fix: {content[:50].split(chr(10))[0].rstrip('.')}"
-            candidates.append({"title": title, "content": content, "tags": ["fix"]})
-
-    # Pattern: Code blocks preceded by instructional context
-    for match in re.finditer(r"(?:use|run|execute|command)[:\s]*\n```[^\n]*\n(.+?)```", text, re.DOTALL | re.IGNORECASE):
-        content = match.group(1).strip()
-        if len(content) > 10:
-            title = f"Command: {content.split(chr(10))[0][:50]}"
-            candidates.append({"title": title, "content": content, "tags": ["command"]})
-
-    return candidates
-
-
 def _llm_extract(text):
     if len(text) < 100:
         return []
 
     import config
 
-    if not config.resolve_llm_command("test"):
-        ollama_url = config.get("ollama_url", "http://localhost:11434")
-        try:
-            urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=2)
-        except Exception:
-            print("  [distill] no LLM available — pattern extraction only", file=sys.stderr)
-            return []
+    if not config.resolve_command("distill"):
+        return []
 
     # Chunk the input and extract from each chunk independently
     chunks = _chunk_text(text, size=3000, overlap=200)
@@ -510,7 +456,7 @@ def _llm_extract(text):
 
 def _run_llm_prompt(prompt):
     """Run a single LLM prompt and return parsed candidates."""
-    response = engine._call_llm(prompt, timeout=180)
+    response = engine._call_llm(prompt, purpose="distill", timeout=180)
     if response:
         return _parse_llm_response(response)
     return []
