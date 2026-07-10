@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""r4t — Router For Teams.
+"""r4t — Roster For Teams.
 
-Turns a repo into a team of lightweight AI agents on the a8s network: the
-repo is registered as one a8s node owning a namespace (e.g. `s1l:*`), a
-human-readable ROSTER.md names the members, and an out-of-repo harness
-config decides what each symbolic tier is actually allowed to run.
+Turns a repo into a team of lightweight AI agents on the a8s network: a
+human-readable ROSTER.md declares the members, an out-of-repo harness config
+decides what each symbolic tier is allowed to run, and r4t dispatches turns
+through the roster.
 """
 from __future__ import annotations
 
@@ -35,6 +35,20 @@ from roster import RosterError, load_roster, resolve_roster_path
 
 DEFAULT_TASK_TTL_SECONDS = 7 * 86400
 R4T_DIR = Path(__file__).resolve().parent
+
+COMMAND_HELP = [
+    ("init", "Write starter ROSTER.md and ~/.r4t/harnesses.json; print a8s registration"),
+    ("status", "Locks, buckets, open tasks, dead letters for one team"),
+    ("harness list", "Tier invoke lines, limits, and roster tier resolution"),
+    ("roster check", "Lint ROSTER.md against the harness config"),
+    ("task list", "List open tasks for a team"),
+    ("task show <id>", "Show one task ledger record as JSON"),
+    ("clear", "Prune stale locks, expire idle tasks, drain deferred messages"),
+    ("idle", "Nudge agents with unfinished work, then clear"),
+    ("sandbox", "Disposable end-to-end run with graded report"),
+    ("sandbox --fake", "Same pipeline with deterministic fake agents (no LLM)"),
+    ("dispatch", "Handle one delivered message (a8s invoke entry)"),
+]
 
 ROSTER_TEMPLATE = """\
 # Team Roster
@@ -98,6 +112,163 @@ def _context(args: argparse.Namespace, node: str) -> DispatchContext:
             simulate=simulate_enabled(getattr(args, "simulate_tell", False)),
         ),
     )
+
+
+def _print_harness_summary(config_path: Path, roster_path: Path | None = None) -> None:
+    try:
+        config = load_harness_config(config_path)
+    except HarnessError as e:
+        print(f"  error: {e}")
+        return
+    if config.missing:
+        print("  (missing — run `r4t init` to write a starter config)")
+        return
+    for name in sorted(config.tiers):
+        tier = config.tiers[name]
+        if tier.error:
+            print(f"  {name}: INVALID — {tier.error}")
+            continue
+        pool = tier.pool()
+        argv = " ".join(pool[0])
+        if len(pool) > 1:
+            argv += f"  [+{len(pool) - 1} pool variant(s)]"
+        print(
+            f"  {name}: {argv}  "
+            f"(timeout={tier.timeout_seconds:g}s turns={tier.max_turns_per_task} "
+            f"hop_limit={tier.hop_limit} sends={tier.max_sends_per_turn})"
+        )
+    if config.pins:
+        print("  pins:")
+        for agent in sorted(config.pins):
+            print(f"    {agent} -> {config.pins[agent]}")
+    print(
+        f"  throttle: max_concurrent={config.throttle.max_concurrent} "
+        f"min_seconds_between_turn_starts="
+        f"{config.throttle.min_seconds_between_turn_starts:g}"
+    )
+    print(
+        f"  governance: suppression_window={config.suppression_window_seconds:g}s "
+        f"bucket_max={config.bucket_max:g} bucket_earn={config.bucket_earn_ratio:g} "
+        f"nudge_cap={config.nudge_cap} active_ttl_rotations={config.active_ttl_rotations}"
+    )
+    if config.rebroadcast_senders:
+        print(f"  rebroadcast_senders: {', '.join(config.rebroadcast_senders)}")
+    if roster_path and roster_path.is_file():
+        try:
+            roster = load_roster(roster_path)
+        except RosterError as e:
+            print(f"  roster ({roster_path.name}): {e}")
+            return
+        print(f"  roster ({roster_path}):")
+        for m in roster.members:
+            if m.is_human:
+                print(f"    {m.name}: Human")
+            elif m.errors:
+                print(f"    {m.name}: DISABLED — {m.error}")
+            else:
+                tier, err, pinned = config.tier_for(m)
+                if tier is None:
+                    print(f"    {m.name}: FAIL CLOSED — {err}")
+                else:
+                    print(f"    {m.name}: {tier.name}" + (" (pinned)" if pinned else ""))
+
+
+def _print_team_summaries() -> None:
+    teams = state.known_teams()
+    if not teams:
+        print("  (none — register a team after `r4t init`; see printed a8s steps)")
+        return
+    for node in teams:
+        locks = state.live_locks(node)
+        open_tasks = tasks.list_tasks(node)
+        dead = len(state.list_dead_letters(node))
+        pending = len(state.list_pending(node))
+        parts = [
+            f"{len(open_tasks)} task(s)",
+            f"{len(locks)} lock(s)",
+            f"{pending} pending",
+            f"{dead} dead letter(s)",
+        ]
+        print(f"  {node}: {', '.join(parts)}")
+        for lock in locks:
+            print(f"    locked: {lock.get('agent', '?')} pid={lock.get('pid', '?')}")
+
+
+def _next_steps(
+    *,
+    config_missing: bool,
+    roster_path: Path,
+    teams: list[str],
+) -> list[str]:
+    steps: list[str] = []
+    if config_missing:
+        steps.append("`r4t init` — write ~/.r4t/harnesses.json with default tiers")
+    if not roster_path.is_file():
+        steps.append("`r4t init` — write a starter ROSTER.md in the current repo")
+    else:
+        steps.append("`r4t roster check` — lint the roster and harness mapping")
+        steps.append("`r4t harness list` — full tier invoke and limit detail")
+    if not teams:
+        steps.append("`r4t init` — prints the a8s add / namespace / start sequence")
+    elif len(teams) == 1:
+        steps.append(f"`r4t status --node {teams[0]}` — live locks, buckets, tasks")
+    else:
+        steps.append("`r4t status --node <team>` — pick a team from the list above")
+    steps.append("`r4t sandbox --fake` — end-to-end plumbing check without LLM calls")
+    return steps
+
+
+def cmd_default(_args: argparse.Namespace) -> int:
+    root = Path.cwd().resolve()
+    config_path = default_config_path()
+    roster_path = resolve_roster_path(root, None)
+    teams = state.known_teams()
+
+    print("r4t — Roster For Teams")
+    print("Define agents in ROSTER.md; ~/.r4t/harnesses.json maps roster tiers")
+    print("to what actually runs. r4t dispatches governed turns on a8s.")
+    print()
+    print("Environment")
+    print(f"  R4T_HOME: {state.r4t_home()}")
+    print(f"  cwd: {root}")
+    print(f"  harness config: {config_path}")
+    print()
+    print("Harness")
+    _print_harness_summary(config_path, roster_path)
+    print()
+    print(f"Teams ({state.teams_dir()})")
+    _print_team_summaries()
+    print()
+    print("This repo")
+    if roster_path.is_file():
+        try:
+            roster = load_roster(roster_path)
+            leaders = [m for m in roster.members if m.leader and not m.is_human]
+            leader = leaders[0].name if len(leaders) == 1 else "(unset)"
+            print(
+                f"  {roster_path}: {len(roster.members)} member(s), "
+                f"leader {leader}"
+            )
+        except RosterError as e:
+            print(f"  {roster_path}: {e}")
+    else:
+        print(f"  no ROSTER.md under {root}")
+    print()
+    print("Commands")
+    width = max(len(name) for name, _ in COMMAND_HELP)
+    for name, blurb in COMMAND_HELP:
+        print(f"  {name:<{width}}  {blurb}")
+    print()
+    print("Next steps")
+    for step in _next_steps(
+        config_missing=not config_path.is_file(),
+        roster_path=roster_path,
+        teams=teams,
+    ):
+        print(f"  - {step}")
+    print()
+    print("More: apps/r4t/README.md and `r4t <command> --help`")
+    return 0
 
 
 def cmd_dispatch(args: argparse.Namespace) -> int:
@@ -229,55 +400,9 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_harness_list(args: argparse.Namespace) -> int:
     config_path = resolve_config_path(args.harness_config)
-    try:
-        config = load_harness_config(config_path)
-    except HarnessError as e:
-        print(str(e), file=sys.stderr)
-        return 1
-    print(f"harness config: {config_path}" + (" (missing)" if config.missing else ""))
-    for name in sorted(config.tiers):
-        tier = config.tiers[name]
-        if tier.error:
-            print(f"  {name}: INVALID — {tier.error}")
-            continue
-        pool = tier.pool()
-        shown = " ".join(pool[0]) + (
-            f"  [+{len(pool) - 1} pool variant(s)]" if len(pool) > 1 else ""
-        )
-        print(
-            f"  {name}: {shown}  "
-            f"(timeout={tier.timeout_seconds:g}s concurrency={tier.concurrency} "
-            f"max_turns_per_task={tier.max_turns_per_task} hop_limit={tier.hop_limit} "
-            f"max_sends_per_turn={tier.max_sends_per_turn})"
-        )
-    if config.pins:
-        print("pins:")
-        for agent in sorted(config.pins):
-            print(f"  {agent} -> {config.pins[agent]}")
-    print(
-        f"throttle: max_concurrent={config.throttle.max_concurrent} "
-        f"min_seconds_between_turn_starts={config.throttle.min_seconds_between_turn_starts:g}"
-    )
-
-    root = _resolve_root(args.root)
-    roster_path = resolve_roster_path(root, args.roster)
-    if roster_path.is_file():
-        try:
-            roster = load_roster(roster_path)
-        except RosterError:
-            return 0
-        print(f"resolved tiers for {roster_path}:")
-        for m in roster.members:
-            if m.is_human:
-                print(f"  {m.name}: Human (never dispatched)")
-            elif m.errors:
-                print(f"  {m.name}: DISABLED — {m.error}")
-            else:
-                tier, err, pinned = config.tier_for(m)
-                if tier is None:
-                    print(f"  {m.name}: FAIL CLOSED — {err}")
-                else:
-                    print(f"  {m.name}: {tier.name}" + (" (pinned)" if pinned else ""))
+    print(f"harness config: {config_path}" + (" (missing)" if not config_path.is_file() else ""))
+    roster_path = resolve_roster_path(_resolve_root(args.root), args.roster)
+    _print_harness_summary(config_path, roster_path if roster_path.is_file() else None)
     return 0
 
 
@@ -454,9 +579,10 @@ def _add_older_than(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="r4t",
-        description="Router For Teams — a repo as a team of AI agents on a8s.",
+        description="Roster For Teams — define agents in ROSTER.md; govern turns on a8s.",
     )
-    sub = p.add_subparsers(dest="command", required=True)
+    sub = p.add_subparsers(dest="command", required=False)
+    p.set_defaults(func=cmd_default)
 
     dispatch_p = sub.add_parser(
         "dispatch", help="Handle one delivered message (the a8s invoke entry)."

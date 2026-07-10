@@ -1,5 +1,5 @@
 {
-  "description": "r4t — Router For Teams. Namespace node: bind a prefix with `a8s namespace <prefix> <node>` and tell <prefix>:<member>. Roster in <root>/ROSTER.md; harness config out-of-repo at ~/.r4t/harnesses.json (append --roster / --harness-config to override). The idle invoke resolves the sole ~/.r4t team; with multiple teams, copy this file per node and append \"--node\", \"<prefix>\".",
+  "description": "r4t — Roster For Teams. Namespace node: bind a prefix with `a8s namespace <prefix> <node>` and tell <prefix>:<member>. Roster in <root>/ROSTER.md; harness config out-of-repo at ~/.r4t/harnesses.json (append --roster / --harness-config to override). The idle invoke resolves the sole ~/.r4t team; with multiple teams, copy this file per node and append \"--node\", \"<prefix>\".",
   "invoke": [
     "python3",
     "$A8S_DIR/../r4t/r4t.py",

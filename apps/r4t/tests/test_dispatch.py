@@ -740,6 +740,43 @@ class TestCli:
         assert "no leader" in capsys.readouterr().out
 
 
+class TestDefault:
+    def run(self, *argv):
+        return r4t_main(list(argv))
+
+    def test_no_args_shows_overview(self, r4t_home, repo, harness_config, capsys, monkeypatch):
+        r4t_home.mkdir(parents=True, exist_ok=True)
+        (r4t_home / "harnesses.json").write_text(
+            harness_config.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        state.team_dir(NODE).mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(repo)
+        rc = self.run()
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "r4t — Roster For Teams" in out
+        assert f"R4T_HOME: {r4t_home}" in out
+        assert "Harness" in out
+        assert "junior-dev:" in out
+        assert "Commands" in out
+        assert "init" in out
+        assert "sandbox --fake" in out
+        assert "Next steps" in out
+        assert f"{NODE}:" in out
+        assert "ROSTER.md" in out
+
+    def test_no_args_missing_config_hints_init(self, tmp_path, monkeypatch, capsys):
+        empty_home = tmp_path / "empty-r4t"
+        monkeypatch.setenv("R4T_HOME", str(empty_home))
+        monkeypatch.chdir(tmp_path)
+        rc = self.run()
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "(missing — run `r4t init`" in out
+        assert "no ROSTER.md" in out
+
+
 class TestInit:
     def run(self, *argv):
         return r4t_main(list(argv))

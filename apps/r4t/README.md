@@ -1,11 +1,11 @@
-# r4t — Router For Teams
+# r4t — Roster For Teams
 
-Turn any repo into a governed team of AI agents on the [a8s](../a8s/README.md)
-network. One a8s node per team repo owns a namespace prefix (`s1l:*`); a
-human-readable `ROSTER.md` in the repo names the members; an out-of-repo
-harness config decides what each symbolic tier actually runs. Every turn is
-dispatched, budgeted, throttled, and audited by r4t — no agent polices
-itself, and nothing ever waits on a human.
+Define a whole team of AI agents in one human-readable `ROSTER.md`; turn any
+repo into a governed team on the [a8s](../a8s/README.md) network. One a8s
+node per team repo owns a namespace prefix (`s1l:*`); an out-of-repo harness
+config decides what each roster tier actually runs. Every turn is dispatched,
+budgeted, throttled, and audited by r4t — no agent polices itself, and
+nothing ever waits on a human.
 
 Why each governance layer exists, with prior art:
 [docs/governance.md](docs/governance.md).

@@ -1,4 +1,4 @@
-# r4t — Router For Teams (v1.0, pre-merge)
+# r4t — Roster For Teams (v1.0, pre-merge)
 
 Standalone app: `apps/r4t/`, shim `~/bin/r4t`. a8s wiring via
 `apps/r4t/example-definition.json` only. One a8s node per team repo, bound
