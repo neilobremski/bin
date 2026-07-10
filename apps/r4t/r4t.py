@@ -577,7 +577,6 @@ def cmd_sandbox(args: argparse.Namespace) -> int:
     return run_sandbox(
         fake=args.fake,
         timeout=args.timeout,
-        out=Path(args.out).expanduser().resolve(),
         preset=args.preset,
         model=args.model,
     )
@@ -738,7 +737,7 @@ def build_parser() -> argparse.ArgumentParser:
     sandbox_p = sub.add_parser(
         "sandbox",
         help="Disposable end-to-end team run in a temp A8S_HOME/R4T_HOME; "
-        "writes a self-contained report.",
+        "logs to stderr, report on stdout.",
     )
     sandbox_p.add_argument(
         "--fake",
@@ -757,9 +756,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model name for presets that need it (e.g. opencode-ollama).",
     )
     sandbox_p.add_argument("--timeout", type=float, default=900, metavar="SECS")
-    sandbox_p.add_argument(
-        "--out", default="./r4t-sandbox-report.md", help="Report path."
-    )
     sandbox_p.set_defaults(func=cmd_sandbox)
 
     return p

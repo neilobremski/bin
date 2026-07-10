@@ -116,21 +116,19 @@ each becomes one JSON record (reason, count, from, to, task, time) in
 - **Unit + fake sandbox (plumbing):** `r4t sandbox --fake` runs a bundled
   three-agent team (Lead/Dev/Tester building a tiny battleship game)
   against deterministic scripted agents — no LLM calls — inside a
-  throwaway `A8S_HOME`/`R4T_HOME`, then writes a self-contained report
-  whose MECHANICAL CHECKS section is computed (program built and runs,
-  leader answered the originator, turns within budget, zero orphan
-  processes, dead-letter counts). The pytest suite runs it end to end.
+  throwaway `A8S_HOME`/`R4T_HOME`, then emits a self-contained report on
+  **stdout** (progress on **stderr**). MECHANICAL CHECKS are computed
+  (program built and runs, leader answered the originator, turns within
+  budget, zero orphan processes, dead-letter counts). The pytest suite
+  runs it end to end.
 - **Live sandbox (acceptance / eval):** `r4t sandbox` (no `--fake`) runs
   the same scenario with a real harness. Pick any named preset:
   `r4t sandbox --preset opencode` (default), or local models via Ollama:
   `r4t sandbox --preset opencode-ollama --model qwen2.5-coder:7b`.
-  Other presets (`claude`, `codex`, `cursor`, …) work the same way — see
-  `r4t harness presets`. Limits come from
-  [sandbox/harnesses.json](sandbox/harnesses.json). Use it to grade prompt
-  and governance changes against real models; it is never run from pytest.
-  The report (default `./r4t-sandbox-report.md`) is written for an external
-  judge — mechanical checks first, then the turn table, full conversation,
-  governance events, and produced source.
+  Other presets (`claude`, `codex`, `cursor`, `agy`, …) work the same
+  way — see `r4t harness presets`. `live-agent.py` prepends explicit
+  per-role steps and stages protocol tells if the model skips them.
+  Save the report: `r4t sandbox --preset agy > report.md`
 
 ## Development
 

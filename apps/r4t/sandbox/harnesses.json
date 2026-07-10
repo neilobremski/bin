@@ -7,13 +7,13 @@
   "suppression_window_seconds": 30,
   "leader": {
     "invoke": ["opencode", "run", "--auto", "--dir", ".", "{prompt}"],
-    "timeout_seconds": 300,
+    "timeout_seconds": 600,
     "max_turns_per_task": 15,
     "hop_limit": 6
   },
   "member": {
     "invoke": ["opencode", "run", "--auto", "--dir", ".", "{prompt}"],
-    "timeout_seconds": 300,
+    "timeout_seconds": 600,
     "max_turns_per_task": 15
   }
 }

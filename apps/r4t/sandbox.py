@@ -7,7 +7,8 @@ GOAL.md task as a registered "human" agent, waits for quiescence, tears
 everything down (a8s stop is a graceful SIGTERM; the no-orphans invariant
 is verified with a process scan), and writes one self-contained markdown
 report whose MECHANICAL CHECKS section is computed — an external judge
-needs nothing but the report.
+needs nothing but the report. Progress logs go to stderr; the final report
+is written to stdout (pipe or redirect to save it).
 
 `--fake` swaps every tier's invoke for sandbox/fake-agent.py: scripted
 role-play that exercises dispatch, staging release, header stamping,
@@ -45,6 +46,10 @@ MAX_TURNS = 15
 
 class SandboxError(Exception):
     pass
+
+
+def _log(msg: str) -> None:
+    print(f"sandbox: {msg}", file=sys.stderr, flush=True)
 
 
 def _a8s(*args: str) -> subprocess.CompletedProcess:
@@ -120,21 +125,20 @@ def _write_harness_config(path: Path, fake: bool) -> None:
     state.atomic_write_json(path, config)
 
 
-def _kickoff(human_root: Path, goal: str, repo: Path) -> None:
+def _kickoff(human_root: Path, goal: str) -> None:
     outbox = human_root / ".outbox"
     outbox.mkdir(parents=True, exist_ok=True)
     msg_id = f"{time.time_ns():026d}"
-    workspace = repo.resolve()
     state.atomic_write_json(
         outbox / f"{msg_id}.json",
         {
             "id": msg_id,
             "to": f"{TEAM}:lead",
             "content": (
-                "Please build this and report back to me when it is done and "
-                "verified. All project files must live in the team repo root "
-                f"({workspace}) using relative paths only — never ~/ or "
-                "paths outside that directory:\n\n" + goal
+                "Build the battleship game in GOAL.md.\n\n"
+                "Lead: your only action this turn is to delegate — run:\n"
+                f'  tell {TEAM}:dev "Build battleship.py per GOAL.md in this directory."\n'
+                "Do not implement it yourself.\n\n" + goal
             ),
             "files": [],
         },
@@ -293,6 +297,37 @@ def _dead_letter_counts() -> dict[str, int]:
     return counts
 
 
+def _emit_progress(
+    *,
+    seen_velocity: int,
+    seen_gov: set[str],
+    seen_locks: set[tuple[str, str]],
+) -> tuple[int, set[str], set[tuple[str, str]]]:
+    rows = _velocity_rows()
+    for row in rows[seen_velocity:]:
+        if len(row) >= 7:
+            _log(f"turn done: {row[1]} ({row[2]}) task={row[3][:8]}… "
+                 f"exit={row[6]} in {row[5]}s")
+        else:
+            _log(f"turn done: {', '.join(row)}")
+    seen_velocity = len(rows)
+
+    for line in _governance_lines():
+        if line not in seen_gov:
+            _log(line)
+            seen_gov.add(line)
+
+    for lock in state.live_locks(TEAM, prune=True):
+        key = (str(lock.get("agent", "")), str(lock.get("task", "")))
+        if key not in seen_locks:
+            seen_locks.add(key)
+            _log(
+                f"turn started: {lock.get('agent', '?')} "
+                f"(tier {lock.get('tier', '?')}, task {str(lock.get('task', ''))[:8]}…)"
+            )
+    return seen_velocity, seen_gov, seen_locks
+
+
 def _build_report(
     *,
     mode: str,
@@ -363,26 +398,30 @@ def run_sandbox(
     *,
     fake: bool,
     timeout: float,
-    out: Path,
     preset: str = "opencode",
     model: str | None = None,
 ) -> int:
     start = time.time()
     tmp = Path(tempfile.mkdtemp(prefix="r4t-sandbox-"))
-    saved_env = {k: os.environ.get(k) for k in ("A8S_HOME", "R4T_HOME", "R4T_SANDBOX_INVOKE")}
+    saved_env = {k: os.environ.get(k) for k in ("A8S_HOME", "R4T_HOME", "R4T_SANDBOX_INVOKE", "R4T_SANDBOX")}
     a8s_home = tmp / "a8s-home"
     os.environ["A8S_HOME"] = str(a8s_home)
     os.environ["R4T_HOME"] = str(tmp / "r4t-home")
+    os.environ["R4T_SANDBOX"] = "1"
     mode = "fake" if fake else "live"
     harness_line = ""
+    seen_velocity = 0
+    seen_gov: set[str] = set()
+    seen_locks: set[tuple[str, str]] = set()
     try:
         if fake:
             os.environ.pop("R4T_SANDBOX_INVOKE", None)
+            _log("mode=fake (deterministic agents, no LLM)")
         else:
             try:
                 invoke = build_preset_invoke(preset, model=model)
             except HarnessError as e:
-                print(f"sandbox: {e}", file=sys.stderr)
+                _log(str(e))
                 return 1
             os.environ["R4T_SANDBOX_INVOKE"] = json.dumps(invoke)
             harness_line = format_preset_invoke(preset.strip().lower())
@@ -390,7 +429,7 @@ def run_sandbox(
                 harness_line = f"{preset} (model={model}) — {harness_line}"
             else:
                 harness_line = f"{preset} — {harness_line}"
-            print(f"sandbox: harness {harness_line}", file=sys.stderr)
+            _log(f"harness {harness_line}")
         repo = tmp / "repo"
         repo.mkdir(parents=True)
         seed_names = {"ROSTER.md", "GOAL.md"}
@@ -412,6 +451,7 @@ def run_sandbox(
         human_root = tmp / "human"
         human_root.mkdir()
 
+        _log("registering node and handlers")
         _a8s("add", NODE, str(repo), str(definition))
         _a8s("add", "human", str(human_root), str(A8S_DIR / "definitions" / "default.json"))
         _a8s("namespace", TEAM, NODE)
@@ -419,23 +459,36 @@ def run_sandbox(
         _a8s("alias", ALIAS, "human")
         _a8s("start", ALIAS)
 
-        _kickoff(human_root, goal, repo)
+        _kickoff(human_root, goal)
+        _log("kickoff sent to crew:lead")
 
         deadline = time.time() + timeout
         quiet_polls = 0
         final = None
         while time.time() < deadline:
             time.sleep(2)
+            seen_velocity, seen_gov, seen_locks = _emit_progress(
+                seen_velocity=seen_velocity,
+                seen_gov=seen_gov,
+                seen_locks=seen_locks,
+            )
             final = _final_answer(a8s_home)
+            if final is not None:
+                _log("leader answered the human")
             if _busy(a8s_home, repo):
                 quiet_polls = 0
                 continue
             quiet_polls += 1
             if final is not None and quiet_polls >= 2:
+                _log("quiescent with final answer")
                 break
             if quiet_polls >= 20:
+                _log("quiescent without final answer")
                 break
+            if quiet_polls == 1:
+                _log("waiting for team to finish…")
 
+        _log("stopping handlers")
         _stop_handlers(a8s_home)
         orphans = _orphans(tmp)
         final = final or _final_answer(a8s_home)
@@ -476,17 +529,16 @@ def run_sandbox(
             repo_files=repo_files,
             harness=harness_line,
         )
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(report, encoding="utf-8")
         failed = [name for name, result, _ in checks if isinstance(result, bool) and not result]
-        print(f"sandbox ({mode}): report written to {out}")
+        sys.stdout.write(report)
+        sys.stdout.flush()
         if failed:
-            print(f"sandbox: FAILED checks: {', '.join(failed)}", file=sys.stderr)
+            _log(f"FAILED checks: {', '.join(failed)}")
             return 1
-        print("sandbox: all mechanical checks passed")
+        _log("all mechanical checks passed")
         return 0
     except SandboxError as e:
-        print(f"sandbox: {e}", file=sys.stderr)
+        _log(str(e))
         return 1
     finally:
         try:

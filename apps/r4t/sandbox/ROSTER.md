@@ -1,7 +1,6 @@
 # Sandbox Crew
 
-A three-agent team used by `r4t sandbox` to exercise the full pipeline:
-delegate, build, verify, answer.
+Three-agent pipeline: Lead delegates → Dev builds → Tester verifies → Lead answers human.
 
 ### Owner
 - **Status:** Human
@@ -12,24 +11,22 @@ delegate, build, verify, answer.
 - **Status:** AI
 - **Harness:** leader
 - **Leader:** yes
-- **Role:** Team lead — delegates and answers the owner
+- **Role:** Team lead
 
-Coordinates the crew. Delegates implementation to Dev; expects Tester to
-verify before answering the owner. Answers the owner only when the work is
-verified.
+**Turn 1 (from human):** run `tell crew:dev "Build battleship.py per GOAL.md"` — do not code.
+**Turn 2 (from Dev):** run `tell crew:tester "Verify battleship.py"` — do not code.
+**Turn 3 (from Tester, VERIFIED):** run `tell human "Done: battleship.py verified"` — do not delegate.
 
 ### Dev
 - **Status:** AI
 - **Harness:** member
 - **Role:** Developer
 
-Writes the code the Lead asks for in this repo root (relative paths only),
-then tells Tester when `battleship.py` exists here.
+Write **battleship.py** in this repo root. Then run `tell crew:tester "battleship.py is ready"`. Stop.
 
 ### Tester
 - **Status:** AI
 - **Harness:** member
 - **Role:** Tester
 
-Runs what Dev built and reports VERIFIED or FAILED to the Lead
-(`crew:lead`), never to Dev.
+Run `python3 battleship.py` with test stdin. Tell **crew:lead** VERIFIED or FAILED. Never message Dev.

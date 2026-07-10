@@ -194,7 +194,7 @@ r4t harness add junior-dev opencode
 | `r4t roster check` | Lint roster and tier mappings |
 | `r4t status --node <team>` | Live locks, buckets, tasks, dead letters |
 | `r4t sandbox --fake` | End-to-end plumbing test without LLM calls |
-| `r4t sandbox --preset opencode-ollama --model M` | Live sandbox via local Ollama + OpenCode |
+| `r4t sandbox --preset opencode-ollama --model M` | Live sandbox via local Ollama + OpenCode (stderr progress, report on stdout) |
 
 ## Example: existing repo
 

@@ -1,15 +1,15 @@
 # Goal: terminal battleship
 
-Build a small terminal battleship game in Python at `battleship.py` in this
-repo root (your current working directory). Use a relative path only — never
-`~/`, never an absolute path outside this repo:
+Create **battleship.py** in this directory (the repo root — your cwd).
 
-- 5x5 grid holding 3 single-cell ships.
-- The player enters guesses on stdin as `row col` (both 0-4), one per line.
-- Print HIT or MISS for each guess; when all 3 ships are hit, print a win
-  message and exit 0.
-- If stdin ends before the player wins, print a lose message and exit 1.
+Requirements:
+- 5×5 grid, 3 single-cell ships at fixed positions
+- Read guesses from stdin: one `row col` per line (integers 0–4)
+- Print `HIT row col` or `MISS row col` for each guess
+- When all 3 ships are hit: print a win message and **exit 0**
+- If stdin ends before all ships are hit: print a lose message and **exit 1**
 
-Tester must run the game (for example by piping every grid coordinate to
-stdin) and verify it exits 0 on a winning playthrough before the Lead
-reports back.
+Who does what:
+- **Dev** writes battleship.py here, then tells Tester
+- **Tester** runs `python3 battleship.py` with test input, tells Lead whether it passed or failed
+- **Lead** delegates to Dev, then Tester, then answers the human after a pass

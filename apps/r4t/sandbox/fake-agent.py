@@ -49,6 +49,9 @@ if __name__ == "__main__":
 '''
 
 
+VERIFIED_RE = re.compile(r"VERIFIED:", re.I)
+
+
 def send(to: str, content: str) -> None:
     outbox = Path(os.environ["TELL_OUTBOX_DIR"])
     outbox.mkdir(parents=True, exist_ok=True)
@@ -77,7 +80,7 @@ def main() -> int:
     print(f"fake-agent: {name} woken by {sender}")
 
     if name == "lead":
-        if "VERIFIED" in incoming or "Respond NOW" in incoming:
+        if (VERIFIED_RE.search(incoming) and f"{team}:tester" in sender.lower()) or "Respond NOW" in incoming:
             originator = first_external_sender(prompt)
             send(
                 originator,

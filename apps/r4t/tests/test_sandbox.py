@@ -9,8 +9,7 @@ from pathlib import Path
 R4T_PY = Path(__file__).resolve().parent.parent / "r4t.py"
 
 
-def test_fake_sandbox_end_to_end(tmp_path):
-    report_path = tmp_path / "report.md"
+def test_fake_sandbox_end_to_end():
     result = subprocess.run(
         [
             sys.executable,
@@ -19,16 +18,14 @@ def test_fake_sandbox_end_to_end(tmp_path):
             "--fake",
             "--timeout",
             "240",
-            "--out",
-            str(report_path),
         ],
         capture_output=True,
         text=True,
         timeout=300,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert report_path.is_file()
-    report = report_path.read_text(encoding="utf-8")
+    report = result.stdout
+    assert "sandbox:" in result.stderr
 
     mechanical = report.split("## Mechanical checks", 1)[1].split("## Run", 1)[0]
     for check in (
