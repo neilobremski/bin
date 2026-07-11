@@ -57,7 +57,7 @@ class DispatchContext:
 
 
 def split_recipient(to: str) -> tuple[str, str]:
-    """`s1l:phil` -> (`s1l`, `phil`); bare `s1l` -> (`s1l`, `""`).
+    """`acme:phil` -> (`acme`, `phil`); bare `acme` -> (`acme`, `""`).
     The sub-address is everything after the FIRST colon, verbatim."""
     to = (to or "").strip()
     if ":" in to:

@@ -132,20 +132,20 @@ A namespace binds an address **prefix** to a single node agent. Any recipient
 of the form `<prefix>:<sub-address>` routes to that one agent — single
 delivery by design, the opposite of alias fan-out, which is why the bind
 target must be an agent, not an alias. The address splits on the FIRST colon
-and everything after it is opaque to a8s (`s1l:team:phil` still routes on
-prefix `s1l`); the sub-address must be non-empty (`s1l:` is malformed). The
+and everything after it is opaque to a8s (`acme:team:phil` still routes on
+prefix `acme`); the sub-address must be non-empty (`acme:` is malformed). The
 full recipient string is preserved in the delivered message's `to`, so the
 node's `$RECIPIENT` carries it verbatim and the node can self-route
 internally.
 
 ```bash
-# One registered node agent owns every s1l:*-style address.
+# One registered node agent owns every acme:*-style address.
 # (The registration binds the prefix — wildcards are not address syntax.)
-a8s add s1l-node ~/projects/s1l-hall
-a8s namespace s1l s1l-node
+a8s add acme-node ~/projects/acme-hall
+a8s namespace acme acme-node
 
-tell s1l:phil "lunch at noon?"      # delivered to s1l-node with to = "s1l:phil"
-tell s1l:team:ops "deploy done"     # same node; sub-address opaque to a8s
+tell acme:phil "lunch at noon?"      # delivered to acme-node with to = "acme:phil"
+tell acme:team:ops "deploy done"     # same node; sub-address opaque to a8s
 ```
 
 Prefixes share the agent/alias name grammar (lowercase canonical form,

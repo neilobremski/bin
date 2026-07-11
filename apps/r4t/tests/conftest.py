@@ -179,7 +179,7 @@ def ctx(r4t_home, repo, rig_config, tells):
     _sent, capture = tells
     return DispatchContext(
         root=repo,
-        node="s1l",
+        node="acme",
         roster_path=repo / "ROSTER.md",
         config_path=rig_config,
         tell_fn=capture,
@@ -193,7 +193,7 @@ def chatty_ctx(r4t_home, repo, chatty_config, tells):
     _sent, capture = tells
     return DispatchContext(
         root=repo,
-        node="s1l",
+        node="acme",
         roster_path=repo / "ROSTER.md",
         config_path=chatty_config,
         tell_fn=capture,

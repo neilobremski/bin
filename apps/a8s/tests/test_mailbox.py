@@ -361,7 +361,7 @@ class TestNamespaceRouting:
         a_root = tmp_path / "a"; a_root.mkdir()
         node_root = tmp_path / "node"; node_root.mkdir()
         save_registry({"A": {"root": str(a_root)}, "NODE": {"root": str(node_root)}})
-        save_namespaces({"s1l": "NODE"})
+        save_namespaces({"acme": "NODE"})
         a = Participant("A", a_root)
         node = Participant("NODE", node_root)
         ensure_mailboxes(a)
@@ -370,26 +370,26 @@ class TestNamespaceRouting:
 
     def test_delivers_one_message_with_to_preserved(self, namespace_agents):
         a, node = namespace_agents
-        _write_outbox("A", a.root, "s1l:phil", "hi phil", [])
+        _write_outbox("A", a.root, "acme:phil", "hi phil", [])
         n = route_outboxes([a, node], all_agents=[a, node])
         assert n == 1
         files = list(inbox_dir("NODE").iterdir())
         assert len(files) == 1
         msg = json.loads(files[0].read_text())
-        assert msg["to"] == "s1l:phil"
+        assert msg["to"] == "acme:phil"
         assert msg["from"] == "A"
 
     def test_prefix_case_insensitive_sub_address_verbatim(self, namespace_agents):
         a, node = namespace_agents
-        _write_outbox("A", a.root, "S1L:Team:Phil", "hi", [])
+        _write_outbox("A", a.root, "ACME:Team:Phil", "hi", [])
         route_outboxes([a, node], all_agents=[a, node])
         msg = json.loads(next(inbox_dir("NODE").iterdir()).read_text())
-        assert msg["to"] == "S1L:Team:Phil"
+        assert msg["to"] == "ACME:Team:Phil"
 
     def test_empty_sub_address_is_trashed(self, namespace_agents):
         # Malformed address — same handling as any malformed recipient.
         a, node = namespace_agents
-        _write_outbox("A", a.root, "s1l:", "malformed", [])
+        _write_outbox("A", a.root, "acme:", "malformed", [])
         n = route_outboxes([a, node], all_agents=[a, node])
         assert n == 0
         assert list(inbox_dir("NODE").iterdir()) == []
@@ -425,10 +425,10 @@ class TestNamespaceRouting:
     def test_dangling_bound_agent_treated_as_unknown(self, fake_home, tmp_path):
         a_root = tmp_path / "a"; a_root.mkdir()
         save_registry({"A": {"root": str(a_root)}})
-        save_namespaces({"s1l": "GONE"})
+        save_namespaces({"acme": "GONE"})
         a = Participant("A", a_root)
         ensure_mailboxes(a)
-        _write_outbox("A", a.root, "s1l:phil", "orphaned", [])
+        _write_outbox("A", a.root, "acme:phil", "orphaned", [])
         n = route_outboxes([a], all_agents=[a])
         assert n == 0
         assert any("orphaned" in f.read_text() for f in trash_dir("A").iterdir())
@@ -436,10 +436,10 @@ class TestNamespaceRouting:
     def test_log_keeps_full_to_visible(self, namespace_agents):
         from core import agent_log_path
         a, node = namespace_agents
-        _write_outbox("A", a.root, "s1l:phil", "hi", [])
+        _write_outbox("A", a.root, "acme:phil", "hi", [])
         route_outboxes([a, node], all_agents=[a, node])
         log = agent_log_path("A").read_text()
-        assert "s1l:phil" in log
+        assert "acme:phil" in log
         assert "namespace via NODE" in log
 
 

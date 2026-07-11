@@ -27,7 +27,7 @@ from state import (
     team_dir,
 )
 
-NODE = "s1l"
+NODE = "acme"
 
 
 class TestHistory:
@@ -115,8 +115,8 @@ class TestLocks:
 
 class TestPending:
     def test_park_and_list_fifo(self, r4t_home):
-        first = park_pending(NODE, {"from": "a", "to": "s1l:phil", "body": "1"})
-        second = park_pending(NODE, {"from": "b", "to": "s1l:phil", "body": "2"})
+        first = park_pending(NODE, {"from": "a", "to": "acme:phil", "body": "1"})
+        second = park_pending(NODE, {"from": "b", "to": "acme:phil", "body": "2"})
         listed = list_pending(NODE)
         assert listed == sorted([first, second])
 
@@ -163,17 +163,17 @@ class TestVelocity:
 class TestDeadLetters:
     def test_record_and_list(self, r4t_home):
         record_dead_letter(
-            NODE, reason="quota", sender="s1l:phil", to="gerry",
+            NODE, reason="quota", sender="acme:phil", to="gerry",
             task="01ABC", content="too chatty",
         )
         record_dead_letter(
-            NODE, reason="pair-repeat", sender="s1l:phil", to="gerry",
+            NODE, reason="pair-repeat", sender="acme:phil", to="gerry",
             task="01ABC", content="again", count=3,
         )
         records = list_dead_letters(NODE)
         assert len(records) == 2
         by_reason = {r["reason"]: r for r in records}
-        assert by_reason["quota"]["from"] == "s1l:phil"
+        assert by_reason["quota"]["from"] == "acme:phil"
         assert by_reason["quota"]["count"] == 1
         assert by_reason["pair-repeat"]["count"] == 3
         assert all(r["time"] for r in records)

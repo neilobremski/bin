@@ -172,23 +172,23 @@ class TestCmdNamespace:
 
     def test_bind_stores_canonical_lowercase(self, agent_root):
         cmd_add(["node", str(agent_root)])
-        rc = cmd_namespace(["S1L", "NODE"])
+        rc = cmd_namespace(["ACME", "NODE"])
         assert rc == 0
-        assert load_namespaces() == {"s1l": "node"}
+        assert load_namespaces() == {"acme": "node"}
 
     def test_rebind_overwrites(self, agent_root, tmp_path, capsys):
         cmd_add(["node", str(agent_root)])
         other = tmp_path / "y"
         other.mkdir()
         cmd_add(["other", str(other)])
-        cmd_namespace(["s1l", "node"])
-        rc = cmd_namespace(["s1l", "other"])
+        cmd_namespace(["acme", "node"])
+        rc = cmd_namespace(["acme", "other"])
         assert rc == 0
-        assert load_namespaces() == {"s1l": "other"}
+        assert load_namespaces() == {"acme": "other"}
         assert "rebound" in capsys.readouterr().out
 
     def test_target_must_be_registered(self, fake_home, capsys):
-        rc = cmd_namespace(["s1l", "ghost"])
+        rc = cmd_namespace(["acme", "ghost"])
         assert rc == 1
         assert "unknown agent" in capsys.readouterr().err
         assert load_namespaces() == {}
@@ -196,7 +196,7 @@ class TestCmdNamespace:
     def test_target_must_not_be_alias(self, agent_root, capsys):
         cmd_add(["node", str(agent_root)])
         cmd_alias(["devs", "node"])
-        rc = cmd_namespace(["s1l", "devs"])
+        rc = cmd_namespace(["acme", "devs"])
         assert rc == 1
         assert "not an alias" in capsys.readouterr().err
         assert load_namespaces() == {}
@@ -216,16 +216,16 @@ class TestCmdNamespace:
 
     def test_invalid_prefix_rejected(self, agent_root, capsys):
         cmd_add(["node", str(agent_root)])
-        rc = cmd_namespace(["s1l:x", "node"])
+        rc = cmd_namespace(["acme:x", "node"])
         assert rc == 2
 
     def test_show_one(self, agent_root, capsys):
         cmd_add(["node", str(agent_root)])
-        cmd_namespace(["s1l", "node"])
+        cmd_namespace(["acme", "node"])
         capsys.readouterr()
-        rc = cmd_namespace(["s1l"])
+        rc = cmd_namespace(["acme"])
         assert rc == 0
-        assert "s1l: -> node" in capsys.readouterr().out
+        assert "acme: -> node" in capsys.readouterr().out
 
     def test_show_unknown(self, fake_home, capsys):
         rc = cmd_namespace(["ghost"])
@@ -234,16 +234,16 @@ class TestCmdNamespace:
 
     def test_list(self, agent_root, capsys):
         cmd_add(["node", str(agent_root)])
-        cmd_namespace(["s1l", "node"])
+        cmd_namespace(["acme", "node"])
         capsys.readouterr()
         rc = cmd_namespaces()
         assert rc == 0
         out = capsys.readouterr().out
-        assert "s1l" in out
+        assert "acme" in out
         assert "node" in out
 
     def test_list_flags_dangling_binding(self, fake_home, capsys):
-        save_namespaces({"s1l": "gone"})
+        save_namespaces({"acme": "gone"})
         rc = cmd_namespaces()
         assert rc == 0
         assert "unknown agent" in capsys.readouterr().out
@@ -252,8 +252,8 @@ class TestCmdNamespace:
 class TestCmdUnnamespace:
     def test_remove_case_insensitive(self, agent_root):
         cmd_add(["node", str(agent_root)])
-        cmd_namespace(["s1l", "node"])
-        rc = cmd_unnamespace(["S1L"])
+        cmd_namespace(["acme", "node"])
+        rc = cmd_unnamespace(["ACME"])
         assert rc == 0
         assert load_namespaces() == {}
 
@@ -275,20 +275,20 @@ class TestNamespaceCollisionsElsewhere:
         node = tmp_path / "node"
         node.mkdir()
         cmd_add(["node", str(node)])
-        cmd_namespace(["s1l", "node"])
+        cmd_namespace(["acme", "node"])
         other = tmp_path / "other"
         other.mkdir()
-        rc = cmd_add(["s1l", str(other)])
+        rc = cmd_add(["acme", str(other)])
         assert rc == 1
         assert "namespace already exists" in capsys.readouterr().err
-        assert "s1l" not in load_registry()
+        assert "acme" not in load_registry()
 
     def test_alias_rejects_existing_namespace_prefix(self, fake_home, tmp_path, capsys):
         node = tmp_path / "node"
         node.mkdir()
         cmd_add(["node", str(node)])
-        cmd_namespace(["s1l", "node"])
-        rc = cmd_alias(["s1l", "node"])
+        cmd_namespace(["acme", "node"])
+        rc = cmd_alias(["acme", "node"])
         assert rc == 1
         assert "namespace already exists" in capsys.readouterr().err
         assert load_aliases() == {}
@@ -297,10 +297,10 @@ class TestNamespaceCollisionsElsewhere:
         node = tmp_path / "node"
         node.mkdir()
         cmd_add(["node", str(node)])
-        cmd_namespace(["s1l", "node"])
+        cmd_namespace(["acme", "node"])
         rc = cmd_remove(["node"])
         assert rc == 0
-        assert "unbound namespaces: s1l" in capsys.readouterr().out
+        assert "unbound namespaces: acme" in capsys.readouterr().out
         assert load_namespaces() == {}
 
 
@@ -622,14 +622,14 @@ class TestCmdTellNamespace:
     def test_bound_prefix_accepted_to_canonicalizes_prefix_only(self, fake_home, tmp_path, monkeypatch):
         import json as _json
         sender_root = self._setup_sender(fake_home, tmp_path, monkeypatch)
-        save_namespaces({"s1l": "node"})
-        rc = cmd_tell(["S1L:Team:Phil", "hi"])
+        save_namespaces({"acme": "node"})
+        rc = cmd_tell(["ACME:Team:Phil", "hi"])
         assert rc == 0
         outbox_files = list(outbox_dir(sender_root).iterdir())
         assert len(outbox_files) == 1
         msg = _json.loads(outbox_files[0].read_text())
         # The prefix canonicalizes like any name; the sub-address is verbatim.
-        assert msg["to"] == "s1l:Team:Phil"
+        assert msg["to"] == "acme:Team:Phil"
 
     def test_unknown_prefix_with_no_remotes_rejected(self, fake_home, tmp_path, monkeypatch, capsys):
         self._setup_sender(fake_home, tmp_path, monkeypatch)
@@ -648,8 +648,8 @@ class TestCmdTellNamespace:
 
     def test_empty_sub_address_rejected(self, fake_home, tmp_path, monkeypatch, capsys):
         self._setup_sender(fake_home, tmp_path, monkeypatch)
-        save_namespaces({"s1l": "node"})
-        rc = cmd_tell(["s1l:", "hi"])
+        save_namespaces({"acme": "node"})
+        rc = cmd_tell(["acme:", "hi"])
         assert rc == 1
         assert "empty sub-address" in capsys.readouterr().err
 

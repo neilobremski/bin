@@ -96,20 +96,20 @@ class TestRegistryIO:
         assert load_aliases() == {"devs": ["X"]}
 
     def test_save_and_load_namespaces(self, fake_home):
-        save_namespaces({"s1l": "node"})
-        assert load_namespaces() == {"s1l": "node"}
+        save_namespaces({"acme": "node"})
+        assert load_namespaces() == {"acme": "node"}
 
     def test_save_namespaces_preserves_other_sections(self, fake_home):
         save_registry({"X": {"root": "/r"}})
         save_aliases({"devs": ["X"]})
-        save_namespaces({"s1l": "X"})
+        save_namespaces({"acme": "X"})
         assert load_registry() == {"X": {"root": "/r"}}
         assert load_aliases() == {"devs": ["X"]}
 
     def test_save_agents_preserves_namespaces(self, fake_home):
-        save_namespaces({"s1l": "X"})
+        save_namespaces({"acme": "X"})
         save_registry({"X": {"root": "/r"}})
-        assert load_namespaces() == {"s1l": "X"}
+        assert load_namespaces() == {"acme": "X"}
 
     def test_corrupt_file_returns_empty(self, fake_home):
         registry_path().write_text("not json")
@@ -190,14 +190,14 @@ class TestSplitNamespaceAddress:
         assert split_namespace_address("claude") is None
 
     def test_splits_on_first_colon(self):
-        assert split_namespace_address("s1l:team:phil") == ("s1l", "team:phil")
+        assert split_namespace_address("acme:team:phil") == ("acme", "team:phil")
 
     def test_prefix_canonicalized_sub_verbatim(self):
-        assert split_namespace_address("S1L:Phil") == ("s1l", "Phil")
+        assert split_namespace_address("ACME:Phil") == ("acme", "Phil")
 
     def test_empty_sub_address_raises(self):
         with pytest.raises(ValueError, match="empty sub-address"):
-            split_namespace_address("s1l:")
+            split_namespace_address("acme:")
 
     def test_empty_prefix_raises(self):
         with pytest.raises(ValueError, match="invalid prefix"):
@@ -213,20 +213,20 @@ class TestSplitNamespaceAddress:
 class TestResolveNamespace:
     def test_colon_address_resolves_to_bound_agent(self, fake_home):
         save_registry({"NODE": {"root": "/r"}})
-        save_namespaces({"s1l": "NODE"})
-        kind, members = resolve_name("s1l:phil")
+        save_namespaces({"acme": "NODE"})
+        kind, members = resolve_name("acme:phil")
         assert kind == "namespace"
         assert members == ["NODE"]
 
     def test_prefix_match_is_case_insensitive(self, fake_home):
         save_registry({"NODE": {"root": "/r"}})
-        save_namespaces({"s1l": "NODE"})
-        assert resolve_name("S1L:Phil") == ("namespace", ["NODE"])
+        save_namespaces({"acme": "NODE"})
+        assert resolve_name("ACME:Phil") == ("namespace", ["NODE"])
 
     def test_further_colons_are_opaque(self, fake_home):
         save_registry({"NODE": {"root": "/r"}})
-        save_namespaces({"s1l": "NODE"})
-        assert resolve_name("s1l:team:phil") == ("namespace", ["NODE"])
+        save_namespaces({"acme": "NODE"})
+        assert resolve_name("acme:team:phil") == ("namespace", ["NODE"])
 
     def test_unknown_prefix_raises_keyerror(self, fake_home):
         with pytest.raises(KeyError):
@@ -234,15 +234,15 @@ class TestResolveNamespace:
 
     def test_empty_sub_address_raises_valueerror(self, fake_home):
         save_registry({"NODE": {"root": "/r"}})
-        save_namespaces({"s1l": "NODE"})
+        save_namespaces({"acme": "NODE"})
         with pytest.raises(ValueError, match="empty sub-address"):
-            resolve_name("s1l:")
+            resolve_name("acme:")
 
     def test_dangling_bound_agent_raises_keyerror(self, fake_home):
         # Same dangling shape as an alias member that no longer exists.
-        save_namespaces({"s1l": "GONE"})
+        save_namespaces({"acme": "GONE"})
         with pytest.raises(KeyError, match="unknown agent"):
-            resolve_name("s1l:phil")
+            resolve_name("acme:phil")
 
 
 # ---------- find_participant + sender_from_cwd ----------

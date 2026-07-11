@@ -278,18 +278,18 @@ class TestReceiveEnvelope:
     def test_namespace_recipient_delivered_to_bound_node(self, two_local_agents):
         # Issue #148: the receive-side filter resolves colon addresses via
         # the local namespaces map — this is how a cross-cluster tell to
-        # `s1l:phil` lands on the cluster that owns the `s1l` prefix.
-        save_namespaces({"s1l": "B"})
+        # `acme:phil` lands on the cluster that owns the `acme` prefix.
+        save_namespaces({"acme": "B"})
         msg_id = new_ulid()
         envelope = json.dumps({
-            "id": msg_id, "from": "REMOTE_X", "to": "s1l:phil",
+            "id": msg_id, "from": "REMOTE_X", "to": "acme:phil",
             "content": "cross-cluster prefix", "files": [],
         }).encode()
         receive_envelope(envelope, two_local_agents)
         files = list(inbox_dir("B").iterdir())
         assert len(files) == 1
         body = json.loads(files[0].read_text())
-        assert body["to"] == "s1l:phil"
+        assert body["to"] == "acme:phil"
         d = inbox_dir("A")
         assert not d.exists() or list(d.iterdir()) == []
 
@@ -304,9 +304,9 @@ class TestReceiveEnvelope:
             assert not d.exists() or list(d.iterdir()) == []
 
     def test_malformed_namespace_address_dropped_silently(self, two_local_agents):
-        save_namespaces({"s1l": "B"})
+        save_namespaces({"acme": "B"})
         envelope = json.dumps({
-            "id": new_ulid(), "from": "X", "to": "s1l:",
+            "id": new_ulid(), "from": "X", "to": "acme:",
             "content": "malformed", "files": [],
         }).encode()
         receive_envelope(envelope, two_local_agents)

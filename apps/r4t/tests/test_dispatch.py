@@ -26,7 +26,7 @@ from rig import Rig
 from r4t import main as r4t_main
 from ulid import new as new_ulid
 
-NODE = "s1l"
+NODE = "acme"
 
 
 def harness_calls(fake_harness):
@@ -54,19 +54,19 @@ def dead_reasons():
 
 class TestSplitRecipient:
     def test_sub_address(self):
-        assert split_recipient("s1l:phil") == ("s1l", "phil")
+        assert split_recipient("acme:phil") == ("acme", "phil")
 
     def test_bare(self):
-        assert split_recipient("s1l") == ("s1l", "")
+        assert split_recipient("acme") == ("acme", "")
 
     def test_first_colon_only(self):
-        assert split_recipient("s1l:team:ops") == ("s1l", "team:ops")
+        assert split_recipient("acme:team:ops") == ("acme", "team:ops")
 
 
 class TestDispatchEndToEnd:
     def test_member_turn_runs_fake_harness(self, ctx, tells, fake_harness):
         sent, _ = tells
-        assert _handle(ctx, "gerry", "s1l:phil", "review the ECS payload") == RAN
+        assert _handle(ctx, "gerry", "acme:phil", "review the ECS payload") == RAN
         calls = harness_calls(fake_harness)
         assert len(calls) == 1
         prompt = read_prompt(calls[0])
@@ -74,12 +74,12 @@ class TestDispatchEndToEnd:
         assert "Grumpy, cynical veteran" in prompt
         assert "From: gerry" in prompt
         assert "review the ECS payload" in prompt
-        assert "tell s1l:gerry" in prompt
+        assert "tell acme:gerry" in prompt
         assert "Neil (Human, tell neil)" in prompt
         assert sent == []  # silence on success — no auto-ack
 
     def test_prompt_carries_actor_doctrine_not_headers(self, ctx, fake_harness):
-        handle_message(ctx, "gerry", "s1l:phil", "hi")
+        handle_message(ctx, "gerry", "acme:phil", "hi")
         prompt = read_prompt(harness_calls(fake_harness)[0])
         assert "Never wait for a reply inside a turn" in prompt
         assert "END your turn" in prompt
@@ -88,7 +88,7 @@ class TestDispatchEndToEnd:
         assert "[r4t task=" not in prompt  # headers are stamped mechanically
 
     def test_new_task_ledger_created(self, ctx, fake_harness):
-        handle_message(ctx, "gerry", "s1l:phil", "hi")
+        handle_message(ctx, "gerry", "acme:phil", "hi")
         listing = tasks.list_tasks(NODE)
         assert len(listing) == 1
         task = listing[0]
@@ -98,39 +98,39 @@ class TestDispatchEndToEnd:
     def test_incoming_header_adopted_and_stripped(self, ctx, fake_harness):
         task_id = new_ulid()
         header = tasks.format_header(task_id, 1, auto=True)
-        handle_message(ctx, "gerry", "s1l:gerry", f"{header} continue please")
+        handle_message(ctx, "gerry", "acme:gerry", f"{header} continue please")
         prompt = read_prompt(harness_calls(fake_harness)[0])
         assert header not in prompt
         assert "## Incoming message\nFrom: gerry\n\ncontinue please" in prompt
         assert tasks.load_task(NODE, task_id)["turns"] == 1
 
     def test_bare_node_goes_to_leader(self, ctx, fake_harness):
-        handle_message(ctx, "neil", "s1l", "status update please")
+        handle_message(ctx, "neil", "acme", "status update please")
         prompt = read_prompt(harness_calls(fake_harness)[0])
         assert "You are Gerry" in prompt
 
     def test_history_holds_inbound_message_not_stdout(self, ctx, fake_harness):
-        handle_message(ctx, "gerry", "s1l:phil", "first job")
+        handle_message(ctx, "gerry", "acme:phil", "first job")
         history = state.read_history(NODE, "phil")
         assert "from gerry" in history
         assert "first job" in history
         assert "fake harness ran" not in history  # stdout goes to the log only
 
     def test_conversation_history_fed_back_into_prompt(self, ctx, fake_harness):
-        handle_message(ctx, "gerry", "s1l:phil", "first job")
-        handle_message(ctx, "marcus", "s1l:phil", "second job")
+        handle_message(ctx, "gerry", "acme:phil", "first job")
+        handle_message(ctx, "marcus", "acme:phil", "second job")
         prompt = read_prompt(harness_calls(fake_harness)[1])
         assert "## Your conversation so far" in prompt
         assert "from gerry" in prompt
         assert "first job" in prompt
 
     def test_velocity_recorded(self, ctx, fake_harness):
-        handle_message(ctx, "gerry", "s1l:phil", "job")
+        handle_message(ctx, "gerry", "acme:phil", "job")
         text = (state.team_dir(NODE) / "velocity.csv").read_text()
         assert "phil,junior-dev," in text
 
     def test_transcript_logged(self, ctx, fake_harness):
-        handle_message(ctx, "gerry", "s1l:phil", "job")
+        handle_message(ctx, "gerry", "acme:phil", "job")
         logs = list((state.team_dir(NODE) / "log").glob("*.md"))
         assert len(logs) == 1
         text = logs[0].read_text(encoding="utf-8")
@@ -141,7 +141,7 @@ class TestDispatchEndToEnd:
 class TestDispatchRejections:
     def test_unknown_member(self, ctx, tells, fake_harness):
         sent, _ = tells
-        handle_message(ctx, "gerry", "s1l:nobody", "hi")
+        handle_message(ctx, "gerry", "acme:nobody", "hi")
         assert not harness_calls(fake_harness)
         assert len(sent) == 1
         agent, body = sent[0]
@@ -150,14 +150,14 @@ class TestDispatchRejections:
 
     def test_human_never_dispatched(self, ctx, tells, fake_harness):
         sent, _ = tells
-        handle_message(ctx, "gerry", "s1l:neil", "hi")
+        handle_message(ctx, "gerry", "acme:neil", "hi")
         assert not harness_calls(fake_harness)
         assert "Human" in sent[0][1]
         assert "tell neil" in sent[0][1]
 
     def test_malformed_member_disabled_with_error(self, ctx, tells, fake_harness):
         sent, _ = tells
-        handle_message(ctx, "gerry", "s1l:broken", "hi")
+        handle_message(ctx, "gerry", "acme:broken", "hi")
         assert not harness_calls(fake_harness)
         assert "disabled" in sent[0][1]
         assert "Status" in sent[0][1]
@@ -169,7 +169,7 @@ class TestDispatchRejections:
             encoding="utf-8",
         )
         sent, _ = tells
-        handle_message(ctx, "gerry", "s1l:ghost", "hi")
+        handle_message(ctx, "gerry", "acme:ghost", "hi")
         assert not harness_calls(fake_harness)
         assert "not found" in sent[0][1]
         assert "fail closed" in sent[0][1]
@@ -177,7 +177,7 @@ class TestDispatchRejections:
     def test_missing_roster(self, ctx, repo, tells, fake_harness):
         (repo / "ROSTER.md").unlink()
         sent, _ = tells
-        handle_message(ctx, "gerry", "s1l:phil", "hi")
+        handle_message(ctx, "gerry", "acme:phil", "hi")
         assert not harness_calls(fake_harness)
         assert "roster not found" in sent[0][1]
 
@@ -187,7 +187,7 @@ class TestDispatchRejections:
             encoding="utf-8",
         )
         sent, _ = tells
-        handle_message(ctx, "gerry", "s1l", "hi")
+        handle_message(ctx, "gerry", "acme", "hi")
         assert not harness_calls(fake_harness)
         assert "no leader" in sent[0][1]
 
@@ -199,7 +199,7 @@ class TestPins:
             "- **Leader:** yes\n",
             encoding="utf-8",
         )
-        handle_message(ctx, "neil", "s1l:gerry", "hi")
+        handle_message(ctx, "neil", "acme:gerry", "hi")
         text = (state.team_dir(NODE) / "velocity.csv").read_text()
         assert "gerry,leader," in text  # pinned rig, not roster's junior-dev
 
@@ -210,7 +210,7 @@ class TestStagingRelease:
     ):
         monkeypatch.setenv("CHATTY_TO", "neil")
         monkeypatch.setenv("CHATTY_BODY", "the fix is deployed")
-        assert _handle(chatty_ctx, "gerry", "s1l:phil", "deploy the fix") == RAN
+        assert _handle(chatty_ctx, "gerry", "acme:phil", "deploy the fix") == RAN
         envelopes = outbox_envelopes(repo)
         assert len(envelopes) == 1
         envelope = envelopes[0]
@@ -227,7 +227,7 @@ class TestStagingRelease:
     def test_outbound_attributed_to_history(self, chatty_ctx, chatty_harness, monkeypatch):
         monkeypatch.setenv("CHATTY_TO", "neil")
         monkeypatch.setenv("CHATTY_BODY", "status: done")
-        _handle(chatty_ctx, "gerry", "s1l:phil", "report status")
+        _handle(chatty_ctx, "gerry", "acme:phil", "report status")
         history = state.read_history(NODE, "phil")
         assert "to neil" in history
         assert "status: done" in history
@@ -237,7 +237,7 @@ class TestStagingRelease:
     ):
         monkeypatch.setenv("CHATTY_TO", "neil")
         monkeypatch.setenv("CHATTY_SENDS", "4")  # max_sends_per_turn is 2
-        _handle(chatty_ctx, "gerry", "s1l:phil", "fan out")
+        _handle(chatty_ctx, "gerry", "acme:phil", "fan out")
         assert len(outbox_envelopes(repo)) == 2
         assert dead_reasons() == ["quota", "quota"]
         assert state.bucket_level(NODE, "phil", 8.0) == 6.0
@@ -245,9 +245,9 @@ class TestStagingRelease:
     def test_intra_team_release_feeds_pending_and_drains(
         self, chatty_ctx, chatty_harness, monkeypatch
     ):
-        monkeypatch.setenv("CHATTY_TO", "s1l:gerry")
+        monkeypatch.setenv("CHATTY_TO", "acme:gerry")
         monkeypatch.setenv("CHATTY_BODY", "please review my patch")
-        assert _handle(chatty_ctx, "neil", "s1l:phil", "do the work") == RAN
+        assert _handle(chatty_ctx, "neil", "acme:phil", "do the work") == RAN
         assert len(state.list_pending(NODE)) == 1
 
         monkeypatch.setenv("CHATTY_SENDS", "0")
@@ -256,7 +256,7 @@ class TestStagingRelease:
         prompts = [read_prompt(p) for p in sorted(out.iterdir())]
         assert len(prompts) == 2
         assert "You are Gerry" in prompts[1]
-        assert "From: s1l:phil" in prompts[1]
+        assert "From: acme:phil" in prompts[1]
         assert "please review my patch" in prompts[1]
         task = tasks.list_tasks(NODE)[0]
         assert task["turns"] == 2  # same task across the delegation hop
@@ -264,7 +264,7 @@ class TestStagingRelease:
     def test_clean_turn_earns_bucket_back(self, chatty_ctx, chatty_harness, monkeypatch):
         state.bucket_drain(NODE, "phil", 1.0, 8.0)
         monkeypatch.setenv("CHATTY_TO", "neil")
-        _handle(chatty_ctx, "gerry", "s1l:phil", "one clean job")
+        _handle(chatty_ctx, "gerry", "acme:phil", "one clean job")
         assert state.bucket_level(NODE, "phil", 8.0) == 7.1
 
 
@@ -274,29 +274,29 @@ class TestPairSuppression:
     ):
         monkeypatch.setenv("CHATTY_TO", "neil")
         monkeypatch.setenv("CHATTY_BODY", "Deploy the fix")
-        _handle(chatty_ctx, "gerry", "s1l:phil", "job one")
-        _handle(chatty_ctx, "gerry", "s1l:phil", "job two")
+        _handle(chatty_ctx, "gerry", "acme:phil", "job one")
+        _handle(chatty_ctx, "gerry", "acme:phil", "job two")
         assert len(outbox_envelopes(repo)) == 1
         assert dead_reasons() == ["pair-repeat"]
         record = state.list_dead_letters(NODE)[0]
         assert record["count"] == 2
-        assert record["from"] == "s1l:phil"
+        assert record["from"] == "acme:phil"
         assert record["to"] == "neil"
         assert state.bucket_level(NODE, "phil", 8.0) == 7.0
 
     def test_different_content_passes(self, chatty_ctx, repo, chatty_harness, monkeypatch):
         monkeypatch.setenv("CHATTY_TO", "neil")
         monkeypatch.setenv("CHATTY_BODY", "unique {i}")
-        _handle(chatty_ctx, "gerry", "s1l:phil", "job one")
+        _handle(chatty_ctx, "gerry", "acme:phil", "job one")
         monkeypatch.setenv("CHATTY_BODY", "another thing entirely")
-        _handle(chatty_ctx, "gerry", "s1l:phil", "job two")
+        _handle(chatty_ctx, "gerry", "acme:phil", "job two")
         assert len(outbox_envelopes(repo)) == 2
         assert dead_reasons() == []
 
     def test_inbound_auto_repeat_suppressed(self, ctx, fake_harness):
         header = tasks.format_header(new_ulid(), 1, auto=True)
-        assert _handle(ctx, "otherbot", "s1l:phil", f"{header} same ping") == RAN
-        assert _handle(ctx, "otherbot", "s1l:phil", f"{header} same ping") == DEAD
+        assert _handle(ctx, "otherbot", "acme:phil", f"{header} same ping") == RAN
+        assert _handle(ctx, "otherbot", "acme:phil", f"{header} same ping") == DEAD
         assert "pair-repeat" in dead_reasons()
         assert len(harness_calls(fake_harness)) == 1
 
@@ -307,9 +307,9 @@ class TestBulkClassMarking:
     ):
         monkeypatch.setenv("CHATTY_TO", "chatroom")
         monkeypatch.setenv("CHATTY_BODY", "posting update alpha")
-        assert _handle(chatty_ctx, "chatroom", "s1l:phil", "#dev room says A") == RAN
+        assert _handle(chatty_ctx, "chatroom", "acme:phil", "#dev room says A") == RAN
         monkeypatch.setenv("CHATTY_BODY", "posting update beta")
-        assert _handle(chatty_ctx, "chatroom", "s1l:phil", "#dev room says B") == RAN
+        assert _handle(chatty_ctx, "chatroom", "acme:phil", "#dev room says B") == RAN
         posts = [e for e in outbox_envelopes(repo) if e["to"] == "chatroom"]
         assert len(posts) == 1
         assert "bulk-window" in dead_reasons()
@@ -317,9 +317,9 @@ class TestBulkClassMarking:
     def test_nonbulk_turn_may_post_to_room(self, chatty_ctx, repo, chatty_harness, monkeypatch):
         monkeypatch.setenv("CHATTY_TO", "chatroom")
         monkeypatch.setenv("CHATTY_BODY", "posting update alpha")
-        _handle(chatty_ctx, "neil", "s1l:phil", "share this in the room")
+        _handle(chatty_ctx, "neil", "acme:phil", "share this in the room")
         monkeypatch.setenv("CHATTY_BODY", "posting update beta")
-        _handle(chatty_ctx, "neil", "s1l:phil", "share more in the room")
+        _handle(chatty_ctx, "neil", "acme:phil", "share more in the room")
         posts = [e for e in outbox_envelopes(repo) if e["to"] == "chatroom"]
         assert len(posts) == 2
 
@@ -327,7 +327,7 @@ class TestBulkClassMarking:
 class TestBucketMute:
     def test_below_floor_records_history_without_running(self, ctx, fake_harness):
         state.bucket_drain(NODE, "phil", 4.5, 8.0)  # 3.5 < floor 4.0
-        assert _handle(ctx, "gerry", "s1l:phil", "are you there?") == DEAD
+        assert _handle(ctx, "gerry", "acme:phil", "are you there?") == DEAD
         assert not harness_calls(fake_harness)
         assert "are you there?" in state.read_history(NODE, "phil")
         assert "bucket-muted" in dead_reasons()
@@ -335,9 +335,9 @@ class TestBucketMute:
     def test_recovers_autonomously_via_earn(self, ctx, fake_harness):
         state.bucket_drain(NODE, "phil", 4.5, 8.0)
         for i in range(5):  # each muted inbound earns 0.1 back
-            assert _handle(ctx, "gerry", "s1l:phil", f"ping {i}") == DEAD
+            assert _handle(ctx, "gerry", "acme:phil", f"ping {i}") == DEAD
         assert state.bucket_level(NODE, "phil", 8.0) == 4.0
-        assert _handle(ctx, "gerry", "s1l:phil", "back to work") == RAN
+        assert _handle(ctx, "gerry", "acme:phil", "back to work") == RAN
         assert len(harness_calls(fake_harness)) == 1
 
 
@@ -355,20 +355,20 @@ def timeout_run(rig, prompt, cwd, *, env=None, variant=0):
 
 def trip_breaker(ctx, agent="phil", cap=5):
     for i in range(cap):
-        assert _handle(ctx, "neil", f"s1l:{agent}", f"attempt {i}", run_fn=fail_run) == RAN
+        assert _handle(ctx, "neil", f"acme:{agent}", f"attempt {i}", run_fn=fail_run) == RAN
 
 
 class TestFailureBreaker:
     def test_failures_counted_and_cleared_by_clean_turn(self, ctx):
-        assert _handle(ctx, "neil", "s1l:phil", "one", run_fn=fail_run) == RAN
-        assert _handle(ctx, "neil", "s1l:phil", "two", run_fn=timeout_run) == RAN
+        assert _handle(ctx, "neil", "acme:phil", "one", run_fn=fail_run) == RAN
+        assert _handle(ctx, "neil", "acme:phil", "two", run_fn=timeout_run) == RAN
         assert state.read_meta(NODE, "phil")["consecutive_failures"] == 2
-        assert _handle(ctx, "neil", "s1l:phil", "three", run_fn=ok_run) == RAN
+        assert _handle(ctx, "neil", "acme:phil", "three", run_fn=ok_run) == RAN
         assert state.read_meta(NODE, "phil")["consecutive_failures"] == 0
 
     def test_trips_at_cap_then_blocks_and_closes_through_synthesis(self, ctx):
         trip_breaker(ctx)
-        assert _handle(ctx, "neil", "s1l:phil", "blocked one", run_fn=ok_run) == SYNTHESIS
+        assert _handle(ctx, "neil", "acme:phil", "blocked one", run_fn=ok_run) == SYNTHESIS
         assert "breaker-open" in dead_reasons()
         assert "blocked one" in state.read_history(NODE, "phil")
         assert any(t.get("synthesized") for t in tasks.list_tasks(NODE))
@@ -376,20 +376,20 @@ class TestFailureBreaker:
     def test_half_open_probe_success_closes(self, ctx):
         trip_breaker(ctx)
         state.update_meta(NODE, "phil", last_failure_at="2020-01-01T00:00:00Z")
-        assert _handle(ctx, "neil", "s1l:phil", "probe", run_fn=ok_run) == RAN
+        assert _handle(ctx, "neil", "acme:phil", "probe", run_fn=ok_run) == RAN
         assert state.read_meta(NODE, "phil")["consecutive_failures"] == 0
-        assert _handle(ctx, "neil", "s1l:phil", "normal again", run_fn=ok_run) == RAN
+        assert _handle(ctx, "neil", "acme:phil", "normal again", run_fn=ok_run) == RAN
 
     def test_failed_probe_reopens_for_another_cooldown(self, ctx):
         trip_breaker(ctx)
         state.update_meta(NODE, "phil", last_failure_at="2020-01-01T00:00:00Z")
-        assert _handle(ctx, "neil", "s1l:phil", "probe", run_fn=fail_run) == RAN
-        assert _handle(ctx, "neil", "s1l:phil", "still broken", run_fn=ok_run) == SYNTHESIS
+        assert _handle(ctx, "neil", "acme:phil", "probe", run_fn=fail_run) == RAN
+        assert _handle(ctx, "neil", "acme:phil", "still broken", run_fn=ok_run) == SYNTHESIS
 
     def test_deliberate_header_resets_breaker(self, ctx):
         trip_breaker(ctx)
         header = tasks.format_header(new_ulid(), 0, auto=False)
-        assert _handle(ctx, "neil", "s1l:phil", f"{header} try again", run_fn=ok_run) == RAN
+        assert _handle(ctx, "neil", "acme:phil", f"{header} try again", run_fn=ok_run) == RAN
         assert state.read_meta(NODE, "phil")["consecutive_failures"] == 0
 
     def test_task_still_closes_through_synthesis_with_breaker_open(self, ctx, fake_harness):
@@ -397,9 +397,9 @@ class TestFailureBreaker:
         task_id = new_ulid()
         for i in range(4):  # leader budget: 4 turns
             header = tasks.format_header(task_id, 0, auto=True)
-            _handle(ctx, "neil", "s1l:gerry", f"{header} step {i}")
+            _handle(ctx, "neil", "acme:gerry", f"{header} step {i}")
         header = tasks.format_header(task_id, 0, auto=True)
-        assert _handle(ctx, "neil", "s1l:gerry", f"{header} over budget") == SYNTHESIS
+        assert _handle(ctx, "neil", "acme:gerry", f"{header} over budget") == SYNTHESIS
         assert tasks.load_task(NODE, task_id)["synthesis_state"] == "done"
 
 
@@ -1177,7 +1177,7 @@ class TestCli:
             "dispatch",
             "--root", str(repo),
             "--from", "gerry",
-            "--to", "s1l:phil",
+            "--to", "acme:phil",
             "--message", "cli job",
             "--rig-config", str(rig_config),
             "--no-notify",
@@ -1190,14 +1190,14 @@ class TestCli:
     ):
         state.park_pending(
             NODE,
-            {"from": "gerry", "to": "s1l:phil", "task": new_ulid(), "hop": 0,
+            {"from": "gerry", "to": "acme:phil", "task": new_ulid(), "hop": 0,
              "auto": True, "body": "parked earlier"},
         )
         self.run(
             "dispatch",
             "--root", str(repo),
             "--from", "gerry",
-            "--to", "s1l:phil",
+            "--to", "acme:phil",
             "--message", "live one",
             "--rig-config", str(rig_config),
             "--no-notify",

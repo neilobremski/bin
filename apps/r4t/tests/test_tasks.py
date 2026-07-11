@@ -16,7 +16,7 @@ from tasks import (
 )
 from ulid import new as new_ulid
 
-NODE = "s1l"
+NODE = "acme"
 
 
 class TestHeader:
@@ -75,9 +75,9 @@ class TestNormalization:
         assert normalize_content(f"{header}  Hello   WORLD\n\nagain ") == "hello world again"
 
     def test_pair_key_matches_reworded_whitespace(self):
-        a = pair_key("s1l:phil", "gerry", "Deploy   the fix")
+        a = pair_key("acme:phil", "gerry", "Deploy   the fix")
         b = pair_key(
-            "S1L:PHIL", "Gerry", f"{format_header(new_ulid(), 3, auto=True)} deploy the fix"
+            "ACME:PHIL", "Gerry", f"{format_header(new_ulid(), 3, auto=True)} deploy the fix"
         )
         assert a == b
 
