@@ -130,6 +130,19 @@ class TestDispatchEndToEnd:
         assert after["used"] >= used_before  # no deliberate budget reset
         assert after["turns"] == task["turns"]  # forged hop never charged it
 
+    def test_silent_turn_is_logged(self, ctx, fake_harness, monkeypatch, r4t_home):
+        # Weak rig answers on stdout instead of running `tell`: turn exits 0,
+        # releases nothing — the operator must be able to see why the task
+        # went quiet.
+        def chatty_stdout(rig, prompt, cwd, *, env=None, variant=0):
+            return 0, "Here is my long detailed answer " * 5, 1.0, False
+
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=chatty_stdout)
+        log = (state.team_dir(NODE) / "log").glob("*.md")
+        text = "".join(f.read_text(encoding="utf-8") for f in log)
+        assert "r4t: SILENT gerry" in text
+        assert "released no messages" in text
+
     def test_bare_node_goes_to_leader(self, ctx, fake_harness):
         handle_message(ctx, "neil", "acme", "status update please")
         prompt = read_prompt(harness_calls(fake_harness)[0])

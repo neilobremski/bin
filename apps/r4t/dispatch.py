@@ -579,6 +579,23 @@ def _run_turn(
         ctx, config, roster, member, rig, task_id, hop, bulk_source=bulk_source,
         synthesis_response=synthesis_response,
     )
+    if (
+        release["released"] == 0
+        and release["violations"] == 0
+        and exit_code == 0
+        and not timed_out
+        and len(output.strip()) > 80
+    ):
+        # The classic weak-rig failure: the model answers on stdout instead
+        # of running `tell`, the turn "succeeds", and the answer vanishes
+        # into the log. Make it visible — the quiet-task backstop will close
+        # the task later, but the operator should see WHY it went quiet.
+        state.append_log(
+            ctx.node,
+            f"r4t: SILENT {member.name.lower()} (rig {rig.name}) exit 0 with "
+            f"{len(output.strip())} bytes of stdout but released no messages "
+            "— likely answered in text instead of running `tell`",
+        )
     if release["violations"]:
         level = state.bucket_drain(
             ctx.node, member.name, float(release["violations"]), config.bucket_max
