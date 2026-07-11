@@ -23,6 +23,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -518,6 +519,31 @@ def release_staging(
 
 # ---------- the turn ----------
 
+STDOUT_REPLY_MIN_CHARS = 80
+
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?)")
+_HARNESS_NOISE_RE = re.compile(
+    r"^(?:"
+    r">\s+\S+\s+·\s"          # opencode banner: "> build · qwen3.6:latest"
+    r"|[→✱✳✻●⏺✓✔✖|]\s"  # tool-trace glyphs
+    r"|Shell cwd was reset\b"
+    r")"
+)
+
+
+def clean_transcript(output: str) -> str:
+    """Reduce a harness transcript to what the model actually said: strip
+    ANSI escapes, then drop harness chrome — the rig banner, tool-trace
+    lines, cwd-reset notices. Heuristic by design; noise that slips through
+    goes out once and pair suppression catches recurrence."""
+    text = _ANSI_RE.sub("", output)
+    kept = [
+        line for line in text.splitlines()
+        if not _HARNESS_NOISE_RE.match(line.strip())
+    ]
+    return "\n".join(kept).strip()
+
+
 def _run_turn(
     ctx: DispatchContext,
     config: RigConfig,
@@ -575,27 +601,41 @@ def _run_turn(
         f"### Output ({member.name}, {outcome})\n\n{output.strip() or '(no output)'}",
     )
 
+    if (
+        exit_code == 0
+        and not timed_out
+        and not state.staged_envelopes(ctx.node, member.name)
+    ):
+        # The classic weak-rig shape: the model answers on stdout instead of
+        # running `tell`. `tell` always wins — a turn that staged anything
+        # keeps its stdout as transcript — but a clean turn that released
+        # nothing gets its cleaned stdout staged as ONE reply to the inbound
+        # sender, riding every normal release gate below.
+        reply = clean_transcript(output)
+        if len(reply) > STDOUT_REPLY_MIN_CHARS:
+            msg_id = tasks.new_task_id()
+            state.atomic_write_json(
+                state.staging_dir(ctx.node, member.name) / f"{msg_id}.json",
+                {"id": msg_id, "to": sender, "content": reply, "files": []},
+            )
+            state.append_log(
+                ctx.node,
+                f"r4t: STDOUT-REPLY {member.name.lower()} (rig {rig.name}) "
+                f"released nothing; {len(reply)} bytes of cleaned stdout "
+                f"staged as a reply to {sender}",
+            )
+        elif len(output.strip()) > STDOUT_REPLY_MIN_CHARS:
+            state.append_log(
+                ctx.node,
+                f"r4t: SILENT {member.name.lower()} (rig {rig.name}) exit 0 "
+                f"with {len(output.strip())} bytes of stdout but nothing "
+                "worth relaying survived transcript cleaning",
+            )
+
     release = release_staging(
         ctx, config, roster, member, rig, task_id, hop, bulk_source=bulk_source,
         synthesis_response=synthesis_response,
     )
-    if (
-        release["released"] == 0
-        and release["violations"] == 0
-        and exit_code == 0
-        and not timed_out
-        and len(output.strip()) > 80
-    ):
-        # The classic weak-rig failure: the model answers on stdout instead
-        # of running `tell`, the turn "succeeds", and the answer vanishes
-        # into the log. Make it visible — the quiet-task backstop will close
-        # the task later, but the operator should see WHY it went quiet.
-        state.append_log(
-            ctx.node,
-            f"r4t: SILENT {member.name.lower()} (rig {rig.name}) exit 0 with "
-            f"{len(output.strip())} bytes of stdout but released no messages "
-            "— likely answered in text instead of running `tell`",
-        )
     if release["violations"]:
         level = state.bucket_drain(
             ctx.node, member.name, float(release["violations"]), config.bucket_max

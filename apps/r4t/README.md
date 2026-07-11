@@ -51,6 +51,14 @@ fail closed — see the [tutorial](docs/tutorial.md#missing-rig-no-default--fail
    the turn, get woken when replies arrive, answer the originator when
    there is enough. `tell --sync` to teammates is prohibited by prompt and
    pointless by design.
+5. Stdout fallback — `tell` always wins. A turn that staged even one
+   envelope keeps its stdout as transcript. But a turn that exits 0,
+   releases nothing, and printed a non-trivial answer (the classic
+   weak-rig shape: small local models reliably answer in text and never
+   run `tell`) gets its cleaned stdout — ANSI and harness chrome stripped —
+   staged as one reply to the inbound sender, riding every gate in step 3.
+   No configuration; strong models never trigger it, and stdout-only
+   models participate without knowing the protocol exists.
 
 Governance defaults apply with no extra configuration — a rig config
 with only rig invoke lines is a fully governed team.
