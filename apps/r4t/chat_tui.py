@@ -18,6 +18,8 @@ import sys
 import threading
 from datetime import datetime
 
+from rich.markdown import Markdown
+from rich.padding import Padding
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
@@ -99,8 +101,7 @@ class ChatApp(App):
             f"seat: {self.human.name} on {self.ctx.node} — messages go to "
             f"{self.target} (leader). /help for commands.",
         )
-        for kind, text in self.feed.poll():
-            self._emit(kind, text)
+        self._pump_feed()
         self._refresh_header()
         threading.Thread(target=self._send_worker, daemon=True).start()
         self.set_interval(FEED_POLL_SECONDS, self._poll_feed)
@@ -117,12 +118,28 @@ class ChatApp(App):
         for line in text.splitlines():
             log.write(Text.assemble((stamp + " ", "dim"), (line, KIND_STYLE[kind])))
 
+    def _emit_message(self, envelope: dict) -> None:
+        """An inbound message: sender header line, then the body as rendered
+        markdown — agents write markdown, and raw ** and # are noise."""
+        log = self.query_one("#conversation", RichLog)
+        stamp = datetime.now().strftime("%H:%M:%S")
+        sender = str(envelope.get("from", "?"))
+        _, _, _, body = taskmod.parse_header(str(envelope.get("content", "")))
+        log.write(Text.assemble((stamp + " ", "dim"), (sender, "bold cyan")))
+        log.write(Padding(Markdown(body.strip() or "(empty)"), (0, 0, 1, 9)))
+
     # ---------- polling ----------
+
+    def _pump_feed(self) -> None:
+        for kind, payload in self.feed.poll():
+            if kind == "in":
+                self._emit_message(payload)
+            else:
+                self._emit(kind, payload)
 
     def _poll_feed(self) -> None:
         state.touch_seat_presence(self.ctx.node, self.human.name)
-        for kind, text in self.feed.poll():
-            self._emit(kind, text)
+        self._pump_feed()
 
     def _refresh_header(self) -> None:
         verdicts = verdict.team_verdicts(self.ctx.node, self.roster, self.rig_config)

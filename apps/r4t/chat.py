@@ -95,10 +95,11 @@ def send_as_human(ctx: DispatchContext, human: Member, to: str, text: str) -> No
 
 
 class SeatFeed:
-    """Polls the seat inbox and the team's daily log into (kind, text)
-    events: 'in' = message parked for the human (marked read on read),
-    'act' = compacted activity line. Log history before the first poll is
-    skipped; unread inbox backlog is always delivered."""
+    """Polls the seat inbox and the team's daily log into (kind, payload)
+    events: 'in' = the raw envelope dict parked for the human (marked read
+    on read) — consumers render it (the line UI flattens, the TUI draws
+    markdown); 'act' = compacted activity line as text. Log history before
+    the first poll is skipped; unread inbox backlog is always delivered."""
 
     def __init__(self, node: str, human_name: str):
         self.node = node
@@ -106,14 +107,14 @@ class SeatFeed:
         self.log_path = None
         self.log_offset = 0
 
-    def poll_inbox(self) -> list[tuple[str, str]]:
-        events: list[tuple[str, str]] = []
+    def poll_inbox(self) -> list[tuple[str, dict]]:
+        events: list[tuple[str, dict]] = []
         for path in state.list_seat_messages(self.node, self.human_name):
             try:
                 envelope = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            events.append(("in", render_envelope(envelope)))
+            events.append(("in", envelope))
             state.mark_seat_read(self.node, self.human_name, path)
         return events
 
@@ -144,8 +145,8 @@ class SeatFeed:
                 events.append(("act", event))
         return events
 
-    def poll(self) -> list[tuple[str, str]]:
-        return self.poll_inbox() + self.poll_log()
+    def poll(self) -> list[tuple[str, object]]:
+        return [*self.poll_inbox(), *self.poll_log()]
 
 
 def format_tasks(node: str) -> list[str]:
@@ -265,6 +266,11 @@ class ChatSession:
 
     # ---------- main loop ----------
 
+    def _pump_feed(self) -> None:
+        for kind, payload in self.feed.poll():
+            text = render_envelope(payload) if kind == "in" else payload
+            self.events.put((kind, text))
+
     def run(self) -> int:
         self.emit(
             "sys",
@@ -272,8 +278,7 @@ class ChatSession:
             f" {self.target} (leader). /help for commands.",
         )
         state.touch_seat_presence(self.ctx.node, self.human.name)
-        for event in self.feed.poll():
-            self.events.put(event)
+        self._pump_feed()
 
         threading.Thread(target=self._send_worker, daemon=True).start()
         lines: queue.Queue[str] = queue.Queue()
@@ -287,8 +292,7 @@ class ChatSession:
                 except queue.Empty:
                     pass
                 state.touch_seat_presence(self.ctx.node, self.human.name)
-                for event in self.feed.poll():
-                    self.events.put(event)
+                self._pump_feed()
                 try:
                     while True:
                         kind, text = self.events.get_nowait()

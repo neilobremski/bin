@@ -75,6 +75,29 @@ def test_tui_consumes_inbox_and_routes_commands(seat, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_tui_renders_markdown_bodies(seat):
+    ctx, roster, human = seat
+    state.park_seat_message(
+        NODE, "Neil", "acme:gerry",
+        "[r4t task=01KX0000000000000000000000 hop=1 auto] "
+        "# Report\n\n**bold claim** and `code()`",
+    )
+
+    async def scenario():
+        from textual.widgets import RichLog
+
+        app = ChatApp(ctx, roster, human)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            conv = app.query_one("#conversation", RichLog)
+            text = "\n".join(strip.text for strip in conv.lines)
+            assert "acme:gerry" in text
+            assert "bold claim" in text and "Report" in text
+            assert "**" not in text and "# Report" not in text
+
+    asyncio.run(scenario())
+
+
 def test_tui_header_surfaces_trouble(seat):
     ctx, roster, human = seat
     state.record_dead_letter(
