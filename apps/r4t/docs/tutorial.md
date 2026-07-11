@@ -199,14 +199,14 @@ r4t rig add junior-dev opencode
 ## Example: existing repo
 
 ```bash
-r4t init --root ~/repos/s1l           # keeps an existing ROSTER.md if present
+r4t init --root ~/repos/acme           # keeps an existing ROSTER.md if present
 r4t rig add junior-dev opencode   # if roster references junior-dev
 r4t roster check
-a8s add s1l-node ~/repos/s1l ~/bin/apps/r4t/example-definition.json
-a8s namespace s1l s1l-node
-a8s start s1l-node
-tell s1l:gerry "Ship the refactor; report when reviewed."
+a8s add acme-node ~/repos/acme ~/bin/apps/r4t/example-definition.json
+a8s namespace acme acme-node
+a8s start acme-node
+tell acme:gerry "Ship the refactor; report when reviewed."
 ```
 
-Watch: `a8s logs s1l-node -f`, `r4t status --node s1l`, and dead letters
-under `~/.config/r4t/teams/s1l/dead-letter/`.
+Watch: `a8s logs acme-node -f`, `r4t status --node acme`, and dead letters
+under `~/.config/r4t/teams/acme/dead-letter/`.

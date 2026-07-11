@@ -13,8 +13,8 @@ never blocks it.
 
 ## The failure modes
 
-These are not hypothetical. The predecessor system (s1l's in-repo agent
-dispatcher) produced all of them within days:
+These are not hypothetical. An early in-repo agent dispatcher produced all
+of them within days:
 
 1. **Ack storms.** Agents acknowledging each other's acknowledgments —
    107 files matching `*reciprocal*`, turns burned restating the same

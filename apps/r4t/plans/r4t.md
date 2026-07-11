@@ -2,7 +2,7 @@
 
 Standalone app: `apps/r4t/`, shim `~/bin/r4t`. a8s wiring via
 `apps/r4t/example-definition.json` only. One a8s node per team repo, bound
-to a namespace prefix (`a8s namespace s1l <node>`), self-routing on the
+to a namespace prefix (`a8s namespace acme <node>`), self-routing on the
 `$RECIPIENT` sub-address to roster members.
 
 Design rationale and prior art for everything in the governance stack:
@@ -31,7 +31,7 @@ Fix them now — nothing below is a compat concern because nothing is merged.
    Operator control is config knobs + `r4t status` + dead-letter
    inspection, never a queue that waits.
 3. **Actor doctrine, not concurrency, for leaders.** Turns never block
-   waiting for replies (`tell --sync` intra-team is the s1l failure mode
+   waiting for replies (`tell --sync` intra-team is the classic failure mode
    reborn). Prompts instruct: delegate, end your turn without answering;
    you will be woken as replies arrive; answer the originator when you
    have enough. Serial execution then interleaves fine. The a8s `batch`
@@ -103,5 +103,5 @@ New governance layers (mechanisms and evidence in docs/governance.md):
       cap, deliberate-decision reset; `r4t init`; `R4T_HOME`; sandbox
       with `--fake` e2e — 147 tests green)
 - [x] README (regenerated — knob table links docs/governance.md)
-- [ ] End-to-end: register s1l team, `tell s1l:gerry`, watch a real
+- [ ] End-to-end: register a team, `tell acme:gerry`, watch a real
       delegate/synthesize cycle under throttle

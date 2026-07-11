@@ -2,7 +2,7 @@
 
 Define a whole team of AI agents in one human-readable `ROSTER.md`; turn any
 repo into a governed team on the [a8s](../a8s/README.md) network. One a8s
-node per team repo owns a namespace prefix (`s1l:*`); an out-of-repo harness
+node per team repo owns a namespace prefix (`acme:*`); an out-of-repo harness
 config decides what each roster rig actually runs. Every turn is dispatched,
 budgeted, throttled, and audited by r4t — no agent polices itself, and
 nothing ever waits on a human.
@@ -29,7 +29,7 @@ fail closed — see the [tutorial](docs/tutorial.md#missing-rig-no-default--fail
 
 ### How a message flows
 
-1. `tell s1l:phil "..."` routes through a8s to the team node; the node's
+1. `tell acme:phil "..."` routes through a8s to the team node; the node's
    definition invokes `r4t dispatch`.
 2. r4t parses the `[r4t task=<ulid> hop=<n> auto]` header (creating a new
    task if absent), checks every gate below, and runs Phil's rig
@@ -49,22 +49,22 @@ fail closed — see the [tutorial](docs/tutorial.md#missing-rig-no-default--fail
 Governance defaults apply with no extra configuration — a rig config
 with only rig invoke lines is a fully governed team.
 
-## Example: the s1l team
+## Example: a team on a real repo
 
 See [docs/tutorial.md](docs/tutorial.md#example-existing-repo) for the full
 sequence. Short version:
 
 ```bash
-r4t init --root ~/repos/s1l
-a8s add s1l-node ~/repos/s1l ~/bin/apps/r4t/example-definition.json
-a8s namespace s1l s1l-node
-a8s start s1l-node
-tell s1l:gerry "Ship the ECS payload refactor; report when reviewed."
+r4t init --root ~/repos/acme
+a8s add acme-node ~/repos/acme ~/bin/apps/r4t/example-definition.json
+a8s namespace acme acme-node
+a8s start acme-node
+tell acme:gerry "Ship the payload refactor; report when reviewed."
 ```
 
-Watch it: `a8s logs s1l-node -f` (traffic + every governance decision line),
-`r4t status --node s1l` (locks, buckets, tasks, dead letters), and the
-dead-letter dir under `~/.config/r4t/teams/s1l/`.
+Watch it: `a8s logs acme-node -f` (traffic + every governance decision line),
+`r4t status --node acme` (locks, buckets, tasks, dead letters), and the
+dead-letter dir under `~/.config/r4t/teams/acme/`.
 
 ## Governance knobs
 
