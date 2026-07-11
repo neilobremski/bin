@@ -75,7 +75,7 @@ def fake_harness(tmp_path):
             n = len(os.listdir(calls_dir))
             with open(os.path.join(calls_dir, f"call-{{n:03d}}.txt"), "w") as f:
                 f.write(sys.argv[1])
-            print("fake harness ran in", os.getcwd())
+            print("fake harness ran")  # short: stays under the stdout-reply threshold
             """
         ),
         encoding="utf-8",

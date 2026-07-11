@@ -130,19 +130,6 @@ class TestDispatchEndToEnd:
         assert after["used"] >= used_before  # no deliberate budget reset
         assert after["turns"] == task["turns"]  # forged hop never charged it
 
-    def test_silent_turn_is_logged(self, ctx, fake_harness, monkeypatch, r4t_home):
-        # Weak rig answers on stdout instead of running `tell`: turn exits 0,
-        # releases nothing — the operator must be able to see why the task
-        # went quiet.
-        def chatty_stdout(rig, prompt, cwd, *, env=None, variant=0):
-            return 0, "Here is my long detailed answer " * 5, 1.0, False
-
-        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=chatty_stdout)
-        log = (state.team_dir(NODE) / "log").glob("*.md")
-        text = "".join(f.read_text(encoding="utf-8") for f in log)
-        assert "r4t: SILENT gerry" in text
-        assert "released no messages" in text
-
     def test_bare_node_goes_to_leader(self, ctx, fake_harness):
         handle_message(ctx, "neil", "acme", "status update please")
         prompt = read_prompt(harness_calls(fake_harness)[0])
@@ -441,6 +428,149 @@ class TestStagingRelease:
         monkeypatch.setenv("CHATTY_TO", "neil")
         _handle(chatty_ctx, "gerry", "acme:phil", "one clean job")
         assert state.bucket_level(NODE, "phil", 8.0) == 7.1
+
+
+ANSWER = "Here is my long detailed answer about the payload format. " * 3
+
+
+def stdout_only(rig, prompt, cwd, *, env=None, variant=0):
+    return 0, ANSWER, 1.0, False
+
+
+def read_log():
+    files = (state.team_dir(NODE) / "log").glob("*.md")
+    return "".join(f.read_text(encoding="utf-8") for f in files)
+
+
+class TestStdoutFallback:
+    def test_stdout_becomes_reply_to_external_sender(self, ctx, repo, r4t_home):
+        # The classic weak-rig shape: exit 0, no tell, answer on stdout —
+        # the cleaned transcript goes back to the sender as one reply.
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=stdout_only)
+        envelopes = outbox_envelopes(repo)
+        assert [e["to"] for e in envelopes] == ["boss"]
+        assert envelopes[0]["content"] == ANSWER.strip()
+        assert envelopes[0]["x_r4t_class"] == "auto"
+        assert "[r4t" not in envelopes[0]["content"]
+        assert "r4t: STDOUT-REPLY gerry" in read_log()
+
+    def test_stdout_reply_to_creator_answers_the_task(self, ctx, r4t_home):
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=stdout_only)
+        task = tasks.list_tasks(NODE)[0]
+        assert task["status"] == tasks.STATUS_CLOSED
+        assert "r4t: ANSWERED" in read_log()
+
+    def test_tell_always_wins(self, ctx, repo, r4t_home):
+        # A turn that stages even one envelope has declared its intent:
+        # stdout is transcript-only, never a message.
+        def tell_and_chatter(rig, prompt, cwd, *, env=None, variant=0):
+            outbox = dispatch.Path(env["TELL_OUTBOX_DIR"])
+            msg_id = new_ulid()
+            (outbox / f"{msg_id}.json").write_text(
+                json.dumps({"id": msg_id, "to": "outsider", "content": "the real reply"}),
+                encoding="utf-8",
+            )
+            return 0, ANSWER, 1.0, False
+
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=tell_and_chatter)
+        envelopes = outbox_envelopes(repo)
+        assert [e["to"] for e in envelopes] == ["outsider"]
+        assert envelopes[0]["content"] == "the real reply"
+        assert "STDOUT-REPLY" not in read_log()
+
+    def test_chrome_only_stdout_stays_silent(self, ctx, repo, r4t_home):
+        chrome = (
+            "\x1b[0m\n> build · qwen3:0.6b\n\x1b[0m\n"
+            '\x1b[0m✱ \x1b[0mGlob "**/sample.txt"\x1b[90m 1 match\x1b[0m\n'
+            "\x1b[0m→ \x1b[0mRead sample.txt\n"
+            "Shell cwd was reset to /Users/neilo/bin\n"
+        )
+        def chrome_only(rig, prompt, cwd, *, env=None, variant=0):
+            return 0, chrome, 1.0, False
+
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=chrome_only)
+        assert outbox_envelopes(repo) == []
+        text = read_log()
+        assert "r4t: SILENT gerry" in text
+        assert "STDOUT-REPLY" not in text
+
+    def test_reply_is_cleaned_of_chrome(self, ctx, repo, r4t_home):
+        noisy = (
+            "\x1b[0m\n> build · qwen3.6:latest\n\x1b[0m\n"
+            "\x1b[0m→ \x1b[0mRead GOAL.md\n"
+            + ANSWER
+            + "\nShell cwd was reset to /Users/neilo/bin\n"
+        )
+        def noisy_answer(rig, prompt, cwd, *, env=None, variant=0):
+            return 0, noisy, 1.0, False
+
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=noisy_answer)
+        assert outbox_envelopes(repo)[0]["content"] == ANSWER.strip()
+
+    def test_fallback_reply_to_internal_sender_wakes_them(
+        self, ctx, fake_harness, r4t_home
+    ):
+        # phil answers gerry on stdout; the reply parks internal and gerry's
+        # turn runs on drain with the cleaned stdout as the inbound body.
+        task_id = new_ulid()
+        header = tasks.format_header(task_id, 1, auto=True)
+        handle_message(ctx, f"{NODE}:gerry", "acme:phil", f"{header} question",
+                       run_fn=stdout_only)
+        drain(ctx)
+        prompts = [read_prompt(p) for p in harness_calls(fake_harness)]
+        assert any("From: phil" in p and ANSWER.strip() in p for p in prompts)
+
+    def test_fallback_reply_to_human_parks_in_seat(self, ctx, fake_harness, r4t_home):
+        handle_message(ctx, "acme:neil", "acme:gerry", "question", run_fn=stdout_only)
+        drain_until_quiet(ctx)
+        parked = seat_messages()
+        assert [m["from"] for m in parked] == ["acme:gerry"]
+        _, _, _, body = tasks.parse_header(parked[0]["content"])
+        assert body == ANSWER.strip()
+        assert tasks.list_tasks(NODE)[0]["status"] == tasks.STATUS_CLOSED
+
+    def test_fallback_obeys_pair_suppression(self, ctx, repo, r4t_home):
+        handle_message(ctx, "boss", "acme:gerry", "question one", run_fn=stdout_only)
+        handle_message(ctx, "boss", "acme:gerry", "question two", run_fn=stdout_only)
+        assert len(outbox_envelopes(repo)) == 1
+        assert "pair-repeat" in dead_reasons()
+
+    def test_short_stdout_is_just_a_quiet_turn(self, ctx, repo, r4t_home):
+        def terse(rig, prompt, cwd, *, env=None, variant=0):
+            return 0, "ok.", 1.0, False
+
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=terse)
+        assert outbox_envelopes(repo) == []
+        text = read_log()
+        assert "SILENT" not in text
+        assert "STDOUT-REPLY" not in text
+
+    def test_failed_turn_gets_no_fallback(self, ctx, repo, r4t_home):
+        def crashed(rig, prompt, cwd, *, env=None, variant=0):
+            return 1, ANSWER, 1.0, False
+
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=crashed)
+        assert outbox_envelopes(repo) == []
+        assert "STDOUT-REPLY" not in read_log()
+
+
+class TestCleanTranscript:
+    def test_strips_ansi_and_chrome(self):
+        raw = (
+            "\x1b[0m\n> build · qwen3.6:latest\n"
+            '\x1b[0m✱ \x1b[0mGlob "**/x.txt"\x1b[90m 1 match\x1b[0m\n'
+            "\x1b[0m→ \x1b[0mRead x.txt\n"
+            "The contents are fine.\n"
+            "Shell cwd was reset to /Users/neilo/bin\n"
+        )
+        assert dispatch.clean_transcript(raw) == "The contents are fine."
+
+    def test_keeps_markdown_blockquotes(self):
+        raw = "As GOAL.md says:\n> the game must exit 0\nDone."
+        assert dispatch.clean_transcript(raw) == raw
+
+    def test_keeps_plain_text_untouched(self):
+        assert dispatch.clean_transcript("hello\nworld") == "hello\nworld"
 
 
 class TestPairSuppression:
