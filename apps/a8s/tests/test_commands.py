@@ -653,15 +653,24 @@ class TestCmdTellNamespace:
         assert rc == 1
         assert "empty sub-address" in capsys.readouterr().err
 
-    def test_bare_prefix_rejected_even_with_remotes(self, fake_home, tmp_path, monkeypatch, capsys):
-        self._setup_sender(fake_home, tmp_path, monkeypatch)
+    def test_bare_prefix_routes_with_to_equal_prefix(self, fake_home, tmp_path, monkeypatch):
+        import json as _json
+        sender_root = self._setup_sender(fake_home, tmp_path, monkeypatch)
+        save_namespaces({"acme": "node"})
+        rc = cmd_tell(["ACME", "hi"])
+        assert rc == 0
+        msg = _json.loads(next(outbox_dir(sender_root).iterdir()).read_text())
+        assert msg["to"] == "acme"
+
+    def test_bare_prefix_accepted_with_remotes_configured(self, fake_home, tmp_path, monkeypatch):
+        import json as _json
+        sender_root = self._setup_sender(fake_home, tmp_path, monkeypatch)
         save_namespaces({"acme": "node"})
         save_network_config({"remotes": {"hub": {"transport": "mqtt", "broker": "mqtt://x", "topic": "t"}}})
         rc = cmd_tell(["acme", "hi"])
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "namespace prefix" in err
-        assert "acme:<member>" in err
+        assert rc == 0
+        msg = _json.loads(next(outbox_dir(sender_root).iterdir()).read_text())
+        assert msg["to"] == "acme"
 
 # ---------- storage services (issue #90) ----------
 

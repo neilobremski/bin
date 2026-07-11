@@ -128,15 +128,16 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 | `a8s namespaces`                 | List every namespace prefix and its bound agent.             |
 
 
-A namespace binds an address **prefix** to a single node agent. Any recipient
-of the form `<prefix>:<sub-address>` routes to that one agent — single
-delivery by design, the opposite of alias fan-out, which is why the bind
-target must be an agent, not an alias. The address splits on the FIRST colon
-and everything after it is opaque to a8s (`acme:team:phil` still routes on
-prefix `acme`); the sub-address must be non-empty (`acme:` is malformed). The
-full recipient string is preserved in the delivered message's `to`, so the
-node's `$RECIPIENT` carries it verbatim and the node can self-route
-internally.
+A namespace binds an address **prefix** to a single node agent. Recipients
+`<prefix>:<sub-address>` and a bare `<prefix>` (no colon) both route to that
+one agent — single delivery by design, the opposite of alias fan-out, which
+is why the bind target must be an agent, not an alias. The address splits on
+the FIRST colon and everything after it is opaque to a8s (`acme:team:phil`
+still routes on prefix `acme`); the sub-address must be non-empty when a colon
+is present (`acme:` is malformed). A bare `<prefix>` is delivered with `to`
+equal to the prefix; the node self-routes (r4t sends that to the roster
+leader). The full recipient string is preserved in the delivered message's
+`to`, so the node's `$RECIPIENT` carries it verbatim.
 
 ```bash
 # One registered node agent owns every acme:*-style address.
@@ -144,6 +145,7 @@ internally.
 a8s add acme-node ~/projects/acme-hall
 a8s namespace acme acme-node
 
+tell acme "status?"               # delivered to acme-node with to = "acme"
 tell acme:phil "lunch at noon?"      # delivered to acme-node with to = "acme:phil"
 tell acme:team:ops "deploy done"     # same node; sub-address opaque to a8s
 ```

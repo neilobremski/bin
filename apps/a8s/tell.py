@@ -298,17 +298,6 @@ def _validate_recipient(target_query: str) -> tuple[int, str | None, str | None]
     try:
         kind, members = resolve_name(target_query)
     except KeyError:
-        if ":" not in target_query:
-            ns_lookup = {k.lower(): k for k in load_namespaces()}
-            key = target_query.strip().lower()
-            if key in ns_lookup:
-                prefix = ns_lookup[key]
-                print(
-                    f"tell: {target_query!r} is a namespace prefix, not a recipient; "
-                    f"use tell {prefix}:<member> …",
-                    file=sys.stderr,
-                )
-                return 1, None, None
         if not configured_remote_ids():
             if ":" in target_query:
                 print(f"tell: no namespace bound for {target_query!r}", file=sys.stderr)
@@ -325,8 +314,15 @@ def _validate_recipient(target_query: str) -> tuple[int, str | None, str | None]
     if kind == "agent":
         canonical = members[0]
     elif kind == "namespace":
-        prefix, sub = split_namespace_address(target_query)
-        canonical = f"{prefix}:{sub}"
+        split = split_namespace_address(target_query)
+        if split is not None:
+            prefix, sub = split
+            canonical = f"{prefix}:{sub}"
+        else:
+            canonical = next(
+                k for k in load_namespaces()
+                if k.lower() == target_query.strip().lower()
+            )
     else:
         aliases = load_aliases()
         canonical = next(

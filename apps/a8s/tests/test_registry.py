@@ -244,6 +244,16 @@ class TestResolveNamespace:
         with pytest.raises(KeyError, match="unknown agent"):
             resolve_name("acme:phil")
 
+    def test_bare_prefix_resolves_to_bound_agent(self, fake_home):
+        save_registry({"NODE": {"root": "/r"}})
+        save_namespaces({"acme": "NODE"})
+        assert resolve_name("acme") == ("namespace", ["NODE"])
+
+    def test_bare_prefix_case_insensitive(self, fake_home):
+        save_registry({"NODE": {"root": "/r"}})
+        save_namespaces({"acme": "NODE"})
+        assert resolve_name("ACME") == ("namespace", ["NODE"])
+
 
 # ---------- find_participant + sender_from_cwd ----------
 

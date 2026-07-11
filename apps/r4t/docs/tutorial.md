@@ -53,8 +53,9 @@ It then prints the exact **a8s registration** sequence for your repo name:
 a8s add myrepo-node /path/to/my-team-repo ~/bin/apps/r4t/example-definition.json
 a8s namespace myrepo myrepo-node
 a8s start myrepo-node
-tell myrepo-node "hello"       # bare node name -> roster leader
-tell myrepo:dev "hello"        # namespace prefix -> specific member
+tell myrepo-node "hello"       # bare agent name -> roster leader
+tell myrepo "hello"            # bare namespace prefix -> roster leader
+tell myrepo:dev "hello"        # namespace prefix:member -> specific member
 ```
 
 Run those commands (adjust paths and names) before expecting live traffic.

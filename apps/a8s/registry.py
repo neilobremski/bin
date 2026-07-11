@@ -149,10 +149,13 @@ def resolve_name(query: str) -> tuple[str, list[str]]:
 
     A colon in `query` makes it a namespace address (#148): the prefix before
     the first colon resolves via the `namespaces` map to its single bound
-    agent. The grammar forbids colons in agent and alias names, so the paths
-    can't overlap. A malformed address raises ValueError; an unbound prefix
-    (or a binding to a since-removed agent — same dangling shape as an alias
-    member that no longer exists) raises KeyError.
+    agent. A bare `query` with no colon that matches a bound prefix is also
+    a namespace address (delivered with `to` = the prefix alone — the node
+    self-routes, e.g. r4t sends bare namespace traffic to the roster leader).
+    The grammar forbids colons in agent and alias names, so the paths can't
+    overlap. A malformed address raises ValueError; an unbound prefix (or a
+    binding to a since-removed agent — same dangling shape as an alias member
+    that no longer exists) raises KeyError.
 
     A diamond (the same alias reached via two distinct parents) is NOT a cycle:
     `path` tracks aliases currently on the recursion stack; `seen_aliases`
@@ -164,18 +167,25 @@ def resolve_name(query: str) -> tuple[str, list[str]]:
     aliases = raw["aliases"]
     agent_lookup = {n.lower(): n for n in agents}
     alias_lookup = {n.lower(): n for n in aliases}
+    namespace_lookup = {n.lower(): (n, v) for n, v in raw["namespaces"].items()}
     split = split_namespace_address(query)
     if split is not None:
         prefix, _sub = split
-        namespace_lookup = {n.lower(): v for n, v in raw["namespaces"].items()}
         bound = namespace_lookup.get(prefix)
         if bound is None:
             raise KeyError(query)
-        bound_key = str(bound).strip().lower()
+        _prefix_canon, bound_agent = bound
+        bound_key = str(bound_agent).strip().lower()
         if bound_key not in agent_lookup:
-            raise KeyError(f"namespace {prefix!r} is bound to unknown agent {bound!r}")
+            raise KeyError(f"namespace {prefix!r} is bound to unknown agent {bound_agent!r}")
         return "namespace", [agent_lookup[bound_key]]
     q = query.strip().lower()
+    if q in namespace_lookup:
+        _prefix_canon, bound_agent = namespace_lookup[q]
+        bound_key = str(bound_agent).strip().lower()
+        if bound_key not in agent_lookup:
+            raise KeyError(f"namespace {q!r} is bound to unknown agent {bound_agent!r}")
+        return "namespace", [agent_lookup[bound_key]]
     if q in agent_lookup:
         return "agent", [agent_lookup[q]]
     if q in alias_lookup:
