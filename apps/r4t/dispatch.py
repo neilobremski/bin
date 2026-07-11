@@ -353,6 +353,7 @@ def release_staging(
     released = 0
     violations = 0
     answered = False
+    internal_released = False
     synthesis_available = synthesis_response
     synthesis_creator = str((tasks.load_task(ctx.node, task_id) or {}).get("creator", ""))
     for i, path in enumerate(state.staged_envelopes(ctx.node, member.name)):
@@ -452,7 +453,9 @@ def release_staging(
         path.unlink(missing_ok=True)
         synthesis_available = synthesis_available and not final_response
         released += 1
-        if (
+        if _is_internal(ctx.node, to):
+            internal_released = True
+        elif (
             not synthesis_response
             and synthesis_creator
             and not _is_internal(ctx.node, synthesis_creator)
@@ -460,7 +463,11 @@ def release_staging(
         ):
             answered = True
     shutil.rmtree(staging, ignore_errors=True)
-    if answered:
+    # A reply to the creator only counts as THE answer when the turn
+    # delegated nothing internally — a leader that acks the human while
+    # farming out work has an alive task, and closing it would dead-letter
+    # every sibling delegation released this same turn.
+    if answered and not internal_released:
         task = tasks.load_task(ctx.node, task_id)
         if task is not None and task.get("status") != tasks.STATUS_CLOSED:
             task["status"] = tasks.STATUS_CLOSED

@@ -301,6 +301,22 @@ class TestStagingRelease:
         task = tasks.list_tasks(NODE)[0]
         assert task["status"] == tasks.STATUS_CLOSED
 
+    def test_ack_plus_delegation_leaves_task_open(
+        self, chatty_ctx, repo, chatty_harness, monkeypatch
+    ):
+        # The leader acks the human AND delegates in the same turn: the task
+        # is alive, and the delegation must dispatch instead of dead-lettering
+        # against a prematurely closed task.
+        monkeypatch.setenv("CHATTY_TO", "neil,gerry")
+        monkeypatch.setenv("CHATTY_SENDS", "2")
+        monkeypatch.setenv("CHATTY_BODY", "P0 logged, dispatching the team ({i})")
+        assert _handle(chatty_ctx, "neil", "acme:phil", "movement is broken") == RAN
+        task = tasks.list_tasks(NODE)[0]
+        assert task["status"] == tasks.STATUS_OPEN
+        monkeypatch.setenv("CHATTY_SENDS", "0")
+        assert drain_until_quiet(chatty_ctx) == 1  # gerry's turn RAN, not DEAD
+        assert dead_reasons() == []
+
     def test_reply_elsewhere_leaves_task_open(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
     ):
