@@ -92,6 +92,14 @@ def main() -> int:
         elif "FAILED" in incoming:
             send("dev", "Tester reports the game FAILED — please fix battleship.py.")
         else:
+            # Ack the human AND delegate in the same turn — the real leader
+            # pattern that must not close the task and kill the delegation.
+            ack_to = sender if sender.lower() not in TEAM else first_external_sender(prompt)
+            send(
+                ack_to,
+                "Acknowledged — delegating the battleship build to Dev now; "
+                "full report when Tester verifies.",
+            )
             send(
                 "dev",
                 "Please build the terminal battleship game from GOAL.md as "

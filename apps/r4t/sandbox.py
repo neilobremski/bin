@@ -549,7 +549,17 @@ def run_sandbox(
                 quiet_polls = 0
                 continue
             quiet_polls += 1
-            if final is not None and quiet_polls >= 2:
+            # In break mode the scenario isn't over until the breaker has
+            # tripped AND blocked a message — the leader's early ack to the
+            # human must not end the run before either.
+            breaker_pending = break_member and (
+                not any(
+                    "BREAKER" in line and "tripped" in line
+                    for line in _governance_lines()
+                )
+                or _dead_letter_counts().get("breaker-open", 0) < 1
+            )
+            if final is not None and quiet_polls >= 2 and not breaker_pending:
                 _log("quiescent with final answer")
                 break
             if quiet_polls >= 20:
