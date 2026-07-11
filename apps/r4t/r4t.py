@@ -536,6 +536,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_chat(args: argparse.Namespace) -> int:
+    node = _resolve_node(args.node)
+    if node is None:
+        return 2
+    root = _resolve_root(args.root)
+    from chat import run_chat
+
+    return run_chat(node, resolve_roster_path(root, args.roster))
+
+
 RIG_COMMAND_HELP = [
     ("rig list", "Rig invoke lines, limits, and roster rig resolution"),
     ("rig presets", "Named CLI presets aligned with a8s definitions"),
@@ -835,6 +845,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(status_p, with_node=True)
     _add_tell_flags(status_p)
     status_p.set_defaults(func=cmd_status)
+
+    chat_p = sub.add_parser(
+        "chat", help="Interactive human seat: messages and team activity in one window."
+    )
+    _add_common(chat_p, with_node=True)
+    chat_p.set_defaults(func=cmd_chat)
 
     rig_p = sub.add_parser(
         "rig",

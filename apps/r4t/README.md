@@ -72,6 +72,25 @@ Watch it: `a8s logs acme-node -f` (traffic + every governance decision line),
 `r4t status --node acme` (locks, buckets, tasks, dead letters), and the
 dead-letter dir under `~/.config/r4t/teams/acme/`.
 
+## Chat: the human seat
+
+`r4t chat` (from the team repo, or `--node <team>`) is all of the above in
+one window: messages delivered to the roster's human member, turn starts and
+completions, governance events, and an input line that sends as that human.
+Typed lines go to the leader by default; `/to <member>` retargets, `/who`
+shows the roster with live turn locks, `/tasks` the task ledgers, `/quit`
+leaves. Training wheels, not a replacement for autonomy — the team runs
+through normal dispatch with all governance; chat is how you watch and steer
+a young team before letting it run unattended.
+
+Two requirements, both checked at startup with the fix printed: the human
+member's `Address:` must be a registered a8s agent whose definition is a
+file-proxy (`a8s define <agent> ~/bin/apps/a8s/definitions/human.json`), and
+the team namespace must be bound (`a8s namespace <team> <node-agent>`).
+Chat spawns a dedicated router for the human seat (taking over from a shared
+handler if needed — a shared one delays delivery behind long team turns) and
+one for the node if nothing handles it; both stop at `/quit`.
+
 ## Governance knobs
 
 All keys live in the out-of-repo rig config (`~/.config/r4t/rigs.json`).
