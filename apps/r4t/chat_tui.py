@@ -152,13 +152,13 @@ class ChatApp(App):
         header = Text()
         header.append(self.ctx.node, style="bold")
         header.append(f" · seat {self.human.name} → {self.target}", style="")
-        header.append("  ")
+        header.append(f" · {len(open_tasks)} open task(s)", style="dim")
+        header.append("   ")
         header.append(
             f"{verdict.MARKS[worst]} "
             + {"ok": "healthy", "warn": "attention", "bad": "action needed"}[worst],
             style=LEVEL_STYLE[worst],
         )
-        header.append(f" · {len(open_tasks)} open task(s)", style="dim")
 
         shown = [v for v in verdicts if v.level != verdict.OK]
         for v in shown[:MAX_HEADER_VERDICTS]:
