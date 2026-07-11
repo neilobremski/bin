@@ -9,6 +9,8 @@ through the roster.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -36,7 +38,7 @@ from rig import (
     resolve_config_path,
 )
 from notify import resolve_tell_fn, simulate_enabled
-from roster import RosterError, load_roster, resolve_roster_path
+from roster import Member, Roster, RosterError, load_roster, resolve_roster_path
 
 DEFAULT_TASK_TTL_SECONDS = 7 * 86400
 R4T_DIR = Path(__file__).resolve().parent
@@ -64,9 +66,11 @@ ROSTER_TEMPLATE = """\
 # Team Roster
 
 Members are `### <Name>` blocks. `Status: Human` members are never
-dispatched; `Rig:` names a SYMBOLIC rig defined in the out-of-repo
-rig config (~/.config/r4t/rigs.json). Free prose in a block becomes the
-member's persona.
+dispatched: mail to them parks in the team's seat mailbox (`r4t seat`,
+`r4t chat`), and the optional `Address:` is a doorbell — a copy forwarded
+over a8s when no seat session is attached. `Rig:` names a SYMBOLIC rig
+defined in the out-of-repo rig config (~/.config/r4t/rigs.json). Free
+prose in a block becomes the member's persona.
 
 ### Owner
 - **Status:** Human
@@ -536,6 +540,101 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ensure_tell_outbox(ctx: DispatchContext) -> None:
+    """Directly-invoked seat/chat sessions have no a8s-injected outbox env;
+    give `tell` subprocesses (the Address: doorbell, error notices) the same
+    fallback dispatch itself uses for releases."""
+    os.environ.setdefault("TELL_OUTBOX_DIR", str(ctx.root / ".outbox"))
+
+
+def cmd_chat(args: argparse.Namespace) -> int:
+    node = _resolve_node(args.node)
+    if node is None:
+        return 2
+    ctx = _context(args, node)
+    _ensure_tell_outbox(ctx)
+    from chat import run_chat
+
+    return run_chat(ctx)
+
+
+def _seat_human(roster: Roster) -> Member | None:
+    return next((m for m in roster.members if m.is_human), None)
+
+
+def cmd_seat(args: argparse.Namespace) -> int:
+    node = _resolve_node(args.node)
+    if node is None:
+        return 2
+    ctx = _context(args, node)
+    _ensure_tell_outbox(ctx)
+    try:
+        roster = load_roster(ctx.roster_path)
+    except RosterError as e:
+        print(f"seat: {e}", file=sys.stderr)
+        return 2
+    human = _seat_human(roster)
+    if human is None:
+        print(
+            "seat: no human member in the roster — add one to ROSTER.md "
+            "(Status: Human)",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.action == "send":
+        text = " ".join(args.message).strip()
+        if not text:
+            print("seat send: message is required", file=sys.stderr)
+            return 2
+        if args.to:
+            member = roster.find(args.to)
+            if member is None or member.is_human or member.errors:
+                print(f"seat send: no dispatchable member {args.to!r}", file=sys.stderr)
+                return 2
+            to = f"{node}:{member.name.lower()}"
+        else:
+            to = node
+        sender = f"{node}:{human.name.lower()}"
+        drain_until_quiet(ctx)
+        handle_message(ctx, sender, to, text)
+        drain_until_quiet(ctx)
+        return 0
+
+    if args.action == "inbox":
+        paths = state.list_seat_messages(node, human.name)
+        if not paths:
+            if not args.as_json:
+                print("(no unread messages)")
+            return 0
+        for path in paths:
+            try:
+                envelope = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if args.as_json:
+                print(json.dumps(envelope))
+            else:
+                print(
+                    f"── from {envelope.get('from', '?')}"
+                    f" ({envelope.get('parked_at', '?')})"
+                )
+                print(envelope.get("content", ""))
+                print()
+            if not args.peek:
+                state.mark_seat_read(node, human.name, path)
+        return 0
+
+    unread = len(state.list_seat_messages(node, human.name))
+    attached = state.seat_attached(node, human.name)
+    print(f"seat: {human.name} on {node}")
+    print(f"unread: {unread}  (try: r4t seat inbox)")
+    print(f"attached: {'yes' if attached else 'no'}")
+    if human.address:
+        print(f"doorbell: {human.address} (rings when not attached)")
+    return 0
+
+
 RIG_COMMAND_HELP = [
     ("rig list", "Rig invoke lines, limits, and roster rig resolution"),
     ("rig presets", "Named CLI presets aligned with a8s definitions"),
@@ -835,6 +934,33 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(status_p, with_node=True)
     _add_tell_flags(status_p)
     status_p.set_defaults(func=cmd_status)
+
+    chat_p = sub.add_parser(
+        "chat", help="Interactive human seat: messages and team activity in one window."
+    )
+    _add_common(chat_p, with_node=True)
+    _add_tell_flags(chat_p)
+    chat_p.set_defaults(func=cmd_chat)
+
+    seat_p = sub.add_parser(
+        "seat", help="The roster human's team mailbox and voice (bare: summary)."
+    )
+    seat_p.add_argument(
+        "action", nargs="?", choices=["inbox", "send"],
+        help="inbox: read parked messages; send: speak as the human.",
+    )
+    seat_p.add_argument("message", nargs="*", help="send: message text.")
+    seat_p.add_argument("--to", help="send: member first name (default: the leader).")
+    seat_p.add_argument(
+        "--peek", action="store_true", help="inbox: leave messages unread."
+    )
+    seat_p.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="inbox: one JSON object per message.",
+    )
+    _add_common(seat_p, with_node=True)
+    _add_tell_flags(seat_p)
+    seat_p.set_defaults(func=cmd_seat)
 
     rig_p = sub.add_parser(
         "rig",

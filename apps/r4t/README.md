@@ -72,6 +72,30 @@ Watch it: `a8s logs acme-node -f` (traffic + every governance decision line),
 `r4t status --node acme` (locks, buckets, tasks, dead letters), and the
 dead-letter dir under `~/.config/r4t/teams/acme/`.
 
+## The seat: being the human in the roster
+
+A human roster member is a first-class team address: teammates just
+`tell neil`, outsiders (your phone, another cluster) `tell acme:neil`, and
+both park in the node's seat mailbox under `~/.config/r4t/teams/acme/seat/` —
+no handler, no router, nothing to disconnect. Two surfaces read and speak
+for it:
+
+```bash
+r4t seat                    # summary: unread count, attached, doorbell
+r4t seat inbox              # read parked messages (marks them read; --peek, --json)
+r4t seat send "message"     # speak as the human — to the leader
+r4t seat send --to phil "…" # or to a member (runs their turn synchronously)
+```
+
+`r4t seat` is the scriptable surface — an orchestrating agent impersonates
+the human with it directly. `r4t chat` is the human view over the same
+mailbox: one window interleaving seat messages, turn starts/completions,
+and governance events, with an input line (`/to`, `/who`, `/tasks`,
+`/quit`). While chat (or anything touching the presence file) is attached,
+dispatch skips the `Address:` doorbell; detach and the doorbell rings
+again. Training wheels, not a replacement for autonomy — everything still
+flows through normal dispatch and governance.
+
 ## Governance knobs
 
 All keys live in the out-of-repo rig config (`~/.config/r4t/rigs.json`).
@@ -95,12 +119,18 @@ prior art per layer: [docs/governance.md](docs/governance.md).
 | `active_ttl_rotations` | 3 | Idle passes an agent stays on the crash-recovery watch list | Unbounded watch lists |
 | `rebroadcast_senders` | `["chatroom"]` | Inbound from these is classed bulk; a bulk-triggered turn may post back to that room at most once per suppression window | Two agents looping through a re-broadcasting room |
 
-Class marking ties it together: every envelope r4t releases carries `auto`
-in its header, so a header **without** `auto` was written by a deliberate
-hand — and resets that task's turn budget (human attention licenses more
-work). Suppressed, cut, and excess messages are never silently dropped:
-each becomes one JSON record (reason, count, from, to, task, time) in
-`~/.config/r4t/teams/<node>/dead-letter/`.
+Class marking ties it together — *inside the garden*: every envelope r4t
+releases internally carries `auto` in its header, so an internal header
+**without** `auto` was written by a deliberate hand and resets that task's
+turn budget (human attention licenses more work). The header is
+garden-internal serialization and never crosses egress: external releases
+carry the bare body (class survives as `x_r4t_class` envelope metadata),
+because other a8s nodes must not need to know whether a name is one agent,
+a human, a device, or a whole roster. Symmetrically, headers on inbound
+external messages are untrusted content — a forged header can't join,
+charge, or reset a task. Suppressed, cut, and excess messages are never
+silently dropped: each becomes one JSON record (reason, count, from, to,
+task, time) in `~/.config/r4t/teams/<node>/dead-letter/`.
 
 ## Security model
 
