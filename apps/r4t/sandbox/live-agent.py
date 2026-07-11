@@ -56,8 +56,10 @@ DEV_RETRY = (
     "Create battleship.py in the current directory now. "
     "Read GOAL.md. Use your file write tool. "
     "The file must be a runnable Python script. "
-    "When done, run: tell crew:tester \"battleship.py is ready\""
+    "When done, run: tell tester \"battleship.py is ready\""
 )
+
+TEAM = {"lead", "dev", "tester", "owner"}
 
 
 def role_name(prompt: str) -> str:
@@ -65,13 +67,6 @@ def role_name(prompt: str) -> str:
     if not match:
         raise SystemExit("live-agent: cannot parse agent name from prompt")
     return match.group(1).lower()
-
-
-def team_name(prompt: str) -> str:
-    match = re.search(r"tell ([a-z0-9_-]+):<name>", prompt)
-    if not match:
-        raise SystemExit("live-agent: cannot parse team name from prompt")
-    return match.group(1)
 
 
 def incoming_block(prompt: str) -> str:
@@ -84,7 +79,7 @@ def sender_from(prompt: str) -> str:
 
 
 def is_external(sender: str) -> bool:
-    return ":" not in sender or sender.strip().lower() == "human"
+    return sender.strip().lower() not in TEAM
 
 
 def harness_invoke() -> list[str]:
@@ -127,15 +122,14 @@ def _kill_process_tree(pid: int) -> None:
             pass
 
 
-def protocol_only(name: str, team: str, sender: str, incoming: str) -> bool:
+def protocol_only(name: str, sender: str, incoming: str) -> bool:
     """Roles/turns where mechanical staging is enough — skip the LLM."""
-    tester = f"{team}:tester"
     if name == "tester":
         return True
     if (
         name == "lead"
         and re.search(r"VERIFIED:", incoming, re.I)
-        and tester in sender.lower()
+        and sender.strip().lower() == "tester"
     ):
         return True
     return False
@@ -169,10 +163,8 @@ def stage_tell(to: str, content: str) -> None:
     print(f"live-agent: staged tell to {to}: {content[:80]}", file=sys.stderr, flush=True)
 
 
-def sandbox_directive(name: str, team: str, sender: str, incoming: str) -> str:
-    dev = f"{team}:dev"
-    tester = f"{team}:tester"
-    verified = re.search(r"VERIFIED:", incoming, re.I) and tester in sender.lower()
+def sandbox_directive(name: str, sender: str, incoming: str) -> str:
+    verified = re.search(r"VERIFIED:", incoming, re.I) and sender.strip().lower() == "tester"
     if name == "lead":
         if verified:
             return (
@@ -181,17 +173,17 @@ def sandbox_directive(name: str, team: str, sender: str, incoming: str) -> str:
                 '  tell human "Done: battleship.py is built and verified."\n'
                 "Do not delegate."
             )
-        if dev in sender.lower():
+        if sender.strip().lower() == "dev":
             return (
                 "## DO THIS NOW (Lead — send to Tester)\n"
                 "Dev finished implementation. Run exactly one shell command, then stop:\n"
-                f'  tell {tester} "Run battleship.py and report VERIFIED or FAILED."\n'
+                '  tell tester "Run battleship.py and report VERIFIED or FAILED."\n'
                 "Do not write code."
             )
         return (
             "## DO THIS NOW (Lead — delegate to Dev)\n"
             "Run exactly one shell command via your shell tool, then stop:\n"
-            f'  tell {dev} "Build battleship.py in this directory exactly as GOAL.md says."\n'
+            '  tell dev "Build battleship.py in this directory exactly as GOAL.md says."\n'
             "Do NOT write code yourself. Do NOT reply to the human yet."
         )
     if name == "dev":
@@ -199,23 +191,23 @@ def sandbox_directive(name: str, team: str, sender: str, incoming: str) -> str:
             "## DO THIS NOW (Dev — implement)\n"
             "1. Read GOAL.md and WORKSPACE.md.\n"
             "2. Create battleship.py in the current directory using your write/edit tool.\n"
-            f'3. Run: tell {tester} "battleship.py is ready for verification."\n'
+            '3. Run: tell tester "battleship.py is ready for verification."\n'
             "4. Stop. Do not message the Lead or the human."
         )
     if name == "tester":
         return (
             "## DO THIS NOW (Tester — verify)\n"
             "1. Run: python3 battleship.py with stdin guesses (pipe row col lines 0-4).\n"
-            f"2. Run: tell {team}:lead \"VERIFIED: ...\" if exit 0 and you see WIN, else FAILED.\n"
+            "2. Run: tell lead \"VERIFIED: ...\" if exit 0 and you see WIN, else FAILED.\n"
             "3. Stop. Do not message Dev."
         )
     return ""
 
 
-def augment_prompt(prompt: str, name: str, team: str) -> str:
+def augment_prompt(prompt: str, name: str) -> str:
     sender = sender_from(prompt)
     incoming = incoming_block(prompt)
-    directive = sandbox_directive(name, team, sender, incoming)
+    directive = sandbox_directive(name, sender, incoming)
     if not directive:
         return prompt
     return directive + "\n\n---\n\n" + prompt
@@ -252,71 +244,68 @@ def verify_battleship() -> tuple[bool, str]:
     return ok, detail
 
 
-def enforce_protocol(name: str, team: str, sender: str, incoming: str) -> None:
+def enforce_protocol(name: str, sender: str, incoming: str) -> None:
     """Stage tells the model should have sent — keeps the pipeline moving."""
-    dev = f"{team}:dev"
-    tester = f"{team}:tester"
-    lead = f"{team}:lead"
+    sender_name = sender.strip().lower()
     staged = staged_tos()
 
     if name == "lead":
-        if re.search(r"VERIFIED:", incoming, re.I) and tester in sender.lower() and "human" not in staged:
+        if re.search(r"VERIFIED:", incoming, re.I) and sender_name == "tester" and "human" not in staged:
             stage_tell(
                 "human",
                 "Done: battleship.py is built and verified. Dev implemented the "
                 "5x5 game with 3 ships and Tester confirmed a winning "
                 "playthrough exits 0. Play it with: python3 battleship.py",
             )
-        elif dev in sender.lower() and tester not in staged:
+        elif sender_name == "dev" and "tester" not in staged:
             stage_tell(
-                tester,
+                "tester",
                 "Run battleship.py (pipe all row col guesses 0-4 on stdin) and "
                 "report VERIFIED or FAILED to the Lead.",
             )
-        elif is_external(sender) and dev not in staged:
+        elif is_external(sender) and "dev" not in staged:
             stage_tell(
-                dev,
+                "dev",
                 "Build battleship.py in this directory exactly as GOAL.md specifies: "
                 "5x5 grid, 3 ships, stdin guesses `row col`, exit 0 on win.",
             )
     elif name == "dev":
         ensure_battleship()
-        if Path("battleship.py").is_file() and tester not in staged:
+        if Path("battleship.py").is_file() and "tester" not in staged:
             stage_tell(
-                tester,
+                "tester",
                 "battleship.py is ready — run it and verify a winning playthrough "
                 "exits 0, then report VERIFIED or FAILED to the Lead.",
             )
     elif name == "tester":
         ok, detail = verify_battleship()
-        if lead not in staged:
+        if "lead" not in staged:
             if ok:
                 stage_tell(
-                    lead,
+                    "lead",
                     "VERIFIED: battleship.py runs, reports HIT/MISS, and exits 0 "
                     "on a winning playthrough.",
                 )
             else:
-                stage_tell(lead, f"FAILED: battleship.py — {detail}")
+                stage_tell("lead", f"FAILED: battleship.py — {detail}")
 
 
 def main() -> int:
     prompt = sys.argv[1]
     name = role_name(prompt)
-    team = team_name(prompt)
     sender = sender_from(prompt)
     incoming = incoming_block(prompt)
 
-    if protocol_only(name, team, sender, incoming):
+    if protocol_only(name, sender, incoming):
         print(
             f"live-agent: {name} — mechanical protocol only (skipping LLM)",
             file=sys.stderr,
             flush=True,
         )
-        enforce_protocol(name, team, sender, incoming)
+        enforce_protocol(name, sender, incoming)
         return 0
 
-    prompt = augment_prompt(prompt, name, team)
+    prompt = augment_prompt(prompt, name)
     code = run_harness(prompt)
     if code != 0:
         print(
@@ -325,7 +314,7 @@ def main() -> int:
             flush=True,
         )
 
-    enforce_protocol(name, team, sender, incoming)
+    enforce_protocol(name, sender, incoming)
     return 0
 
 

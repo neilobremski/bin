@@ -51,6 +51,8 @@ if __name__ == "__main__":
 
 VERIFIED_RE = re.compile(r"VERIFIED:", re.I)
 
+TEAM = {"lead", "dev", "tester", "owner"}
+
 
 def send(to: str, content: str) -> None:
     outbox = Path(os.environ["TELL_OUTBOX_DIR"])
@@ -65,7 +67,7 @@ def send(to: str, content: str) -> None:
 
 def first_external_sender(prompt: str) -> str:
     for name in re.findall(r"(?m)^## \S+ from (\S+)$", prompt):
-        if ":" not in name and name != "r4t":
+        if ":" not in name and name != "r4t" and name.lower() not in TEAM:
             return name
     return "human"
 
@@ -73,14 +75,13 @@ def first_external_sender(prompt: str) -> str:
 def main() -> int:
     prompt = sys.argv[1]
     name = re.search(r"You are (\w+),", prompt).group(1).lower()
-    team = re.search(r"tell ([a-z0-9_-]+):<name>", prompt).group(1)
     sender_match = re.search(r"(?m)^From: (\S+)$", prompt)
     sender = sender_match.group(1) if sender_match else "unknown"
     incoming = prompt.split("## Incoming message", 1)[-1].split("## How to work", 1)[0]
     print(f"fake-agent: {name} woken by {sender}")
 
     if name == "lead":
-        if (VERIFIED_RE.search(incoming) and f"{team}:tester" in sender.lower()) or "Respond NOW" in incoming:
+        if (VERIFIED_RE.search(incoming) and sender.lower() == "tester") or "Respond NOW" in incoming:
             originator = first_external_sender(prompt)
             send(
                 originator,
@@ -89,10 +90,10 @@ def main() -> int:
                 "playthrough exits 0. Play it with: python3 battleship.py",
             )
         elif "FAILED" in incoming:
-            send(f"{team}:dev", "Tester reports the game FAILED — please fix battleship.py.")
+            send("dev", "Tester reports the game FAILED — please fix battleship.py.")
         else:
             send(
-                f"{team}:dev",
+                "dev",
                 "Please build the terminal battleship game from GOAL.md as "
                 "battleship.py (5x5 grid, 3 ships, stdin guesses `row col`, "
                 "exit 0 on win). Hand it to Tester when written.",
@@ -101,7 +102,7 @@ def main() -> int:
         Path("battleship.py").write_text(BATTLESHIP, encoding="utf-8")
         print("fake-agent: wrote battleship.py")
         send(
-            f"{team}:tester",
+            "tester",
             "battleship.py is written — please run it and verify a winning "
             "playthrough exits 0, then report to the Lead.",
         )
@@ -117,13 +118,13 @@ def main() -> int:
         print(f"fake-agent: battleship.py exited {result.returncode}")
         if result.returncode == 0 and "WIN" in result.stdout:
             send(
-                f"{team}:lead",
+                "lead",
                 "VERIFIED: battleship.py runs, reports HIT/MISS, and exits 0 "
                 "on a winning playthrough.",
             )
         else:
             send(
-                f"{team}:lead",
+                "lead",
                 f"FAILED: battleship.py exited {result.returncode}: "
                 f"{(result.stdout + result.stderr)[-200:]}",
             )

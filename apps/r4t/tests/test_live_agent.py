@@ -41,12 +41,7 @@ def test_harness_invoke_rejects_bad_json(monkeypatch):
 
 def test_protocol_only_skips_llm_for_tester_and_verified_lead():
     mod = _load_live_agent()
-    assert mod.protocol_only("tester", "crew", "crew:dev", "ready")
-    assert mod.protocol_only(
-        "lead",
-        "crew",
-        "crew:tester",
-        "VERIFIED: battleship.py runs",
-    )
-    assert not mod.protocol_only("lead", "crew", "human", "build this")
-    assert not mod.protocol_only("dev", "crew", "crew:lead", "build it")
+    assert mod.protocol_only("tester", "dev", "ready")
+    assert mod.protocol_only("lead", "tester", "VERIFIED: battleship.py runs")
+    assert not mod.protocol_only("lead", "human", "build this")
+    assert not mod.protocol_only("dev", "lead", "build it")

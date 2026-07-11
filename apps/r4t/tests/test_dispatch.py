@@ -74,7 +74,8 @@ class TestDispatchEndToEnd:
         assert "Grumpy, cynical veteran" in prompt
         assert "From: gerry" in prompt
         assert "review the ECS payload" in prompt
-        assert "tell acme:gerry" in prompt
+        assert "Gerry (tell gerry)" in prompt
+        assert "acme:" not in prompt  # the wall is invisible from inside
         assert "Neil (Human, tell neil)" in prompt
         assert sent == []  # silence on success — no auto-ack
 
@@ -256,10 +257,39 @@ class TestStagingRelease:
         prompts = [read_prompt(p) for p in sorted(out.iterdir())]
         assert len(prompts) == 2
         assert "You are Gerry" in prompts[1]
-        assert "From: acme:phil" in prompts[1]
+        assert "From: phil" in prompts[1]
         assert "please review my patch" in prompts[1]
         task = tasks.list_tasks(NODE)[0]
         assert task["turns"] == 2  # same task across the delegation hop
+
+    def test_bare_teammate_name_parks_internal(
+        self, chatty_ctx, repo, chatty_harness, monkeypatch
+    ):
+        monkeypatch.setenv("CHATTY_TO", "Gerry")
+        monkeypatch.setenv("CHATTY_BODY", "please review my patch")
+        assert _handle(chatty_ctx, "neil", "acme:phil", "do the work") == RAN
+        assert outbox_envelopes(repo) == []
+        pending = [json.loads(p.read_text()) for p in state.list_pending(NODE)]
+        assert [p["to"] for p in pending] == ["acme:gerry"]
+
+    def test_bare_human_name_resolves_to_address(
+        self, chatty_ctx, repo, chatty_harness, monkeypatch
+    ):
+        monkeypatch.setenv("CHATTY_TO", "acme:neil")
+        monkeypatch.setenv("CHATTY_BODY", "shipped")
+        assert _handle(chatty_ctx, "gerry", "acme:phil", "ship it") == RAN
+        envelopes = outbox_envelopes(repo)
+        assert [e["to"] for e in envelopes] == ["neil"]
+
+    def test_bare_unknown_name_passes_through_external(
+        self, chatty_ctx, repo, chatty_harness, monkeypatch
+    ):
+        monkeypatch.setenv("CHATTY_TO", "chatroom")
+        monkeypatch.setenv("CHATTY_BODY", "#dev hello")
+        assert _handle(chatty_ctx, "neil", "acme:phil", "post an update") == RAN
+        envelopes = outbox_envelopes(repo)
+        assert [e["to"] for e in envelopes] == ["chatroom"]
+        assert not state.list_pending(NODE)
 
     def test_clean_turn_earns_bucket_back(self, chatty_ctx, chatty_harness, monkeypatch):
         state.bucket_drain(NODE, "phil", 1.0, 8.0)

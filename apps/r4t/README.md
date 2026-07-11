@@ -41,6 +41,12 @@ fail closed — see the [tutorial](docs/tutorial.md#missing-rig-no-default--fail
    mechanically (the LLM never sees or copies headers), the send quota and
    suppression checks apply, outbound messages land in Phil's history, and
    the envelopes move into the node's real outbox for a8s.
+   Inside the team, agents address each other by bare first name
+   (`tell gerry`) — the namespace prefix is the *outside* address of the
+   walled garden, and roster agents never see it. Release canonicalizes
+   recipients: bare roster names become intra-team routes, human members
+   resolve to their real a8s address, and anything else (`chatroom`,
+   external addresses) passes through untouched.
 4. Agents never wait for replies in a turn (actor doctrine): delegate, end
    the turn, get woken when replies arrive, answer the originator when
    there is enough. `tell --sync` to teammates is prohibited by prompt and

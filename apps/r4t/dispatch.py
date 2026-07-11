@@ -71,6 +71,34 @@ def _is_internal(node: str, to: str) -> bool:
     return t == node.lower() or t.startswith(node.lower() + ":")
 
 
+def _display_name(node: str, addr: str) -> str:
+    prefix = node.lower() + ":"
+    a = (addr or "").strip()
+    return a[len(prefix):] if a.lower().startswith(prefix) else a
+
+
+def _canonical_recipient(node: str, roster: Roster, to: str) -> str:
+    """Agents address the walled garden by bare first name; the wire uses
+    `node:name`. Bare roster names canonicalize to internal form, humans
+    (bare or prefixed) resolve to their real a8s address, and anything
+    else — `chatroom`, external addresses, unknown names — passes through
+    untouched."""
+    t = to.strip()
+    if ":" in t:
+        prefix, _, sub = t.partition(":")
+        if prefix.strip().lower() != node.lower():
+            return t
+        name = sub
+    else:
+        name = t
+    member = roster.find(name)
+    if member is None:
+        return t
+    if member.is_human and member.address:
+        return member.address
+    return f"{node}:{member.name.lower()}"
+
+
 def _tell_error(ctx: DispatchContext, recipient: str, text: str) -> None:
     body = f"[r4t {ctx.node}] {text}"
     state.append_log(ctx.node, f"r4t: ERROR -> {recipient}: {text}")
@@ -103,11 +131,11 @@ def _teammate_lines(ctx: DispatchContext, roster: Roster, member: Member) -> lis
         if m.name.lower() == member.name.lower():
             continue
         if m.is_human:
-            reach = f"tell {m.address}" if m.address else "(no a8s address)"
+            reach = f"tell {m.name.lower()}" if m.address else "(unreachable)"
             lines.append(f"    - {m.name} (Human, {reach}) — {m.role}".rstrip(" —"))
         elif not m.errors:
             lines.append(
-                f"    - {m.name} (tell {ctx.node}:{m.name.lower()}) — {m.role}".rstrip(" —")
+                f"    - {m.name} (tell {m.name.lower()}) — {m.role}".rstrip(" —")
             )
     return lines
 
@@ -135,7 +163,7 @@ def build_prompt(
         history.strip() or "(no prior messages — this is your first recorded turn)",
         "",
         "## Incoming message",
-        f"From: {sender}",
+        f"From: {_display_name(ctx.node, sender)}",
         "",
         body or "(empty message)",
         "",
@@ -149,8 +177,8 @@ def build_prompt(
         "person who asked once you have enough.",
         "- Send messages with the `tell` shell command (run it via your shell "
         "tool — printing it as text sends nothing):",
-        f"    - reply to the sender: tell {sender} \"<message>\"",
-        f"    - a teammate: tell {ctx.node}:<name> \"<message>\". Teammates:",
+        f"    - reply to the sender: tell {_display_name(ctx.node, sender)} \"<message>\"",
+        "    - a teammate: tell <name> \"<message>\". Teammates:",
         *(teammates or ["    - (none)"]),
         "    - group discussion: tell chatroom '#<room> <message>'",
         "- Never use `tell --sync` with teammates — it blocks your turn "
@@ -304,6 +332,7 @@ def _release_one(
 def release_staging(
     ctx: DispatchContext,
     config: RigConfig,
+    roster: Roster,
     member: Member,
     rig: Rig,
     task_id: str,
@@ -338,6 +367,8 @@ def release_staging(
         if not to or not body.strip():
             path.unlink(missing_ok=True)
             continue
+        to = _canonical_recipient(ctx.node, roster, to)
+        envelope["to"] = to
         if i >= rig.max_sends_per_turn:
             path.unlink(missing_ok=True)
             violations += 1
@@ -404,7 +435,7 @@ def release_staging(
         state.append_history(
             ctx.node,
             member.name,
-            f"## {state.utc_now()} to {to}\n\n"
+            f"## {state.utc_now()} to {_display_name(ctx.node, to)}\n\n"
             + (body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"),
         )
         final_response = (
@@ -460,7 +491,7 @@ def _run_turn(
 
     now = state.utc_now()
     entry_body = body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"
-    state.append_history(ctx.node, member.name, f"## {now} from {sender}\n\n{entry_body}")
+    state.append_history(ctx.node, member.name, f"## {now} from {_display_name(ctx.node, sender)}\n\n{entry_body}")
     state.update_meta(ctx.node, member.name, last_inbound_at=now)
     state.append_log(
         ctx.node,
@@ -483,7 +514,7 @@ def _run_turn(
     )
 
     release = release_staging(
-        ctx, config, member, rig, task_id, hop, bulk_source=bulk_source,
+        ctx, config, roster, member, rig, task_id, hop, bulk_source=bulk_source,
         synthesis_response=synthesis_response,
     )
     if release["violations"]:
@@ -664,8 +695,7 @@ def _handle(
             _tell_error(
                 ctx,
                 sender,
-                f"no team member named {sub!r}. Dispatchable members: {names}. "
-                f"Address them as {ctx.node}:<name>.",
+                f"no team member named {sub!r}. Dispatchable members: {names}.",
             )
             return SKIPPED
     else:
@@ -676,8 +706,8 @@ def _handle(
                 ctx,
                 sender,
                 "no leader is marked in the roster, so bare messages to "
-                f"{ctx.node} have no recipient. Address a member directly: "
-                f"{ctx.node}:<name> (members: {names}).",
+                f"{ctx.node} have no recipient. Address a member directly "
+                f"(members: {names}).",
             )
             return SKIPPED
 
@@ -819,7 +849,7 @@ def _handle(
     if breaker_blocked:
         now = state.utc_now()
         entry_body = body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"
-        state.append_history(ctx.node, member.name, f"## {now} from {sender}\n\n{entry_body}")
+        state.append_history(ctx.node, member.name, f"## {now} from {_display_name(ctx.node, sender)}\n\n{entry_body}")
         state.update_meta(ctx.node, member.name, last_inbound_at=now, last_completed_at=now)
         state.record_dead_letter(
             ctx.node, reason="breaker-open", sender=sender, to=to,
@@ -846,7 +876,7 @@ def _handle(
     if state.bucket_muted(level, config.bucket_max):
         now = state.utc_now()
         entry_body = body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"
-        state.append_history(ctx.node, member.name, f"## {now} from {sender}\n\n{entry_body}")
+        state.append_history(ctx.node, member.name, f"## {now} from {_display_name(ctx.node, sender)}\n\n{entry_body}")
         state.update_meta(ctx.node, member.name, last_inbound_at=now, last_completed_at=now)
         state.bucket_earn(ctx.node, member.name, config.bucket_earn_ratio, config.bucket_max)
         state.record_dead_letter(
