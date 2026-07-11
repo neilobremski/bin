@@ -171,7 +171,10 @@ def _agent_messages(a8s_home: Path, agent: str) -> list[dict]:
 
 def _final_answer(a8s_home: Path) -> dict | None:
     for msg in _agent_messages(a8s_home, "human"):
-        if msg.get("from") == NODE and str(msg.get("content", "")).strip():
+        sender = str(msg.get("from", ""))
+        if sender != NODE and not sender.startswith(f"{TEAM}:"):
+            continue
+        if str(msg.get("content", "")).strip():
             return msg
     return None
 

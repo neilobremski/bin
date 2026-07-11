@@ -65,7 +65,7 @@ from core import (
     unique_path,
 )
 from network import seen_id_append
-from registry import resolve_name
+from registry import load_namespaces, resolve_name
 from sync_listen import A8S_CONTROL, expire_stale_listeners_for_participants, handle_a8s_command, try_sync_capture
 from services import StorageError, StorageService
 import txlog
@@ -508,6 +508,10 @@ def _process_pending(
     pending = pending_dir(sender.name)
     if not pending.is_dir():
         return 0
+    owned_prefixes = {
+        p.lower() for p, a in load_namespaces().items()
+        if a.lower() == sender.name.lower()
+    }
     now = datetime.now(timezone.utc)
     files = sorted(
         f for f in pending.iterdir()
@@ -532,8 +536,14 @@ def _process_pending(
             _drop_sidecar(f)
             continue
         # Defense: the outbox was agent-writable, so the JSON could lie about
-        # `from`. The unforgeable identity is the enclosing sender — overwrite.
+        # `from`. The unforgeable identity is the enclosing sender — overwrite,
+        # except a sub-sender claim inside a namespace bound to this sender
+        # (`s1l:gerry` from the node bound to `s1l`): only that node writes
+        # this outbox, so the claim carries the node's own authority.
+        claimed = str(msg.get("from") or "").strip()
         msg["from"] = sender.name
+        if ":" in claimed and claimed.partition(":")[0].strip().lower() in owned_prefixes:
+            msg["from"] = claimed
         recipient_name = (msg.get("to") or "").strip()
         preview = _preview(msg.get("content", ""))
         msg_files = [e.get("filename", "") for e in (msg.get("files") or []) if e.get("filename")]

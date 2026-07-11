@@ -312,6 +312,36 @@ class TestRouteOutboxes:
         # Routing forces from = sender's actual name, regardless of the JSON.
         assert delivered["from"] == "A"
 
+    def test_from_within_owned_namespace_is_preserved(self, two_agents):
+        a, b = two_agents
+        save_namespaces({"crew": "A"})
+        outbox = outbox_dir(a.root)
+        f = outbox / "20260101T000000_A.json"
+        f.write_text(json.dumps({
+            "from": "crew:gerry",  # sub-sender inside A's own namespace
+            "to": "B",
+            "content": "report",
+            "files": [],
+        }))
+        route_outboxes([a, b], all_agents=[a, b])
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert delivered["from"] == "crew:gerry"
+
+    def test_from_in_foreign_namespace_is_overwritten(self, two_agents):
+        a, b = two_agents
+        save_namespaces({"crew": "B"})  # bound to someone else
+        outbox = outbox_dir(a.root)
+        f = outbox / "20260101T000000_A.json"
+        f.write_text(json.dumps({
+            "from": "crew:gerry",
+            "to": "B",
+            "content": "spoof attempt",
+            "files": [],
+        }))
+        route_outboxes([a, b], all_agents=[a, b])
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert delivered["from"] == "A"
+
     def test_local_routing_appends_seen_ids(self, two_agents):
         """When local routing commits, the message ULID enters the seen-ids
         ring. Without this a remote round-trip — we publish to MQTT, the

@@ -291,6 +291,43 @@ class TestStagingRelease:
         assert [e["to"] for e in envelopes] == ["chatroom"]
         assert not state.list_pending(NODE)
 
+    def test_reply_to_external_creator_closes_task(
+        self, chatty_ctx, repo, chatty_harness, monkeypatch
+    ):
+        monkeypatch.setenv("CHATTY_TO", "neil")
+        monkeypatch.setenv("CHATTY_BODY", "done: shipped and verified")
+        assert _handle(chatty_ctx, "neil", "acme:phil", "ship it") == RAN
+        assert [e["to"] for e in outbox_envelopes(repo)] == ["neil"]
+        task = tasks.list_tasks(NODE)[0]
+        assert task["status"] == tasks.STATUS_CLOSED
+
+    def test_reply_elsewhere_leaves_task_open(
+        self, chatty_ctx, repo, chatty_harness, monkeypatch
+    ):
+        monkeypatch.setenv("CHATTY_TO", "chatroom")
+        monkeypatch.setenv("CHATTY_BODY", "#dev progress update")
+        assert _handle(chatty_ctx, "neil", "acme:phil", "post an update") == RAN
+        task = tasks.list_tasks(NODE)[0]
+        assert task["status"] == tasks.STATUS_OPEN
+
+    def test_reply_to_internal_creator_leaves_task_open(
+        self, chatty_ctx, chatty_harness, monkeypatch
+    ):
+        monkeypatch.setenv("CHATTY_TO", "acme:gerry")
+        monkeypatch.setenv("CHATTY_BODY", "here is what you asked for")
+        assert _handle(chatty_ctx, "acme:gerry", "acme:phil", "need this") == RAN
+        task = tasks.list_tasks(NODE)[0]
+        assert task["status"] == tasks.STATUS_OPEN
+
+    def test_released_envelope_claims_namespaced_sender(
+        self, chatty_ctx, repo, chatty_harness, monkeypatch
+    ):
+        monkeypatch.setenv("CHATTY_TO", "neil")
+        monkeypatch.setenv("CHATTY_BODY", "status: done")
+        _handle(chatty_ctx, "gerry", "acme:phil", "report status")
+        envelopes = outbox_envelopes(repo)
+        assert [e["from"] for e in envelopes] == ["acme:phil"]
+
     def test_clean_turn_earns_bucket_back(self, chatty_ctx, chatty_harness, monkeypatch):
         state.bucket_drain(NODE, "phil", 1.0, 8.0)
         monkeypatch.setenv("CHATTY_TO", "neil")

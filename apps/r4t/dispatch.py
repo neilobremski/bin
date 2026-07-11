@@ -300,6 +300,7 @@ def _release_one(
         return
     envelope["content"] = stamped_content
     envelope["x_r4t_class"] = "auto"
+    envelope["from"] = sender_addr
     outbox.mkdir(parents=True, exist_ok=True)
     msg_id = str(envelope.get("id", "")) or tasks.new_task_id()
     envelope["id"] = msg_id
@@ -351,6 +352,7 @@ def release_staging(
     outbox = _real_outbox(ctx)
     released = 0
     violations = 0
+    answered = False
     synthesis_available = synthesis_response
     synthesis_creator = str((tasks.load_task(ctx.node, task_id) or {}).get("creator", ""))
     for i, path in enumerate(state.staged_envelopes(ctx.node, member.name)):
@@ -450,7 +452,24 @@ def release_staging(
         path.unlink(missing_ok=True)
         synthesis_available = synthesis_available and not final_response
         released += 1
+        if (
+            not synthesis_response
+            and synthesis_creator
+            and not _is_internal(ctx.node, synthesis_creator)
+            and to.lower() == synthesis_creator.strip().lower()
+        ):
+            answered = True
     shutil.rmtree(staging, ignore_errors=True)
+    if answered:
+        task = tasks.load_task(ctx.node, task_id)
+        if task is not None and task.get("status") != tasks.STATUS_CLOSED:
+            task["status"] = tasks.STATUS_CLOSED
+            tasks.save_task(ctx.node, task)
+            state.append_log(
+                ctx.node,
+                f"r4t: ANSWERED task={task_id} {sender_addr} -> {synthesis_creator} "
+                "(task closed)",
+            )
     return {"released": released, "violations": violations}
 
 
