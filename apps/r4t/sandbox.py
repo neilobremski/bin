@@ -10,10 +10,10 @@ report whose MECHANICAL CHECKS section is computed — an external judge
 needs nothing but the report. Progress logs go to stderr; the final report
 is written to stdout (pipe or redirect to save it).
 
-`--fake` swaps every tier's invoke for sandbox/fake-agent.py: scripted
+`--fake` swaps every rig's invoke for sandbox/fake-agent.py: scripted
 role-play that exercises dispatch, staging release, header stamping,
 delegation, and the final leader answer with zero LLM calls. Live mode uses
-`--preset` (any `r4t harness presets` entry; default `opencode`) and
+`--preset` (any `r4t rig presets` entry; default `opencode`) and
 optional `--model` for presets like `opencode-ollama`. The chosen argv is
 passed to live-agent.py via R4T_SANDBOX_INVOKE.
 """
@@ -32,7 +32,7 @@ from pathlib import Path
 
 import state
 
-from harness import HarnessError, build_preset_invoke, format_preset_invoke, preset_names
+from rig import RigError, build_preset_invoke, format_preset_invoke, preset_names
 
 R4T_DIR = Path(__file__).resolve().parent
 SANDBOX_DIR = R4T_DIR / "sandbox"
@@ -103,8 +103,8 @@ def _write_definition(path: Path) -> None:
     )
 
 
-def _write_harness_config(path: Path, fake: bool) -> None:
-    config = json.loads((SANDBOX_DIR / "harnesses.json").read_text(encoding="utf-8"))
+def _write_rig_config(path: Path, fake: bool, break_member: str | None = None) -> None:
+    config = json.loads((SANDBOX_DIR / "rigs.json").read_text(encoding="utf-8"))
     if fake:
         for value in config.values():
             if isinstance(value, dict) and "invoke" in value:
@@ -123,6 +123,13 @@ def _write_harness_config(path: Path, fake: bool) -> None:
                     str(SANDBOX_DIR / "live-agent.py"),
                     "{prompt}",
                 ]
+    if break_member:
+        config["broken"] = {
+            "invoke": [sys.executable, "-c", "import sys; sys.exit(1)", "{prompt}"],
+            "timeout_seconds": 30,
+        }
+        config["pins"] = {break_member.lower(): "broken"}
+        config["breaker_cap"] = 2
     state.atomic_write_json(path, config)
 
 
@@ -355,7 +362,7 @@ def _emit_progress(
             seen_locks.add(key)
             _log(
                 f"turn started: {lock.get('agent', '?')} "
-                f"(tier {lock.get('tier', '?')}, task {str(lock.get('task', ''))[:8]}…)"
+                f"(rig {lock.get('rig', '?')}, task {str(lock.get('task', ''))[:8]}…)"
             )
     return seen_velocity, seen_gov, seen_locks
 
@@ -400,7 +407,7 @@ def _build_report(
         "",
         "### Turns (velocity)",
         "",
-        "| time | agent | tier | task | hop | seconds | exit |",
+        "| time | agent | rig | task | hop | seconds | exit |",
         "|---|---|---|---|---|---|---|",
     ]
     for row in _velocity_rows():
@@ -432,6 +439,7 @@ def run_sandbox(
     timeout: float,
     preset: str = "opencode",
     model: str | None = None,
+    break_member: str | None = None,
 ) -> int:
     start = time.time()
     tmp = Path(tempfile.mkdtemp(prefix="r4t-sandbox-"))
@@ -441,6 +449,8 @@ def run_sandbox(
     os.environ["R4T_HOME"] = str(tmp / "r4t-home")
     os.environ["R4T_SANDBOX"] = "1"
     mode = "fake" if fake else "live"
+    if break_member:
+        mode += f"+break:{break_member.lower()}"
     harness_line = ""
     seen_velocity = 0
     seen_gov: set[str] = set()
@@ -452,7 +462,7 @@ def run_sandbox(
         else:
             try:
                 invoke = build_preset_invoke(preset, model=model)
-            except HarnessError as e:
+            except RigError as e:
                 _log(str(e))
                 return 1
             os.environ["R4T_SANDBOX_INVOKE"] = json.dumps(invoke)
@@ -477,7 +487,9 @@ def run_sandbox(
         )
         goal = (repo / "GOAL.md").read_text(encoding="utf-8")
 
-        _write_harness_config(tmp / "r4t-home" / "harnesses.json", fake)
+        _write_rig_config(
+            tmp / "r4t-home" / "rigs.json", fake, break_member=break_member
+        )
         definition = tmp / "r4t-def.json"
         _write_definition(definition)
         human_root = tmp / "human"
@@ -558,13 +570,33 @@ def run_sandbox(
         dead = _dead_letter_counts()
         suppressions = dead.get("pair-repeat", 0) + dead.get("bulk-window", 0)
 
-        checks: list[tuple[str, object, str]] = [
-            (
-                "Program file(s) created",
-                bool(repo_files),
-                ", ".join(sorted(repo_files)) or "no .py files in repo",
-            ),
-            ("Program runs and exits 0", program_ok, program_detail),
+        checks: list[tuple[str, object, str]] = []
+        if break_member:
+            gov = _governance_lines()
+            tripped = any("BREAKER" in line and "tripped" in line for line in gov)
+            blocked = dead.get("breaker-open", 0)
+            checks += [
+                (
+                    "Breaker tripped",
+                    tripped,
+                    f"{break_member} pinned to an always-failing rig (breaker_cap 2)",
+                ),
+                (
+                    "Breaker blocked message(s)",
+                    blocked >= 1,
+                    f"{blocked} breaker-open dead letter(s)",
+                ),
+            ]
+        else:
+            checks += [
+                (
+                    "Program file(s) created",
+                    bool(repo_files),
+                    ", ".join(sorted(repo_files)) or "no .py files in repo",
+                ),
+                ("Program runs and exits 0", program_ok, program_detail),
+            ]
+        checks += [
             (
                 "Leader answered the originator",
                 final is not None,

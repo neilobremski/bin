@@ -46,3 +46,35 @@ def test_fake_sandbox_end_to_end():
     assert re.search(r"\| \S+ \| lead \| leader \|", report)  # velocity table rows
     assert "crew:lead" in report  # conversation section
     assert "human" in report
+
+
+def test_fake_sandbox_breaker_trips_and_task_still_closes():
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(R4T_PY),
+            "sandbox",
+            "--fake",
+            "--break",
+            "dev",
+            "--timeout",
+            "240",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = result.stdout
+
+    mechanical = report.split("## Mechanical checks", 1)[1].split("## Run", 1)[0]
+    for check in (
+        "Breaker tripped",
+        "Breaker blocked message(s)",
+        "Leader answered the originator",
+        "Zero orphan processes",
+    ):
+        assert check in mechanical
+    assert "| FAIL |" not in mechanical
+    assert "BREAKER dev tripped" in report  # governance events section
+    assert "breaker-open" in report

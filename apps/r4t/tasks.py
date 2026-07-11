@@ -8,12 +8,12 @@ The header is stamped and stripped by r4t only — agents never see or copy
 it. Incoming: parse + strip, adopt task/hop. Missing header → new task
 ULID, hop 0. The `auto` flag is the message-class mark (RFC 3834's
 Auto-Submitted analog): a header WITHOUT it was written by a deliberate
-hand, which resets the task's turn budget (docs/governance.md §8).
+hand, which resets the task's turn budget (docs/governance.md §9).
 
-Turn budget is weighted by tier: each dispatch by a tier whose
+Turn budget is weighted by rig: each dispatch by a rig whose
 `max_turns_per_task` is M consumes 1/M of the task's budget (which starts
-at 1.0). A task run entirely by one tier therefore gets exactly
-`max_turns_per_task` turns; mixed-tier chains pro-rate. Exhaustion closes
+at 1.0). A task run entirely by one rig therefore gets exactly
+`max_turns_per_task` turns; mixed-rig chains pro-rate. Exhaustion closes
 the task through one forced-synthesis leader turn — there is no human
 approval gate.
 """

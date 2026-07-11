@@ -1,8 +1,8 @@
 {
   "_notes": [
-    "r4t harness config — copy to ~/.r4t/harnesses.json and edit (or start from `r4t init`).",
-    "This file is the security boundary: it lives OUTSIDE the repo, and only tiers",
-    "defined here can run. A roster Harness naming a tier absent from this file fails",
+    "r4t rig config — copy to ~/.config/r4t/rigs.json and edit (or start from `r4t init`).",
+    "This file is the security boundary: it lives OUTSIDE the repo, and only rigs",
+    "defined here can run. A roster Harness naming a rig absent from this file fails",
     "closed. Keys starting with _ are ignored everywhere.",
     "{prompt} is replaced with the built prompt as a single argv element — never a shell.",
     "Every key below is optional; the values shown for the governance knobs are the",
@@ -21,7 +21,7 @@
   "rebroadcast_senders": ["chatroom"],
 
   "leader": {
-    "_notes": "Orchestrator tier — Cursor agent CLI, generous limits.",
+    "_notes": "Orchestrator rig — Cursor agent CLI, generous limits.",
     "invoke": ["agent", "-p", "--yolo", "{prompt}"],
     "timeout_seconds": 1800,
     "max_turns_per_task": 25,
@@ -30,7 +30,7 @@
   },
 
   "junior-dev": {
-    "_notes": "Cheap worker tier — OpenCode with whatever model the repo's opencode.json picks. invoke may also be a POOL (list of argvs) rotated round-robin per turn, e.g. across local models — agents never know which variant ran them.",
+    "_notes": "Cheap worker rig — OpenCode with whatever model the repo's opencode.json picks. invoke may also be a POOL (list of argvs) rotated round-robin per turn, e.g. across local models — agents never know which variant ran them.",
     "invoke": [
       ["opencode", "run", "--auto", "{prompt}"],
       ["opencode", "run", "--auto", "--model", "ollama/gpt-oss:20b", "{prompt}"]
@@ -42,13 +42,13 @@
   },
 
   "agy": {
-    "_notes": "Antigravity tier.",
+    "_notes": "Antigravity rig.",
     "invoke": ["agy", "-p", "{prompt}"],
     "timeout_seconds": 1200
   },
 
   "pins": {
-    "_notes": "agent name -> tier. A pinned agent's tier comes from HERE, silently overriding the roster's Harness line — an in-repo roster edit can't upgrade a pinned agent.",
+    "_notes": "agent name -> rig. A pinned agent's rig comes from HERE, silently overriding the roster's Rig line — an in-repo roster edit can't upgrade a pinned agent.",
     "gerry": "leader"
   }
 }

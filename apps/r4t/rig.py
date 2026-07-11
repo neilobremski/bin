@@ -1,22 +1,25 @@
-"""Harness config — the out-of-repo security boundary.
+"""Rig config — the out-of-repo security boundary.
 
-The roster names a SYMBOLIC tier (`leader`, `junior-dev`, ...). Only this
-config, which lives outside the repo (default `~/.r4t/harnesses.json`,
-overridable per-node with --harness-config), maps a tier to an actual argv.
-A tier missing from the config fails closed: the member does not run.
+The roster names a SYMBOLIC rig (`leader`, `junior-dev`, ...). Only this
+config, which lives outside the repo (default `~/.config/r4t/rigs.json`,
+overridable per-node with --rig-config), maps a rig to an actual argv.
+A rig missing from the config fails closed: the member does not run.
 
-Top-level keys are tier names, except these reserved governance keys (all
+Top-level keys are rig names, except these reserved governance keys (all
 optional — every knob has a sane default; see README.md for the table):
 
-- `"pins"` — agent name → tier, silently overriding the roster's Harness
+- `"pins"` — agent name → rig, silently overriding the roster's Rig
   line (an in-repo roster edit can't upgrade a pinned agent).
 - `"throttle"` — team-wide `max_concurrent` + `min_seconds_between_turn_starts`
-  gates, enforced before any tier check.
+  gates, enforced before any rig check.
 - `"active_ttl_rotations"` — idle passes an agent stays on the crash-recovery
   watch list after its last dispatch.
 - `"suppression_window_seconds"` — content-keyed pair suppression window.
 - `"bucket_max"` / `"bucket_earn_ratio"` — reply-privilege token bucket.
 - `"nudge_cap"` — idle nudges per agent per task before forced synthesis.
+- `"breaker_cap"` / `"breaker_cooldown_seconds"` — per-agent failure breaker:
+  consecutive failed turns (nonzero exit or timeout) that trip it, and how
+  long turns stay paused per failure before one probe turn is let through.
 - `"rebroadcast_senders"` — sender names whose inbound traffic is classed
   bulk (h4l rooms etc.).
 
@@ -42,6 +45,8 @@ RESERVED_CONFIG_KEYS = frozenset({
     "bucket_max",
     "bucket_earn_ratio",
     "nudge_cap",
+    "breaker_cap",
+    "breaker_cooldown_seconds",
     "rebroadcast_senders",
 })
 
@@ -162,17 +167,19 @@ DEFAULT_SUPPRESSION_WINDOW_SECONDS = 600.0
 DEFAULT_BUCKET_MAX = 8.0
 DEFAULT_BUCKET_EARN_RATIO = 0.1
 DEFAULT_NUDGE_CAP = 2
+DEFAULT_BREAKER_CAP = 5
+DEFAULT_BREAKER_COOLDOWN_SECONDS = 600.0
 DEFAULT_REBROADCAST_SENDERS = ("chatroom",)
 
 
-class HarnessError(Exception):
+class RigError(Exception):
     pass
 
 
 @dataclass
 class Throttle:
-    """Team-wide gate applied before any tier check. `max_concurrent` caps
-    live turns across ALL tiers (0 = unlimited); the cadence field spaces
+    """Team-wide gate applied before any rig check. `max_concurrent` caps
+    live turns across ALL rigs (0 = unlimited); the cadence field spaces
     turn STARTS so a human can watch and intervene (0 = no gate)."""
 
     max_concurrent: int = DEFAULT_MAX_CONCURRENT
@@ -180,7 +187,7 @@ class Throttle:
 
 
 @dataclass
-class Tier:
+class Rig:
     name: str
     invoke: list = field(default_factory=list)
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
@@ -192,8 +199,8 @@ class Tier:
 
     def pool(self) -> list[list[str]]:
         """`invoke` is one argv (list of str) or a pool (list of argvs) —
-        rotated round-robin per tier so e.g. local-model pools can back one
-        tier while agents stay oblivious to what runs them."""
+        rotated round-robin per rig so e.g. local-model pools can back one
+        rig while agents stay oblivious to what runs them."""
         if self.invoke and isinstance(self.invoke[0], list):
             return self.invoke
         return [self.invoke] if self.invoke else []
@@ -209,9 +216,9 @@ class Tier:
 
 
 @dataclass
-class HarnessConfig:
+class RigConfig:
     path: Path
-    tiers: dict[str, Tier] = field(default_factory=dict)
+    rigs: dict[str, Rig] = field(default_factory=dict)
     pins: dict[str, str] = field(default_factory=dict)
     throttle: Throttle = field(default_factory=Throttle)
     active_ttl_rotations: int = DEFAULT_ACTIVE_TTL_ROTATIONS
@@ -219,39 +226,41 @@ class HarnessConfig:
     bucket_max: float = DEFAULT_BUCKET_MAX
     bucket_earn_ratio: float = DEFAULT_BUCKET_EARN_RATIO
     nudge_cap: int = DEFAULT_NUDGE_CAP
+    breaker_cap: int = DEFAULT_BREAKER_CAP
+    breaker_cooldown_seconds: float = DEFAULT_BREAKER_COOLDOWN_SECONDS
     rebroadcast_senders: tuple[str, ...] = DEFAULT_REBROADCAST_SENDERS
     missing: bool = False
 
-    def tier_for(self, member: Member) -> tuple[Tier | None, str | None, bool]:
-        """Resolve a member to a runnable tier. Returns (tier, error, pinned).
-        Any failure fails closed with tier=None and a human-readable error."""
-        pinned_tier = self.pins.get(member.name.lower())
-        pinned = pinned_tier is not None
-        tier_name = pinned_tier if pinned else (member.harness or "")
-        if not tier_name:
-            return None, f"{member.name} has no harness tier", pinned
+    def rig_for(self, member: Member) -> tuple[Rig | None, str | None, bool]:
+        """Resolve a member to a runnable rig. Returns (rig, error, pinned).
+        Any failure fails closed with rig=None and a human-readable error."""
+        pinned_rig = self.pins.get(member.name.lower())
+        pinned = pinned_rig is not None
+        rig_name = pinned_rig if pinned else (member.rig or "")
+        if not rig_name:
+            return None, f"{member.name} has no Rig line in the roster", pinned
         if self.missing:
             return (
                 None,
-                f"harness config not found at {self.path} — tier {tier_name!r} "
-                f"cannot be resolved (fail closed)",
+                f"rig {rig_name!r} not found (fail closed) — "
+                f"try: r4t rig add {rig_name} <preset>",
                 pinned,
             )
-        tier = self.tiers.get(tier_name.lower())
-        if tier is None:
+        rig = self.rigs.get(rig_name.lower())
+        if rig is None:
             return (
                 None,
-                f"tier {tier_name!r} not found in harness config {self.path} "
-                "(fail closed)",
+                f"rig {rig_name!r} not found in {self.path} (fail closed) — "
+                f"try: r4t rig add {rig_name} <preset>",
                 pinned,
             )
-        if tier.error:
-            return None, f"tier {tier_name!r} is invalid: {tier.error}", pinned
-        return tier, None, pinned
+        if rig.error:
+            return None, f"rig {rig_name!r} is invalid: {rig.error}", pinned
+        return rig, None, pinned
 
 
 def default_config_path() -> Path:
-    return r4t_home() / "harnesses.json"
+    return r4t_home() / "rigs.json"
 
 
 def preset_names() -> list[str]:
@@ -268,10 +277,10 @@ def build_preset_invoke(preset: str, *, model: str | None = None) -> list[str]:
     preset_key = preset.strip().lower()
     if preset_key not in HARNESS_PRESETS:
         known = ", ".join(preset_names())
-        raise HarnessError(f"unknown preset {preset!r}; choose one of: {known}")
+        raise RigError(f"unknown preset {preset!r}; choose one of: {known}")
     needs_model = any("{model}" in arg for arg in HARNESS_PRESETS[preset_key]["invoke"])
     if needs_model and not (model or "").strip():
-        raise HarnessError(f"preset {preset_key!r} requires --model")
+        raise RigError(f"preset {preset_key!r} requires --model")
     model_value = (model or "").strip()
     argv: list[str] = []
     for arg in HARNESS_PRESETS[preset_key]["invoke"]:
@@ -282,60 +291,69 @@ def build_preset_invoke(preset: str, *, model: str | None = None) -> list[str]:
     return argv
 
 
-def _validate_tier_name(name: str) -> str:
+def _validate_rig_name(name: str) -> str:
     key = name.strip().lower()
     if not key:
-        raise HarnessError("tier name is required")
+        raise RigError("rig name is required")
     if key in RESERVED_CONFIG_KEYS:
-        raise HarnessError(f"{key!r} is a reserved harness config key, not a tier name")
+        raise RigError(f"{key!r} is a reserved rig config key, not a rig name")
     return key
 
 
 def _load_config_payload(path: Path) -> dict:
+    """A missing file is an EMPTY config, not the `r4t init` starter payload —
+    seeding starter rigs here made a fresh `rig add leader ...` collide
+    with a phantom 'leader' the user never created."""
     if path.is_file():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
-            raise HarnessError(f"cannot load harness config {path}: {e}") from e
+            raise RigError(f"cannot load rig config {path}: {e}") from e
         if not isinstance(data, dict):
-            raise HarnessError(f"harness config {path} must be a JSON object")
+            raise RigError(f"rig config {path} must be a JSON object")
         return data
-    return default_config_payload()
+    return {
+        "_notes": (
+            "Created by `r4t rig add`. Rig names are SYMBOLIC — ROSTER.md "
+            "Rig lines reference them. See `r4t rig presets` and "
+            "apps/r4t/README.md."
+        ),
+    }
 
 
-def add_preset_tier(
+def add_preset_rig(
     path: Path,
-    tier_name: str,
+    rig_name: str,
     preset: str,
     *,
     model: str | None = None,
     force: bool = False,
 ) -> str:
-    """Add or replace a symbolic tier from a named CLI preset. Returns tier key."""
-    tier_key = _validate_tier_name(tier_name)
+    """Add or replace a symbolic rig from a named CLI preset. Returns rig key."""
+    rig_key = _validate_rig_name(rig_name)
     preset_key = preset.strip().lower()
     if preset_key not in HARNESS_PRESETS:
         known = ", ".join(preset_names())
-        raise HarnessError(f"unknown preset {preset!r}; choose one of: {known}")
+        raise RigError(f"unknown preset {preset!r}; choose one of: {known}")
     payload = _load_config_payload(path)
-    if tier_key in payload and not tier_key.startswith("_") and not force:
-        raise HarnessError(
-            f"tier {tier_key!r} already exists in {path} (pass --force to replace)"
+    if rig_key in payload and not rig_key.startswith("_") and not force:
+        raise RigError(
+            f"rig {rig_key!r} already exists in {path} (pass --force to replace)"
         )
     entry = HARNESS_PRESETS[preset_key]
     invoke = build_preset_invoke(preset_key, model=model)
     note = (
-        f"Added by `r4t harness add` from preset {preset_key!r} "
+        f"Added by `r4t rig add` from preset {preset_key!r} "
         f"({entry['description']})."
     )
     if model:
         note += f" model={model.strip()}."
-    payload[tier_key] = {
+    payload[rig_key] = {
         "_notes": note,
         "invoke": invoke,
     }
     atomic_write_json(path, payload)
-    return tier_key
+    return rig_key
 
 
 def resolve_config_path(raw: str | None) -> Path:
@@ -375,19 +393,19 @@ def _normalize_invoke(invoke: object) -> tuple[list, str | None]:
     return (list(invoke) if flat else [list(v) for v in variants]), None
 
 
-def _parse_tier(name: str, raw: object) -> Tier:
-    tier = Tier(name=name.lower())
+def _parse_rig(name: str, raw: object) -> Rig:
+    rig = Rig(name=name.lower())
     if not isinstance(raw, dict):
-        tier.error = "tier definition must be an object"
-        return tier
+        rig.error = "rig definition must be an object"
+        return rig
     invoke, err = _normalize_invoke(raw.get("invoke"))
     if err:
-        tier.error = err
-        return tier
-    tier.invoke = invoke
+        rig.error = err
+        return rig
+    rig.invoke = invoke
 
     problems: list[str] = []
-    tier.timeout_seconds, err = _positive_number(
+    rig.timeout_seconds, err = _positive_number(
         raw.get("timeout_seconds"), DEFAULT_TIMEOUT_SECONDS
     )
     if err:
@@ -395,40 +413,40 @@ def _parse_tier(name: str, raw: object) -> Tier:
     concurrency, err = _positive_number(raw.get("concurrency"), DEFAULT_CONCURRENCY)
     if err:
         problems.append(f"concurrency: {err}")
-    tier.concurrency = int(concurrency)
+    rig.concurrency = int(concurrency)
     max_turns, err = _positive_number(
         raw.get("max_turns_per_task"), DEFAULT_MAX_TURNS_PER_TASK
     )
     if err:
         problems.append(f"max_turns_per_task: {err}")
-    tier.max_turns_per_task = int(max_turns)
+    rig.max_turns_per_task = int(max_turns)
     hop_limit, err = _positive_number(raw.get("hop_limit"), DEFAULT_HOP_LIMIT)
     if err:
         problems.append(f"hop_limit: {err}")
-    tier.hop_limit = int(hop_limit)
+    rig.hop_limit = int(hop_limit)
     max_sends, err = _positive_number(
         raw.get("max_sends_per_turn"), DEFAULT_MAX_SENDS_PER_TURN
     )
     if err:
         problems.append(f"max_sends_per_turn: {err}")
-    tier.max_sends_per_turn = int(max_sends)
+    rig.max_sends_per_turn = int(max_sends)
 
     if problems:
-        tier.error = "; ".join(problems)
-    return tier
+        rig.error = "; ".join(problems)
+    return rig
 
 
 def _non_negative_number(raw: object, default: float, label: str) -> float:
     if raw is None:
         return default
     if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw < 0:
-        raise HarnessError(f"{label} must be a non-negative number, got {raw!r}")
+        raise RigError(f"{label} must be a non-negative number, got {raw!r}")
     return float(raw)
 
 
 def _parse_throttle(raw: object) -> Throttle:
     if not isinstance(raw, dict):
-        raise HarnessError('"throttle" must be an object')
+        raise RigError('"throttle" must be an object')
     return Throttle(
         max_concurrent=int(
             _non_negative_number(
@@ -445,63 +463,68 @@ def _parse_throttle(raw: object) -> Throttle:
     )
 
 
-def load_harness_config(path: Path) -> HarnessConfig:
+def load_rig_config(path: Path) -> RigConfig:
     if not path.is_file():
-        return HarnessConfig(path=path, missing=True)
+        return RigConfig(path=path, missing=True)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
-        raise HarnessError(f"cannot load harness config {path}: {e}") from e
+        raise RigError(f"cannot load rig config {path}: {e}") from e
     if not isinstance(data, dict):
-        raise HarnessError(f"harness config {path} must be a JSON object")
+        raise RigError(f"rig config {path} must be a JSON object")
 
-    config = HarnessConfig(path=path)
+    config = RigConfig(path=path)
     for key, value in data.items():
         if key.startswith("_"):
             continue
         if key == "pins":
             if isinstance(value, dict):
                 config.pins = {
-                    str(agent).lower(): str(tier).strip().lower()
-                    for agent, tier in value.items()
+                    str(agent).lower(): str(rig).strip().lower()
+                    for agent, rig in value.items()
                     if not str(agent).startswith("_")
                 }
             continue
         if key == "throttle":
             config.throttle = _parse_throttle(value)
             continue
-        if key in ("active_ttl_rotations", "nudge_cap"):
+        if key in ("active_ttl_rotations", "nudge_cap", "breaker_cap"):
             n = _non_negative_number(value, 0, key)
             if n <= 0:
-                raise HarnessError(f"{key} must be positive, got {value!r}")
+                raise RigError(f"{key} must be positive, got {value!r}")
             setattr(config, key, int(n))
             continue
-        if key in ("suppression_window_seconds", "bucket_max", "bucket_earn_ratio"):
+        if key in (
+            "suppression_window_seconds",
+            "bucket_max",
+            "bucket_earn_ratio",
+            "breaker_cooldown_seconds",
+        ):
             n = _non_negative_number(value, 0, key)
             if n <= 0:
-                raise HarnessError(f"{key} must be positive, got {value!r}")
+                raise RigError(f"{key} must be positive, got {value!r}")
             setattr(config, key, n)
             continue
         if key == "rebroadcast_senders":
             if not isinstance(value, list) or not all(isinstance(s, str) for s in value):
-                raise HarnessError(f"{key} must be a list of sender names")
+                raise RigError(f"{key} must be a list of sender names")
             config.rebroadcast_senders = tuple(s.strip().lower() for s in value if s.strip())
             continue
-        config.tiers[key.lower()] = _parse_tier(key, value)
+        config.rigs[key.lower()] = _parse_rig(key, value)
     return config
 
 
 def default_config_payload() -> dict:
-    """The `r4t init` starter config: two symbolic tiers on the cheapest
-    common harness, plus notes for swapping in other CLIs. Every governance
+    """The `r4t init` starter config: two symbolic rigs on the cheapest
+    common harness CLI, plus notes for swapping in other CLIs. Every governance
     knob is left to its default."""
     return {
         "_notes": [
-            "Generated by `r4t init`. Tier names are SYMBOLIC — the roster's",
-            "Harness lines reference them; only this out-of-repo file says what",
+            "Generated by `r4t init`. Rig names are SYMBOLIC — the roster's",
+            "Rig lines reference them; only this out-of-repo file says what",
             "actually runs. Swap invoke for your CLI, or run:",
-            "  r4t harness presets",
-            "  r4t harness add <tier> <preset>",
+            "  r4t rig presets",
+            "  r4t rig add <rig> <preset>",
             "Presets mirror apps/a8s/definitions/ (claude, codex, cursor, ...).",
             "invoke may also be a LIST of argvs (a pool, rotated round-robin).",
             "All governance knobs default sanely; see apps/r4t/README.md.",

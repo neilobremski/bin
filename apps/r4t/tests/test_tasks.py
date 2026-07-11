@@ -99,14 +99,14 @@ class TestLedger:
         again = ensure_task(NODE, task_id, "someone-else")
         assert again["creator"] == "gerry"
 
-    def test_charge_weighted_by_tier(self):
+    def test_charge_weighted_by_rig(self):
         task = new_task(new_ulid(), "gerry")
         for _ in range(4):
             assert charge_turn(task, 4)
         assert not charge_turn(task, 4)
         assert task["turns"] == 4
 
-    def test_mixed_tier_weighting(self):
+    def test_mixed_rig_weighting(self):
         task = new_task(new_ulid(), "gerry")
         assert charge_turn(task, 2)  # 0.5
         assert charge_turn(task, 4)  # 0.75

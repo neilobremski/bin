@@ -159,7 +159,27 @@ Prior art: Erlang/OTP supervision restart intensity (default 1 restart
 per 5 seconds; exceed it and the supervisor stops fixing and escalates) —
 a rate limit on the recovery actions themselves.
 
-### 8. The deliberate-decision rule
+### 8. Per-agent failure breaker
+
+A member whose turns keep failing outright (nonzero exit or timeout —
+a bad flag after a CLI update, a revoked key, a dead local model) would
+otherwise burn a full turn on every inbound message while the asker
+waits forever. After `breaker_cap` consecutive failed turns the member's
+turns pause: inbound still records to history, but the message
+dead-letters and its task closes through forced synthesis so the
+originator gets an answer now. One probe turn is let through per
+`breaker_cooldown_seconds`; the first clean turn closes the breaker. A
+deliberate (non-`auto`) message resets it immediately — same license as
+the budget reset.
+
+Prior art: systemd start rate limiting (`StartLimitBurst`/
+`StartLimitIntervalSec`, default 5 starts in 10s — exceed it and the
+unit stops being restarted) and the circuit-breaker pattern's
+closed/open/half-open probe cycle; the failure counter doubling as the
+trip state mirrors SQS's `ReceiveCount` vs `maxReceiveCount` redrive
+test.
+
+### 9. The deliberate-decision rule
 
 Cycles in which every step was automatic are killed; a human message
 anywhere in a chain resets its budgets. Human attention is the license
@@ -201,6 +221,8 @@ Observability rides on a8s rather than duplicating it:
 - RabbitMQ federation max-hops — https://www.rabbitmq.com/docs/federation-reference
 - RabbitMQ dead-letter exchanges — https://www.rabbitmq.com/docs/dlx
 - Erlang/OTP supervision principles — https://www.erlang.org/doc/system/sup_princ.html
+- systemd unit start rate limiting — https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html#StartLimitIntervalSec=interval
+- AWS SQS dead-letter queue redrive (`maxReceiveCount`) — https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html
 - gRFC A6, gRPC client retries — https://github.com/grpc/proposal/blob/master/A6-client-retries.md
 - RFC 5681, TCP congestion control (AIMD) — https://www.rfc-editor.org/rfc/rfc5681
 - AWS, Exponential Backoff and Jitter —

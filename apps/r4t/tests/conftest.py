@@ -20,7 +20,7 @@ ROSTER_TEXT = textwrap.dedent(
 
     ### Gerry
     - **Status:** AI
-    - **Harness:** leader
+    - **Rig:** leader
     - **Role:** Technical Producer
     - **Leader:** yes
 
@@ -28,7 +28,7 @@ ROSTER_TEXT = textwrap.dedent(
 
     ### Phil
     - **Status:** AI
-    - **Harness:** junior-dev
+    - **Rig:** junior-dev
     - **Role:** Lead Backend Engineer
 
     Grumpy, cynical veteran. Despises feature creep.
@@ -40,7 +40,7 @@ ROSTER_TEXT = textwrap.dedent(
 
     ### Broken
     - **Status:** Sometimes
-    - **Harness:** junior-dev
+    - **Rig:** junior-dev
     """
 )
 
@@ -106,9 +106,9 @@ def base_config(script) -> dict:
 
 
 @pytest.fixture
-def harness_config(tmp_path, fake_harness):
+def rig_config(tmp_path, fake_harness):
     script, _out = fake_harness
-    path = tmp_path / "harnesses.json"
+    path = tmp_path / "rigs.json"
     path.write_text(json.dumps(base_config(script), indent=2), encoding="utf-8")
     return path
 
@@ -157,7 +157,7 @@ def chatty_config(tmp_path, chatty_harness):
     config["junior-dev"]["max_turns_per_task"] = 10
     config["junior-dev"]["max_sends_per_turn"] = 2
     config["junior-dev"]["hop_limit"] = 6
-    path = tmp_path / "chatty-harnesses.json"
+    path = tmp_path / "chatty-rigs.json"
     path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     return path
 
@@ -173,7 +173,7 @@ def tells():
 
 
 @pytest.fixture
-def ctx(r4t_home, repo, harness_config, tells):
+def ctx(r4t_home, repo, rig_config, tells):
     from dispatch import DispatchContext
 
     _sent, capture = tells
@@ -181,7 +181,7 @@ def ctx(r4t_home, repo, harness_config, tells):
         root=repo,
         node="s1l",
         roster_path=repo / "ROSTER.md",
-        config_path=harness_config,
+        config_path=rig_config,
         tell_fn=capture,
     )
 

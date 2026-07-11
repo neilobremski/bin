@@ -11,7 +11,7 @@ from state import (
     bucket_earn,
     bucket_level,
     bucket_muted,
-    count_tier_locks,
+    count_rig_locks,
     history_path,
     list_dead_letters,
     list_pending,
@@ -59,6 +59,24 @@ class TestHistory:
         assert history_path(NODE, "phil").is_relative_to(r4t_home)
 
 
+class TestHome:
+    def test_default_is_xdg_config(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("R4T_HOME", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert state.r4t_home() == tmp_path / ".config" / "r4t"
+
+    def test_xdg_config_home_respected(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("R4T_HOME", raising=False)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        assert state.r4t_home() == tmp_path / "xdg" / "r4t"
+
+    def test_r4t_home_env_wins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("R4T_HOME", str(tmp_path / "custom"))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        assert state.r4t_home() == tmp_path / "custom"
+
+
 class TestLocks:
     def test_acquire_release(self, r4t_home):
         lock = AgentLock(NODE, "phil")
@@ -70,22 +88,22 @@ class TestLocks:
     def test_stale_lock_is_stolen(self, r4t_home):
         path = state.agent_dir(NODE, "phil") / ".lock"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"pid": 99999999, "tier": "t"}), encoding="utf-8")
+        path.write_text(json.dumps({"pid": 99999999, "rig": "t"}), encoding="utf-8")
         assert AgentLock(NODE, "phil").acquire("junior-dev")
 
-    def test_live_locks_and_tier_count(self, r4t_home):
+    def test_live_locks_and_rig_count(self, r4t_home):
         AgentLock(NODE, "phil").acquire("junior-dev")
         AgentLock(NODE, "marcus").acquire("junior-dev")
         AgentLock(NODE, "gerry").acquire("leader")
         assert len(live_locks(NODE)) == 3
-        assert count_tier_locks(NODE, "junior-dev") == 2
-        assert count_tier_locks(NODE, "LEADER") == 1
+        assert count_rig_locks(NODE, "junior-dev") == 2
+        assert count_rig_locks(NODE, "LEADER") == 1
 
     def test_prune_stale_locks(self, r4t_home):
         AgentLock(NODE, "gerry").acquire("leader")
         dead = state.agent_dir(NODE, "phil") / ".lock"
         dead.parent.mkdir(parents=True, exist_ok=True)
-        dead.write_text(json.dumps({"pid": 99999999, "tier": "t"}), encoding="utf-8")
+        dead.write_text(json.dumps({"pid": 99999999, "rig": "t"}), encoding="utf-8")
         corrupt = state.agent_dir(NODE, "zoe") / ".lock"
         corrupt.parent.mkdir(parents=True, exist_ok=True)
         corrupt.write_text("not json", encoding="utf-8")
@@ -108,7 +126,7 @@ class TestVelocity:
         record_velocity(
             NODE,
             agent="phil",
-            tier="junior-dev",
+            rig="junior-dev",
             task="01ABC",
             hop=1,
             duration_seconds=1.234,
@@ -117,7 +135,7 @@ class TestVelocity:
         record_velocity(
             NODE,
             agent="gerry",
-            tier="leader",
+            rig="leader",
             task="01DEF",
             hop=0,
             duration_seconds=2.0,
@@ -132,7 +150,7 @@ class TestVelocity:
         record_velocity(
             NODE,
             agent='we,"ird',
-            tier="t",
+            rig="t",
             task="x",
             hop=0,
             duration_seconds=0,

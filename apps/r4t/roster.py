@@ -4,14 +4,14 @@ Format: `### <Name>` blocks with bullet fields:
 
     ### Phil
     - **Status:** AI
-    - **Harness:** junior-dev
+    - **Rig:** junior-dev
     - **Role:** Lead Backend Engineer
     - **Leader:** yes
     Free persona prose lives anywhere in the block.
 
 Humans (`- **Status:** Human`) are never dispatched; an optional
-`- **Address:** <a8s-name>` tells teammates how to reach them. The Harness
-value is a SYMBOLIC tier name resolved against the out-of-repo harness
+`- **Address:** <a8s-name>` tells teammates how to reach them. The Rig
+value is a SYMBOLIC rig name resolved against the out-of-repo rig
 config — never a command. Parsing is defensive: a malformed block disables
 that one member (Member.error set) without crashing dispatch.
 """
@@ -26,7 +26,7 @@ DEFAULT_ROSTER_NAME = "ROSTER.md"
 HEADING_RE = re.compile(r"^###\s+(.+?)\s*$")
 STOP_RE = re.compile(r"^#{1,3}\s")
 FIELD_RE = re.compile(r"^-\s+\*\*([A-Za-z]+):\*\*\s*(.*?)\s*$")
-TIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+RIG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
 class RosterError(Exception):
@@ -37,7 +37,7 @@ class RosterError(Exception):
 class Member:
     name: str
     status: str = "AI"
-    harness: str | None = None
+    rig: str | None = None
     role: str = ""
     leader: bool = False
     address: str | None = None
@@ -114,16 +114,16 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
     m.leader = _is_true(fields.get("leader", ""))
     m.address = fields.get("address") or None
 
-    harness = fields.get("harness", "")
-    if harness:
-        if TIER_RE.match(harness):
-            m.harness = harness.lower()
+    rig = fields.get("rig", "")
+    if rig:
+        if RIG_RE.match(rig):
+            m.rig = rig.lower()
         else:
             m.errors.append(
-                f"Harness must be a symbolic tier name, not a command (got {harness!r})"
+                f"Rig must be a symbolic rig name, not a command (got {rig!r})"
             )
     elif not m.is_human:
-        m.errors.append("missing Harness tier")
+        m.errors.append("missing Rig line")
     return m
 
 

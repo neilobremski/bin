@@ -1,5 +1,6 @@
-"""Out-of-repo team state under ~/.r4t/teams/<node>/ (relocate with R4T_HOME,
-mirroring how a8s honors A8S_HOME).
+"""Out-of-repo team state under ~/.config/r4t/teams/<node>/ (honors
+XDG_CONFIG_HOME; relocate wholesale with R4T_HOME, mirroring how a8s
+honors A8S_HOME).
 
     teams/<node>/
     ├── agents/<name>/history.md   rolling conversation memory (messages only), ~8KB cap
@@ -15,7 +16,7 @@ mirroring how a8s honors A8S_HOME).
     ├── suppression.json           content-keyed pair suppression window
     ├── buckets.json               per-agent reply-privilege token buckets
     ├── active.json                idle-recovery watch list (agent → ttl)
-    ├── rotation.json              per-tier round-robin index for harness pools
+    ├── rotation.json              per-rig round-robin index for harness pools
     ├── last-turn-start            cadence stamp for the team throttle
     ├── log/<date>.md              full I/O transcript, append-only
     └── velocity.csv               one row per harness turn
@@ -37,7 +38,7 @@ from ulid import new as new_ulid
 
 HISTORY_MAX_BYTES = 8192
 HISTORY_ENTRY_RE = re.compile(r"(?m)^(?=## )")
-VELOCITY_HEADER = "timestamp,agent,tier,task,hop,duration_seconds,exit_code\n"
+VELOCITY_HEADER = "timestamp,agent,rig,task,hop,duration_seconds,exit_code\n"
 
 
 def utc_now() -> str:
@@ -48,7 +49,9 @@ def r4t_home() -> Path:
     raw = os.environ.get("R4T_HOME", "").strip()
     if raw:
         return Path(raw).expanduser()
-    return Path.home() / ".r4t"
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    return base / "r4t"
 
 
 def teams_dir() -> Path:
@@ -141,10 +144,10 @@ class AgentLock:
         self.path = agent_dir(node, name) / ".lock"
         self.acquired = False
 
-    def acquire(self, tier: str) -> bool:
+    def acquire(self, rig: str) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(
-            {"pid": os.getpid(), "tier": tier, "started": utc_now()}
+            {"pid": os.getpid(), "rig": rig, "started": utc_now()}
         )
         for _ in range(2):
             try:
@@ -253,9 +256,9 @@ def live_locks(node: str, *, prune: bool = True) -> list[dict]:
     return out
 
 
-def count_tier_locks(node: str, tier: str) -> int:
-    key = tier.lower()
-    return sum(1 for lock in live_locks(node) if str(lock.get("tier", "")).lower() == key)
+def count_rig_locks(node: str, rig: str) -> int:
+    key = rig.lower()
+    return sum(1 for lock in live_locks(node) if str(lock.get("rig", "")).lower() == key)
 
 
 def prune_stale_locks(node: str) -> int:
@@ -310,7 +313,7 @@ def record_velocity(
     node: str,
     *,
     agent: str,
-    tier: str,
+    rig: str,
     task: str,
     hop: int,
     duration_seconds: float,
@@ -324,7 +327,7 @@ def record_velocity(
         for v in (
             utc_now(),
             agent,
-            tier,
+            rig,
             task,
             hop,
             f"{duration_seconds:.2f}",
@@ -521,6 +524,32 @@ def bucket_muted(level: float, bucket_max: float) -> bool:
     return level < bucket_max / 2.0
 
 
+# ---------- per-agent failure breaker ----------
+
+def breaker_open(
+    node: str, name: str, cap: int, cooldown_seconds: float
+) -> tuple[bool, int]:
+    """systemd-StartLimitBurst-style breaker: `cap` consecutive failed turns
+    (nonzero exit or timeout, tracked in meta.json by dispatch) opens it.
+    While open, turns are blocked until `cooldown_seconds` have passed since
+    the last failure — then one probe turn is let through (half-open); a
+    clean turn resets the count and closes it. Returns (blocked, count)."""
+    meta = read_meta(node, name)
+    count = int(meta.get("consecutive_failures", 0) or 0)
+    if cap <= 0 or count < cap:
+        return False, count
+    raw = str(meta.get("last_failure_at", ""))
+    try:
+        last = datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return False, count
+    return (time.time() - last) < cooldown_seconds, count
+
+
+def clear_failures(node: str, name: str) -> None:
+    update_meta(node, name, consecutive_failures=0)
+
+
 # ---------- per-agent meta (idle recovery bookkeeping) ----------
 
 def meta_path(node: str, name: str) -> Path:
@@ -547,9 +576,9 @@ def update_meta(node: str, name: str, **fields) -> dict:
 
 # ---------- harness pool rotation ----------
 
-def take_rotation(node: str, tier: str, pool_size: int) -> int:
-    """Return the round-robin index for this tier's next turn and persist
-    the advance. Single-variant tiers always get 0 without touching disk."""
+def take_rotation(node: str, rig: str, pool_size: int) -> int:
+    """Return the round-robin index for this rig's next turn and persist
+    the advance. Single-variant rigs always get 0 without touching disk."""
     if pool_size <= 1:
         return 0
     path = team_dir(node) / "rotation.json"
@@ -562,10 +591,10 @@ def take_rotation(node: str, tier: str, pool_size: int) -> int:
         except (OSError, json.JSONDecodeError):
             pass
     try:
-        index = int(data.get(tier, 0)) % pool_size
+        index = int(data.get(rig, 0)) % pool_size
     except (TypeError, ValueError):
         index = 0
-    data[tier] = index + 1
+    data[rig] = index + 1
     atomic_write_json(path, data)
     return index
 

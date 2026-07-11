@@ -32,7 +32,7 @@ from pathlib import Path
 
 import state
 import tasks
-from harness import HarnessConfig, HarnessError, Tier, load_harness_config
+from rig import RigConfig, RigError, Rig, load_rig_config
 from notify import TellFn
 from roster import Member, Roster, RosterError, load_roster
 
@@ -85,10 +85,10 @@ def _load_roster(ctx: DispatchContext, sender: str) -> Roster | None:
         return None
 
 
-def _load_config(ctx: DispatchContext, sender: str) -> HarnessConfig | None:
+def _load_config(ctx: DispatchContext, sender: str) -> RigConfig | None:
     try:
-        return load_harness_config(ctx.config_path)
-    except HarnessError as e:
+        return load_rig_config(ctx.config_path)
+    except RigError as e:
         _tell_error(ctx, sender, f"cannot dispatch: {e}")
         return None
 
@@ -162,17 +162,17 @@ def build_prompt(
 
 
 def run_harness(
-    tier: Tier,
+    rig: Rig,
     prompt: str,
     cwd: Path,
     *,
     env: dict | None = None,
     variant: int = 0,
 ) -> tuple[int, str, float, bool]:
-    """Run the tier's argv (pool variant `variant`) with {prompt} substituted
+    """Run the rig's argv (pool variant `variant`) with {prompt} substituted
     as a single argv element — never a shell. Returns (exit_code, output,
     duration_seconds, timed_out)."""
-    argv = tier.argv(prompt, variant)
+    argv = rig.argv(prompt, variant)
     start = time.monotonic()
     try:
         proc = subprocess.Popen(
@@ -189,7 +189,7 @@ def run_harness(
         return 127, f"failed to spawn harness {argv[0]!r}: {e}", 0.0, False
     timed_out = False
     try:
-        output, _ = proc.communicate(timeout=tier.timeout_seconds)
+        output, _ = proc.communicate(timeout=rig.timeout_seconds)
     except subprocess.TimeoutExpired:
         timed_out = True
         try:
@@ -201,7 +201,7 @@ def run_harness(
     return proc.returncode, output or "", duration, timed_out
 
 
-def _throttle_block(ctx: DispatchContext, config: HarnessConfig) -> str | None:
+def _throttle_block(ctx: DispatchContext, config: RigConfig) -> str | None:
     throttle = config.throttle
     if throttle.max_concurrent > 0:
         live = len(state.live_locks(ctx.node))
@@ -303,9 +303,9 @@ def _release_one(
 
 def release_staging(
     ctx: DispatchContext,
-    config: HarnessConfig,
+    config: RigConfig,
     member: Member,
-    tier: Tier,
+    rig: Rig,
     task_id: str,
     hop: int,
     *,
@@ -338,7 +338,7 @@ def release_staging(
         if not to or not body.strip():
             path.unlink(missing_ok=True)
             continue
-        if i >= tier.max_sends_per_turn:
+        if i >= rig.max_sends_per_turn:
             path.unlink(missing_ok=True)
             violations += 1
             state.record_dead_letter(
@@ -352,7 +352,7 @@ def release_staging(
             state.append_log(
                 ctx.node,
                 f"r4t: QUOTA {sender_addr} -> {to} task={task_id} "
-                f"(> max_sends_per_turn {tier.max_sends_per_turn})",
+                f"(> max_sends_per_turn {rig.max_sends_per_turn})",
             )
             continue
         repeated, count = state.suppression_check(
@@ -427,10 +427,10 @@ def release_staging(
 
 def _run_turn(
     ctx: DispatchContext,
-    config: HarnessConfig,
+    config: RigConfig,
     roster: Roster,
     member: Member,
-    tier: Tier,
+    rig: Rig,
     sender: str,
     body: str,
     task_id: str,
@@ -441,7 +441,7 @@ def _run_turn(
     synthesis_response: bool = False,
 ) -> None:
     prompt = build_prompt(ctx, roster, member, sender, body)
-    variant = state.take_rotation(ctx.node, tier.name, tier.pool_size)
+    variant = state.take_rotation(ctx.node, rig.name, rig.pool_size)
     staging = state.prepare_staging(ctx.node, member.name)
     state.write_turn(
         ctx.node,
@@ -451,7 +451,7 @@ def _run_turn(
             "hop": hop,
             "sender": sender,
             "body": body[:HISTORY_BODY_MAX],
-            "tier": tier.name,
+            "rig": rig.name,
             "started": state.utc_now(),
         },
     )
@@ -465,25 +465,25 @@ def _run_turn(
     state.append_log(
         ctx.node,
         f"## {state.utc_now()} dispatch {sender} -> {member.name} "
-        f"(task {task_id} hop {hop}, tier {tier.name}"
-        + (f" variant {variant}" if tier.pool_size > 1 else "")
+        f"(task {task_id} hop {hop}, rig {rig.name}"
+        + (f" variant {variant}" if rig.pool_size > 1 else "")
         + f")\n\n### Prompt\n\n{prompt}",
     )
 
     exit_code, output, duration, timed_out = run_fn(
-        tier, prompt, ctx.root, env=env, variant=variant
+        rig, prompt, ctx.root, env=env, variant=variant
     )
 
     outcome = f"exit {exit_code} in {duration:.1f}s"
     if timed_out:
-        outcome += f" (killed at timeout {tier.timeout_seconds:g}s)"
+        outcome += f" (killed at timeout {rig.timeout_seconds:g}s)"
     state.append_log(
         ctx.node,
         f"### Output ({member.name}, {outcome})\n\n{output.strip() or '(no output)'}",
     )
 
     release = release_staging(
-        ctx, config, member, tier, task_id, hop, bulk_source=bulk_source,
+        ctx, config, member, rig, task_id, hop, bulk_source=bulk_source,
         synthesis_response=synthesis_response,
     )
     if release["violations"]:
@@ -501,18 +501,22 @@ def _run_turn(
     state.record_velocity(
         ctx.node,
         agent=member.name.lower(),
-        tier=tier.name,
+        rig=rig.name,
         task=task_id,
         hop=hop,
         duration_seconds=duration,
         exit_code=exit_code,
     )
     completed = state.utc_now()
-    state.update_meta(
-        ctx.node,
-        member.name,
-        last_completed_at=completed,
-        last_turn={
+    failed = timed_out or exit_code != 0
+    failures = int(
+        state.read_meta(ctx.node, member.name).get("consecutive_failures", 0) or 0
+    )
+    failures = failures + 1 if failed else 0
+    meta_fields = {
+        "last_completed_at": completed,
+        "consecutive_failures": failures,
+        "last_turn": {
             "task": task_id,
             "hop": hop,
             "sender": sender,
@@ -520,13 +524,23 @@ def _run_turn(
             "timed_out": timed_out,
             "completed_at": completed,
         },
-    )
+    }
+    if failed:
+        meta_fields["last_failure_at"] = completed
+    state.update_meta(ctx.node, member.name, **meta_fields)
     state.clear_turn(ctx.node, member.name)
+    if failed and failures == config.breaker_cap:
+        state.append_log(
+            ctx.node,
+            f"r4t: BREAKER {member.name.lower()} tripped ({failures} consecutive "
+            f"failed turns, rig {rig.name}) — turns pause; one probe per "
+            f"{config.breaker_cooldown_seconds:g}s until a turn succeeds",
+        )
     if exit_code == 127:
         _tell_error(
             ctx,
             sender,
-            f"{member.name}'s harness (tier {tier.name}) failed to start: "
+            f"{member.name}'s harness (rig {rig.name}) failed to start: "
             f"{output.strip()}",
         )
 
@@ -535,7 +549,7 @@ def _run_turn(
 
 def _forced_synthesis(
     ctx: DispatchContext,
-    config: HarnessConfig,
+    config: RigConfig,
     roster: Roster,
     task: dict,
     run_fn,
@@ -573,14 +587,14 @@ def _forced_synthesis(
             f"r4t: SYNTHESIS-SKIPPED task={task_id} ({why}; no usable leader)",
         )
         return SKIPPED
-    tier, err, _pinned = config.tier_for(leader)
-    if tier is None:
+    rig, err, _pinned = config.rig_for(leader)
+    if rig is None:
         state.append_log(
             ctx.node, f"r4t: SYNTHESIS-SKIPPED task={task_id} ({why}; {err})"
         )
         return SKIPPED
     lock = state.AgentLock(ctx.node, leader.name)
-    if not lock.acquire(tier.name):
+    if not lock.acquire(rig.name):
         state.park_pending(ctx.node, {"synthesis": True, "task": task_id, "why": why})
         return DEFERRED
     try:
@@ -608,7 +622,7 @@ def _forced_synthesis(
             ctx.node, f"r4t: SYNTHESIS task={task['id']} leader={leader.name.lower()} ({why})"
         )
         _run_turn(
-            ctx, config, roster, leader, tier, creator, body,
+            ctx, config, roster, leader, rig, creator, body,
             task["id"], int(task.get("turns", 0)), run_fn,
             synthesis_response=True,
         )
@@ -692,8 +706,8 @@ def _handle(
     config = _load_config(ctx, sender)
     if config is None:
         return SKIPPED
-    tier, err, _pinned = config.tier_for(member)
-    if tier is None:
+    rig, err, _pinned = config.rig_for(member)
+    if rig is None:
         _tell_error(ctx, sender, f"{member.name} cannot run: {err}")
         return SKIPPED
 
@@ -733,7 +747,7 @@ def _handle(
         early_outcome = ""
         if task.get("status") == tasks.STATUS_CLOSED and not accepted_synthesis:
             early_outcome = "closed"
-        elif not accepted_synthesis and hop >= tier.hop_limit:
+        elif not accepted_synthesis and hop >= rig.hop_limit:
             early_outcome = "hop-cut"
             if not task.get("cut_notified"):
                 task["cut_notified"] = True
@@ -742,10 +756,13 @@ def _handle(
     finally:
         ledger_lock.release()
 
+    if had_header and not auto:
+        state.clear_failures(ctx.node, member.name)
     if deliberate_reset:
         state.append_log(
             ctx.node,
-            f"r4t: DELIBERATE task={task_id} budget reset (non-auto header from {sender})",
+            f"r4t: DELIBERATE task={task_id} budget and breaker reset "
+            f"(non-auto header from {sender})",
         )
     if early_outcome == "closed":
         state.record_dead_letter(
@@ -764,13 +781,13 @@ def _handle(
         state.append_log(
             ctx.node,
             f"r4t: CUT task={task_id} hop={hop} {sender} -> {member.name.lower()} "
-            f"(tier {tier.name} hop_limit {tier.hop_limit})",
+            f"(rig {rig.name} hop_limit {rig.hop_limit})",
         )
         if cut_recipient:
             ctx.tell_fn(
                 cut_recipient,
                 f"[r4t {ctx.node}] task {task_id}: message chain cut at hop "
-                f"{hop} (tier {tier.name} hop_limit {tier.hop_limit}). The last "
+                f"{hop} (rig {rig.name} hop_limit {rig.hop_limit}). The last "
                 f"message was {sender} -> {member.name} and was not dispatched.",
             )
         return DEAD
@@ -795,6 +812,35 @@ def _handle(
                 f"r4t: SUPPRESSED inbound {sender} -> {to} task={task_id} repeat={count}",
             )
             return DEAD
+
+    breaker_blocked, failures = state.breaker_open(
+        ctx.node, member.name, config.breaker_cap, config.breaker_cooldown_seconds
+    )
+    if breaker_blocked:
+        now = state.utc_now()
+        entry_body = body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"
+        state.append_history(ctx.node, member.name, f"## {now} from {sender}\n\n{entry_body}")
+        state.update_meta(ctx.node, member.name, last_inbound_at=now, last_completed_at=now)
+        state.record_dead_letter(
+            ctx.node, reason="breaker-open", sender=sender, to=to,
+            task=task_id, content=body,
+        )
+        state.append_log(
+            ctx.node,
+            f"r4t: BREAKER {member.name.lower()} open ({failures} consecutive "
+            f"failed turns, rig {rig.name}) — message from {sender} recorded "
+            "to history only; closing the task through forced synthesis",
+        )
+        # The chain through this member is dead until a probe succeeds, so
+        # the task terminates in an answer now instead of dangling (same
+        # rule as budget exhaustion). A deliberate human message reopens
+        # both the task budget and the breaker.
+        task = tasks.ensure_task(ctx.node, task_id, sender)
+        return _forced_synthesis(
+            ctx, config, roster, task, run_fn,
+            why=f"{member.name.lower()}'s failure breaker is open "
+            f"({failures} consecutive failed turns)",
+        )
 
     level = state.bucket_level(ctx.node, member.name, config.bucket_max)
     if state.bucket_muted(level, config.bucket_max):
@@ -823,11 +869,11 @@ def _handle(
     task_outcome = ""
     try:
         throttle_reason = _throttle_block(ctx, config)
-        acquired = throttle_reason is None and lock.acquire(tier.name)
-        tier_blocked = acquired and state.count_tier_locks(
-            ctx.node, tier.name
-        ) > tier.concurrency
-        if tier_blocked:
+        acquired = throttle_reason is None and lock.acquire(rig.name)
+        rig_blocked = acquired and state.count_rig_locks(
+            ctx.node, rig.name
+        ) > rig.concurrency
+        if rig_blocked:
             lock.release()
             acquired = False
         if acquired:
@@ -852,7 +898,7 @@ def _handle(
                     if task.get("status") == tasks.STATUS_CLOSED and not accepted_synthesis:
                         task_outcome = "closed"
                     elif accepted_synthesis or tasks.charge_turn(
-                        task, tier.max_turns_per_task
+                        task, rig.max_turns_per_task
                     ):
                         task_outcome = "admitted"
                     else:
@@ -904,11 +950,11 @@ def _handle(
         )
         return DEFERRED
 
-    if tier_blocked:
+    if rig_blocked:
         state.park_pending(ctx.node, envelope)
         state.append_log(
             ctx.node,
-            f"r4t: DEFERRED (tier {tier.name} at concurrency {tier.concurrency}) "
+            f"r4t: DEFERRED (rig {rig.name} at concurrency {rig.concurrency}) "
             f"{sender} -> {member.name.lower()} task={task_id}",
         )
         return DEFERRED
@@ -933,7 +979,7 @@ def _handle(
 
     try:
         _run_turn(
-            ctx, config, roster, member, tier, sender, body, task_id, hop,
+            ctx, config, roster, member, rig, sender, body, task_id, hop,
             run_fn, bulk_source=bulk_source,
         )
         return RAN
@@ -1093,8 +1139,8 @@ def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
     task, then the leader closes the task with what exists."""
     try:
         roster = load_roster(ctx.roster_path)
-        config = load_harness_config(ctx.config_path)
-    except (RosterError, HarnessError) as e:
+        config = load_rig_config(ctx.config_path)
+    except (RosterError, RigError) as e:
         state.append_log(ctx.node, f"r4t: IDLE-SKIPPED {e}")
         return {"watched": 0, "nudged": [], "dropped": [], "error": str(e)}
 
@@ -1179,9 +1225,12 @@ def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
             f"({count + 1}/{config.nudge_cap}): " + "; ".join(evidence),
         )
         message = f"{tasks.format_header(task_id, hop, auto=True)} {_nudge_body(evidence)}"
+        # Stamped BEFORE the nudge turn runs: a nudged turn that fails
+        # completes after this stamp, so its failure stays visible as
+        # evidence next pass and the nudge cap can actually be reached.
+        state.mark_nudged(ctx.node, agent_key)
         try:
             _handle(ctx, sender, f"{ctx.node}:{agent_key}", message, run_fn=run_fn)
-            state.mark_nudged(ctx.node, agent_key)
         finally:
             ledger_lock = state.task_lock(ctx.node, task_id)
             if ledger_lock.acquire():

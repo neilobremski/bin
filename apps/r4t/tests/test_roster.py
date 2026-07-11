@@ -22,7 +22,7 @@ class TestParsing:
         gerry = roster.find("gerry")
         assert gerry is not None
         assert gerry.status == "AI"
-        assert gerry.harness == "leader"
+        assert gerry.rig == "leader"
         assert gerry.role == "Technical Producer"
         assert gerry.leader
         assert not gerry.errors
@@ -42,13 +42,13 @@ class TestParsing:
         assert roster.leader().name == "Gerry"
 
     def test_no_leader(self):
-        roster = parse("### Solo\n- **Status:** AI\n- **Harness:** t\n")
+        roster = parse("### Solo\n- **Status:** AI\n- **Rig:** t\n")
         assert roster.leader() is None
 
     def test_human_leader_not_dispatched_as_leader(self):
         roster = parse(
             "### Boss\n- **Status:** Human\n- **Leader:** yes\n"
-            "### Dev\n- **Status:** AI\n- **Harness:** t\n"
+            "### Dev\n- **Status:** AI\n- **Rig:** t\n"
         )
         assert roster.leader() is None
 
@@ -62,25 +62,25 @@ class TestParsing:
         roster = parse("### Human\n- **Status:** Human\n")
         assert not roster.find("human").errors
 
-    def test_backticked_harness(self):
-        roster = parse("### A\n- **Status:** AI\n- **Harness:** `tier-1`\n")
-        assert roster.find("a").harness == "tier-1"
+    def test_backticked_rig(self):
+        roster = parse("### A\n- **Status:** AI\n- **Rig:** `rig-1`\n")
+        assert roster.find("a").rig == "rig-1"
 
-    def test_harness_tier_is_lowercased(self):
-        roster = parse("### A\n- **Status:** AI\n- **Harness:** Leader\n")
-        assert roster.find("a").harness == "leader"
+    def test_rig_is_lowercased(self):
+        roster = parse("### A\n- **Status:** AI\n- **Rig:** Leader\n")
+        assert roster.find("a").rig == "leader"
 
     def test_mandate_accepted_as_role(self):
         roster = parse(
-            "### A\n- **Status:** AI\n- **Harness:** t\n- **Mandate:** The Server\n"
+            "### A\n- **Status:** AI\n- **Rig:** t\n- **Mandate:** The Server\n"
         )
         assert roster.find("a").role == "The Server"
 
     def test_blocks_end_at_next_heading(self):
         roster = parse(
-            "### A\n- **Status:** AI\n- **Harness:** t\npersona a\n"
+            "### A\n- **Status:** AI\n- **Rig:** t\npersona a\n"
             "## Section\nloose prose\n"
-            "### B\n- **Status:** AI\n- **Harness:** t\n"
+            "### B\n- **Status:** AI\n- **Rig:** t\n"
         )
         assert "loose prose" not in roster.find("a").persona
         assert roster.find("b") is not None
@@ -95,20 +95,20 @@ class TestMalformed:
 
     def test_command_harness_disables_member(self):
         roster = parse(
-            "### A\n- **Status:** AI\n- **Harness:** `agent -p --yolo {prompt}`\n"
+            "### A\n- **Status:** AI\n- **Rig:** `agent -p --yolo {prompt}`\n"
         )
         member = roster.find("a")
         assert member.errors
-        assert "symbolic tier" in member.error
+        assert "symbolic rig" in member.error
 
-    def test_ai_without_harness_disabled(self):
+    def test_ai_without_rig_disabled(self):
         roster = parse("### A\n- **Status:** AI\n")
-        assert "missing Harness" in roster.find("a").error
+        assert "missing Rig" in roster.find("a").error
 
     def test_duplicate_names_disable_both(self):
         roster = parse(
-            "### A\n- **Status:** AI\n- **Harness:** t\n"
-            "### a\n- **Status:** AI\n- **Harness:** t\n"
+            "### A\n- **Status:** AI\n- **Rig:** t\n"
+            "### a\n- **Status:** AI\n- **Rig:** t\n"
         )
         assert all("duplicate" in m.error for m in roster.members)
 

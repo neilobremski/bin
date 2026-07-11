@@ -22,7 +22,7 @@ from dispatch import (
     run_idle,
     split_recipient,
 )
-from harness import Tier
+from rig import Rig
 from r4t import main as r4t_main
 from ulid import new as new_ulid
 
@@ -162,9 +162,9 @@ class TestDispatchRejections:
         assert "disabled" in sent[0][1]
         assert "Status" in sent[0][1]
 
-    def test_unknown_tier_fails_closed(self, ctx, repo, tells, fake_harness):
+    def test_unknown_rig_fails_closed(self, ctx, repo, tells, fake_harness):
         (repo / "ROSTER.md").write_text(
-            "### Ghost\n- **Status:** AI\n- **Harness:** unconfigured-tier\n"
+            "### Ghost\n- **Status:** AI\n- **Rig:** unconfigured-rig\n"
             "- **Leader:** yes\n",
             encoding="utf-8",
         )
@@ -183,7 +183,7 @@ class TestDispatchRejections:
 
     def test_no_leader_for_bare_node(self, ctx, repo, tells, fake_harness):
         (repo / "ROSTER.md").write_text(
-            "### Solo\n- **Status:** AI\n- **Harness:** junior-dev\n",
+            "### Solo\n- **Status:** AI\n- **Rig:** junior-dev\n",
             encoding="utf-8",
         )
         sent, _ = tells
@@ -193,15 +193,15 @@ class TestDispatchRejections:
 
 
 class TestPins:
-    def test_pin_overrides_roster_tier(self, ctx, repo, fake_harness):
+    def test_pin_overrides_roster_rig(self, ctx, repo, fake_harness):
         (repo / "ROSTER.md").write_text(
-            "### Gerry\n- **Status:** AI\n- **Harness:** junior-dev\n"
+            "### Gerry\n- **Status:** AI\n- **Rig:** junior-dev\n"
             "- **Leader:** yes\n",
             encoding="utf-8",
         )
         handle_message(ctx, "neil", "s1l:gerry", "hi")
         text = (state.team_dir(NODE) / "velocity.csv").read_text()
-        assert "gerry,leader," in text  # pinned tier, not roster's junior-dev
+        assert "gerry,leader," in text  # pinned rig, not roster's junior-dev
 
 
 class TestStagingRelease:
@@ -341,6 +341,68 @@ class TestBucketMute:
         assert len(harness_calls(fake_harness)) == 1
 
 
+def fail_run(rig, prompt, cwd, *, env=None, variant=0):
+    return 1, "boom", 0.05, False
+
+
+def ok_run(rig, prompt, cwd, *, env=None, variant=0):
+    return 0, "ok", 0.05, False
+
+
+def timeout_run(rig, prompt, cwd, *, env=None, variant=0):
+    return 0, "hung", 0.05, True
+
+
+def trip_breaker(ctx, agent="phil", cap=5):
+    for i in range(cap):
+        assert _handle(ctx, "neil", f"s1l:{agent}", f"attempt {i}", run_fn=fail_run) == RAN
+
+
+class TestFailureBreaker:
+    def test_failures_counted_and_cleared_by_clean_turn(self, ctx):
+        assert _handle(ctx, "neil", "s1l:phil", "one", run_fn=fail_run) == RAN
+        assert _handle(ctx, "neil", "s1l:phil", "two", run_fn=timeout_run) == RAN
+        assert state.read_meta(NODE, "phil")["consecutive_failures"] == 2
+        assert _handle(ctx, "neil", "s1l:phil", "three", run_fn=ok_run) == RAN
+        assert state.read_meta(NODE, "phil")["consecutive_failures"] == 0
+
+    def test_trips_at_cap_then_blocks_and_closes_through_synthesis(self, ctx):
+        trip_breaker(ctx)
+        assert _handle(ctx, "neil", "s1l:phil", "blocked one", run_fn=ok_run) == SYNTHESIS
+        assert "breaker-open" in dead_reasons()
+        assert "blocked one" in state.read_history(NODE, "phil")
+        assert any(t.get("synthesized") for t in tasks.list_tasks(NODE))
+
+    def test_half_open_probe_success_closes(self, ctx):
+        trip_breaker(ctx)
+        state.update_meta(NODE, "phil", last_failure_at="2020-01-01T00:00:00Z")
+        assert _handle(ctx, "neil", "s1l:phil", "probe", run_fn=ok_run) == RAN
+        assert state.read_meta(NODE, "phil")["consecutive_failures"] == 0
+        assert _handle(ctx, "neil", "s1l:phil", "normal again", run_fn=ok_run) == RAN
+
+    def test_failed_probe_reopens_for_another_cooldown(self, ctx):
+        trip_breaker(ctx)
+        state.update_meta(NODE, "phil", last_failure_at="2020-01-01T00:00:00Z")
+        assert _handle(ctx, "neil", "s1l:phil", "probe", run_fn=fail_run) == RAN
+        assert _handle(ctx, "neil", "s1l:phil", "still broken", run_fn=ok_run) == SYNTHESIS
+
+    def test_deliberate_header_resets_breaker(self, ctx):
+        trip_breaker(ctx)
+        header = tasks.format_header(new_ulid(), 0, auto=False)
+        assert _handle(ctx, "neil", "s1l:phil", f"{header} try again", run_fn=ok_run) == RAN
+        assert state.read_meta(NODE, "phil")["consecutive_failures"] == 0
+
+    def test_task_still_closes_through_synthesis_with_breaker_open(self, ctx, fake_harness):
+        trip_breaker(ctx)
+        task_id = new_ulid()
+        for i in range(4):  # leader budget: 4 turns
+            header = tasks.format_header(task_id, 0, auto=True)
+            _handle(ctx, "neil", "s1l:gerry", f"{header} step {i}")
+        header = tasks.format_header(task_id, 0, auto=True)
+        assert _handle(ctx, "neil", "s1l:gerry", f"{header} over budget") == SYNTHESIS
+        assert tasks.load_task(NODE, task_id)["synthesis_state"] == "done"
+
+
 class TestForcedSynthesis:
     def test_budget_exhaustion_runs_one_leader_turn_and_closes(
         self, ctx, tells, fake_harness
@@ -378,7 +440,7 @@ class TestForcedSynthesis:
 
     def test_synthesis_runs_once_per_task(self, ctx, repo, fake_harness):
         (repo / "ROSTER.md").write_text(
-            "### Phil\n- **Status:** AI\n- **Harness:** junior-dev\n",
+            "### Phil\n- **Status:** AI\n- **Rig:** junior-dev\n",
             encoding="utf-8",
         )
         task_id = new_ulid()
@@ -680,7 +742,7 @@ class TestClassificationOrdering:
 
 
 class TestConcurrency:
-    def test_tier_limit_defers_to_pending(self, ctx, tells, fake_harness):
+    def test_rig_limit_defers_to_pending(self, ctx, tells, fake_harness):
         other = state.AgentLock(NODE, "marcus")
         assert other.acquire("junior-dev")
         assert _handle(ctx, "gerry", f"{NODE}:phil", "blocked") == DEFERRED
@@ -765,9 +827,9 @@ def _set_throttle(config_path, **throttle):
 
 
 class TestTeamThrottle:
-    def test_max_concurrent_caps_across_tiers(self, ctx, harness_config, fake_harness):
+    def test_max_concurrent_caps_across_rigs(self, ctx, rig_config, fake_harness):
         _set_throttle(
-            harness_config, max_concurrent=1, min_seconds_between_turn_starts=0
+            rig_config, max_concurrent=1, min_seconds_between_turn_starts=0
         )
         other = state.AgentLock(NODE, "marcus")
         assert other.acquire("leader")
@@ -779,9 +841,9 @@ class TestTeamThrottle:
         assert drain(ctx) == 1
         assert len(harness_calls(fake_harness)) == 1
 
-    def test_cadence_spaces_turn_starts(self, ctx, harness_config, fake_harness):
+    def test_cadence_spaces_turn_starts(self, ctx, rig_config, fake_harness):
         _set_throttle(
-            harness_config, max_concurrent=0, min_seconds_between_turn_starts=3600
+            rig_config, max_concurrent=0, min_seconds_between_turn_starts=3600
         )
         assert _handle(ctx, "gerry", f"{NODE}:phil", "first") == RAN
         assert _handle(ctx, "gerry", f"{NODE}:gerry", "too soon") == DEFERRED
@@ -792,9 +854,9 @@ class TestTeamThrottle:
         assert len(harness_calls(fake_harness)) == 1
         assert len(state.list_pending(NODE)) == 1
 
-    def test_cadence_allows_after_window(self, ctx, harness_config, fake_harness):
+    def test_cadence_allows_after_window(self, ctx, rig_config, fake_harness):
         _set_throttle(
-            harness_config, max_concurrent=0, min_seconds_between_turn_starts=3600
+            rig_config, max_concurrent=0, min_seconds_between_turn_starts=3600
         )
         state._atomic_write_text(
             state.last_turn_start_path(NODE), "2020-01-01T00:00:00Z\n"
@@ -802,10 +864,10 @@ class TestTeamThrottle:
         assert _handle(ctx, "gerry", f"{NODE}:phil", "late enough") == RAN
 
     def test_simultaneous_admissions_reserve_team_slot_and_cadence(
-        self, ctx, harness_config
+        self, ctx, rig_config
     ):
         _set_throttle(
-            harness_config, max_concurrent=1, min_seconds_between_turn_starts=3600
+            rig_config, max_concurrent=1, min_seconds_between_turn_starts=3600
         )
         entered = threading.Event()
         release = threading.Event()
@@ -1080,27 +1142,27 @@ class TestRunHarness:
     def test_timeout_kills_process_group(self, tmp_path):
         script = tmp_path / "sleepy.py"
         script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
-        tier = Tier(
+        rig = Rig(
             name="slow",
             invoke=[sys.executable, str(script), "{prompt}"],
             timeout_seconds=1,
         )
-        code, _out, duration, timed_out = run_harness(tier, "x", tmp_path)
+        code, _out, duration, timed_out = run_harness(rig, "x", tmp_path)
         assert timed_out
         assert duration < 10
         assert code != 0
 
     def test_spawn_failure_reports_127(self, tmp_path):
-        tier = Tier(name="t", invoke=["/no/such/binary-r4t", "{prompt}"])
-        code, out, _dur, timed_out = run_harness(tier, "x", tmp_path)
+        rig = Rig(name="t", invoke=["/no/such/binary-r4t", "{prompt}"])
+        code, out, _dur, timed_out = run_harness(rig, "x", tmp_path)
         assert code == 127
         assert "failed to spawn" in out
         assert not timed_out
 
-    def test_spawn_failure_tells_sender(self, ctx, repo, tells, fake_harness, harness_config):
-        config = json.loads(harness_config.read_text(encoding="utf-8"))
+    def test_spawn_failure_tells_sender(self, ctx, repo, tells, fake_harness, rig_config):
+        config = json.loads(rig_config.read_text(encoding="utf-8"))
         config["junior-dev"]["invoke"] = ["/no/such/binary-r4t", "{prompt}"]
-        harness_config.write_text(json.dumps(config), encoding="utf-8")
+        rig_config.write_text(json.dumps(config), encoding="utf-8")
         sent, _ = tells
         handle_message(ctx, "gerry", f"{NODE}:phil", "hi")
         assert any("failed to start" in b for _, b in sent)
@@ -1110,21 +1172,21 @@ class TestCli:
     def run(self, *argv):
         return r4t_main(list(argv))
 
-    def test_dispatch_end_to_end(self, r4t_home, repo, harness_config, fake_harness):
+    def test_dispatch_end_to_end(self, r4t_home, repo, rig_config, fake_harness):
         rc = self.run(
             "dispatch",
             "--root", str(repo),
             "--from", "gerry",
             "--to", "s1l:phil",
             "--message", "cli job",
-            "--harness-config", str(harness_config),
+            "--rig-config", str(rig_config),
             "--no-notify",
         )
         assert rc == 0
         assert len(harness_calls(fake_harness)) == 1
 
     def test_dispatch_drains_pending_first(
-        self, r4t_home, repo, harness_config, fake_harness
+        self, r4t_home, repo, rig_config, fake_harness
     ):
         state.park_pending(
             NODE,
@@ -1137,7 +1199,7 @@ class TestCli:
             "--from", "gerry",
             "--to", "s1l:phil",
             "--message", "live one",
-            "--harness-config", str(harness_config),
+            "--rig-config", str(rig_config),
             "--no-notify",
         )
         calls = harness_calls(fake_harness)
@@ -1145,29 +1207,33 @@ class TestCli:
         assert "parked earlier" in read_prompt(calls[0])
         assert "live one" in read_prompt(calls[1])
 
-    def test_status(self, r4t_home, repo, harness_config, capsys):
+    def test_status(self, r4t_home, repo, rig_config, capsys):
         state.team_dir(NODE).mkdir(parents=True, exist_ok=True)
         rc = self.run(
             "status",
             "--root", str(repo),
             "--node", NODE,
-            "--harness-config", str(harness_config),
+            "--rig-config", str(rig_config),
             "--no-notify",
         )
         assert rc == 0
         out = capsys.readouterr().out
-        assert "Gerry: tier=leader (pinned)" in out
+        assert "Roster  (repo settings:" in out
+        assert "Rigs  (your configuration:" in out
+        assert "Activity" in out
+        assert "rig=leader (pinned)" in out
         assert "bucket=8.0/8" in out
-        assert "Phil: tier=junior-dev" in out
-        assert "Neil: Human, address=neil" in out
-        assert "Broken: DISABLED" in out
-        assert "dead letters: 0" in out
+        assert "✓ Phil" in out and "rig=junior-dev" in out
+        assert "Human  address=neil" in out
+        assert "✗ Broken" in out and "disabled:" in out
+        assert "(try: fix ROSTER.md)" in out
+        assert "dead letters  0" in out
 
-    def test_harness_list(self, r4t_home, repo, harness_config, capsys):
+    def test_rig_list(self, r4t_home, repo, rig_config, capsys):
         rc = self.run(
-            "harness", "list",
+            "rig", "list",
             "--root", str(repo),
-            "--harness-config", str(harness_config),
+            "--rig-config", str(rig_config),
         )
         assert rc == 0
         out = capsys.readouterr().out
@@ -1176,38 +1242,65 @@ class TestCli:
         assert "Phil: junior-dev" in out
         assert "Neil: Human" in out
 
-    def test_harness_presets(self, capsys):
-        rc = self.run("harness", "presets")
+    def test_rig_presets(self, capsys):
+        rc = self.run("rig", "presets")
         assert rc == 0
         out = capsys.readouterr().out
         assert "claude" in out
         assert "opencode" in out
         assert "cursor" in out
         assert "headless:" in out
-        assert "r4t harness add" in out
+        assert "r4t rig add" in out
 
-    def test_harness_add(self, tmp_path, capsys):
-        config_path = tmp_path / "harnesses.json"
+    def test_rig_add(self, tmp_path, capsys):
+        config_path = tmp_path / "rigs.json"
         rc = self.run(
-            "harness", "add", "reviewer", "claude",
-            "--harness-config", str(config_path),
+            "rig", "add", "reviewer", "claude",
+            "--rig-config", str(config_path),
         )
         assert rc == 0
         out = capsys.readouterr().out
-        assert "added tier 'reviewer'" in out
-        assert "Harness:** reviewer" in out
+        assert "added rig 'reviewer'" in out
+        assert "Rig:** reviewer" in out
         data = json.loads(config_path.read_text(encoding="utf-8"))
         assert data["reviewer"]["invoke"][0] == "claude"
 
-    def test_harness_add_duplicate_fails(self, tmp_path, capsys):
-        config_path = tmp_path / "harnesses.json"
+    def test_rig_add_fresh_config_has_no_phantom_rigs(self, tmp_path):
+        config_path = tmp_path / "rigs.json"
+        rc = self.run(
+            "rig", "add", "leader", "agy",
+            "--rig-config", str(config_path),
+        )
+        assert rc == 0
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert [k for k in data if not k.startswith("_")] == ["leader"]
+
+    def test_rig_bare_shows_overview(self, r4t_home, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        rc = self.run("rig")
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "r4t rig —" in out
+        assert "(missing)" in out
+        assert "no rigs yet" in out
+        assert "Commands" in out
+        assert "Next steps" in out
+        assert "r4t rig add leader <preset>" in out
+
+    def test_rigs_alias(self, r4t_home, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        assert self.run("rigs") == 0
+        assert "r4t rig —" in capsys.readouterr().out
+
+    def test_rig_add_duplicate_fails(self, tmp_path, capsys):
+        config_path = tmp_path / "rigs.json"
         config_path.write_text(
             json.dumps({"worker": {"invoke": ["x", "{prompt}"]}}),
             encoding="utf-8",
         )
         rc = self.run(
-            "harness", "add", "worker", "opencode",
-            "--harness-config", str(config_path),
+            "rig", "add", "worker", "opencode",
+            "--rig-config", str(config_path),
         )
         assert rc == 1
         assert "already exists" in capsys.readouterr().err
@@ -1219,10 +1312,10 @@ class TestCli:
         assert self.run("task", "show", task["id"], "--node", NODE) == 0
         assert '"creator": "gerry"' in capsys.readouterr().out
 
-    def test_clear_prunes_and_expires(self, r4t_home, repo, harness_config, capsys):
+    def test_clear_prunes_and_expires(self, r4t_home, repo, rig_config, capsys):
         dead = state.agent_dir(NODE, "phil") / ".lock"
         dead.parent.mkdir(parents=True, exist_ok=True)
-        dead.write_text(json.dumps({"pid": 99999999, "tier": "t"}), encoding="utf-8")
+        dead.write_text(json.dumps({"pid": 99999999, "rig": "t"}), encoding="utf-8")
         stale = tasks.new_task(new_ulid(), "gerry")
         stale["updated_at"] = "2020-01-01T00:00:00Z"
         tasks.atomic_write_json(tasks.task_path(NODE, stale["id"]), stale)
@@ -1230,7 +1323,7 @@ class TestCli:
             "clear",
             "--root", str(repo),
             "--node", NODE,
-            "--harness-config", str(harness_config),
+            "--rig-config", str(rig_config),
             "--no-notify",
         )
         assert rc == 0
@@ -1239,17 +1332,17 @@ class TestCli:
         assert "expired 1 task(s)" in out
         assert tasks.load_task(NODE, stale["id"]) is None
 
-    def test_roster_check_flags_problems(self, r4t_home, repo, harness_config, capsys):
+    def test_roster_check_flags_problems(self, r4t_home, repo, rig_config, capsys):
         rc = self.run(
             "roster", "check",
             "--root", str(repo),
-            "--harness-config", str(harness_config),
+            "--rig-config", str(rig_config),
         )
         assert rc == 1  # the fixture roster contains the Broken member
         out = capsys.readouterr().out
         assert "Broken" in out
 
-    def test_roster_check_clean(self, r4t_home, tmp_path, harness_config, capsys):
+    def test_roster_check_clean(self, r4t_home, tmp_path, rig_config, capsys):
         root = tmp_path / "clean-repo"
         root.mkdir()
         (root / "ROSTER.md").write_text(
@@ -1257,12 +1350,12 @@ class TestCli:
                 """\
                 ### Gerry
                 - **Status:** AI
-                - **Harness:** leader
+                - **Rig:** leader
                 - **Leader:** yes
 
                 ### Phil
                 - **Status:** AI
-                - **Harness:** junior-dev
+                - **Rig:** junior-dev
                 """
             ),
             encoding="utf-8",
@@ -1270,22 +1363,22 @@ class TestCli:
         rc = self.run(
             "roster", "check",
             "--root", str(root),
-            "--harness-config", str(harness_config),
+            "--rig-config", str(rig_config),
         )
         assert rc == 0
         assert "OK" in capsys.readouterr().out
 
-    def test_roster_check_missing_leader(self, r4t_home, tmp_path, harness_config, capsys):
+    def test_roster_check_missing_leader(self, r4t_home, tmp_path, rig_config, capsys):
         root = tmp_path / "leaderless"
         root.mkdir()
         (root / "ROSTER.md").write_text(
-            "### Phil\n- **Status:** AI\n- **Harness:** junior-dev\n",
+            "### Phil\n- **Status:** AI\n- **Rig:** junior-dev\n",
             encoding="utf-8",
         )
         rc = self.run(
             "roster", "check",
             "--root", str(root),
-            "--harness-config", str(harness_config),
+            "--rig-config", str(rig_config),
         )
         assert rc == 1
         assert "no leader" in capsys.readouterr().out
@@ -1295,10 +1388,10 @@ class TestDefault:
     def run(self, *argv):
         return r4t_main(list(argv))
 
-    def test_no_args_shows_overview(self, r4t_home, repo, harness_config, capsys, monkeypatch):
+    def test_no_args_shows_overview(self, r4t_home, repo, rig_config, capsys, monkeypatch):
         r4t_home.mkdir(parents=True, exist_ok=True)
-        (r4t_home / "harnesses.json").write_text(
-            harness_config.read_text(encoding="utf-8"),
+        (r4t_home / "rigs.json").write_text(
+            rig_config.read_text(encoding="utf-8"),
             encoding="utf-8",
         )
         state.team_dir(NODE).mkdir(parents=True, exist_ok=True)
@@ -1308,7 +1401,7 @@ class TestDefault:
         out = capsys.readouterr().out
         assert "r4t — Roster For Teams" in out
         assert f"R4T_HOME: {r4t_home}" in out
-        assert "Harness" in out
+        assert "Rigs" in out
         assert "junior-dev:" in out
         assert "Commands" in out
         assert "init" in out
@@ -1325,7 +1418,7 @@ class TestDefault:
         rc = self.run()
         assert rc == 0
         out = capsys.readouterr().out
-        assert "(missing — run `r4t init`" in out
+        assert "(no rigs yet — try: r4t rig add" in out
         assert "no ROSTER.md" in out
 
 
@@ -1340,7 +1433,7 @@ class TestInit:
         assert rc == 0
         out = capsys.readouterr().out
         assert (root / "ROSTER.md").is_file()
-        assert (r4t_home / "harnesses.json").is_file()
+        assert (r4t_home / "rigs.json").is_file()
         assert "a8s add fresh-repo-node" in out
         assert "a8s namespace fresh-repo fresh-repo-node" in out
         assert "a8s start fresh-repo-node" in out
@@ -1360,7 +1453,7 @@ class TestInit:
         root.mkdir()
         self.run("init", "--root", str(root))
         roster_before = (root / "ROSTER.md").read_text(encoding="utf-8")
-        config_before = (r4t_home / "harnesses.json").read_text(encoding="utf-8")
+        config_before = (r4t_home / "rigs.json").read_text(encoding="utf-8")
         capsys.readouterr()
 
         rc = self.run("init", "--root", str(root))
@@ -1368,4 +1461,4 @@ class TestInit:
         out = capsys.readouterr().out
         assert "left unchanged" in out
         assert (root / "ROSTER.md").read_text(encoding="utf-8") == roster_before
-        assert (r4t_home / "harnesses.json").read_text(encoding="utf-8") == config_before
+        assert (r4t_home / "rigs.json").read_text(encoding="utf-8") == config_before

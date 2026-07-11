@@ -9,7 +9,7 @@ Three-agent pipeline: Lead delegates → Dev builds → Tester verifies → Lead
 
 ### Lead
 - **Status:** AI
-- **Harness:** leader
+- **Rig:** leader
 - **Leader:** yes
 - **Role:** Team lead
 
@@ -19,14 +19,14 @@ Three-agent pipeline: Lead delegates → Dev builds → Tester verifies → Lead
 
 ### Dev
 - **Status:** AI
-- **Harness:** member
+- **Rig:** member
 - **Role:** Developer
 
 Write **battleship.py** in this repo root. Then run `tell crew:tester "battleship.py is ready"`. Stop.
 
 ### Tester
 - **Status:** AI
-- **Harness:** member
+- **Rig:** member
 - **Role:** Tester
 
 Run `python3 battleship.py` with test stdin. Tell **crew:lead** VERIFIED or FAILED. Never message Dev.
