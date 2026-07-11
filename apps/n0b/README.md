@@ -24,6 +24,7 @@ Detailed docs live in [`docs/`](docs/):
 | [ltx-video.md](docs/ltx-video.md) | `n0b ai video` | LTX-Video generation, models, setup guide |
 | [research.md](docs/research.md) | `n0b ai research` | OpenAI o4-mini-deep-research |
 | [secrets.md](docs/secrets.md) | `n0b secrets` | Get/set secrets — env, `~/lib`, Keychain, dotenv |
+| [ai-speak.md](docs/ai-speak.md) | `n0b ai speak` | Local Kokoro text-to-speech, markdown-aware |
 | [transcribe.md](docs/transcribe.md) | `n0b ai transcribe` | Local Whisper speech-to-text, hints + replacement files |
 
 ### Quick reference (no separate doc yet)
@@ -34,7 +35,7 @@ Detailed docs live in [`docs/`](docs/):
 | `ports` | `free`, `listen <port>` | Ephemeral free port; list process on a port (`lsof` / `netstat`) |
 | `gpu` | `cuda`, `mps`, `mlx`, `mb-free` | GPU / MLX checks; free MiB |
 | `mqtt` | `pub`, `sub` | `mosquitto_*` with `MQTT_HOST`, `MQTT_PORT`, `MQTT_USER`, `MQTT_PASS` |
-| `ai` | `image`, `video`, `audio`, `research`, `transcribe` | See [ltx-video.md](docs/ltx-video.md) for video; [research.md](docs/research.md) for deep research; [transcribe.md](docs/transcribe.md) for speech-to-text |
+| `ai` | `image`, `video`, `audio`, `research`, `speak`, `transcribe` | See [ltx-video.md](docs/ltx-video.md) for video; [research.md](docs/research.md) for deep research; [ai-speak.md](docs/ai-speak.md) for text-to-speech; [transcribe.md](docs/transcribe.md) for speech-to-text |
 | `video` | `last-frame` | Extract last frame with `ffmpeg` |
 
 ### AI model defaults
@@ -44,6 +45,7 @@ Detailed docs live in [`docs/`](docs/):
 | `n0b ai image` | Z-Image (`z-image.sh`) | `--model z-image` |
 | `n0b ai video` | LTX-Video 1, LTX-2 (PyTorch), MLX-Video (Apple Silicon) | `--model ltx-2`, `--model ltx-1`, or `-2`/`-1` flags |
 | `n0b ai audio` | AudioLDM (`audioldm.sh`) | `--model bark` for Suno Bark |
+| `n0b ai speak` | Kokoro-82M (local, no API key) | `--voice af_heart`, `--speed` |
 | `n0b ai transcribe` | Whisper `turbo` (local, no API key) | `--model tiny|base|small|medium|large` |
 
 ## Layout

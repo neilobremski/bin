@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from commands.ai_cmd import cmd_ai, cmd_research, cmd_transcribe
+from commands.ai_cmd import cmd_ai, cmd_research, cmd_speak, cmd_transcribe
 from commands.az_cmd import cmd_tail
 from commands.gpu_cmd import cmd_cuda, cmd_mb_free, cmd_mlx, cmd_mps
 from commands.json_cmd import cmd_json
@@ -80,6 +80,25 @@ def build_parser() -> argparse.ArgumentParser:
     ai_sub = ai_p.add_subparsers(dest="ai_kind", required=True)
     ai_research = ai_sub.add_parser("research", help="Deep research via o4-mini-deep-research")
     ai_research.add_argument("prompt", nargs=argparse.REMAINDER)
+    ai_speak = ai_sub.add_parser(
+        "speak", help="Synthesize speech from text locally with Kokoro"
+    )
+    ai_speak.add_argument(
+        "text", nargs="?", help="Text/markdown file to read aloud (- or omit for stdin)"
+    )
+    ai_speak.add_argument(
+        "-o", "--out",
+        help="Output audio file: .wav, or .m4a via afconvert (default: <input>.wav)",
+    )
+    ai_speak.add_argument(
+        "--voice", default="af_heart", help="Kokoro voice (default: af_heart)"
+    )
+    ai_speak.add_argument(
+        "--speed", type=float, default=1.0, help="Speech speed multiplier"
+    )
+    ai_speak.add_argument(
+        "--raw", action="store_true", help="Skip markdown-to-prose cleanup"
+    )
     ai_transcribe = ai_sub.add_parser(
         "transcribe", help="Transcribe an audio file locally with Whisper"
     )
@@ -189,6 +208,10 @@ def dispatch(args: argparse.Namespace) -> int:
     if group == "ai":
         if args.ai_kind == "research":
             return cmd_research(args.prompt)
+        if args.ai_kind == "speak":
+            return cmd_speak(
+                args.text, args.out, args.voice, args.speed, raw=args.raw
+            )
         if args.ai_kind == "transcribe":
             return cmd_transcribe(
                 args.audio,

@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from paths import BIN_ROOT, SCRIPTS_DIR
@@ -73,6 +74,159 @@ result = model.transcribe(
 )
 print(result["text"].strip())
 """
+
+
+_KOKORO_SNIPPET = """\
+import sys
+
+import numpy as np
+import soundfile as sf
+from kokoro import KPipeline
+
+text_path, out_path, voice, speed = sys.argv[1:5]
+text = open(text_path, encoding="utf-8").read()
+pipeline = KPipeline(lang_code=voice[0])
+chunks = []
+for i, result in enumerate(pipeline(text, voice=voice, speed=float(speed))):
+    audio = result[2]
+    chunks.append(audio.numpy() if hasattr(audio, "numpy") else audio)
+    print(f"  segment {i + 1}", file=sys.stderr)
+if not chunks:
+    print("no audio produced", file=sys.stderr)
+    sys.exit(1)
+sf.write(out_path, np.concatenate(chunks), 24000)
+"""
+
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_MD_NOISE_RE = re.compile(r"[*_`#>|]+")
+
+
+def speakable(markdown: str) -> str:
+    """Reduce markdown to prose worth hearing: drop code fences and table
+    rows, unwrap links, strip emphasis markers."""
+    out: list[str] = []
+    fenced = False
+    for line in markdown.splitlines():
+        s = line.strip()
+        if s.startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced or s.startswith("|"):
+            continue
+        line = _MD_LINK_RE.sub(r"\1", line)
+        line = _MD_NOISE_RE.sub("", line)
+        out.append(line)
+    return "\n".join(out)
+
+
+KOKORO_VENV = Path.home() / ".cache" / "n0b" / "kokoro-venv"
+
+
+def _kokoro_base_python() -> str:
+    # kokoro -> misaki[en] -> spacy, which trails new CPython releases;
+    # prefer an interpreter old enough to have wheels.
+    for name in ("python3.13", "python3.12", "python3.11"):
+        if shutil.which(name):
+            return name
+    return sys.executable
+
+
+def _kokoro_python() -> Path:
+    python = KOKORO_VENV / "bin" / "python3"
+    if python.is_file():
+        probe = subprocess.run(
+            [str(python), "-c", "import kokoro, soundfile"], capture_output=True
+        )
+        if probe.returncode == 0:
+            return python
+    else:
+        print(f"Setting up Kokoro venv at {KOKORO_VENV} (one-time)...", file=sys.stderr)
+        KOKORO_VENV.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [_kokoro_base_python(), "-m", "venv", str(KOKORO_VENV)],
+            check=True, stdout=sys.stderr,
+        )
+    subprocess.run(
+        [str(python), "-m", "pip", "install", "--upgrade", "pip"],
+        check=True, stdout=sys.stderr,
+    )
+    # spacy 4.x ships sdist-only for this platform and its build chain is
+    # broken; the <4 pin keeps pip on the 3.8 wheels misaki actually needs.
+    # phonemizer enables misaki's espeak fallback for names and other
+    # out-of-dictionary words (the library itself comes from espeak-ng).
+    subprocess.run(
+        [str(python), "-m", "pip", "install", "spacy<4", "kokoro", "soundfile",
+         "phonemizer"],
+        check=True, stdout=sys.stderr,
+    )
+    return python
+
+
+def cmd_speak(
+    source: str | None,
+    out: str | None,
+    voice: str,
+    speed: float,
+    raw: bool = False,
+) -> int:
+    if source is None or source == "-":
+        text = sys.stdin.read()
+        stem = "speech"
+    else:
+        path = Path(source).expanduser()
+        if not path.is_file():
+            print(f"n0b ai speak: no such file: {source}", file=sys.stderr)
+            return 1
+        text = path.read_text(encoding="utf-8")
+        stem = path.stem
+    if not raw:
+        text = speakable(text)
+    if not text.strip():
+        print("n0b ai speak: nothing to say after cleanup", file=sys.stderr)
+        return 2
+    out_path = Path(out).expanduser() if out else Path(f"{stem}.wav")
+    convert = out_path.suffix.lower() in (".m4a", ".aac", ".mp4")
+    if convert and shutil.which("afconvert") is None:
+        print(
+            "n0b ai speak: compressed output needs afconvert (macOS) — "
+            "use a .wav path",
+            file=sys.stderr,
+        )
+        return 1
+    if not convert and out_path.suffix.lower() != ".wav":
+        print(f"n0b ai speak: unsupported output format {out_path.suffix!r} "
+              "(use .wav or .m4a)", file=sys.stderr)
+        return 2
+    try:
+        python = _kokoro_python()
+    except subprocess.CalledProcessError as exc:
+        print(f"n0b ai speak: Kokoro setup failed: {exc}", file=sys.stderr)
+        return 1
+    wav_path = out_path.with_suffix(".tmp.wav") if convert else out_path
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".txt", encoding="utf-8", delete=False
+    ) as f:
+        f.write(text)
+        text_file = Path(f.name)
+    try:
+        proc = subprocess.run(
+            [str(python), "-c", _KOKORO_SNIPPET, str(text_file), str(wav_path),
+             voice, str(speed)],
+        )
+        if proc.returncode != 0:
+            return proc.returncode
+        if convert:
+            conv = subprocess.run(
+                ["afconvert", "-f", "m4af", "-d", "aac", str(wav_path),
+                 str(out_path)],
+            )
+            wav_path.unlink(missing_ok=True)
+            if conv.returncode != 0:
+                return conv.returncode
+    finally:
+        text_file.unlink(missing_ok=True)
+    print(out_path)
+    return 0
 
 
 def read_hints(hints_file: Path) -> list[str]:
