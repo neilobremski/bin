@@ -83,7 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
     ai_transcribe = ai_sub.add_parser(
         "transcribe", help="Transcribe an audio file locally with Whisper"
     )
-    ai_transcribe.add_argument("audio", help="Audio file (anything ffmpeg reads)")
+    ai_transcribe.add_argument(
+        "audio", nargs="?", help="Audio file (anything ffmpeg reads)"
+    )
     ai_transcribe.add_argument(
         "--hint",
         "--hints",
@@ -100,6 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ai_transcribe.add_argument(
         "--model", default="turbo", help="Whisper model (default: turbo)"
+    )
+    ai_transcribe.add_argument(
+        "--save",
+        action="store_true",
+        help="Append the given --hint values to the global hints file",
     )
     for kind, help_text in (
         ("image", "Generate images (default model: z-image)"),
@@ -172,7 +179,9 @@ def dispatch(args: argparse.Namespace) -> int:
         if args.ai_kind == "research":
             return cmd_research(args.prompt)
         if args.ai_kind == "transcribe":
-            return cmd_transcribe(args.audio, args.hints, args.language, args.model)
+            return cmd_transcribe(
+                args.audio, args.hints, args.language, args.model, save=args.save
+            )
         rest = args.args
         if rest[:1] == ["--"]:
             rest = rest[1:]

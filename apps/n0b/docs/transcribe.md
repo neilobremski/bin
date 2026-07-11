@@ -19,7 +19,14 @@ n0b ai transcribe memo.m4a > memo.txt
 n0b ai transcribe memo.m4a --hint "Pay-i" --hint "a8s, r4t"   # bias proper nouns
 n0b ai transcribe memo.m4a --language en                       # skip auto-detect
 n0b ai transcribe memo.m4a --model base                        # smaller/faster model
+
+n0b ai transcribe --hint "Pay-i, k7e" --save                   # add to the global hints file
+n0b ai transcribe memo.m4a --hint "Pay-i" --save               # save, then transcribe
 ```
+
+stderr reports the hints in effect (and where each came from), model
+loading, and a progress bar over the audio, so a long silence is never
+ambiguous.
 
 Any format ffmpeg can read works: m4a, mp3, wav, aiff, ogg, mp4, ...
 
@@ -33,6 +40,10 @@ to bias decoding. Two sources, merged (file first, then flags):
   `--hint` on every call.
 - `--hint` / `--hints` — repeatable; each value may hold several
   comma-separated terms.
+
+`--save` appends the given `--hint` values to the global file (deduped,
+case-insensitive) instead of you editing it by hand; with no audio argument
+it saves and exits.
 
 ## Models
 

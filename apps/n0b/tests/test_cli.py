@@ -12,7 +12,12 @@ import pytest
 N0B_PY = Path(__file__).resolve().parents[1] / "n0b.py"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from commands.ai_cmd import cmd_ai, cmd_transcribe, merged_hints  # noqa: E402
+from commands.ai_cmd import (  # noqa: E402
+    cmd_ai,
+    cmd_transcribe,
+    merged_hints,
+    save_hints,
+)
 from commands.secrets_cmd import cmd_set, resolve  # noqa: E402
 
 
@@ -162,6 +167,38 @@ def test_merged_hints_no_file(tmp_path):
 def test_transcribe_missing_file():
     rc = cmd_transcribe("/nonexistent/audio.m4a", [], None, "turbo")
     assert rc == 1
+
+
+def test_transcribe_no_audio_no_save():
+    rc = cmd_transcribe(None, [], None, "turbo")
+    assert rc == 2
+
+
+def test_save_hints_appends_and_dedupes(tmp_path):
+    hints_file = tmp_path / "cfg" / "transcribe-hints.txt"
+    assert save_hints(["Pay-i", "a8s, r4t"], hints_file) == 0
+    assert hints_file.read_text() == "Pay-i\na8s\nr4t\n"
+    assert save_hints(["pay-i", "k7e"], hints_file) == 0
+    assert hints_file.read_text() == "Pay-i\na8s\nr4t\nk7e\n"
+
+
+def test_save_hints_requires_hints(tmp_path):
+    assert save_hints([], tmp_path / "hints.txt") == 2
+
+
+def test_save_hints_no_trailing_newline(tmp_path):
+    hints_file = tmp_path / "hints.txt"
+    hints_file.write_text("a8s")
+    assert save_hints(["k7e"], hints_file) == 0
+    assert hints_file.read_text() == "a8s\nk7e\n"
+
+
+def test_transcribe_save_only(tmp_path):
+    hints_file = tmp_path / "hints.txt"
+    with patch("commands.ai_cmd.HINTS_FILE", hints_file):
+        rc = cmd_transcribe(None, ["Pay-i"], None, "turbo", save=True)
+    assert rc == 0
+    assert hints_file.read_text() == "Pay-i\n"
 
 
 def test_transcribe_invokes_whisper_venv(tmp_path):
