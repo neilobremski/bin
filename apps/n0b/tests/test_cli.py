@@ -12,7 +12,7 @@ import pytest
 N0B_PY = Path(__file__).resolve().parents[1] / "n0b.py"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from commands.ai_cmd import cmd_ai  # noqa: E402
+from commands.ai_cmd import cmd_ai, cmd_transcribe, merged_hints  # noqa: E402
 from commands.secrets_cmd import cmd_set, resolve  # noqa: E402
 
 
@@ -146,3 +146,44 @@ def test_ai_video_ltx2_passes_flag():
         assert argv[0] == "bash"
         assert argv[2] == "--ltx2"
         assert argv[3] == "hello"
+
+
+def test_merged_hints_file_then_flags(tmp_path):
+    hints_file = tmp_path / "transcribe-hints.txt"
+    hints_file.write_text("# my glossary\nPay-i\n\nNeil Obremski\n")
+    assert merged_hints(["a8s", " r4t "], hints_file) == "Pay-i, Neil Obremski, a8s, r4t"
+
+
+def test_merged_hints_no_file(tmp_path):
+    assert merged_hints(["only-flag"], tmp_path / "missing.txt") == "only-flag"
+    assert merged_hints([], tmp_path / "missing.txt") == ""
+
+
+def test_transcribe_missing_file():
+    rc = cmd_transcribe("/nonexistent/audio.m4a", [], None, "turbo")
+    assert rc == 1
+
+
+def test_transcribe_invokes_whisper_venv(tmp_path):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"RIFF")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    with (
+        patch("commands.ai_cmd._whisper_python", return_value=fake_python),
+        patch("commands.ai_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_cmd.subprocess.run") as run,
+    ):
+        run.return_value.returncode = 0
+        rc = cmd_transcribe(str(audio), ["Pay-i"], "en", "base")
+        assert rc == 0
+        argv = run.call_args[0][0]
+        assert argv[0] == str(fake_python)
+        assert argv[1] == "-c"
+        assert argv[3:] == [str(audio), "base", "en", "Pay-i"]
+
+
+def test_transcribe_help():
+    proc = run_n0b("ai", "transcribe", "--help")
+    assert proc.returncode == 0
+    assert "--hint" in proc.stdout
+    assert "--language" in proc.stdout

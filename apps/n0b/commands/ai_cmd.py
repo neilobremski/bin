@@ -1,7 +1,8 @@
-"""AI generation wrappers (image, video, audio) and deep research."""
+"""AI generation wrappers (image, video, audio), transcription, and deep research."""
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -48,6 +49,84 @@ def cmd_research(args: list[str]) -> int:
         print("Usage: n0b ai research <prompt...>", file=sys.stderr)
         return 2
     return run_research(args)
+
+
+WHISPER_VENV = Path.home() / ".cache" / "n0b" / "whisper-venv"
+HINTS_FILE = Path.home() / ".config" / "n0b" / "transcribe-hints.txt"
+
+_WHISPER_SNIPPET = """\
+import sys
+import whisper
+
+audio, model_name, language, prompt = sys.argv[1:5]
+model = whisper.load_model(model_name)
+result = model.transcribe(
+    audio,
+    language=language or None,
+    initial_prompt=prompt or None,
+    fp16=False,
+)
+print(result["text"].strip())
+"""
+
+
+def merged_hints(cli_hints: list[str], hints_file: Path) -> str:
+    hints: list[str] = []
+    if hints_file.is_file():
+        for line in hints_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                hints.append(line)
+    hints.extend(h.strip() for h in cli_hints if h.strip())
+    return ", ".join(hints)
+
+
+def _whisper_python() -> Path:
+    python = WHISPER_VENV / "bin" / "python3"
+    if python.is_file():
+        return python
+    print(f"Setting up Whisper venv at {WHISPER_VENV} (one-time)...", file=sys.stderr)
+    WHISPER_VENV.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(WHISPER_VENV)],
+        check=True, stdout=sys.stderr,
+    )
+    subprocess.run(
+        [str(python), "-m", "pip", "install", "--upgrade", "pip"],
+        check=True, stdout=sys.stderr,
+    )
+    subprocess.run(
+        [str(python), "-m", "pip", "install", "openai-whisper"],
+        check=True, stdout=sys.stderr,
+    )
+    return python
+
+
+def cmd_transcribe(
+    audio: str, hints: list[str], language: str | None, model: str
+) -> int:
+    path = Path(audio).expanduser()
+    if not path.is_file():
+        print(f"n0b ai transcribe: no such file: {audio}", file=sys.stderr)
+        return 1
+    if shutil.which("ffmpeg") is None:
+        print(
+            "n0b ai transcribe: ffmpeg not found (try: brew install ffmpeg)",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        python = _whisper_python()
+    except subprocess.CalledProcessError as exc:
+        print(f"n0b ai transcribe: Whisper setup failed: {exc}", file=sys.stderr)
+        return 1
+    proc = subprocess.run(
+        [
+            str(python), "-c", _WHISPER_SNIPPET,
+            str(path), model, language or "", merged_hints(hints, HINTS_FILE),
+        ]
+    )
+    return proc.returncode
 
 
 def cmd_ai(kind: str, model: str | None, args: list[str]) -> int:

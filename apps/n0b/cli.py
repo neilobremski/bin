@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from commands.ai_cmd import cmd_ai, cmd_research
+from commands.ai_cmd import cmd_ai, cmd_research, cmd_transcribe
 from commands.az_cmd import cmd_tail
 from commands.gpu_cmd import cmd_cuda, cmd_mb_free, cmd_mlx, cmd_mps
 from commands.json_cmd import cmd_json
@@ -80,6 +80,27 @@ def build_parser() -> argparse.ArgumentParser:
     ai_sub = ai_p.add_subparsers(dest="ai_kind", required=True)
     ai_research = ai_sub.add_parser("research", help="Deep research via o4-mini-deep-research")
     ai_research.add_argument("prompt", nargs=argparse.REMAINDER)
+    ai_transcribe = ai_sub.add_parser(
+        "transcribe", help="Transcribe an audio file locally with Whisper"
+    )
+    ai_transcribe.add_argument("audio", help="Audio file (anything ffmpeg reads)")
+    ai_transcribe.add_argument(
+        "--hint",
+        "--hints",
+        action="append",
+        default=[],
+        dest="hints",
+        help=(
+            "Vocabulary hint, repeatable; merged with "
+            "~/.config/n0b/transcribe-hints.txt"
+        ),
+    )
+    ai_transcribe.add_argument(
+        "--language", help="Spoken language (e.g. en); default auto-detect"
+    )
+    ai_transcribe.add_argument(
+        "--model", default="turbo", help="Whisper model (default: turbo)"
+    )
     for kind, help_text in (
         ("image", "Generate images (default model: z-image)"),
         ("video", "Generate videos — LTX-Video 1/2, MLX on Apple Silicon (default: auto)"),
@@ -150,6 +171,8 @@ def dispatch(args: argparse.Namespace) -> int:
     if group == "ai":
         if args.ai_kind == "research":
             return cmd_research(args.prompt)
+        if args.ai_kind == "transcribe":
+            return cmd_transcribe(args.audio, args.hints, args.language, args.model)
         rest = args.args
         if rest[:1] == ["--"]:
             rest = rest[1:]
