@@ -123,7 +123,8 @@ def _park_seat(ctx: DispatchContext, member: Member, sender: str, message: str) 
     state.park_seat_message(ctx.node, member.name, sender, message)
     bell = ""
     if member.address and not state.seat_attached(ctx.node, member.name):
-        ctx.tell_fn(member.address, message)
+        _, _, _, bell_body = tasks.parse_header(message)
+        ctx.tell_fn(member.address, bell_body)
         bell = f", doorbell -> {member.address}"
     state.append_log(
         ctx.node,
@@ -292,7 +293,6 @@ def _release_one(
     outbox: Path,
     staging: Path,
     envelope: dict,
-    stamped_content: str,
     sender_addr: str,
     task_id: str,
     next_hop: int,
@@ -325,7 +325,11 @@ def _release_one(
             f"r4t: RELEASED-internal {sender_addr} -> {to} task={task_id} hop={next_hop}",
         )
         return
-    envelope["content"] = stamped_content
+    # Egress protocol: the r4t header never leaves the garden. Other a8s
+    # nodes must not need to know whether a name is one agent, a human, a
+    # device, or a whole roster — class marking survives as envelope
+    # metadata only.
+    envelope["content"] = body
     envelope["x_r4t_class"] = "auto"
     envelope["from"] = sender_addr
     outbox.mkdir(parents=True, exist_ok=True)
@@ -461,7 +465,6 @@ def release_staging(
                     f"r4t: BULK-WINDOW {sender_addr} -> {to} task={task_id} repeat={count}",
                 )
                 continue
-        stamped = f"{tasks.format_header(task_id, next_hop, auto=True)} {body}"
         state.append_history(
             ctx.node,
             member.name,
@@ -474,7 +477,7 @@ def release_staging(
             and to.lower() == synthesis_creator.lower()
         )
         _release_one(
-            ctx, outbox, staging, envelope, stamped, sender_addr, task_id, next_hop,
+            ctx, outbox, staging, envelope, sender_addr, task_id, next_hop,
             body, final_response,
         )
         path.unlink(missing_ok=True)
@@ -740,6 +743,8 @@ def _handle(
     *,
     run_fn=run_harness,
     synthesis_response: bool = False,
+    trusted_header: bool = True,
+    suppression_checked: bool = False,
 ) -> str:
     _, sub = split_recipient(to)
 
@@ -793,7 +798,14 @@ def _handle(
 
     state.refresh_active(ctx.node, member.name, config.active_ttl_rotations)
 
-    task_id, hop, auto, body = tasks.parse_header(message)
+    if trusted_header:
+        task_id, hop, auto, body = tasks.parse_header(message)
+    else:
+        # Ingress protocol: headers never legitimately arrive from outside
+        # the garden (egress strips them), so an external header is either
+        # noise or a forgery aimed at an existing task's budget/breaker —
+        # treat the whole message as content.
+        task_id, hop, auto, body = None, None, False, message
     had_header = task_id is not None
     if task_id is None:
         task_id = tasks.new_task_id()
@@ -880,7 +892,13 @@ def _handle(
 
     # Intra-team traffic was already suppression-checked at release (same
     # store, same key) — re-checking here would suppress every delivery.
-    if (auto and not _is_internal(ctx.node, sender)) or bulk_source:
+    # External headers are untrusted, so machine/human can't be told apart:
+    # every external repeat within the window dead-letters (recorded, never
+    # silent). The check registers the pair key, so it must run at most
+    # once per message: a deferred message re-presented by drain would
+    # otherwise be suppressed as its own repeat (observed live — a phone
+    # message hit the throttle, deferred, and died on redispatch).
+    if not _is_internal(ctx.node, sender) and not suppression_checked:
         repeated, count = state.suppression_check(
             ctx.node,
             tasks.pair_key(sender, to, body),
@@ -896,6 +914,7 @@ def _handle(
                 f"r4t: SUPPRESSED inbound {sender} -> {to} task={task_id} repeat={count}",
             )
             return DEAD
+    envelope["checked"] = True
 
     breaker_blocked, failures = state.breaker_open(
         ctx.node, member.name, config.breaker_cap, config.breaker_cooldown_seconds
@@ -1079,7 +1098,10 @@ def handle_message(
     *,
     run_fn=run_harness,
 ) -> int:
-    _handle(ctx, sender, to, message, run_fn=run_fn)
+    _handle(
+        ctx, sender, to, message, run_fn=run_fn,
+        trusted_header=_is_internal(ctx.node, sender),
+    )
     return 0
 
 
@@ -1115,6 +1137,7 @@ def _redispatch(ctx: DispatchContext, envelope: dict, *, run_fn=run_harness) -> 
         message,
         run_fn=run_fn,
         synthesis_response=bool(envelope.get("synthesis_response", False)),
+        suppression_checked=bool(envelope.get("checked")),
     )
 
 

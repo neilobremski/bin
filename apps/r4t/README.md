@@ -119,12 +119,18 @@ prior art per layer: [docs/governance.md](docs/governance.md).
 | `active_ttl_rotations` | 3 | Idle passes an agent stays on the crash-recovery watch list | Unbounded watch lists |
 | `rebroadcast_senders` | `["chatroom"]` | Inbound from these is classed bulk; a bulk-triggered turn may post back to that room at most once per suppression window | Two agents looping through a re-broadcasting room |
 
-Class marking ties it together: every envelope r4t releases carries `auto`
-in its header, so a header **without** `auto` was written by a deliberate
-hand — and resets that task's turn budget (human attention licenses more
-work). Suppressed, cut, and excess messages are never silently dropped:
-each becomes one JSON record (reason, count, from, to, task, time) in
-`~/.config/r4t/teams/<node>/dead-letter/`.
+Class marking ties it together — *inside the garden*: every envelope r4t
+releases internally carries `auto` in its header, so an internal header
+**without** `auto` was written by a deliberate hand and resets that task's
+turn budget (human attention licenses more work). The header is
+garden-internal serialization and never crosses egress: external releases
+carry the bare body (class survives as `x_r4t_class` envelope metadata),
+because other a8s nodes must not need to know whether a name is one agent,
+a human, a device, or a whole roster. Symmetrically, headers on inbound
+external messages are untrusted content — a forged header can't join,
+charge, or reset a task. Suppressed, cut, and excess messages are never
+silently dropped: each becomes one JSON record (reason, count, from, to,
+task, time) in `~/.config/r4t/teams/<node>/dead-letter/`.
 
 ## Security model
 
