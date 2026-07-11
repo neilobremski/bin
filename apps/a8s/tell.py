@@ -293,11 +293,22 @@ def _optional_sender() -> tuple[str, dict] | None:
 
 def _validate_recipient(target_query: str) -> tuple[int, str | None, str | None]:
     from network import configured_remote_ids
-    from registry import load_aliases, resolve_name, split_namespace_address
+    from registry import load_aliases, load_namespaces, resolve_name, split_namespace_address
 
     try:
         kind, members = resolve_name(target_query)
     except KeyError:
+        if ":" not in target_query:
+            ns_lookup = {k.lower(): k for k in load_namespaces()}
+            key = target_query.strip().lower()
+            if key in ns_lookup:
+                prefix = ns_lookup[key]
+                print(
+                    f"tell: {target_query!r} is a namespace prefix, not a recipient; "
+                    f"use tell {prefix}:<member> …",
+                    file=sys.stderr,
+                )
+                return 1, None, None
         if not configured_remote_ids():
             if ":" in target_query:
                 print(f"tell: no namespace bound for {target_query!r}", file=sys.stderr)

@@ -653,6 +653,15 @@ class TestCmdTellNamespace:
         assert rc == 1
         assert "empty sub-address" in capsys.readouterr().err
 
+    def test_bare_prefix_rejected_even_with_remotes(self, fake_home, tmp_path, monkeypatch, capsys):
+        self._setup_sender(fake_home, tmp_path, monkeypatch)
+        save_namespaces({"acme": "node"})
+        save_network_config({"remotes": {"hub": {"transport": "mqtt", "broker": "mqtt://x", "topic": "t"}}})
+        rc = cmd_tell(["acme", "hi"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "namespace prefix" in err
+        assert "acme:<member>" in err
 
 # ---------- storage services (issue #90) ----------
 
