@@ -285,6 +285,31 @@ def park_pending(node: str, envelope: dict) -> Path:
     return path
 
 
+def recover_dead_claims(node: str) -> int:
+    """Re-queue pending claims whose drainer died between claim and consume
+    (`<msg>.json.claim-<pid>` with a dead pid) — nothing is silently dropped."""
+    root = pending_dir(node)
+    if not root.is_dir():
+        return 0
+    recovered = 0
+    for f in root.iterdir():
+        if not f.is_file() or ".json.claim-" not in f.name:
+            continue
+        original, _, pid_text = f.name.rpartition(".claim-")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid == os.getpid() or _pid_alive(pid):
+            continue
+        try:
+            f.rename(root / original)
+            recovered += 1
+        except OSError:
+            continue
+    return recovered
+
+
 def list_pending(node: str) -> list[Path]:
     root = pending_dir(node)
     if not root.is_dir():

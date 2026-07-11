@@ -1119,17 +1119,26 @@ def _redispatch(ctx: DispatchContext, envelope: dict, *, run_fn=run_harness) -> 
 
 
 def drain(ctx: DispatchContext, *, run_fn=run_harness) -> int:
-    """One pass over the pending queue. Each file is consumed before
-    redispatch so a re-defer creates a fresh entry instead of looping.
-    Returns the number of turns that actually RAN."""
+    """One pass over the pending queue. Each file is claimed by atomic
+    rename before redispatch: concurrent drainers (an a8s-woken dispatch
+    and a `seat send`, say) race on the rename and exactly one wins — a
+    read-then-unlink claim would let both redispatch the same envelope.
+    The claim is consumed before redispatch so a re-defer creates a fresh
+    entry instead of looping. Returns the number of turns that RAN."""
     ran = 0
+    state.recover_dead_claims(ctx.node)
     for path in state.list_pending(ctx.node):
+        claim = path.with_name(f"{path.name}.claim-{os.getpid()}")
         try:
-            envelope = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            path.unlink(missing_ok=True)
+            os.rename(str(path), str(claim))
+        except OSError:
             continue
-        path.unlink(missing_ok=True)
+        try:
+            envelope = json.loads(claim.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            claim.unlink(missing_ok=True)
+            continue
+        claim.unlink(missing_ok=True)
         if isinstance(envelope, dict):
             if _redispatch(ctx, envelope, run_fn=run_fn) in (RAN, SYNTHESIS):
                 ran += 1
