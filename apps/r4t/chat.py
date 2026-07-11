@@ -21,7 +21,7 @@ import queue
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import state
 import tasks as taskmod
@@ -118,8 +118,10 @@ class SeatFeed:
         return events
 
     def poll_log(self) -> list[tuple[str, str]]:
+        # append_log names day files by UTC date — matching local time here
+        # would watch a file that stops receiving writes after UTC midnight.
         path = state.team_dir(self.node) / "log" / (
-            datetime.now().strftime("%Y-%m-%d") + ".md"
+            datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".md"
         )
         if path != self.log_path:
             self.log_path = path

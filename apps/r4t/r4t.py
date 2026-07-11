@@ -13,6 +13,8 @@ import json
 import os
 import re
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import state
@@ -574,6 +576,64 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_logs(args: argparse.Namespace) -> int:
+    node = _resolve_node(args.node)
+    if node is None:
+        return 2
+    from chat import filter_log_line
+
+    log_dir = state.team_dir(node) / "log"
+
+    def rendered(raw: str) -> list[str]:
+        if args.full:
+            return [raw]
+        event = filter_log_line(raw)
+        return [event] if event else []
+
+    files = sorted(log_dir.glob("*.md")) if log_dir.is_dir() else []
+    collected: list[str] = []
+    offset = 0
+    for path in files[-2:]:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if path == files[-1]:
+            offset = len(text.encode("utf-8"))
+        for raw in text.splitlines():
+            collected.extend(rendered(raw))
+    for line in collected[-args.lines:] if args.lines else collected:
+        print(line)
+    if not args.follow:
+        if not files:
+            print(f"(no log yet under {log_dir})", file=sys.stderr)
+        return 0
+
+    current = files[-1] if files else None
+    try:
+        while True:
+            today = log_dir / (
+                datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".md"
+            )
+            if today != current:
+                current, offset = today, 0
+            if current.is_file():
+                size = current.stat().st_size
+                if size > offset:
+                    with current.open("r", encoding="utf-8") as f:
+                        f.seek(offset)
+                        chunk = f.read()
+                        offset = f.tell()
+                    for raw in chunk.splitlines():
+                        for line in rendered(raw):
+                            print(line, flush=True)
+                elif size < offset:
+                    offset = size
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        return 0
+
+
 def _ensure_tell_outbox(ctx: DispatchContext) -> None:
     """Directly-invoked seat/chat sessions have no a8s-injected outbox env;
     give `tell` subprocesses (the Address: doorbell, error notices) the same
@@ -979,6 +1039,24 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(status_p, with_node=True)
     _add_tell_flags(status_p)
     status_p.set_defaults(func=cmd_status)
+
+    logs_p = sub.add_parser(
+        "logs", help="The team's own event log: every governance decision "
+        "and turn boundary, including traffic that never reaches a8s."
+    )
+    _add_common(logs_p, with_node=True)
+    logs_p.add_argument(
+        "-f", "--follow", action="store_true", help="Keep streaming new events."
+    )
+    logs_p.add_argument(
+        "-n", "--lines", type=int, default=40,
+        help="Backfill this many lines first (0 = everything kept on disk).",
+    )
+    logs_p.add_argument(
+        "--full", action="store_true",
+        help="Raw daily log, prompts and transcripts included.",
+    )
+    logs_p.set_defaults(func=cmd_logs)
 
     chat_p = sub.add_parser(
         "chat", help="Interactive human seat: messages and team activity in one window."

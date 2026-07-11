@@ -76,13 +76,20 @@ a8s start acme-node
 tell acme:gerry "Ship the payload refactor; report when reviewed."
 ```
 
-Watch it: `a8s logs acme-node -f` (traffic + every governance decision line),
-`r4t status --node acme` (leads with plain-English health verdicts — waiting
-on you? runaway? member broken/muted/stalled? task starved on hops? — then
-locks, buckets, tasks, and dead letters rolled up by meaning), and the
-dead-letter dir under `~/.config/r4t/teams/acme/`. The first dispatch stamps
-the repo root into team state, so `--node` works from any directory — and
-from inside a team repo the `--node` flag itself is optional.
+Watch it — one surface per way of looking:
+
+- `r4t status` — the snapshot. Leads with plain-English health verdicts
+  (waiting on you? runaway? member broken/muted/stalled? task starved on
+  hops?), then locks, buckets, tasks, and dead letters rolled up by meaning.
+- `r4t logs -f` — the stream. The team's own event log: every governance
+  decision and turn boundary, including walled-garden traffic that never
+  reaches a8s. `--full` includes prompts and transcripts.
+- `r4t chat` — the human, interactively (see the seat section below).
+- `r4t seat` — an orchestrating agent, programmatically.
+
+The first dispatch stamps the repo root into team state, so `--node` works
+from any directory — and from inside a team repo the `--node` flag itself
+is optional. (`a8s logs acme-node -f` still shows the cross-wall view.)
 
 ## The seat: being the human in the roster
 
