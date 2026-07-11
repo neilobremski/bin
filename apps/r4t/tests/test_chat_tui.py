@@ -25,11 +25,11 @@ def seat(ctx, repo, r4t_home):
 
 
 def test_budget_bar_shapes():
-    assert budget_bar(0.0, 1.0) == "▯" * 8
-    assert budget_bar(1.0, 1.0) == "▮" * 8
-    assert budget_bar(0.5, 1.0).count("▮") == 4
-    assert budget_bar(5.0, 1.0) == "▮" * 8
-    assert budget_bar(1.0, 0.0) == "▯" * 8
+    assert budget_bar(0.0, 1.0) == "░" * 8
+    assert budget_bar(1.0, 1.0) == "█" * 8
+    assert budget_bar(0.5, 1.0).count("█") == 4
+    assert budget_bar(5.0, 1.0) == "█" * 8
+    assert budget_bar(1.0, 0.0) == "░" * 8
 
 
 def test_tui_consumes_inbox_and_routes_commands(seat, monkeypatch):

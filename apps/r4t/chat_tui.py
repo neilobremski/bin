@@ -54,7 +54,7 @@ LEVEL_STYLE = {verdict.OK: "green", verdict.WARN: "yellow", verdict.BAD: "red"}
 def budget_bar(used: float, budget: float, width: int = 8) -> str:
     frac = 0.0 if budget <= 0 else min(1.0, used / budget)
     filled = round(frac * width)
-    return "▮" * filled + "▯" * (width - filled)
+    return "█" * filled + "░" * (width - filled)
 
 
 class ChatApp(App):
