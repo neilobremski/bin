@@ -73,6 +73,43 @@ def known_teams() -> list[str]:
     return sorted(p.name for p in root.iterdir() if p.is_dir())
 
 
+def root_path(node: str) -> Path:
+    return team_dir(node) / "root"
+
+
+def stamp_root(node: str, root: Path) -> None:
+    path = root_path(node)
+    text = str(root)
+    try:
+        if path.is_file() and path.read_text(encoding="utf-8").strip() == text:
+            return
+    except OSError:
+        pass
+    _atomic_write_text(path, text + "\n")
+
+
+def read_root(node: str) -> Path | None:
+    try:
+        text = root_path(node).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return Path(text) if text else None
+
+
+def node_for_root(cwd: Path) -> str | None:
+    """The team whose stamped repo root is cwd or an ancestor of it."""
+    by_root = {}
+    for node in known_teams():
+        root = read_root(node)
+        if root is not None:
+            by_root[root] = node
+    cwd = cwd.resolve()
+    for candidate in (cwd, *cwd.parents):
+        if candidate in by_root:
+            return by_root[candidate]
+    return None
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{new_ulid()}.tmp")

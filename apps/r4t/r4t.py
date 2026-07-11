@@ -17,6 +17,7 @@ from pathlib import Path
 
 import state
 import tasks
+import verdict
 from dispatch import (
     DispatchContext,
     drain_until_quiet,
@@ -107,6 +108,9 @@ def _resolve_node(raw: str | None) -> str | None:
     teams = state.known_teams()
     if len(teams) == 1:
         return teams[0]
+    match = state.node_for_root(Path.cwd())
+    if match:
+        return match
     if not teams:
         print("no teams found under ~/.config/r4t/teams — pass --node", file=sys.stderr)
     else:
@@ -116,10 +120,16 @@ def _resolve_node(raw: str | None) -> str | None:
 
 def _context(args: argparse.Namespace, node: str) -> DispatchContext:
     root = _resolve_root(args.root)
+    roster_path = resolve_roster_path(root, getattr(args, "roster", None))
+    if not getattr(args, "root", None) and not roster_path.is_file():
+        stamped = state.read_root(node)
+        if stamped is not None and stamped.is_dir():
+            root = stamped
+            roster_path = resolve_roster_path(root, getattr(args, "roster", None))
     return DispatchContext(
         root=root,
         node=node,
-        roster_path=resolve_roster_path(root, getattr(args, "roster", None)),
+        roster_path=roster_path,
         config_path=resolve_config_path(getattr(args, "rig_config", None)),
         tell_fn=resolve_tell_fn(
             notify=getattr(args, "notify", True),
@@ -294,6 +304,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         print("dispatch: --to must carry the node name", file=sys.stderr)
         return 2
     ctx = _context(args, node.lower())
+    state.stamp_root(ctx.node, ctx.root)
     if not args.no_drain:
         drain_until_quiet(ctx)
     rc = handle_message(ctx, args.from_agent, args.to, args.message)
@@ -478,16 +489,31 @@ def _activity_rows(node: str) -> list[tuple[bool | None, str, str, str | None]]:
     if not open_tasks:
         rows.append((None, "tasks", "none", None))
     rows.append((None, "pending", f"{len(state.list_pending(node))} deferred message(s)", None))
-    dead = state.list_dead_letters(node)
-    reasons: dict[str, int] = {}
-    for record in dead:
-        reasons[record.get("reason", "?")] = reasons.get(record.get("reason", "?"), 0) + 1
-    breakdown = ", ".join(f"{k}: {v}" for k, v in sorted(reasons.items()))
-    rows.append((
-        None, "dead letters",
-        f"{len(dead)}" + (f"  ({breakdown})" if breakdown else ""),
-        f"ls {state.dead_letter_dir(node)}" if dead else None,
-    ))
+    roll = verdict.rollup_dead_letters(state.list_dead_letters(node))
+    if not roll.routine_total and not roll.signal_total:
+        rows.append((None, "dead letters", "0", None))
+    if roll.routine_total:
+        breakdown = ", ".join(f"{k} {v}" for k, v in sorted(roll.routine.items()))
+        rows.append((
+            None, "dead letters",
+            f"{roll.routine_total} routine ({breakdown}) — governance debris, "
+            "not failures",
+            None,
+        ))
+    for reason in sorted(roll.signals):
+        records = roll.signals[reason]
+        pairs: dict[str, int] = {}
+        for record in records:
+            key = f"{record.get('from', '?')} -> {record.get('to', '?')}"
+            pairs[key] = pairs.get(key, 0) + 1
+        worst = max(pairs, key=pairs.get)  # type: ignore[arg-type]
+        others = f" +{len(pairs) - 1} pair(s)" if len(pairs) > 1 else ""
+        rows.append((
+            False, "dead letters",
+            f"{len(records)} {reason} ({worst}{others}) — "
+            f"{verdict.REASON_GLOSS.get(reason, reason)}",
+            f"ls {state.dead_letter_dir(node)}",
+        ))
     active = state.load_active(node)
     for agent in sorted(active):
         entry = active[agent] if isinstance(active[agent], dict) else {}
@@ -521,6 +547,14 @@ def cmd_status(args: argparse.Namespace) -> int:
     except RigError as e:
         config_err = str(e)
 
+    print("Health")
+    for v in verdict.team_verdicts(node, roster, config):
+        line = f"  {verdict.MARKS[v.level]} {v.text}"
+        if v.hint:
+            line += f"   (try: {v.hint})"
+        print(line)
+    print()
+
     print(f"Roster  (repo settings: {ctx.roster_path})")
     if roster_err:
         _print_rows([(False, "roster", roster_err, "r4t init")])
@@ -553,6 +587,17 @@ def cmd_chat(args: argparse.Namespace) -> int:
         return 2
     ctx = _context(args, node)
     _ensure_tell_outbox(ctx)
+    if not args.plain and sys.stdout.isatty():
+        try:
+            from chat_tui import run_chat_tui
+        except ImportError:
+            print(
+                "textual not installed — line UI instead"
+                " (try: python3 -m pip install textual)",
+                file=sys.stderr,
+            )
+        else:
+            return run_chat_tui(ctx)
     from chat import run_chat
 
     return run_chat(ctx)
@@ -940,6 +985,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common(chat_p, with_node=True)
     _add_tell_flags(chat_p)
+    chat_p.add_argument(
+        "--plain", action="store_true",
+        help="Line UI instead of the full-screen TUI.",
+    )
     chat_p.set_defaults(func=cmd_chat)
 
     seat_p = sub.add_parser(
