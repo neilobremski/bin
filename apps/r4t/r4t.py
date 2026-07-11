@@ -320,11 +320,13 @@ def cmd_idle(args: argparse.Namespace) -> int:
         return 2
     ctx = _context(args, node)
     summary = run_idle(ctx)
+    quiet = summary.get("quiet_closed") or []
     print(
         f"watched {summary['watched']} active agent(s); "
         f"nudged {len(summary['nudged'])}"
         + (f" ({', '.join(summary['nudged'])})" if summary["nudged"] else "")
         + f"; dropped {len(summary['dropped'])}"
+        + (f"; quiet-closed {len(quiet)} ({', '.join(quiet)})" if quiet else "")
     )
     clear_summary = run_clear(ctx, args.older_than)
     expired = clear_summary["tasks_expired"]
@@ -728,8 +730,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"  a8s add {node} {root} {definition}")
     print(f"  a8s namespace {team} {node}")
     print(f"  a8s start {node}")
-    print(f'  tell {node} "hello"            # bare node -> the roster leader')
-    print(f'  tell {team}:dev "hello"        # namespace -> a specific member')
+    print(f'  tell {team} "hello"            # bare namespace -> roster leader')
+    print(f'  tell {team}:dev "hello"        # namespace:member -> specific member')
     return 0
 
 

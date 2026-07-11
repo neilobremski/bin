@@ -1135,6 +1135,46 @@ class TestAttachmentRelease:
         assert (outbox / "message-4.json").is_file()
 
 
+class TestQuietTaskBackstop:
+    def _quiet_task(self, creator="neil"):
+        task = tasks.new_task(new_ulid(), creator)
+        task["updated_at"] = "2026-01-01T00:00:00Z"
+        state.atomic_write_json(tasks.task_path(NODE, task["id"]), task)
+        return task["id"]
+
+    def test_quiet_open_task_closes_through_synthesis(self, ctx, fake_harness):
+        task_id = self._quiet_task()
+        summary = run_idle(ctx)
+        assert summary["quiet_closed"] == [task_id]
+        task = tasks.load_task(NODE, task_id)
+        assert task["status"] == tasks.STATUS_CLOSED
+        assert task["synthesized"]
+        prompt = read_prompt(harness_calls(fake_harness)[-1])
+        assert "You are Gerry" in prompt
+        assert "Respond NOW" in prompt
+        assert "went quiet" in prompt
+
+    def test_recent_task_left_alone(self, ctx, fake_harness):
+        task = tasks.ensure_task(NODE, new_ulid(), "neil")
+        summary = run_idle(ctx)
+        assert summary["quiet_closed"] == []
+        assert tasks.load_task(NODE, task["id"])["status"] == tasks.STATUS_OPEN
+
+    def test_pending_work_defers_the_sweep(self, ctx, fake_harness):
+        task_id = self._quiet_task()
+        state.park_pending(NODE, {"from": "a", "to": "acme:phil", "body": "queued"})
+        summary = run_idle(ctx)
+        assert summary["quiet_closed"] == []
+        assert tasks.load_task(NODE, task_id)["status"] == tasks.STATUS_OPEN
+
+    def test_live_turn_defers_the_sweep(self, ctx, fake_harness):
+        task_id = self._quiet_task()
+        state.AgentLock(NODE, "phil").acquire("junior-dev")
+        summary = run_idle(ctx)
+        assert summary["quiet_closed"] == []
+        assert tasks.load_task(NODE, task_id)["status"] == tasks.STATUS_OPEN
+
+
 class TestGovernedRecovery:
     def _crash_evidence(self, task_id):
         state.refresh_active(NODE, "phil", ttl=5)

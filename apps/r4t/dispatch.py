@@ -1321,4 +1321,47 @@ def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
                     ledger_lock.release()
         nudged.append(agent_key)
 
-    return {"watched": len(active) + len(dropped), "nudged": nudged, "dropped": dropped}
+    quiet_closed = _quiet_task_sweep(ctx, config, roster, run_fn)
+    return {
+        "watched": len(active) + len(dropped),
+        "nudged": nudged,
+        "dropped": dropped,
+        "quiet_closed": quiet_closed,
+    }
+
+
+def _quiet_task_sweep(
+    ctx: DispatchContext, config: RigConfig, roster: Roster, run_fn
+) -> list[str]:
+    """The termination backstop for the silent fan-in hole: a member's turn
+    can succeed while staging no reply, leaving zero recovery evidence — the
+    task would dangle open until expiry and the originator would never hear
+    back. An open task with nothing in flight and no ledger activity for
+    `quiet_task_seconds` closes through forced synthesis instead."""
+    if config.quiet_task_seconds <= 0:
+        return []
+    if state.live_locks(ctx.node) or state.list_pending(ctx.node):
+        return []
+    cutoff = time.time() - config.quiet_task_seconds
+    closed: list[str] = []
+    for task in tasks.list_tasks(ctx.node):
+        if task.get("status") != tasks.STATUS_OPEN or task.get("synthesis_state"):
+            continue
+        if tasks.last_activity(task) > cutoff:
+            continue
+        task_id = str(task["id"])
+        state.append_log(
+            ctx.node,
+            f"r4t: QUIET task={task_id} no activity for "
+            f"{config.quiet_task_seconds:g}s with nothing in flight — "
+            "closing through forced synthesis",
+        )
+        _forced_synthesis(
+            ctx, config, roster, task, run_fn,
+            why=(
+                f"the task went quiet for over {config.quiet_task_seconds:g} "
+                "seconds without the originator being answered"
+            ),
+        )
+        closed.append(task_id)
+    return closed

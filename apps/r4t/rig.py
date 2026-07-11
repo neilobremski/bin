@@ -47,6 +47,7 @@ RESERVED_CONFIG_KEYS = frozenset({
     "nudge_cap",
     "breaker_cap",
     "breaker_cooldown_seconds",
+    "quiet_task_seconds",
     "rebroadcast_senders",
 })
 
@@ -169,6 +170,7 @@ DEFAULT_BUCKET_EARN_RATIO = 0.1
 DEFAULT_NUDGE_CAP = 2
 DEFAULT_BREAKER_CAP = 5
 DEFAULT_BREAKER_COOLDOWN_SECONDS = 600.0
+DEFAULT_QUIET_TASK_SECONDS = 1800.0
 DEFAULT_REBROADCAST_SENDERS = ("chatroom",)
 
 
@@ -228,6 +230,7 @@ class RigConfig:
     nudge_cap: int = DEFAULT_NUDGE_CAP
     breaker_cap: int = DEFAULT_BREAKER_CAP
     breaker_cooldown_seconds: float = DEFAULT_BREAKER_COOLDOWN_SECONDS
+    quiet_task_seconds: float = DEFAULT_QUIET_TASK_SECONDS
     rebroadcast_senders: tuple[str, ...] = DEFAULT_REBROADCAST_SENDERS
     missing: bool = False
 
@@ -499,6 +502,7 @@ def load_rig_config(path: Path) -> RigConfig:
             "bucket_max",
             "bucket_earn_ratio",
             "breaker_cooldown_seconds",
+            "quiet_task_seconds",
         ):
             n = _non_negative_number(value, 0, key)
             if n <= 0:

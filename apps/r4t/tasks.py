@@ -164,6 +164,17 @@ def list_tasks(node: str) -> list[dict]:
 
 # ---------- expiry (idle maintenance) ----------
 
+def last_activity(task: dict) -> float:
+    """Unix timestamp of the ledger's last write (0.0 when unparsable)."""
+    from datetime import datetime
+
+    raw = task.get("updated_at") or task.get("created_at") or ""
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
 def expire_tasks(node: str, older_than_seconds: float) -> list[str]:
     """Delete task ledgers idle longer than `older_than_seconds`."""
     from datetime import datetime, timezone
@@ -171,12 +182,7 @@ def expire_tasks(node: str, older_than_seconds: float) -> list[str]:
     cutoff = datetime.now(timezone.utc).timestamp() - older_than_seconds
     removed: list[str] = []
     for task in list_tasks(node):
-        raw = task.get("updated_at") or task.get("created_at") or ""
-        try:
-            stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            stamp = 0.0
-        if stamp >= cutoff:
+        if last_activity(task) >= cutoff:
             continue
         try:
             task_path(node, task["id"]).unlink()
