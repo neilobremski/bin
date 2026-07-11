@@ -52,6 +52,13 @@ def dead_reasons():
     return sorted(r["reason"] for r in state.list_dead_letters(NODE))
 
 
+def seat_messages(name="neil"):
+    return [
+        json.loads(f.read_text(encoding="utf-8"))
+        for f in state.list_seat_messages(NODE, name)
+    ]
+
+
 class TestSplitRecipient:
     def test_sub_address(self):
         assert split_recipient("acme:phil") == ("acme", "phil")
@@ -149,12 +156,20 @@ class TestDispatchRejections:
         assert agent == "gerry"
         assert "nobody" in body and "Gerry" in body and "Phil" in body
 
-    def test_human_never_dispatched(self, ctx, tells, fake_harness):
+    def test_human_message_parks_in_seat(self, ctx, tells, fake_harness):
         sent, _ = tells
         handle_message(ctx, "gerry", "acme:neil", "hi")
         assert not harness_calls(fake_harness)
-        assert "Human" in sent[0][1]
-        assert "tell neil" in sent[0][1]
+        parked = seat_messages()
+        assert [(m["from"], m["content"]) for m in parked] == [("gerry", "hi")]
+        assert sent == [("neil", "hi")]  # Address: doorbell — seat not attached
+
+    def test_human_doorbell_skipped_when_attached(self, ctx, tells, fake_harness):
+        sent, _ = tells
+        state.touch_seat_presence(NODE, "neil")
+        handle_message(ctx, "gerry", "acme:neil", "hi")
+        assert [m["content"] for m in seat_messages()] == ["hi"]
+        assert sent == []
 
     def test_malformed_member_disabled_with_error(self, ctx, tells, fake_harness):
         sent, _ = tells
@@ -209,13 +224,13 @@ class TestStagingRelease:
     def test_external_release_stamps_header_and_class(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
     ):
-        monkeypatch.setenv("CHATTY_TO", "neil")
+        monkeypatch.setenv("CHATTY_TO", "outsider")
         monkeypatch.setenv("CHATTY_BODY", "the fix is deployed")
         assert _handle(chatty_ctx, "gerry", "acme:phil", "deploy the fix") == RAN
         envelopes = outbox_envelopes(repo)
         assert len(envelopes) == 1
         envelope = envelopes[0]
-        assert envelope["to"] == "neil"
+        assert envelope["to"] == "outsider"
         assert envelope["x_r4t_class"] == "auto"
         task = tasks.list_tasks(NODE)[0]
         task_id, hop, auto, body = tasks.parse_header(envelope["content"])
@@ -236,7 +251,7 @@ class TestStagingRelease:
     def test_quota_overflow_dead_letters_and_drains_bucket(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
     ):
-        monkeypatch.setenv("CHATTY_TO", "neil")
+        monkeypatch.setenv("CHATTY_TO", "outsider")
         monkeypatch.setenv("CHATTY_SENDS", "4")  # max_sends_per_turn is 2
         _handle(chatty_ctx, "gerry", "acme:phil", "fan out")
         assert len(outbox_envelopes(repo)) == 2
@@ -272,14 +287,19 @@ class TestStagingRelease:
         pending = [json.loads(p.read_text()) for p in state.list_pending(NODE)]
         assert [p["to"] for p in pending] == ["acme:gerry"]
 
-    def test_bare_human_name_resolves_to_address(
+    def test_human_recipient_stays_internal_and_parks(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
     ):
         monkeypatch.setenv("CHATTY_TO", "acme:neil")
         monkeypatch.setenv("CHATTY_BODY", "shipped")
         assert _handle(chatty_ctx, "gerry", "acme:phil", "ship it") == RAN
-        envelopes = outbox_envelopes(repo)
-        assert [e["to"] for e in envelopes] == ["neil"]
+        assert outbox_envelopes(repo) == []
+        pending = [json.loads(f.read_text()) for f in state.list_pending(NODE)]
+        assert [p["to"] for p in pending] == ["acme:neil"]
+        drain_until_quiet(chatty_ctx)
+        parked = seat_messages()
+        assert [m["from"] for m in parked] == ["acme:phil"]
+        assert "shipped" in parked[0]["content"]
 
     def test_bare_unknown_name_passes_through_external(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
@@ -291,13 +311,23 @@ class TestStagingRelease:
         assert [e["to"] for e in envelopes] == ["chatroom"]
         assert not state.list_pending(NODE)
 
-    def test_reply_to_external_creator_closes_task(
+    def test_reply_to_human_creator_closes_task(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
     ):
         monkeypatch.setenv("CHATTY_TO", "neil")
         monkeypatch.setenv("CHATTY_BODY", "done: shipped and verified")
-        assert _handle(chatty_ctx, "neil", "acme:phil", "ship it") == RAN
-        assert [e["to"] for e in outbox_envelopes(repo)] == ["neil"]
+        assert _handle(chatty_ctx, "acme:neil", "acme:phil", "ship it") == RAN
+        assert outbox_envelopes(repo) == []
+        task = tasks.list_tasks(NODE)[0]
+        assert task["status"] == tasks.STATUS_CLOSED
+
+    def test_reply_to_external_creator_closes_task(
+        self, chatty_ctx, repo, chatty_harness, monkeypatch
+    ):
+        monkeypatch.setenv("CHATTY_TO", "boss-agent")
+        monkeypatch.setenv("CHATTY_BODY", "done: shipped and verified")
+        assert _handle(chatty_ctx, "boss-agent", "acme:phil", "ship it") == RAN
+        assert [e["to"] for e in outbox_envelopes(repo)] == ["boss-agent"]
         task = tasks.list_tasks(NODE)[0]
         assert task["status"] == tasks.STATUS_CLOSED
 
@@ -338,7 +368,7 @@ class TestStagingRelease:
     def test_released_envelope_claims_namespaced_sender(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
     ):
-        monkeypatch.setenv("CHATTY_TO", "neil")
+        monkeypatch.setenv("CHATTY_TO", "outsider")
         monkeypatch.setenv("CHATTY_BODY", "status: done")
         _handle(chatty_ctx, "gerry", "acme:phil", "report status")
         envelopes = outbox_envelopes(repo)
@@ -381,7 +411,7 @@ class TestPairSuppression:
     def test_repeat_within_window_dead_letters(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
     ):
-        monkeypatch.setenv("CHATTY_TO", "neil")
+        monkeypatch.setenv("CHATTY_TO", "outsider")
         monkeypatch.setenv("CHATTY_BODY", "Deploy the fix")
         _handle(chatty_ctx, "gerry", "acme:phil", "job one")
         _handle(chatty_ctx, "gerry", "acme:phil", "job two")
@@ -390,11 +420,11 @@ class TestPairSuppression:
         record = state.list_dead_letters(NODE)[0]
         assert record["count"] == 2
         assert record["from"] == "acme:phil"
-        assert record["to"] == "neil"
+        assert record["to"] == "outsider"
         assert state.bucket_level(NODE, "phil", 8.0) == 7.0
 
     def test_different_content_passes(self, chatty_ctx, repo, chatty_harness, monkeypatch):
-        monkeypatch.setenv("CHATTY_TO", "neil")
+        monkeypatch.setenv("CHATTY_TO", "outsider")
         monkeypatch.setenv("CHATTY_BODY", "unique {i}")
         _handle(chatty_ctx, "gerry", "acme:phil", "job one")
         monkeypatch.setenv("CHATTY_BODY", "another thing entirely")

@@ -72,24 +72,29 @@ Watch it: `a8s logs acme-node -f` (traffic + every governance decision line),
 `r4t status --node acme` (locks, buckets, tasks, dead letters), and the
 dead-letter dir under `~/.config/r4t/teams/acme/`.
 
-## Chat: the human seat
+## The seat: being the human in the roster
 
-`r4t chat` (from the team repo, or `--node <team>`) is all of the above in
-one window: messages delivered to the roster's human member, turn starts and
-completions, governance events, and an input line that sends as that human.
-Typed lines go to the leader by default; `/to <member>` retargets, `/who`
-shows the roster with live turn locks, `/tasks` the task ledgers, `/quit`
-leaves. Training wheels, not a replacement for autonomy — the team runs
-through normal dispatch with all governance; chat is how you watch and steer
-a young team before letting it run unattended.
+A human roster member is a first-class team address: teammates just
+`tell neil`, outsiders (your phone, another cluster) `tell acme:neil`, and
+both park in the node's seat mailbox under `~/.config/r4t/teams/acme/seat/` —
+no handler, no router, nothing to disconnect. Two surfaces read and speak
+for it:
 
-Two requirements, both checked at startup with the fix printed: the human
-member's `Address:` must be a registered a8s agent whose definition is a
-file-proxy (`a8s define <agent> ~/bin/apps/a8s/definitions/human.json`), and
-the team namespace must be bound (`a8s namespace <team> <node-agent>`).
-Chat spawns a dedicated router for the human seat (taking over from a shared
-handler if needed — a shared one delays delivery behind long team turns) and
-one for the node if nothing handles it; both stop at `/quit`.
+```bash
+r4t seat                    # summary: unread count, attached, doorbell
+r4t seat inbox              # read parked messages (marks them read; --peek, --json)
+r4t seat send "message"     # speak as the human — to the leader
+r4t seat send --to phil "…" # or to a member (runs their turn synchronously)
+```
+
+`r4t seat` is the scriptable surface — an orchestrating agent impersonates
+the human with it directly. `r4t chat` is the human view over the same
+mailbox: one window interleaving seat messages, turn starts/completions,
+and governance events, with an input line (`/to`, `/who`, `/tasks`,
+`/quit`). While chat (or anything touching the presence file) is attached,
+dispatch skips the `Address:` doorbell; detach and the doorbell rings
+again. Training wheels, not a replacement for autonomy — everything still
+flows through normal dispatch and governance.
 
 ## Governance knobs
 

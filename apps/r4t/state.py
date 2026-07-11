@@ -292,6 +292,73 @@ def list_pending(node: str) -> list[Path]:
     return sorted(f for f in root.iterdir() if f.is_file() and f.name.endswith(".json"))
 
 
+# ---------- seat (the roster human's mailbox on the node) ----------
+
+def seat_dir(node: str, name: str) -> Path:
+    return team_dir(node) / "seat" / name.strip().lower()
+
+
+def seat_inbox_dir(node: str, name: str) -> Path:
+    return seat_dir(node, name) / "inbox"
+
+
+def seat_read_dir(node: str, name: str) -> Path:
+    return seat_dir(node, name) / "read"
+
+
+def park_seat_message(node: str, name: str, sender: str, content: str) -> Path:
+    envelope = {
+        "id": new_ulid(),
+        "from": sender,
+        "to": name.strip().lower(),
+        "content": content,
+        "parked_at": utc_now(),
+    }
+    path = seat_inbox_dir(node, name) / f"{envelope['id']}.json"
+    atomic_write_json(path, envelope)
+    return path
+
+
+def list_seat_messages(node: str, name: str, *, read: bool = False) -> list[Path]:
+    root = seat_read_dir(node, name) if read else seat_inbox_dir(node, name)
+    if not root.is_dir():
+        return []
+    return sorted(f for f in root.iterdir() if f.is_file() and f.name.endswith(".json"))
+
+
+def mark_seat_read(node: str, name: str, path: Path) -> Path:
+    dest_dir = seat_read_dir(node, name)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / path.name
+    path.rename(dest)
+    return dest
+
+
+def seat_presence_path(node: str, name: str) -> Path:
+    return seat_dir(node, name) / "presence"
+
+
+def touch_seat_presence(node: str, name: str) -> None:
+    p = seat_presence_path(node, name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(p, str(os.getpid()))
+
+
+def clear_seat_presence(node: str, name: str) -> None:
+    try:
+        seat_presence_path(node, name).unlink()
+    except OSError:
+        pass
+
+
+def seat_attached(node: str, name: str) -> bool:
+    try:
+        pid = int(seat_presence_path(node, name).read_text().strip())
+    except (OSError, ValueError):
+        return False
+    return pid > 0 and _pid_alive(pid)
+
+
 # ---------- transcript log + velocity ----------
 
 def append_log(node: str, text: str) -> None:

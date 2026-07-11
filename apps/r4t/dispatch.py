@@ -79,10 +79,11 @@ def _display_name(node: str, addr: str) -> str:
 
 def _canonical_recipient(node: str, roster: Roster, to: str) -> str:
     """Agents address the walled garden by bare first name; the wire uses
-    `node:name`. Bare roster names canonicalize to internal form, humans
-    (bare or prefixed) resolve to their real a8s address, and anything
-    else — `chatroom`, external addresses, unknown names — passes through
-    untouched."""
+    `node:name`. Bare roster names — humans included — canonicalize to
+    internal form; anything else (`chatroom`, external addresses, unknown
+    names) passes through untouched. Human members are internal on purpose:
+    their mail parks in the node's seat mailbox, and `Address:` is only a
+    doorbell copy when no seat session is attached."""
     t = to.strip()
     if ":" in t:
         prefix, _, sub = t.partition(":")
@@ -94,15 +95,40 @@ def _canonical_recipient(node: str, roster: Roster, to: str) -> str:
     member = roster.find(name)
     if member is None:
         return t
-    if member.is_human and member.address:
-        return member.address
     return f"{node}:{member.name.lower()}"
+
+
+def _human_member(node: str, roster: Roster, addr: str) -> Member | None:
+    """The roster human that `addr` (canonical or bare) names, if any."""
+    t = (addr or "").strip()
+    if ":" in t:
+        prefix, _, sub = t.partition(":")
+        if prefix.strip().lower() != node.lower():
+            return None
+        t = sub
+    member = roster.find(t)
+    return member if member is not None and member.is_human else None
 
 
 def _tell_error(ctx: DispatchContext, recipient: str, text: str) -> None:
     body = f"[r4t {ctx.node}] {text}"
     state.append_log(ctx.node, f"r4t: ERROR -> {recipient}: {text}")
     ctx.tell_fn(recipient, body)
+
+
+def _park_seat(ctx: DispatchContext, member: Member, sender: str, message: str) -> None:
+    """Deliver a message to a roster human: park it in the node's seat
+    mailbox, and ring the `Address:` doorbell (a forwarded copy over a8s)
+    only when no seat session is attached to read it live."""
+    state.park_seat_message(ctx.node, member.name, sender, message)
+    bell = ""
+    if member.address and not state.seat_attached(ctx.node, member.name):
+        ctx.tell_fn(member.address, message)
+        bell = f", doorbell -> {member.address}"
+    state.append_log(
+        ctx.node,
+        f"r4t: SEAT {member.name.lower()} <- {sender} (parked{bell})",
+    )
 
 
 def _load_roster(ctx: DispatchContext, sender: str) -> Roster | None:
@@ -131,8 +157,9 @@ def _teammate_lines(ctx: DispatchContext, roster: Roster, member: Member) -> lis
         if m.name.lower() == member.name.lower():
             continue
         if m.is_human:
-            reach = f"tell {m.name.lower()}" if m.address else "(unreachable)"
-            lines.append(f"    - {m.name} (Human, {reach}) — {m.role}".rstrip(" —"))
+            lines.append(
+                f"    - {m.name} (Human, tell {m.name.lower()}) — {m.role}".rstrip(" —")
+            )
         elif not m.errors:
             lines.append(
                 f"    - {m.name} (tell {m.name.lower()}) — {m.role}".rstrip(" —")
@@ -453,13 +480,19 @@ def release_staging(
         path.unlink(missing_ok=True)
         synthesis_available = synthesis_available and not final_response
         released += 1
-        if _is_internal(ctx.node, to):
+        # Humans are terminal: a release to them wakes no further turns, so
+        # it neither counts as internal delegation nor keeps the task alive.
+        if _is_internal(ctx.node, to) and _human_member(ctx.node, roster, to) is None:
             internal_released = True
         elif (
             not synthesis_response
             and synthesis_creator
-            and not _is_internal(ctx.node, synthesis_creator)
-            and to.lower() == synthesis_creator.strip().lower()
+            and (
+                not _is_internal(ctx.node, synthesis_creator)
+                or _human_member(ctx.node, roster, synthesis_creator) is not None
+            )
+            and to.lower()
+            == _canonical_recipient(ctx.node, roster, synthesis_creator).lower()
         ):
             answered = True
     shutil.rmtree(staging, ignore_errors=True)
@@ -738,16 +771,7 @@ def _handle(
             return SKIPPED
 
     if member.is_human:
-        reach = (
-            f"reach them directly: tell {member.address} \"...\""
-            if member.address
-            else "they have no a8s address in the roster"
-        )
-        _tell_error(
-            ctx,
-            sender,
-            f"{member.name} is Human — r4t never dispatches humans; {reach}.",
-        )
+        _park_seat(ctx, member, sender, message)
         return SKIPPED
 
     if member.errors:
@@ -840,12 +864,16 @@ def _handle(
             f"(rig {rig.name} hop_limit {rig.hop_limit})",
         )
         if cut_recipient:
-            ctx.tell_fn(
-                cut_recipient,
+            cut_body = (
                 f"[r4t {ctx.node}] task {task_id}: message chain cut at hop "
                 f"{hop} (rig {rig.name} hop_limit {rig.hop_limit}). The last "
-                f"message was {sender} -> {member.name} and was not dispatched.",
+                f"message was {sender} -> {member.name} and was not dispatched."
             )
+            cut_human = _human_member(ctx.node, roster, cut_recipient)
+            if cut_human is not None:
+                _park_seat(ctx, cut_human, f"r4t:{ctx.node}", cut_body)
+            else:
+                ctx.tell_fn(cut_recipient, cut_body)
         return DEAD
 
     bulk_source = sender.lower() if sender.lower() in config.rebroadcast_senders else None
