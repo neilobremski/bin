@@ -328,6 +328,32 @@ class TestStagingRelease:
         envelopes = outbox_envelopes(repo)
         assert [e["from"] for e in envelopes] == ["acme:phil"]
 
+    def test_drain_waits_out_cadence_instead_of_stalling(
+        self, r4t_home, repo, chatty_harness, tells, monkeypatch, tmp_path
+    ):
+        from conftest import base_config
+
+        script, out = chatty_harness
+        config = base_config(script)
+        config["junior-dev"]["max_turns_per_task"] = 10
+        config["throttle"] = {"max_concurrent": 1, "min_seconds_between_turn_starts": 0.4}
+        config_path = tmp_path / "cadence-rigs.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        _sent, capture = tells
+        ctx = dispatch.DispatchContext(
+            root=repo, node=NODE, roster_path=repo / "ROSTER.md",
+            config_path=config_path, tell_fn=capture,
+        )
+        monkeypatch.setenv("CHATTY_TO", "gerry")
+        monkeypatch.setenv("CHATTY_BODY", "please review my patch")
+        assert _handle(ctx, "neil", "acme:phil", "do the work") == RAN
+        assert len(state.list_pending(NODE)) == 1
+        monkeypatch.setenv("CHATTY_SENDS", "0")
+        # The cadence window is still shut from phil's turn: the drain must
+        # sleep it out and run gerry, not give up until the next idle pass.
+        assert drain_until_quiet(ctx) == 1
+        assert not state.list_pending(NODE)
+
     def test_clean_turn_earns_bucket_back(self, chatty_ctx, chatty_harness, monkeypatch):
         state.bucket_drain(NODE, "phil", 1.0, 8.0)
         monkeypatch.setenv("CHATTY_TO", "neil")

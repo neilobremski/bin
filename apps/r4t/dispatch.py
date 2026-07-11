@@ -1101,16 +1101,42 @@ def drain(ctx: DispatchContext, *, run_fn=run_harness) -> int:
     return ran
 
 
+def _cadence_wait(ctx: DispatchContext) -> float:
+    """Seconds until the cadence throttle admits another turn start (0 when
+    the window is already open or the config is unreadable)."""
+    try:
+        config = load_rig_config(ctx.config_path)
+    except RigError:
+        return 0.0
+    interval = config.throttle.min_seconds_between_turn_starts
+    if interval <= 0:
+        return 0.0
+    last = state.read_last_turn_start(ctx.node)
+    if last is None:
+        return 0.0
+    return max(0.0, interval - (time.time() - last))
+
+
 def drain_until_quiet(ctx: DispatchContext, *, run_fn=run_harness) -> int:
     """Drain repeatedly until a pass runs nothing — a released intra-team
-    message can enable the next turn in the same invocation (the cadence
-    throttle still spaces the starts; blocked messages simply re-defer)."""
+    message can enable the next turn in the same invocation, with the
+    cadence throttle spacing the starts. A pass that runs nothing while
+    deferred messages remain and no other turn is live means the cadence
+    window is the only thing in the way — and nobody else is coming back
+    for the queue before the next idle pass. Sleep the window out and go
+    again instead of stalling every intra-team hop for minutes."""
     total = 0
     for _ in range(DRAIN_MAX_PASSES):
         ran = drain(ctx, run_fn=run_fn)
         total += ran
-        if ran == 0:
+        if ran:
+            continue
+        if not state.list_pending(ctx.node) or state.live_locks(ctx.node):
             break
+        wait = _cadence_wait(ctx)
+        if wait <= 0:
+            break
+        time.sleep(wait + 0.05)
     return total
 
 
