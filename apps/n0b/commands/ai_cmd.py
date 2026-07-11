@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,7 @@ def cmd_research(args: list[str]) -> int:
 
 WHISPER_VENV = Path.home() / ".cache" / "n0b" / "whisper-venv"
 HINTS_FILE = Path.home() / ".config" / "n0b" / "transcribe-hints.txt"
+REPLACEMENTS_FILE = Path.home() / ".config" / "n0b" / "transcribe-replacements.txt"
 
 _WHISPER_SNIPPET = """\
 import sys
@@ -92,10 +94,98 @@ def merged_hints(cli_hints: list[str], hints_file: Path) -> str:
     return ", ".join(read_hints(hints_file) + split_cli_hints(cli_hints))
 
 
+def parse_replacement(line: str) -> tuple[str, str] | None:
+    if "=>" not in line:
+        return None
+    pattern, correction = line.split("=>", 1)
+    pattern, correction = pattern.strip(), correction.strip()
+    if not pattern or not correction:
+        return None
+    return pattern, correction
+
+
+def read_replacements(replacements_file: Path) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    if not replacements_file.is_file():
+        return pairs
+    for line in replacements_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        pair = parse_replacement(line)
+        if pair is None:
+            print(
+                f"n0b ai transcribe: skipping bad replacement line "
+                f"(want 'wrong => right'): {line!r}",
+                file=sys.stderr,
+            )
+            continue
+        pairs.append(pair)
+    return pairs
+
+
+def parse_cli_replacements(cli_replaces: list[str]) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for raw in cli_replaces:
+        pair = parse_replacement(raw)
+        if pair is None:
+            print(
+                f"n0b ai transcribe: bad --replace value "
+                f"(want 'wrong => right'): {raw!r}",
+                file=sys.stderr,
+            )
+            continue
+        pairs.append(pair)
+    return pairs
+
+
+def apply_replacements(
+    text: str, pairs: list[tuple[str, str]]
+) -> tuple[str, list[str]]:
+    applied: list[str] = []
+    for pattern, correction in pairs:
+        def annotate(m: re.Match[str]) -> str:
+            return f"{m.group(0)} (possible transcribe error, might be '{correction}')"
+
+        try:
+            text, count = re.subn(pattern, annotate, text)
+        except re.error as exc:
+            print(
+                f"n0b ai transcribe: bad replacement regex {pattern!r}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        if count:
+            applied.append(f"{pattern} => {correction} (x{count})")
+    return text, applied
+
+
+def save_replacements(cli_replaces: list[str], replacements_file: Path) -> int:
+    new = parse_cli_replacements(cli_replaces)
+    if not new:
+        return 2
+    known = {pattern for pattern, _ in read_replacements(replacements_file)}
+    added = [(p, c) for p, c in new if p not in known]
+    if added:
+        replacements_file.parent.mkdir(parents=True, exist_ok=True)
+        lead = ""
+        if replacements_file.is_file():
+            text = replacements_file.read_text()
+            if text and not text.endswith("\n"):
+                lead = "\n"
+        with replacements_file.open("a") as f:
+            f.write(lead + "".join(f"{p} => {c}\n" for p, c in added))
+    print(
+        f"saved {len(added)} replacement(s) to {replacements_file}"
+        + (f" ({len(new) - len(added)} already there)" if len(added) < len(new) else ""),
+        file=sys.stderr,
+    )
+    return 0
+
+
 def save_hints(cli_hints: list[str], hints_file: Path) -> int:
     new = split_cli_hints(cli_hints)
     if not new:
-        print("n0b ai transcribe: --save needs at least one --hint", file=sys.stderr)
         return 2
     existing = read_hints(hints_file)
     known = {h.lower() for h in existing}
@@ -148,11 +238,25 @@ def cmd_transcribe(
     language: str | None,
     model: str,
     save: bool = False,
+    replaces: list[str] | None = None,
 ) -> int:
+    replaces = replaces or []
     if save:
-        rc = save_hints(hints, HINTS_FILE)
-        if rc != 0 or audio is None:
-            return rc
+        saved = False
+        if split_cli_hints(hints):
+            save_hints(hints, HINTS_FILE)
+            saved = True
+        if parse_cli_replacements(replaces):
+            save_replacements(replaces, REPLACEMENTS_FILE)
+            saved = True
+        if not saved:
+            print(
+                "n0b ai transcribe: --save needs at least one --hint or --replace",
+                file=sys.stderr,
+            )
+            return 2
+        if audio is None:
+            return 0
     if audio is None:
         print("n0b ai transcribe: audio file required (or --save)", file=sys.stderr)
         return 2
@@ -180,15 +284,27 @@ def cmd_transcribe(
             f"hints: none (create {HINTS_FILE}, or pass --hint, add --save to keep)",
             file=sys.stderr,
         )
+    pairs = read_replacements(REPLACEMENTS_FILE) + parse_cli_replacements(replaces)
+    if pairs:
+        print(f"replacements: {len(pairs)} pattern(s) loaded", file=sys.stderr)
     try:
         python = _whisper_python()
     except subprocess.CalledProcessError as exc:
         print(f"n0b ai transcribe: Whisper setup failed: {exc}", file=sys.stderr)
         return 1
     proc = subprocess.run(
-        [str(python), "-c", _WHISPER_SNIPPET, str(path), model, language or "", prompt]
+        [str(python), "-c", _WHISPER_SNIPPET, str(path), model, language or "", prompt],
+        stdout=subprocess.PIPE,
+        text=True,
     )
-    return proc.returncode
+    if proc.returncode != 0:
+        return proc.returncode
+    text, applied = apply_replacements(proc.stdout.strip(), pairs)
+    if pairs:
+        note = "; ".join(applied) if applied else "none matched"
+        print(f"replacements applied: {note}", file=sys.stderr)
+    print(text)
+    return 0
 
 
 def cmd_ai(kind: str, model: str | None, args: list[str]) -> int:

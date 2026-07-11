@@ -13,10 +13,13 @@ N0B_PY = Path(__file__).resolve().parents[1] / "n0b.py"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from commands.ai_cmd import (  # noqa: E402
+    apply_replacements,
     cmd_ai,
     cmd_transcribe,
     merged_hints,
+    read_replacements,
     save_hints,
+    save_replacements,
 )
 from commands.secrets_cmd import cmd_set, resolve  # noqa: E402
 
@@ -201,6 +204,68 @@ def test_transcribe_save_only(tmp_path):
     assert hints_file.read_text() == "Pay-i\n"
 
 
+def test_read_replacements_skips_bad_lines(tmp_path, capsys):
+    f = tmp_path / "transcribe-replacements.txt"
+    f.write_text("# comment\nJerry => Gerry\nnodelimiter\n\\bAmber up\\b => AmperUp\n")
+    pairs = read_replacements(f)
+    assert pairs == [("Jerry", "Gerry"), ("\\bAmber up\\b", "AmperUp")]
+    assert "nodelimiter" in capsys.readouterr().err
+
+
+def test_apply_replacements_annotates_every_match():
+    text, applied = apply_replacements(
+        "Jerry said hi. Then Jerry left.", [("Jerry", "Gerry")]
+    )
+    assert text == (
+        "Jerry (possible transcribe error, might be 'Gerry') said hi. "
+        "Then Jerry (possible transcribe error, might be 'Gerry') left."
+    )
+    assert applied == ["Jerry => Gerry (x2)"]
+
+
+def test_apply_replacements_regex_and_no_match():
+    text, applied = apply_replacements(
+        "amber up is live", [("[Aa]mber ?up", "AmperUp"), ("Jerry", "Gerry")]
+    )
+    assert "might be 'AmperUp'" in text
+    assert applied == ["[Aa]mber ?up => AmperUp (x1)"]
+
+
+def test_apply_replacements_bad_regex_skipped(capsys):
+    text, applied = apply_replacements("hello", [("(unclosed", "x")])
+    assert text == "hello"
+    assert applied == []
+    assert "bad replacement regex" in capsys.readouterr().err
+
+
+def test_save_replacements_dedupes_by_pattern(tmp_path):
+    f = tmp_path / "transcribe-replacements.txt"
+    assert save_replacements(["Jerry => Gerry"], f) == 0
+    assert save_replacements(["Jerry => Larry", "2020 => 2026"], f) == 0
+    assert f.read_text() == "Jerry => Gerry\n2020 => 2026\n"
+
+
+def test_transcribe_applies_replacements(tmp_path, capsys):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"RIFF")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    repl = tmp_path / "transcribe-replacements.txt"
+    repl.write_text("Jerry => Gerry\n")
+    with (
+        patch("commands.ai_cmd._whisper_python", return_value=fake_python),
+        patch("commands.ai_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_cmd.REPLACEMENTS_FILE", repl),
+        patch("commands.ai_cmd.subprocess.run") as run,
+    ):
+        run.return_value.returncode = 0
+        run.return_value.stdout = "Jerry said hi.\n"
+        rc = cmd_transcribe(str(audio), [], "en", "base")
+    assert rc == 0
+    out, err = capsys.readouterr()
+    assert out == "Jerry (possible transcribe error, might be 'Gerry') said hi.\n"
+    assert "Jerry => Gerry (x1)" in err
+
+
 def test_transcribe_invokes_whisper_venv(tmp_path):
     audio = tmp_path / "memo.wav"
     audio.write_bytes(b"RIFF")
@@ -208,9 +273,11 @@ def test_transcribe_invokes_whisper_venv(tmp_path):
     with (
         patch("commands.ai_cmd._whisper_python", return_value=fake_python),
         patch("commands.ai_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
         patch("commands.ai_cmd.subprocess.run") as run,
     ):
         run.return_value.returncode = 0
+        run.return_value.stdout = "hello\n"
         rc = cmd_transcribe(str(audio), ["Pay-i"], "en", "base")
         assert rc == 0
         argv = run.call_args[0][0]

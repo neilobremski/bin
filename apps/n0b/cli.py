@@ -104,9 +104,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--model", default="turbo", help="Whisper model (default: turbo)"
     )
     ai_transcribe.add_argument(
+        "--replace",
+        action="append",
+        default=[],
+        dest="replaces",
+        metavar="'WRONG => RIGHT'",
+        help=(
+            "Regex + correction; matches get annotated after transcription. "
+            "Merged with ~/.config/n0b/transcribe-replacements.txt"
+        ),
+    )
+    ai_transcribe.add_argument(
         "--save",
         action="store_true",
-        help="Append the given --hint values to the global hints file",
+        help="Append the given --hint/--replace values to their global files",
     )
     for kind, help_text in (
         ("image", "Generate images (default model: z-image)"),
@@ -180,7 +191,12 @@ def dispatch(args: argparse.Namespace) -> int:
             return cmd_research(args.prompt)
         if args.ai_kind == "transcribe":
             return cmd_transcribe(
-                args.audio, args.hints, args.language, args.model, save=args.save
+                args.audio,
+                args.hints,
+                args.language,
+                args.model,
+                save=args.save,
+                replaces=args.replaces,
             )
         rest = args.args
         if rest[:1] == ["--"]:

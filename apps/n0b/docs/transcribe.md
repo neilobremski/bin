@@ -22,6 +22,9 @@ n0b ai transcribe memo.m4a --model base                        # smaller/faster 
 
 n0b ai transcribe --hint "Pay-i, k7e" --save                   # add to the global hints file
 n0b ai transcribe memo.m4a --hint "Pay-i" --save               # save, then transcribe
+
+n0b ai transcribe memo.m4a --replace 'Jerry => Gerry'          # annotate known mis-hearings
+n0b ai transcribe --replace 'Jerry => Gerry' --save            # add to the global replacements file
 ```
 
 stderr reports the hints in effect (and where each came from), model
@@ -44,6 +47,24 @@ to bias decoding. Two sources, merged (file first, then flags):
 `--save` appends the given `--hint` values to the global file (deduped,
 case-insensitive) instead of you editing it by hand; with no audio argument
 it saves and exits.
+
+## Replacements
+
+Hints only bias decoding; some words lose anyway ("Gerry" always comes out
+"Jerry"). Replacements run **after** transcription: each is a regex plus the
+likely correction, and every match gets annotated in place —
+
+> Jerry (possible transcribe error, might be 'Gerry') said blah
+
+— verbose by design, so downstream agents aren't misled by a confident wrong
+word. Two sources, merged:
+
+- `~/.config/n0b/transcribe-replacements.txt` — one `wrong => right` per
+  line, `#` comments allowed; the left side is a Python regex.
+- `--replace 'wrong => right'` — repeatable; `--save` appends these to the
+  global file (deduped by pattern).
+
+stderr reports how many patterns loaded and which ones matched.
 
 ## Models
 

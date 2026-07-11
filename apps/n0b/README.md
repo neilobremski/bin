@@ -24,7 +24,7 @@ Detailed docs live in [`docs/`](docs/):
 | [ltx-video.md](docs/ltx-video.md) | `n0b ai video` | LTX-Video generation, models, setup guide |
 | [research.md](docs/research.md) | `n0b ai research` | OpenAI o4-mini-deep-research |
 | [secrets.md](docs/secrets.md) | `n0b secrets` | Get/set secrets — env, `~/lib`, Keychain, dotenv |
-| [transcribe.md](docs/transcribe.md) | `n0b ai transcribe` | Local Whisper speech-to-text, hints file |
+| [transcribe.md](docs/transcribe.md) | `n0b ai transcribe` | Local Whisper speech-to-text, hints + replacement files |
 
 ### Quick reference (no separate doc yet)
 
