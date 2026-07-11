@@ -29,7 +29,7 @@ from mailbox import (
     next_inbox_message,
     route_outboxes,
 )
-from registry import participants_from_registry, save_aliases, save_registry
+from registry import participants_from_registry, save_aliases, save_namespaces, save_registry
 
 
 class TestPendingAttachmentStatus:
@@ -312,6 +312,36 @@ class TestRouteOutboxes:
         # Routing forces from = sender's actual name, regardless of the JSON.
         assert delivered["from"] == "A"
 
+    def test_from_within_owned_namespace_is_preserved(self, two_agents):
+        a, b = two_agents
+        save_namespaces({"crew": "A"})
+        outbox = outbox_dir(a.root)
+        f = outbox / "20260101T000000_A.json"
+        f.write_text(json.dumps({
+            "from": "crew:gerry",  # sub-sender inside A's own namespace
+            "to": "B",
+            "content": "report",
+            "files": [],
+        }))
+        route_outboxes([a, b], all_agents=[a, b])
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert delivered["from"] == "crew:gerry"
+
+    def test_from_in_foreign_namespace_is_overwritten(self, two_agents):
+        a, b = two_agents
+        save_namespaces({"crew": "B"})  # bound to someone else
+        outbox = outbox_dir(a.root)
+        f = outbox / "20260101T000000_A.json"
+        f.write_text(json.dumps({
+            "from": "crew:gerry",
+            "to": "B",
+            "content": "spoof attempt",
+            "files": [],
+        }))
+        route_outboxes([a, b], all_agents=[a, b])
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert delivered["from"] == "A"
+
     def test_local_routing_appends_seen_ids(self, two_agents):
         """When local routing commits, the message ULID enters the seen-ids
         ring. Without this a remote round-trip — we publish to MQTT, the
@@ -349,6 +379,98 @@ class TestRouteOutboxes:
         assert list(inbox_b.iterdir()) == [], (
             "Round-trip must be deduped via seen-ids, not delivered again"
         )
+
+
+class TestNamespaceRouting:
+    """Issue #148 — a `<prefix>:<sub-address>` recipient delivers to the
+    single agent bound to the prefix, with the full address preserved in
+    `to` so the node can self-route internally via $RECIPIENT."""
+
+    @pytest.fixture
+    def namespace_agents(self, fake_home, tmp_path):
+        a_root = tmp_path / "a"; a_root.mkdir()
+        node_root = tmp_path / "node"; node_root.mkdir()
+        save_registry({"A": {"root": str(a_root)}, "NODE": {"root": str(node_root)}})
+        save_namespaces({"acme": "NODE"})
+        a = Participant("A", a_root)
+        node = Participant("NODE", node_root)
+        ensure_mailboxes(a)
+        ensure_mailboxes(node)
+        return a, node
+
+    def test_delivers_one_message_with_to_preserved(self, namespace_agents):
+        a, node = namespace_agents
+        _write_outbox("A", a.root, "acme:phil", "hi phil", [])
+        n = route_outboxes([a, node], all_agents=[a, node])
+        assert n == 1
+        files = list(inbox_dir("NODE").iterdir())
+        assert len(files) == 1
+        msg = json.loads(files[0].read_text())
+        assert msg["to"] == "acme:phil"
+        assert msg["from"] == "A"
+
+    def test_prefix_case_insensitive_sub_address_verbatim(self, namespace_agents):
+        a, node = namespace_agents
+        _write_outbox("A", a.root, "ACME:Team:Phil", "hi", [])
+        route_outboxes([a, node], all_agents=[a, node])
+        msg = json.loads(next(inbox_dir("NODE").iterdir()).read_text())
+        assert msg["to"] == "ACME:Team:Phil"
+
+    def test_empty_sub_address_is_trashed(self, namespace_agents):
+        # Malformed address — same handling as any malformed recipient.
+        a, node = namespace_agents
+        _write_outbox("A", a.root, "acme:", "malformed", [])
+        n = route_outboxes([a, node], all_agents=[a, node])
+        assert n == 0
+        assert list(inbox_dir("NODE").iterdir()) == []
+        assert any("malformed" in f.read_text() for f in trash_dir("A").iterdir())
+
+    def test_unknown_prefix_with_no_remotes_is_trashed(self, namespace_agents):
+        a, node = namespace_agents
+        _write_outbox("A", a.root, "ghost:phil", "nowhere to go", [])
+        n = route_outboxes([a, node], all_agents=[a, node])
+        assert n == 0
+        assert any("ghost:phil" in f.read_text() for f in trash_dir("A").iterdir())
+
+    def test_unknown_prefix_with_remotes_publishes(self, namespace_agents):
+        # Same fallback as an unknown agent name: another cluster may hold
+        # the binding, so the envelope goes out with `to` untouched.
+        a, node = namespace_agents
+        published: list[dict] = []
+
+        def publish(msg, sender_name, succeeded_so_far, attempt_count):
+            published.append(msg)
+            return ["hub"]
+
+        _write_outbox("A", a.root, "ghost:phil", "cross-cluster", [])
+        n = route_outboxes(
+            [a, node], all_agents=[a, node],
+            publish_remotes=publish, configured_remote_ids=["hub"],
+        )
+        assert n == 0
+        assert len(published) == 1
+        assert published[0]["to"] == "ghost:phil"
+        assert list(pending_dir("A").iterdir()) == []
+
+    def test_dangling_bound_agent_treated_as_unknown(self, fake_home, tmp_path):
+        a_root = tmp_path / "a"; a_root.mkdir()
+        save_registry({"A": {"root": str(a_root)}})
+        save_namespaces({"acme": "GONE"})
+        a = Participant("A", a_root)
+        ensure_mailboxes(a)
+        _write_outbox("A", a.root, "acme:phil", "orphaned", [])
+        n = route_outboxes([a], all_agents=[a])
+        assert n == 0
+        assert any("orphaned" in f.read_text() for f in trash_dir("A").iterdir())
+
+    def test_log_keeps_full_to_visible(self, namespace_agents):
+        from core import agent_log_path
+        a, node = namespace_agents
+        _write_outbox("A", a.root, "acme:phil", "hi", [])
+        route_outboxes([a, node], all_agents=[a, node])
+        log = agent_log_path("A").read_text()
+        assert "acme:phil" in log
+        assert "namespace via NODE" in log
 
 
 class TestAtomicFanout:

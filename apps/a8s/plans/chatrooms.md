@@ -7,9 +7,15 @@ Standalone app: `apps/h4l/`, shim `~/bin/h4l`. a8s wiring via
 
 ## Deferred
 
-- Registry prefix routing ([#148](https://github.com/neilobremski/bin/issues/148))
 - tell auto-sync ([#149](https://github.com/neilobremski/bin/issues/149))
-- @mentions, namespaces, shared-repo sender spike
+- @mentions, shared-repo sender spike
+
+## Done
+
+- Registry prefix routing ([#148](https://github.com/neilobremski/bin/issues/148)) —
+  `a8s namespace <prefix> <agent>` binds a prefix so `tell <prefix>:<sub> ...`
+  routes to the single bound node with the full address preserved in `to`
+  (the node self-routes internally via `$RECIPIENT`).
 
 ## Usage
 

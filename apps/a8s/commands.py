@@ -3,6 +3,7 @@
 Grouped by section:
   registry mgmt    — add, define, agents, discover, install
   aliases          — alias, unalias, aliases
+  namespaces       — namespace, unnamespace, namespaces
   process control  — start, run, step, stop, kill, exit, ls
   messaging        — tell
   logs             — logs
@@ -56,11 +57,13 @@ from registry import (
     _scan_for_markers,
     find_participant,
     load_aliases,
+    load_namespaces,
     load_registry,
     participants_from_registry,
     resolve_name,
     resolve_recipient,
     save_aliases,
+    save_namespaces,
     save_registry,
 )
 
@@ -197,6 +200,11 @@ def cmd_add(args: list[str]) -> int:
         if k.lower() == name:
             print(f"alias already exists with name: {k} — pick a different agent name", file=sys.stderr)
             return 1
+    namespaces = load_namespaces()
+    for k in namespaces:
+        if k.lower() == name:
+            print(f"namespace already exists with prefix: {k} — pick a different agent name", file=sys.stderr)
+            return 1
 
     if definition_arg:
         path = Path(definition_arg).expanduser().resolve()
@@ -225,8 +233,10 @@ def cmd_remove(args: list[str]) -> int:
     """`a8s remove <name>` — unregister an agent. Refuses if a handler is
     running (the user must `a8s stop` it first). Cascades into aliases:
     drops <name> from any alias's member list, and deletes any alias that
-    becomes empty as a result. Wipes the on-disk per-agent dir
-    (~/.a8s/agents/<NAME>/) — inbox, trash, log, pid file all gone."""
+    becomes empty as a result. Cascades into namespaces the same way: any
+    prefix bound to <name> is unbound (no orphans). Wipes the on-disk
+    per-agent dir (~/.a8s/agents/<NAME>/) — inbox, trash, log, pid file
+    all gone."""
     if len(args) != 1:
         print("usage: a8s remove <name>", file=sys.stderr)
         return 2
@@ -262,6 +272,15 @@ def cmd_remove(args: list[str]) -> int:
             dropped.append(alias_name)
     if pruned or dropped:
         save_aliases(aliases)
+    namespaces = load_namespaces()
+    unbound = sorted(
+        p for p, target in namespaces.items()
+        if str(target).lower() == name.lower()
+    )
+    if unbound:
+        for p in unbound:
+            del namespaces[p]
+        save_namespaces(namespaces)
     d = agent_dir(name)
     if d.exists():
         shutil.rmtree(d, ignore_errors=True)
@@ -272,6 +291,8 @@ def cmd_remove(args: list[str]) -> int:
         print(f"  pruned from aliases: {', '.join(sorted(pruned))}")
     if dropped:
         print(f"  dropped now-empty aliases: {', '.join(sorted(dropped))}")
+    if unbound:
+        print(f"  unbound namespaces: {', '.join(unbound)}")
     return 0
 
 
@@ -581,6 +602,10 @@ def cmd_alias(args: list[str]) -> int:
         if k.lower() == alias_name:
             print(f"agent already exists with name: {k} — pick a different alias", file=sys.stderr)
             return 1
+    for k in load_namespaces():
+        if k.lower() == alias_name:
+            print(f"namespace already exists with prefix: {k} — pick a different alias", file=sys.stderr)
+            return 1
     member_resolved: str | None = None
     for k in agents:
         if k.lower() == member:
@@ -704,6 +729,129 @@ def cmd_aliases() -> int:
         except (KeyError, ValueError) as e:
             tail = f"  [{e}]"
         print(f"  {name.ljust(width)}  [{', '.join(members)}]{tail}")
+    return 0
+
+
+# ---------- namespace commands (issue #148) ----------
+
+def cmd_namespace(args: list[str]) -> int:
+    """`a8s namespace` — bind address prefixes to node agents.
+
+    Forms (mirror `a8s alias`):
+      a8s namespace                      list all
+      a8s namespace <prefix>             show one binding
+      a8s namespace <prefix> <agent>     bind or rebind
+
+    A bound prefix routes every `<prefix>:<sub-address>` recipient to the
+    single bound agent; the full address stays in the message's `to` so the
+    node's `$RECIPIENT` carries it verbatim and the node can self-route
+    internally. The target must be a registered agent, not an alias —
+    namespace delegation is single-delivery by design, the opposite of
+    alias fan-out. Prefixes share the agent/alias name grammar (lowercase
+    canonical form) and must not collide with either pool."""
+    if len(args) == 0:
+        return cmd_namespaces()
+    if len(args) == 1:
+        return _cmd_namespace_show(args[0])
+    if len(args) != 2:
+        print("usage: a8s namespace <prefix> <agent>   # bind or rebind", file=sys.stderr)
+        print("       a8s namespace <prefix>           # show one", file=sys.stderr)
+        print("       a8s namespace                    # list", file=sys.stderr)
+        return 2
+    raw_prefix, raw_target = args
+    try:
+        prefix = canonical_name(raw_prefix)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    try:
+        target = canonical_name(raw_target)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    agents = load_registry()
+    aliases = load_aliases()
+    for k in agents:
+        if k.lower() == prefix:
+            print(f"agent already exists with name: {k} — pick a different prefix", file=sys.stderr)
+            return 1
+    for k in aliases:
+        if k.lower() == prefix:
+            print(f"alias already exists with name: {k} — pick a different prefix", file=sys.stderr)
+            return 1
+    if any(k.lower() == target for k in aliases):
+        print(f"namespace target must be an agent, not an alias: {raw_target!r}", file=sys.stderr)
+        return 1
+    target_resolved: str | None = None
+    for k in agents:
+        if k.lower() == target:
+            target_resolved = k
+            break
+    if target_resolved is None:
+        print(f"unknown agent {raw_target!r}", file=sys.stderr)
+        return 1
+    namespaces = load_namespaces()
+    previous = namespaces.get(prefix)
+    namespaces[prefix] = target_resolved
+    save_namespaces(namespaces)
+    if previous is not None and str(previous).lower() != target_resolved.lower():
+        print(f"rebound {prefix}: -> {target_resolved} (was {previous})")
+    else:
+        print(f"bound {prefix}: -> {target_resolved}")
+    return 0
+
+
+def cmd_unnamespace(args: list[str]) -> int:
+    """`a8s unnamespace <prefix>` — remove a namespace binding. Mirrors
+    `unalias`'s shape so the surface stays uniform across registry
+    primitives."""
+    if len(args) != 1:
+        print("usage: a8s unnamespace <prefix>", file=sys.stderr)
+        return 2
+    target = args[0].strip().lower()
+    namespaces = load_namespaces()
+    canonical = next((k for k in namespaces if k.lower() == target), None)
+    if canonical is None:
+        print(f"no namespace named {args[0]!r}", file=sys.stderr)
+        return 1
+    del namespaces[canonical]
+    save_namespaces(namespaces)
+    print(f"removed namespace {canonical}")
+    return 0
+
+
+def _namespace_binding_tail(target: str) -> str:
+    known = {n.lower() for n in load_registry()}
+    return "" if str(target).lower() in known else f"  [unknown agent {target!r}]"
+
+
+def _cmd_namespace_show(name: str) -> int:
+    """`a8s namespace <prefix>` — show one binding. Mirrors `alias <name>`."""
+    try:
+        target = canonical_name(name)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    namespaces = load_namespaces()
+    canonical = next((k for k in namespaces if k.lower() == target), None)
+    if canonical is None:
+        print(f"no namespace named {name!r}", file=sys.stderr)
+        return 1
+    bound = namespaces[canonical]
+    print(f"{canonical}: -> {bound}{_namespace_binding_tail(bound)}")
+    return 0
+
+
+def cmd_namespaces() -> int:
+    """`a8s namespaces` — list every namespace prefix and its bound agent."""
+    namespaces = load_namespaces()
+    if not namespaces:
+        print("(no namespaces — use `a8s namespace <prefix> <agent>` to bind one)")
+        return 0
+    width = max(len(p) for p in namespaces)
+    for prefix in sorted(namespaces, key=str.lower):
+        bound = namespaces[prefix]
+        print(f"  {prefix.ljust(width)}  -> {bound}{_namespace_binding_tail(bound)}")
     return 0
 
 

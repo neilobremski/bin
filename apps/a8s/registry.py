@@ -2,12 +2,16 @@
 
 Schema:
   {
-    "agents":  {"<NAME>": {"root": "...", "definition": "...?", "safe_dirs": ["..."]}},
-    "aliases": {"<ALIAS>": ["<NAME-or-ALIAS>", ...]}
+    "agents":     {"<NAME>": {"root": "...", "definition": "...?", "safe_dirs": ["..."]}},
+    "aliases":    {"<ALIAS>": ["<NAME-or-ALIAS>", ...]},
+    "namespaces": {"<PREFIX>": "<AGENT>"}
   }
   `safe_dirs` — optional extra directories (absolute paths) where FILE
   attachments may originate at routing time, in addition to `root`.
-Agent and alias namespaces are disjoint (`cmd_alias` rejects collisions).
+  `namespaces` — prefix routing (#148): a recipient `<PREFIX>:<sub-address>`
+  routes to the single bound agent with the full address preserved in `to`.
+Agent, alias, and namespace name pools are disjoint (`cmd_add`, `cmd_alias`,
+and `cmd_namespace` reject collisions).
 
 Also hosts the read-only marker-file scan used by `cmd_discover` and the
 auto-detect path in `cmd_add`.
@@ -21,36 +25,39 @@ from core import (
     MARKER_FILES,
     NAME_RE,
     Participant,
+    canonical_name,
     registry_path,
 )
 
 
 # ---------- registry I/O ----------
 
+_REGISTRY_SECTIONS = ("agents", "aliases", "namespaces")
+
+
+def _empty_registry() -> dict:
+    return {section: {} for section in _REGISTRY_SECTIONS}
+
+
 def _load_raw_registry() -> dict:
     p = registry_path()
     if not p.is_file():
-        return {"agents": {}, "aliases": {}}
+        return _empty_registry()
     try:
         data = json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
-        return {"agents": {}, "aliases": {}}
+        return _empty_registry()
     if not isinstance(data, dict):
-        return {"agents": {}, "aliases": {}}
-    agents = data.get("agents")
-    aliases = data.get("aliases")
-    if not isinstance(agents, dict):
-        agents = {}
-    if not isinstance(aliases, dict):
-        aliases = {}
-    return {"agents": agents, "aliases": aliases}
+        return _empty_registry()
+    raw = {}
+    for section in _REGISTRY_SECTIONS:
+        value = data.get(section)
+        raw[section] = value if isinstance(value, dict) else {}
+    return raw
 
 
 def _save_raw_registry(data: dict) -> None:
-    payload = {
-        "agents": data.get("agents") or {},
-        "aliases": data.get("aliases") or {},
-    }
+    payload = {section: data.get(section) or {} for section in _REGISTRY_SECTIONS}
     registry_path().write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
@@ -76,7 +83,37 @@ def save_aliases(aliases: dict) -> None:
     _save_raw_registry(raw)
 
 
+def load_namespaces() -> dict:
+    return _load_raw_registry()["namespaces"]
+
+
+def save_namespaces(namespaces: dict) -> None:
+    raw = _load_raw_registry()
+    raw["namespaces"] = namespaces
+    _save_raw_registry(raw)
+
+
 # ---------- lookups ----------
+
+def split_namespace_address(query: str) -> tuple[str, str] | None:
+    """Split a `<prefix>:<sub-address>` recipient on the FIRST colon. Returns
+    `(canonical_prefix, sub_address)`, or None when `query` has no colon.
+
+    The sub-address is opaque to a8s — further colons belong to it
+    (`acme:team:phil` → prefix `acme`, sub `team:phil`). Raises ValueError on a
+    malformed address (empty sub-address, or a prefix outside the NAME_RE
+    grammar) — a colon address can never name an agent or alias, so a bad one
+    is a malformed recipient, not an unknown one."""
+    q = (query or "").strip()
+    if ":" not in q:
+        return None
+    prefix, _, sub = q.partition(":")
+    if not sub:
+        raise ValueError(f"namespace address {query!r} has an empty sub-address")
+    try:
+        return canonical_name(prefix), sub
+    except ValueError:
+        raise ValueError(f"namespace address {query!r} has an invalid prefix") from None
 
 def resolve_recipient(query: str) -> tuple[str, dict] | None:
     """Look up an agent by exact (case-insensitive) name. Aliases are NOT
@@ -106,9 +143,19 @@ def sender_from_cwd() -> tuple[str, dict] | None:
 def resolve_name(query: str) -> tuple[str, list[str]]:
     """Expand `query` into a flat list of agent names.
 
-    Returns (kind, agent_names) where kind ∈ {"agent", "alias"}. For an alias,
-    members are walked recursively; cycles raise ValueError. Unknown names
-    raise KeyError.
+    Returns (kind, agent_names) where kind ∈ {"agent", "alias", "namespace"}.
+    For an alias, members are walked recursively; cycles raise ValueError.
+    Unknown names raise KeyError.
+
+    A colon in `query` makes it a namespace address (#148): the prefix before
+    the first colon resolves via the `namespaces` map to its single bound
+    agent. A bare `query` with no colon that matches a bound prefix is also
+    a namespace address (delivered with `to` = the prefix alone — the node
+    self-routes, e.g. r4t sends bare namespace traffic to the roster leader).
+    The grammar forbids colons in agent and alias names, so the paths can't
+    overlap. A malformed address raises ValueError; an unbound prefix (or a
+    binding to a since-removed agent — same dangling shape as an alias member
+    that no longer exists) raises KeyError.
 
     A diamond (the same alias reached via two distinct parents) is NOT a cycle:
     `path` tracks aliases currently on the recursion stack; `seen_aliases`
@@ -120,7 +167,25 @@ def resolve_name(query: str) -> tuple[str, list[str]]:
     aliases = raw["aliases"]
     agent_lookup = {n.lower(): n for n in agents}
     alias_lookup = {n.lower(): n for n in aliases}
+    namespace_lookup = {n.lower(): (n, v) for n, v in raw["namespaces"].items()}
+    split = split_namespace_address(query)
+    if split is not None:
+        prefix, _sub = split
+        bound = namespace_lookup.get(prefix)
+        if bound is None:
+            raise KeyError(query)
+        _prefix_canon, bound_agent = bound
+        bound_key = str(bound_agent).strip().lower()
+        if bound_key not in agent_lookup:
+            raise KeyError(f"namespace {prefix!r} is bound to unknown agent {bound_agent!r}")
+        return "namespace", [agent_lookup[bound_key]]
     q = query.strip().lower()
+    if q in namespace_lookup:
+        _prefix_canon, bound_agent = namespace_lookup[q]
+        bound_key = str(bound_agent).strip().lower()
+        if bound_key not in agent_lookup:
+            raise KeyError(f"namespace {q!r} is bound to unknown agent {bound_agent!r}")
+        return "namespace", [agent_lookup[bound_key]]
     if q in agent_lookup:
         return "agent", [agent_lookup[q]]
     if q in alias_lookup:

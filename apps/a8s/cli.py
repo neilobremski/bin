@@ -22,6 +22,8 @@ from commands import (
     cmd_kill,
     cmd_logs,
     cmd_ls,
+    cmd_namespace,
+    cmd_namespaces,
     cmd_remote,
     cmd_remove,
     cmd_run,
@@ -31,6 +33,7 @@ from commands import (
     cmd_storage,
     cmd_tell,
     cmd_unalias,
+    cmd_unnamespace,
     cmd_unremote,
     cmd_unstorage,
 )
@@ -45,6 +48,9 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("alias",    "[<name> [<member>]]",       "Group agents under an alias name; show one with `<name>`."),
     ("unalias",  "<alias> [<member>]",        "Remove a member from an alias, or the whole alias."),
     ("aliases",  "",                          "List aliases and their members."),
+    ("namespace", "[<prefix> [<agent>]]",     "Bind an address prefix to one agent (`tell <prefix>:<sub> ...`); show one with `<prefix>`."),
+    ("unnamespace", "<prefix>",               "Remove a namespace binding."),
+    ("namespaces", "",                        "List namespace prefixes and their bound agents."),
     ("start",    "<name>",                    "Run an agent in the background."),
     ("run",      "<name> [--drain <sec>]",     "Run an agent in the foreground."),
     ("step",     "<name>",                    "Run an agent for one pass and exit."),
@@ -98,6 +104,12 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_unalias(args)
     if cmd == "aliases":
         return cmd_aliases()
+    if cmd == "namespace":
+        return cmd_namespace(args)
+    if cmd == "unnamespace":
+        return cmd_unnamespace(args)
+    if cmd == "namespaces":
+        return cmd_namespaces()
     if cmd == "start":
         return cmd_start(args)
     if cmd == "run":
