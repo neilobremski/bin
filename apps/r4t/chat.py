@@ -21,6 +21,7 @@ import queue
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import state
@@ -48,8 +49,20 @@ def load_seat(ctx: DispatchContext) -> tuple[Roster, Member]:
     return roster, human
 
 
-def render_envelope(envelope: dict) -> str:
-    sender = envelope.get("from", "?")
+def sender_label(roster: Roster, sender: str) -> str:
+    """Decorate an envelope sender with its rig slug — `d5n:vela (specialist)`
+    — so the human sees which capability answered. Non-member senders
+    (external agents, the seat) render unchanged."""
+    member = roster.find(sender.split(":")[-1])
+    if member is not None and not member.is_human and member.rig:
+        return f"{sender} ({member.rig})"
+    return sender
+
+
+def render_envelope(envelope: dict, roster: Roster | None = None) -> str:
+    sender = str(envelope.get("from", "?"))
+    if roster is not None:
+        sender = sender_label(roster, sender)
     _, _, _, body = taskmod.parse_header(str(envelope.get("content", "")))
     lines = body.strip().splitlines() or ["(empty)"]
     out = [f"{sender}: {lines[0]}"]
@@ -151,15 +164,31 @@ class SeatFeed:
         return [*self.poll_inbox(), *self.poll_log()]
 
 
-def format_tasks(node: str) -> list[str]:
+def _thread_age(task: dict) -> str:
+    """Compact age of a thread from its creation stamp (e.g. 12s, 4m, 2h)."""
+    try:
+        created = datetime.fromisoformat(
+            str(task.get("created_at", "")).replace("Z", "+00:00")
+        )
+    except ValueError:
+        return "?"
+    secs = max(0, int(datetime.now(timezone.utc).timestamp() - created.timestamp()))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            return f"{secs // size}{unit}"
+    return f"{secs}s"
+
+
+def format_threads(node: str) -> list[str]:
     rows: list[str] = []
     for t in taskmod.list_tasks(node):
+        if t.get("status") != taskmod.STATUS_OPEN:
+            continue
+        short = str(t.get("id", "?"))[-8:]
         rows.append(
-            f"{t.get('id', '?')}  {t.get('status', '?'):8}"
-            + ("  answered" if t.get("answered") else "          ")
-            + f"  creator={t.get('creator', '?')}"
+            f"{short}  creator={str(t.get('creator', '?')):12}  {_thread_age(t)}"
         )
-    return rows or ["(no threads)"]
+    return rows or ["(no open threads)"]
 
 
 def format_who(node: str, roster: Roster, human: Member) -> list[str]:
@@ -184,9 +213,42 @@ def format_who(node: str, roster: Roster, human: Member) -> list[str]:
 HELP = """\
 /to <name|team>   set message target (bare team = leader)
 /who              roster and live turn locks
-/tasks            task ledgers for this team
+/threads          open threads for this team
 /help             this help
 /quit             leave the seat"""
+
+
+@dataclass
+class CommandResult:
+    """Outcome of a shared /command: system lines both surfaces display, plus
+    any state change the surface applies itself (quit, adopt a new target)."""
+
+    lines: list[str] = field(default_factory=list)
+    quit: bool = False
+    target: str | None = None
+
+
+def handle_command(roster: Roster, node: str, human: Member, line: str) -> CommandResult:
+    """Parse one slash command shared by the line UI and the TUI. Unknown
+    commands and /to misses come back as displayable lines, never silence."""
+    cmd, _, arg = line.partition(" ")
+    cmd = cmd.lower()
+    if cmd == "/quit":
+        return CommandResult(quit=True)
+    if cmd == "/help":
+        return CommandResult(lines=HELP.splitlines())
+    if cmd == "/who":
+        return CommandResult(lines=format_who(node, roster, human))
+    if cmd == "/threads":
+        return CommandResult(lines=format_threads(node))
+    if cmd == "/to":
+        target = resolve_target(roster, node, arg)
+        if target is None:
+            return CommandResult(
+                lines=[f"no AI member named {arg.strip().lower()!r} in the roster"]
+            )
+        return CommandResult(lines=[f"target: {target}"], target=target)
+    return CommandResult(lines=[f"unknown command: {cmd} (try /help)"])
 
 
 class ChatSession:
@@ -238,30 +300,13 @@ class ChatSession:
         if not line:
             return True
         if line.startswith("/"):
-            cmd, _, arg = line.partition(" ")
-            cmd = cmd.lower()
-            if cmd == "/quit":
+            result = handle_command(self.roster, self.ctx.node, self.human, line)
+            if result.quit:
                 return False
-            if cmd == "/help":
-                self.emit("sys", HELP)
-            elif cmd == "/to":
-                target = resolve_target(self.roster, self.ctx.node, arg)
-                if target is None:
-                    self.emit(
-                        "sys", f"no AI member named {arg.strip().lower()!r} in the roster"
-                    )
-                    return True
-                self.target = target
-                self.emit("sys", f"target: {self.target}")
-            elif cmd == "/who":
-                self.emit(
-                    "sys",
-                    "\n".join(format_who(self.ctx.node, self.roster, self.human)),
-                )
-            elif cmd == "/tasks":
-                self.emit("sys", "\n".join(format_tasks(self.ctx.node)))
-            else:
-                self.emit("sys", f"unknown command {cmd!r} (/help)")
+            if result.target is not None:
+                self.target = result.target
+            if result.lines:
+                self.emit("sys", "\n".join(result.lines))
             return True
         self.sends.put((self.target, line))
         self.emit("you", f"you -> {self.target}: {line}")
@@ -271,7 +316,7 @@ class ChatSession:
 
     def _pump_feed(self) -> None:
         for kind, payload in self.feed.poll():
-            text = render_envelope(payload) if kind == "in" else payload
+            text = render_envelope(payload, self.roster) if kind == "in" else payload
             self.events.put((kind, text))
 
     def run(self) -> int:

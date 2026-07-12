@@ -6,7 +6,15 @@ import json
 import pytest
 
 import state
-from chat import ChatSession, filter_log_line, render_envelope, run_chat
+import tasks as taskmod
+from chat import (
+    ChatSession,
+    filter_log_line,
+    handle_command,
+    render_envelope,
+    run_chat,
+    sender_label,
+)
 from roster import load_roster
 
 NODE = "acme"
@@ -89,8 +97,56 @@ def test_to_command_targets(session, capsys):
 def test_quit_and_unknown_command(session, capsys):
     assert session.handle_line("/quit") is False
     assert session.handle_line("/bogus") is True
-    assert "unknown command" in capsys.readouterr().out
+    assert "unknown command: /bogus (try /help)" in capsys.readouterr().out
     assert session.handle_line("") is True
+
+
+def test_help_lists_commands(session, capsys):
+    assert session.handle_line("/help") is True
+    out = capsys.readouterr().out
+    for cmd in ("/to", "/who", "/threads", "/help", "/quit"):
+        assert cmd in out
+    assert "/tasks" not in out
+
+
+def test_threads_lists_only_open_threads(session, capsys, r4t_home):
+    taskmod.ensure_task(NODE, "01KX000000000000000000AAAA", "acme:gerry")
+    closed = taskmod.ensure_task(NODE, "01KX000000000000000000BBBB", "acme:phil")
+    taskmod.close_task(NODE, closed["id"])
+    session.handle_line("/threads")
+    out = capsys.readouterr().out
+    assert "creator=acme:gerry" in out
+    assert "0000AAAA" in out  # short id tail (last 8 chars)
+    assert "acme:phil" not in out  # closed thread is hidden
+
+
+def test_threads_empty_message(session, capsys, r4t_home):
+    session.handle_line("/threads")
+    assert "(no open threads)" in capsys.readouterr().out
+
+
+def test_sender_label_adds_rig_for_members(roster):
+    assert sender_label(roster, "acme:gerry") == "acme:gerry (leader)"
+    assert sender_label(roster, "acme:phil") == "acme:phil (junior-dev)"
+    # external agents and the human seat carry no rig slug
+    assert sender_label(roster, "external:bot") == "external:bot"
+    assert sender_label(roster, "acme:neil") == "acme:neil"
+
+
+def test_render_envelope_carries_rig_slug(roster):
+    text = render_envelope({"from": "acme:gerry", "content": "hi"}, roster)
+    assert text == "acme:gerry (leader): hi"
+    plain = render_envelope({"from": "acme:gerry", "content": "hi"})
+    assert plain == "acme:gerry: hi"
+
+
+def test_handle_command_reports_target_and_quit(roster, human):
+    result = handle_command(roster, NODE, human, "/to phil")
+    assert result.target == "acme:phil"
+    assert result.lines == ["target: acme:phil"]
+    assert handle_command(roster, NODE, human, "/quit").quit is True
+    miss = handle_command(roster, NODE, human, "/to nobody")
+    assert miss.target is None and "no AI member" in miss.lines[0]
 
 
 def test_plain_line_queues_send(session, capsys):

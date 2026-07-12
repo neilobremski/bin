@@ -29,14 +29,12 @@ import state
 import tasks as taskmod
 import verdict
 from chat import (
-    HELP,
     SeatError,
     SeatFeed,
-    format_tasks,
-    format_who,
+    handle_command,
     load_seat,
-    resolve_target,
     send_as_human,
+    sender_label,
 )
 from dispatch import DispatchContext
 from rig import RigError, load_rig_config
@@ -125,7 +123,7 @@ class ChatApp(App):
         markdown — agents write markdown, and raw ** and # are noise."""
         log = self.query_one("#conversation", RichLog)
         stamp = datetime.now().strftime("%H:%M:%S")
-        sender = str(envelope.get("from", "?"))
+        sender = sender_label(self.roster, str(envelope.get("from", "?")))
         _, _, _, body = taskmod.parse_header(str(envelope.get("content", "")))
         log.write(Text.assemble((stamp + " ", "dim"), (sender, "bold cyan")))
         log.write(Padding(Markdown(body.strip() or "(empty)"), (0, 0, 1, 9)))
@@ -223,34 +221,19 @@ class ChatApp(App):
         self._emit("you", f"you -> {self.target}: {line}")
 
     def _command(self, line: str) -> None:
-        cmd, _, arg = line.partition(" ")
-        cmd = cmd.lower()
-        if cmd == "/quit":
+        result = handle_command(self.roster, self.ctx.node, self.human, line)
+        if result.quit:
             self.exit(0)
-        elif cmd == "/help":
-            self._emit("sys", HELP)
-        elif cmd == "/to":
-            target = resolve_target(self.roster, self.ctx.node, arg)
-            if target is None:
-                self._emit(
-                    "sys", f"no AI member named {arg.strip().lower()!r} in the roster"
-                )
-                return
-            self.target = target
-            suffix = " (leader)" if target == self.ctx.node else ""
+            return
+        if result.target is not None:
+            self.target = result.target
+            suffix = " (leader)" if result.target == self.ctx.node else ""
             self.query_one("#composer", Input).placeholder = (
                 f"message {self.target}{suffix} — /help for commands"
             )
-            self._emit("sys", f"target: {self.target}")
             self._refresh_header()
-        elif cmd == "/who":
-            self._emit(
-                "sys", "\n".join(format_who(self.ctx.node, self.roster, self.human))
-            )
-        elif cmd == "/tasks":
-            self._emit("sys", "\n".join(format_tasks(self.ctx.node)))
-        else:
-            self._emit("sys", f"unknown command {cmd!r} (/help)")
+        if result.lines:
+            self._emit("sys", "\n".join(result.lines))
 
 
 def run_chat_tui(ctx: DispatchContext) -> int:
