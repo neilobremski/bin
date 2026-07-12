@@ -641,10 +641,12 @@ CELL_BUDGET_KEY = "__cell__"
 
 
 def fmt_budget(value: float) -> str:
-    """Budget level as a clean number: 8.0 -> "8", 7.5 -> "7.5"."""
-    if value == int(value):
-        return str(int(value))
-    return f"{value:.1f}"
+    """Budget level as a clean number: 8.0 -> "8", 7.5 -> "7.5". Rounds to
+    one decimal FIRST so a lazily-extrapolated 7.0004 renders "7", not "7.0"."""
+    rounded = round(value, 1)
+    if rounded == int(rounded):
+        return str(int(rounded))
+    return f"{rounded:.1f}"
 
 
 def buckets_path(node: str) -> Path:
