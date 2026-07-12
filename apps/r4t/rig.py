@@ -124,6 +124,19 @@ HARNESS_PRESETS: dict[str, dict] = {
             "{prompt}",
         ],
     },
+    "ollama": {
+        "description": (
+            "Bare `ollama run` — tiny models with no tool use or big context; "
+            "replies ride the stdout fallback; requires --model"
+        ),
+        "headless": "run MODEL PROMPT (positional)",
+        "invoke": [
+            "ollama",
+            "run",
+            "{model}",
+            "{prompt}",
+        ],
+    },
     "agy": {
         "description": (
             "Antigravity 1.1+ — --print for headless turns; --sandbox + "

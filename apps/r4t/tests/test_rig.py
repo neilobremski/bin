@@ -270,7 +270,8 @@ class TestDefaultPayload:
 class TestHarnessPresets:
     def test_preset_names_match_a8s_kinds(self):
         assert preset_names() == [
-            "agy", "claude", "codex", "copilot", "cursor", "opencode", "opencode-ollama",
+            "agy", "claude", "codex", "copilot", "cursor", "ollama", "opencode",
+            "opencode-ollama",
         ]
 
     def test_every_preset_invoke_is_valid(self, tmp_path):
