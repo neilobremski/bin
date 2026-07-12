@@ -8,3 +8,9 @@ story unfolds; the text is the source, the m4a is the listenable cut.
    the dream, the first build, the s1l melt, the crisis-of-faith run,
    the cell re-founding, the research that validated it, and d5n ahead.
    Recorded 2026-07-12.
+2. [02-the-honest-run](02-the-honest-run.txt) ([audio, ~7.5 min](02-the-honest-run.m4a)) —
+   M2 blessed by a human walk-through; fresh minds and Phase 2 walls;
+   the briefback that got lost above the tell; Faye's disciplined
+   silence; a full autonomous build-test-fix loop; the keyboard bug
+   only real keys could find; M3 awaiting Neil's ruling and blessing.
+   Recorded 2026-07-12.
