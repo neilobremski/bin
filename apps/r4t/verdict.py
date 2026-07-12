@@ -22,20 +22,17 @@ MARKS = {OK: "✓", WARN: "⚠", BAD: "✗"}
 
 RECENT_WINDOW_SECONDS = 600.0
 RUNAWAY_TURNS_PER_WINDOW = 20
-BUDGET_HOT_RATIO = 0.75
 SIGNAL_RECENT_SECONDS = 3600.0
+QUEUE_DEPTH_WARN = 10
 
-ROUTINE_REASONS = {"task-closed", "hop-cut"}
+ROUTINE_REASONS = {"quota"}
 
 REASON_GLOSS = {
-    "task-closed": "in-flight replies to already-closed tasks",
-    "hop-cut": "chains clipped at hop_limit",
-    "pair-repeat": "the same message looping between two agents; suppression held it",
-    "bucket-muted": "sender was out of reply privilege after violations",
-    "breaker-open": "harness kept failing; the breaker blocked the turn",
-    "budget-exhausted": "task hit its turn budget and closed through synthesis",
     "quota": "one turn tried to send past max_sends_per_turn",
-    "bulk-window": "room re-broadcast held to once per window",
+    "unknown-recipient": "mail to a name that is not on the roster",
+    "no-leader": "a bare-node message with no leader marked to receive it",
+    "member-disabled": "mail to a member disabled by a roster problem",
+    "no-rig": "mail to a member whose rig will not resolve",
 }
 
 
@@ -102,9 +99,10 @@ def team_verdicts(
     node: str, roster=None, config=None, *, now: float | None = None
 ) -> list[Verdict]:
     """One plain-English line per operator concern: is anything waiting on
-    the human, is the team runaway, is a member broken/muted/stalled, did a
-    task starve on hops. Roster/config are optional; concerns that need
-    them are skipped when they are unavailable."""
+    the human, is the team runaway, is a member broken or resting with work
+    queued, is the shared team budget spent, is any queue backing up.
+    Roster/config are optional; concerns that need them are skipped when they
+    are unavailable."""
     now = time.time() if now is None else now
     out: list[Verdict] = []
     open_tasks = [
@@ -128,95 +126,78 @@ def team_verdicts(
 
     turns, active_tasks = recent_turns(node, now)
     live = state.live_locks(node, prune=False)
-    hot = [
-        t for t in open_tasks
-        if float(t.get("budget", 0.0) or 0.0)
-        and float(t.get("used", 0.0)) / float(t["budget"]) >= BUDGET_HOT_RATIO
-    ]
     if turns >= RUNAWAY_TURNS_PER_WINDOW:
         out.append(Verdict(
             WARN,
             f"hot: {turns} turns in the last 10m across "
-            f"{len(active_tasks)} task(s)",
+            f"{len(active_tasks)} thread(s)",
             "watch it live: r4t chat",
         ))
     else:
         detail = f"{turns} turn(s) last 10m"
         if live:
             detail += f", {len(live)} live now"
-        if not hot:
-            detail += "; budgets healthy"
         out.append(Verdict(OK, f"no runaway signs ({detail})"))
-    for t in hot:
-        pct = 100.0 * float(t.get("used", 0.0)) / float(t["budget"])
-        out.append(Verdict(
-            WARN,
-            f"task {t['id']} at {pct:.0f}% of its turn budget "
-            f"(creator {t.get('creator', '?')})",
-            "at 100% it closes through forced leader synthesis",
-        ))
+
+    if config is not None:
+        team_level = state.budget_level(
+            node, state.TEAM_BUDGET_KEY,
+            config.team_budget_max, config.team_budget_earn_per_hour, now=now,
+        )
+        if team_level < 1.0:
+            wait = state.budget_seconds_until(
+                node, state.TEAM_BUDGET_KEY,
+                config.team_budget_max, config.team_budget_earn_per_hour, now=now,
+            )
+            out.append(Verdict(
+                WARN,
+                f"team budget spent ({team_level:.1f}/{config.team_budget_max:g}) "
+                f"— everyone rests, ready in ~{wait / 60:.0f} min",
+                "raise team_budget_max/team_budget_earn_per_hour to run faster",
+            ))
 
     if roster is not None and config is not None:
         flagged = 0
         members = [m for m in roster.members if not m.is_human and not m.errors]
         for m in members:
+            rig, _err, _pinned = config.rig_for(m)
+            depth = state.queue_depth(node, m.name)
             blocked, failures = state.breaker_open(
                 node, m.name, config.breaker_cap, config.breaker_cooldown_seconds
             )
             if blocked:
-                rig, _err, _pinned = config.rig_for(m)
                 out.append(Verdict(
                     BAD,
                     f"{m.name} broken — {failures} straight harness failures; "
-                    "turns paused",
+                    f"turns paused ({depth} queued)",
                     f"fix the {rig.name if rig else '?'} rig; "
-                    "a deliberate message retries it",
+                    "turns retry when the breaker closes",
                 ))
                 flagged += 1
                 continue
-            level = state.bucket_level(node, m.name, config.bucket_max)
-            if state.bucket_muted(level, config.bucket_max):
-                out.append(Verdict(
-                    BAD,
-                    f"{m.name} muted — reply bucket drained to "
-                    f"{level:.1f}/{config.bucket_max:g}",
-                    "self-heals: clean turns re-earn reply privilege",
-                ))
-                flagged += 1
-                continue
-            key = m.name.lower()
-            for t in open_tasks:
-                count = int((t.get("nudges") or {}).get(key, 0))
-                if not count:
-                    continue
-                left = max(0, config.nudge_cap - count)
-                tail = (
-                    f", {left} nudge(s) left" if left
-                    else "; next silence closes the task"
+            if rig is not None and depth:
+                level = state.budget_level(
+                    node, m.name, rig.budget_max, rig.budget_earn_per_hour, now=now
                 )
+                if level < 1.0:
+                    wait = state.budget_seconds_until(
+                        node, m.name, rig.budget_max, rig.budget_earn_per_hour, now=now
+                    )
+                    out.append(Verdict(
+                        WARN,
+                        f"{m.name} resting — {depth} queued, ready in "
+                        f"~{wait / 60:.0f} min",
+                    ))
+                    flagged += 1
+                    continue
+            if depth >= QUEUE_DEPTH_WARN:
                 out.append(Verdict(
                     WARN,
-                    f"{m.name} stalled on task {t['id']} — "
-                    f"nudged {count}/{config.nudge_cap}{tail}",
+                    f"{m.name}'s queue is backing up — {depth} message(s) waiting",
                 ))
                 flagged += 1
         if members and not flagged:
             out.append(Verdict(OK, f"all {len(members)} member(s) healthy"))
-
-    open_ids = {t["id"] for t in open_tasks}
-    cuts: dict[str, int] = {}
-    for record in dead:
-        if record.get("reason") == "hop-cut" and record.get("task") in open_ids:
-            task_id = str(record["task"])
-            cuts[task_id] = cuts.get(task_id, 0) + int(record.get("count", 1) or 1)
-    for task_id in sorted(cuts):
-        out.append(Verdict(
-            WARN,
-            f"task {task_id} ran out of hops relaying through the leader "
-            f"({cuts[task_id]} message(s) cut)",
-            "weak-rig teams star through the leader (~2 hops per delegation)"
-            " — raise hop_limit",
-        ))
 
     roll = rollup_dead_letters(dead)
     for reason in sorted(roll.signals):

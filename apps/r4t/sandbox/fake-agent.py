@@ -66,7 +66,7 @@ def send(to: str, content: str) -> None:
 
 
 def first_external_sender(prompt: str) -> str:
-    for name in re.findall(r"(?m)^## \S+ from (\S+)$", prompt):
+    for name in re.findall(r"(?m)^(?:## \S+ from|From:) (\S+)", prompt):
         if ":" not in name and name != "r4t" and name.lower() not in TEAM:
             return name
     return "human"
@@ -75,13 +75,15 @@ def first_external_sender(prompt: str) -> str:
 def main() -> int:
     prompt = sys.argv[1]
     name = re.search(r"You are (\w+),", prompt).group(1).lower()
-    sender_match = re.search(r"(?m)^From: (\S+)$", prompt)
+    incoming = prompt.split("## Messages since your last turn", 1)[-1].split(
+        "## How to work", 1
+    )[0]
+    sender_match = re.search(r"(?m)^From: (\S+)", incoming)
     sender = sender_match.group(1) if sender_match else "unknown"
-    incoming = prompt.split("## Incoming message", 1)[-1].split("## How to work", 1)[0]
     print(f"fake-agent: {name} woken by {sender}")
 
     if name == "lead":
-        if (VERIFIED_RE.search(incoming) and sender.lower() == "tester") or "Respond NOW" in incoming:
+        if (VERIFIED_RE.search(incoming) and "tester" in incoming.lower()) or "gone quiet" in incoming:
             originator = first_external_sender(prompt)
             send(
                 originator,

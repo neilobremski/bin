@@ -106,7 +106,7 @@ work.
 ### 6. Operate
 
 ```bash
-r4t status --node myrepo    # locks, buckets, tasks, dead letters
+r4t status --node myrepo    # budgets, queues, threads, dead letters
 a8s logs myrepo-node -f     # traffic + r4t governance lines
 ```
 
@@ -194,7 +194,7 @@ r4t rig add junior-dev opencode
 | `r4t rig add <rig> <preset>` | Define a rig in the rig config |
 | `r4t rig list` | Show rigs and how roster members resolve |
 | `r4t roster check` | Lint roster and rig mappings |
-| `r4t status --node <team>` | Live locks, buckets, tasks, dead letters |
+| `r4t status --node <team>` | Member budgets, queue depths, threads, dead letters |
 | `r4t sandbox --fake` | End-to-end plumbing test without LLM calls |
 | `r4t sandbox --preset opencode-ollama --model M` | Live sandbox via local Ollama + OpenCode (stderr progress, report on stdout) |
 

@@ -32,16 +32,21 @@ fail closed — see the [tutorial](docs/tutorial.md#missing-rig-no-default--fail
 
 1. `tell acme:phil "..."` routes through a8s to the team node; the node's
    definition invokes `r4t dispatch`.
-2. r4t parses the `[r4t task=<ulid> hop=<n> auto]` header (creating a new
-   task if absent), checks every gate below, and runs Phil's rig
-   with a prompt carrying his persona, rolling history, and the message.
+2. r4t parses the `[r4t task=<ulid> hop=<n> auto]` header (a thread label,
+   creating a new thread if absent) and ENQUEUES the message into Phil's
+   durable queue — unconditionally. When Phil is runnable (both his spend
+   bucket and the team bucket hold ≥1, his breaker is closed, the throttle
+   admits a start), ONE turn drains his whole queue: the prompt carries his
+   persona, rolling history, and every waiting message at once.
 3. The harness's `$TELL_OUTBOX_DIR` points at a per-turn staging dir, so
    Phil replies with the ordinary `tell` — unmodified. After the turn r4t
    releases the staged envelopes: sender attribution is free (only that
-   turn wrote there), the task/hop header + `auto` class mark are stamped
-   mechanically (the LLM never sees or copies headers), the send quota and
-   suppression checks apply, outbound messages land in Phil's history, and
-   the envelopes move into the node's real outbox for a8s.
+   turn wrote there), each reply is attributed to the thread of the message
+   it answers and the thread/hop header + `auto` class mark are stamped
+   mechanically (the LLM never sees or copies headers), the send quota
+   applies, outbound messages land in Phil's history, and the envelopes go
+   to the node's real outbox (external) or straight onto the recipient
+   member's queue (intra-team).
    Inside the team, agents address each other by bare first name
    (`tell gerry`) — the namespace prefix is the *outside* address of the
    walled garden, and roster agents never see it. Release canonicalizes
@@ -80,8 +85,9 @@ tell acme:gerry "Ship the payload refactor; report when reviewed."
 Watch it — one surface per way of looking:
 
 - `r4t status` — the snapshot. Leads with plain-English health verdicts
-  (waiting on you? runaway? member broken/muted/stalled? task starved on
-  hops?), then locks, buckets, tasks, and dead letters rolled up by meaning.
+  (waiting on you? runaway? member broken or resting with work queued? team
+  budget spent? a queue backing up?), then member budgets, queue depths,
+  open threads, and dead letters rolled up by meaning.
 - `r4t logs -f` — the stream. The team's own event log: every governance
   decision and turn boundary, including walled-garden traffic that never
   reaches a8s. `--full` includes prompts and transcripts.
@@ -110,10 +116,10 @@ r4t seat send --to phil "…" # or to a member (runs their turn synchronously)
 `r4t seat` is the scriptable surface — an orchestrating agent impersonates
 the human with it directly. `r4t chat` is the human view over the same
 mailbox: a full-screen TUI with a health header fed by the same verdict
-engine as `r4t status` (worst-level summary, live warnings, open-task
-budget bars), a conversation pane beside a fly-on-the-wall activity pane
-(turn starts/completions and every governance decision line), and an
-input line (`/to`, `/who`, `/tasks`, `/quit`). The TUI needs
+engine as `r4t status` (worst-level summary, live warnings, member budget
+bars for whoever you're talking to), a conversation pane beside a
+fly-on-the-wall activity pane (turn starts/completions and every governance
+decision line), and an input line (`/to`, `/who`, `/tasks`, `/quit`). The TUI needs
 [textual](https://textual.textualize.io/) (`python3 -m pip install
 textual`); without it — or with `--plain`, or piped — chat falls back to
 a line UI over the same feed. While chat (or anything touching the
@@ -128,35 +134,44 @@ All keys live in the out-of-repo rig config (`~/.config/r4t/rigs.json`).
 Per-rig keys go inside a rig block; the rest are top-level. Rationale and
 prior art per layer: [docs/governance.md](docs/governance.md).
 
+The economics are budgets, not cuts: a member runs while its own spend
+bucket and the shared team bucket both hold ≥1 unit (a turn costs 1 of
+each). An empty bucket means the member is *resting* — its queue holds and
+it runs again when the bucket refills. Messages are never dropped for lack
+of budget.
+
 | Key | Default | Governs | Failure mode it stops |
 |---|---|---|---|
+| `budget_max` / `budget_earn_per_hour` (rig) | 8 / 4 | Per-member spend bucket. A turn costs 1 unit regardless of how many queued messages it consumes; empty = resting. Put frontier rigs on a low budget (slow, smart), local rigs on a high one (near-free) | Money burn; a fast rig outrunning its quota |
 | `max_sends_per_turn` (rig) | 6 | Envelopes released per turn; excess dead-letters | Runaway fan-out width |
-| `max_turns_per_task` (rig) | 25 | Weighted per-task turn budget (1/M per turn); exhaustion forces one leader synthesis turn, then the task closes | Quota burn without work; endless chains |
-| `hop_limit` (rig) | 4 | Chain depth; past it the message dead-letters and the originator is told once | Trivial loops (backstop) |
 | `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed | Hung harnesses |
 | `concurrency` (rig) | 1 | Live turns within one rig | Rig-wide pile-ups |
+| `team_budget_max` / `team_budget_earn_per_hour` | 16 / 8 | Shared team spend bucket; a turn also costs 1 team unit. When empty, everyone rests | Whole-team money burn |
 | `throttle.max_concurrent` | 1 | Live turns across ALL rigs | Team-wide pile-ups |
-| `throttle.min_seconds_between_turn_starts` | 15 | Cadence floor between turn starts; blocked messages defer to `pending/` and drain later | Invisible burn — a storm degrades into a watchable drip |
-| `suppression_window_seconds` | 600 | Content-keyed (sender, recipient, normalized hash) pair suppression window; repeats dead-letter | Ack storms; room ping-pong |
-| `bucket_max` / `bucket_earn_ratio` | 8 / 0.1 | Reply-privilege bucket: violations drain 1.0, clean turns earn the ratio; below half the agent's turns stop (inbound still records to history) and recover autonomously | A misbehaving agent muting everyone else's budget |
-| `nudge_cap` | 2 | Idle-recovery nudges per agent per task; past it the leader closes the task with what exists | Recovery machinery becoming its own storm |
-| `quiet_task_seconds` | 1800 | Termination backstop: an open task with nothing in flight and no ledger activity for this long closes through forced synthesis | A member turn that "succeeds" without replying — no crash, no evidence, task dangles and the originator never hears back |
-| `breaker_cap` / `breaker_cooldown_seconds` | 5 / 600 | Failure breaker: after N consecutive failed turns (nonzero exit or timeout) the member's turns pause; one probe turn runs per cooldown until a turn succeeds, and a deliberate (non-`auto`) message resets it. A blocked message dead-letters and its task closes through forced synthesis, so the originator still gets an answer | A broken harness (bad flag, revoked key, dead local model) burning a turn on every inbound message while the asker waits forever |
-| `active_ttl_rotations` | 3 | Idle passes an agent stays on the crash-recovery watch list | Unbounded watch lists |
-| `rebroadcast_senders` | `["chatroom"]` | Inbound from these is classed bulk; a bulk-triggered turn may post back to that room at most once per suppression window | Two agents looping through a re-broadcasting room |
+| `throttle.min_seconds_between_turn_starts` | 15 | Cadence floor between turn starts; a member that can't start yet keeps its queue and runs later | Invisible burn — a storm degrades into a watchable drip |
+| `quiet_task_seconds` | 1800 | Backstop: an open thread whose originator has not been answered and that has seen no activity for this long wakes the leader with a nudge to report current state | A thread that dangles — a turn "succeeds" without replying and the originator never hears back |
+| `breaker_cap` / `breaker_cooldown_seconds` | 5 / 600 | Failure breaker: after N consecutive failed turns (nonzero exit or timeout) the member's turns pause; one probe runs per cooldown until a turn succeeds. Queued messages hold — nothing is dropped | A broken harness (bad flag, revoked key, dead local model) burning turn after turn while messages pile up |
 
-Class marking ties it together — *inside the garden*: every envelope r4t
-releases internally carries `auto` in its header, so an internal header
-**without** `auto` was written by a deliberate hand and resets that task's
-turn budget (human attention licenses more work). The header is
-garden-internal serialization and never crosses egress: external releases
-carry the bare body (class survives as `x_r4t_class` envelope metadata),
-because other a8s nodes must not need to know whether a name is one agent,
-a human, a device, or a whole roster. Symmetrically, headers on inbound
-external messages are untrusted content — a forged header can't join,
-charge, or reset a task. Suppressed, cut, and excess messages are never
-silently dropped: each becomes one JSON record (reason, count, from, to,
-task, time) in `~/.config/r4t/teams/<node>/dead-letter/`.
+The durable queue ties it together. Every inbound message to a member
+enqueues unconditionally — no gate ever drops or dead-letters a deliverable
+message. Dead letters are for *undeliverable* mail only (unknown recipient,
+disabled member, a rig that will not resolve) plus a per-turn send-quota
+overflow: each becomes one JSON record (reason, count, from, to, thread,
+time) in `~/.config/r4t/teams/<node>/dead-letter/`. Duplicate collapse
+replaces pair suppression: when the newest queued entry has the same sender
+and identical normalized body, the arrival collapses into it with a
+`repeats` count rather than adding noise. A turn drains the WHOLE queue at
+once (batch invoke): one prompt shows every waiting message, so an agent
+pivots on the current state instead of burning a turn per message.
+
+Class marking rides the garden's internal serialization: every internally
+released envelope carries `auto` in its `[r4t task=<ulid> hop=<n>]` header
+(a thread label plus a telemetry hop count that never cuts a message). The
+header never crosses egress — external releases carry the bare body (class
+survives as `x_r4t_class` envelope metadata), because other a8s nodes must
+not need to know whether a name is one agent, a human, a device, or a whole
+roster. Symmetrically, headers on inbound external messages are untrusted
+content: a forged header can't attach to an existing thread.
 
 ## Security model
 
@@ -201,8 +216,8 @@ python3 -m pytest apps/r4t/tests/     # from anywhere in ~/bin — the repo
                                       # venv wrapper supplies pytest
 ```
 
-Layout: `r4t.py` (CLI) · `dispatch.py` (turns, staging release, forced
-synthesis, idle recovery) · `tasks.py` (header + ledger) · `state.py`
+Layout: `r4t.py` (CLI) · `dispatch.py` (enqueue, batch turns, staging
+release, quiet-thread sweep) · `tasks.py` (header + thread ledger) · `state.py`
 (all on-disk state under `$R4T_HOME`) · `harness.py` (rig config) ·
 `roster.py` · `verdict.py` (health verdicts + dead-letter rollup, shared
 by status and chat) · `chat.py` (seat feed + line UI) · `chat_tui.py`

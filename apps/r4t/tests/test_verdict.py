@@ -40,19 +40,27 @@ def texts(verdicts):
     return "\n".join(v.text for v in verdicts)
 
 
+def enqueue_n(name: str, n: int) -> None:
+    for i in range(n):
+        state.enqueue(NODE, name, {"from": f"sender-{i}", "body": f"job {i}", "task": "t"})
+
+
+def empty_budget(node, key, budget_max, earn):
+    state.budget_charge(node, key, budget_max, earn, budget_max + 10)
+
+
 class TestRollup:
     def test_routine_vs_signals(self):
         records = [
-            {"reason": "task-closed"},
-            {"reason": "task-closed"},
-            {"reason": "hop-cut"},
-            {"reason": "pair-repeat", "from": "a", "to": "b"},
             {"reason": "quota", "from": "a", "to": "b"},
+            {"reason": "quota", "from": "a", "to": "b"},
+            {"reason": "unknown-recipient", "from": "a", "to": "ghost"},
+            {"reason": "no-rig", "from": "a", "to": "b"},
         ]
         roll = verdict.rollup_dead_letters(records)
-        assert roll.routine == {"task-closed": 2, "hop-cut": 1}
-        assert roll.routine_total == 3
-        assert set(roll.signals) == {"pair-repeat", "quota"}
+        assert roll.routine == {"quota": 2}
+        assert roll.routine_total == 2
+        assert set(roll.signals) == {"unknown-recipient", "no-rig"}
         assert roll.signal_total == 2
 
     def test_empty(self):
@@ -103,11 +111,14 @@ class TestRunawayVerdict:
         verdicts = verdict.team_verdicts(NODE, roster, config, now=later)
         assert any("no runaway signs" in v.text for v in verdicts)
 
-    def test_hot_budget_warns(self, r4t_home, roster, config):
-        task = open_task(used=0.8, budget=1.0)
+    def test_team_budget_spent_warns(self, r4t_home, roster, config):
+        empty_budget(
+            NODE, state.TEAM_BUDGET_KEY,
+            config.team_budget_max, config.team_budget_earn_per_hour,
+        )
         verdicts = verdict.team_verdicts(NODE, roster, config)
         warn = by_level(verdicts, verdict.WARN)
-        assert any(task["id"] in v.text and "budget" in v.text for v in warn)
+        assert any("team budget spent" in v.text for v in warn)
 
 
 class TestMemberVerdicts:
@@ -126,70 +137,48 @@ class TestMemberVerdicts:
         assert any("Phil broken" in v.text for v in bad)
         assert not any("member(s) healthy" in v.text for v in verdicts)
 
-    def test_muted_is_bad(self, r4t_home, roster, config):
-        state.bucket_drain(NODE, "phil", config.bucket_max, config.bucket_max)
-        verdicts = verdict.team_verdicts(NODE, roster, config)
-        assert any("Phil muted" in v.text for v in by_level(verdicts, verdict.BAD))
-
-    def test_nudged_member_is_stalled(self, r4t_home, roster, config):
-        task = open_task(nudges={"phil": 1})
+    def test_resting_member_with_queue_warns(self, r4t_home, roster, config):
+        rig, _e, _p = config.rig_for(next(m for m in roster.members if m.name == "Phil"))
+        enqueue_n("phil", 2)
+        empty_budget(NODE, "phil", rig.budget_max, rig.budget_earn_per_hour)
         verdicts = verdict.team_verdicts(NODE, roster, config)
         warn = by_level(verdicts, verdict.WARN)
-        assert any(
-            "Phil stalled" in v.text and task["id"] in v.text for v in warn
-        )
+        assert any("Phil resting" in v.text and "queued" in v.text for v in warn)
 
-    def test_nudge_cap_reached_says_so(self, r4t_home, roster, config):
-        open_task(nudges={"phil": config.nudge_cap})
+    def test_resting_without_queue_is_quiet(self, r4t_home, roster, config):
+        rig, _e, _p = config.rig_for(next(m for m in roster.members if m.name == "Phil"))
+        empty_budget(NODE, "phil", rig.budget_max, rig.budget_earn_per_hour)
         verdicts = verdict.team_verdicts(NODE, roster, config)
-        assert any("next silence closes the task" in v.text for v in verdicts)
+        assert "resting" not in texts(verdicts)
 
-
-class TestHopStarvation:
-    def test_hop_cuts_on_open_task_warn(self, r4t_home, roster, config):
-        task = open_task()
-        for _ in range(3):
-            state.record_dead_letter(
-                NODE, reason="hop-cut", sender="acme:gerry", to="phil",
-                task=task["id"], content="x",
-            )
+    def test_deep_queue_backs_up(self, r4t_home, roster, config):
+        enqueue_n("phil", verdict.QUEUE_DEPTH_WARN)
         verdicts = verdict.team_verdicts(NODE, roster, config)
         warn = by_level(verdicts, verdict.WARN)
-        assert any(
-            "ran out of hops" in v.text and task["id"] in v.text for v in warn
-        )
-        assert any("hop_limit" in (v.hint or "") for v in warn)
-
-    def test_hop_cuts_on_closed_task_are_quiet(self, r4t_home, roster, config):
-        task = open_task(status=tasks.STATUS_CLOSED)
-        state.record_dead_letter(
-            NODE, reason="hop-cut", sender="acme:gerry", to="phil",
-            task=task["id"], content="x",
-        )
-        verdicts = verdict.team_verdicts(NODE, roster, config)
-        assert "ran out of hops" not in texts(verdicts)
+        assert any("backing up" in v.text for v in warn)
 
 
 class TestSignalDeadLetters:
     def test_recent_signal_warns_with_gloss(self, r4t_home, roster, config):
         state.record_dead_letter(
-            NODE, reason="pair-repeat", sender="acme:gerry", to="phil",
-            task="01X", content="x",
+            NODE, reason="unknown-recipient", sender="acme:gerry", to="ghost",
+            task="", content="x",
         )
         verdicts = verdict.team_verdicts(NODE, roster, config)
         warn = by_level(verdicts, verdict.WARN)
         assert any(
-            "pair-repeat" in v.text and "looping" in v.text for v in warn
+            "unknown-recipient" in v.text and "not on the roster" in v.text
+            for v in warn
         )
 
     def test_stale_signal_is_quiet(self, r4t_home, roster, config):
         state.record_dead_letter(
-            NODE, reason="pair-repeat", sender="acme:gerry", to="phil",
-            task="01X", content="x",
+            NODE, reason="unknown-recipient", sender="acme:gerry", to="ghost",
+            task="", content="x",
         )
         later = time.time() + verdict.SIGNAL_RECENT_SECONDS + 60
         verdicts = verdict.team_verdicts(NODE, roster, config, now=later)
-        assert "pair-repeat" not in texts(verdicts)
+        assert "unknown-recipient" not in texts(verdicts)
 
 
 def test_worst_level():

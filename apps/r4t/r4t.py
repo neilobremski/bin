@@ -22,7 +22,6 @@ import tasks
 import verdict
 from dispatch import (
     DispatchContext,
-    drain_until_quiet,
     handle_message,
     run_clear,
     run_idle,
@@ -49,14 +48,14 @@ R4T_DIR = Path(__file__).resolve().parent
 
 COMMAND_HELP = [
     ("init", "Write starter ROSTER.md and ~/.config/r4t/rigs.json; print a8s registration"),
-    ("status", "Locks, buckets, open tasks, dead letters for one team"),
+    ("status", "Budgets, queues, open threads, dead letters for one team"),
     ("rig list", "Rig invoke lines, limits, and roster rig resolution"),
     ("rig presets", "Named CLI presets aligned with a8s definitions"),
     ("rig add <rig> <preset>", "Add a rig to ~/.config/r4t/rigs.json from a preset"),
     ("roster check", "Lint ROSTER.md against the rig config"),
-    ("task list", "List open tasks for a team"),
+    ("task list", "List conversation threads for a team"),
     ("task show <id>", "Show one task ledger record as JSON"),
-    ("clear", "Prune stale locks, expire idle tasks, drain deferred messages"),
+    ("clear", "Prune stale locks, expire idle threads, drain queued turns"),
     ("idle", "Nudge agents with unfinished work, then clear"),
     ("sandbox", "Disposable end-to-end run with graded report"),
     ("sandbox --fake", "Same pipeline with deterministic fake agents (no LLM)"),
@@ -161,8 +160,9 @@ def _print_rig_summary(config_path: Path, roster_path: Path | None = None) -> No
             argv += f"  [+{len(pool) - 1} pool variant(s)]"
         print(
             f"  {name}: {argv}  "
-            f"(timeout={rig.timeout_seconds:g}s turns={rig.max_turns_per_task} "
-            f"hop_limit={rig.hop_limit} sends={rig.max_sends_per_turn})"
+            f"(timeout={rig.timeout_seconds:g}s "
+            f"budget={rig.budget_max:g}/+{rig.budget_earn_per_hour:g}per-h "
+            f"sends={rig.max_sends_per_turn})"
         )
     if config.pins:
         print("  pins:")
@@ -174,14 +174,12 @@ def _print_rig_summary(config_path: Path, roster_path: Path | None = None) -> No
         f"{config.throttle.min_seconds_between_turn_starts:g}"
     )
     print(
-        f"  governance: suppression_window={config.suppression_window_seconds:g}s "
-        f"bucket_max={config.bucket_max:g} bucket_earn={config.bucket_earn_ratio:g} "
-        f"nudge_cap={config.nudge_cap} active_ttl_rotations={config.active_ttl_rotations} "
+        f"  governance: team_budget={config.team_budget_max:g}/"
+        f"+{config.team_budget_earn_per_hour:g}per-h "
+        f"quiet_task={config.quiet_task_seconds:g}s "
         f"breaker_cap={config.breaker_cap} "
         f"breaker_cooldown={config.breaker_cooldown_seconds:g}s"
     )
-    if config.rebroadcast_senders:
-        print(f"  rebroadcast_senders: {', '.join(config.rebroadcast_senders)}")
     if roster_path and roster_path.is_file():
         try:
             roster = load_roster(roster_path)
@@ -209,13 +207,15 @@ def _print_team_summaries() -> None:
         return
     for node in teams:
         locks = state.live_locks(node)
-        open_tasks = tasks.list_tasks(node)
+        open_tasks = [
+            t for t in tasks.list_tasks(node) if t.get("status") == tasks.STATUS_OPEN
+        ]
         dead = len(state.list_dead_letters(node))
-        pending = len(state.list_pending(node))
+        queued = sum(state.queue_depth(node, m) for m in state.members_with_queue(node))
         parts = [
-            f"{len(open_tasks)} task(s)",
+            f"{len(open_tasks)} open thread(s)",
             f"{len(locks)} lock(s)",
-            f"{pending} pending",
+            f"{queued} queued",
             f"{dead} dead letter(s)",
         ]
         print(f"  {node}: {', '.join(parts)}")
@@ -241,7 +241,7 @@ def _next_steps(
     if not teams:
         steps.append("`r4t init` — prints the a8s add / namespace / start sequence")
     elif len(teams) == 1:
-        steps.append(f"`r4t status --node {teams[0]}` — live locks, buckets, tasks")
+        steps.append(f"`r4t status --node {teams[0]}` — budgets, queues, threads")
     else:
         steps.append("`r4t status --node <team>` — pick a team from the list above")
     steps.append("`r4t sandbox --fake` — end-to-end plumbing check without LLM calls")
@@ -308,12 +308,10 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         return 2
     ctx = _context(args, node.lower())
     state.stamp_root(ctx.node, ctx.root)
-    if not args.no_drain:
-        drain_until_quiet(ctx)
-    rc = handle_message(ctx, args.from_agent, args.to, args.message)
-    if not args.no_drain:
-        drain_until_quiet(ctx)
-    return rc
+    return handle_message(
+        ctx, args.from_agent, args.to, args.message,
+        drain_after=not args.no_drain,
+    )
 
 
 def cmd_clear(args: argparse.Namespace) -> int:
@@ -325,9 +323,9 @@ def cmd_clear(args: argparse.Namespace) -> int:
     expired = summary["tasks_expired"]
     print(
         f"pruned {summary['locks_pruned']} stale lock(s); "
-        f"expired {len(expired)} task(s)"
+        f"expired {len(expired)} thread(s)"
         + (f" ({', '.join(expired)})" if expired else "")
-        + f"; drained {summary['drained']} deferred message(s)"
+        + f"; drained {summary['drained']} queued turn(s)"
     )
     return 0
 
@@ -338,20 +336,18 @@ def cmd_idle(args: argparse.Namespace) -> int:
         return 2
     ctx = _context(args, node)
     summary = run_idle(ctx)
-    quiet = summary.get("quiet_closed") or []
+    nudged = summary.get("quiet_nudged") or []
     print(
-        f"watched {summary['watched']} active agent(s); "
-        f"nudged {len(summary['nudged'])}"
-        + (f" ({', '.join(summary['nudged'])})" if summary["nudged"] else "")
-        + f"; dropped {len(summary['dropped'])}"
-        + (f"; quiet-closed {len(quiet)} ({', '.join(quiet)})" if quiet else "")
+        f"drained {summary['drained']} queued turn(s); "
+        f"nudged the leader on {len(nudged)} quiet thread(s)"
+        + (f" ({', '.join(nudged)})" if nudged else "")
     )
     clear_summary = run_clear(ctx, args.older_than)
     expired = clear_summary["tasks_expired"]
     print(
         f"pruned {clear_summary['locks_pruned']} stale lock(s); "
-        f"expired {len(expired)} task(s); "
-        f"drained {clear_summary['drained']} deferred message(s)"
+        f"expired {len(expired)} thread(s); "
+        f"drained {clear_summary['drained']} more queued turn(s)"
     )
     return 0
 
@@ -409,14 +405,20 @@ def _roster_rows(
             rows.append((False, m.name, f"{state_text}{suffix}", hint or None))
             continue
         detail = f"rig={rig.name}" + (" (pinned)" if pinned else "")
-        level = state.bucket_level(node, m.name, config.bucket_max)
-        detail += f"  bucket={level:.1f}/{config.bucket_max:g}"
+        level = state.budget_level(
+            node, m.name, rig.budget_max, rig.budget_earn_per_hour
+        )
+        detail += f"  budget={level:.1f}/{rig.budget_max:g}"
+        depth = state.queue_depth(node, m.name)
+        if depth:
+            detail += f"  {depth} queued"
         healthy: bool | None = True
         hint = None
-        if state.bucket_muted(level, config.bucket_max):
-            detail += "  MUTED"
-            healthy = False
-            hint = "wait — it self-heals as clean inbound accrues"
+        if level < 1.0 and depth:
+            wait = state.budget_seconds_until(
+                node, m.name, rig.budget_max, rig.budget_earn_per_hour
+            )
+            detail += f"  RESTING (ready in ~{wait / 60:.0f} min)"
         blocked, failures = state.breaker_open(
             node, m.name, config.breaker_cap, config.breaker_cooldown_seconds
         )
@@ -425,7 +427,7 @@ def _roster_rows(
         if blocked:
             detail += "  BREAKER OPEN"
             healthy = False
-            hint = f"fix the {rig.name} harness; a non-auto message resets it"
+            hint = f"fix the {rig.name} harness; turns retry when it closes"
         rows.append((healthy, m.name, f"{detail}{suffix}", hint))
     return rows
 
@@ -452,7 +454,7 @@ def _rig_rows(
         rows.append((
             True, name,
             f"{argv}  (timeout={rig.timeout_seconds:g}s "
-            f"turns={rig.max_turns_per_task} hops={rig.hop_limit} "
+            f"budget={rig.budget_max:g}/+{rig.budget_earn_per_hour:g}per-h "
             f"sends={rig.max_sends_per_turn})",
             None,
         ))
@@ -466,11 +468,10 @@ def _rig_rows(
     ))
     rows.append((
         None, "governance",
-        f"suppression={config.suppression_window_seconds:g}s  "
-        f"bucket={config.bucket_max:g}/{config.bucket_earn_ratio:g}  "
-        f"nudge_cap={config.nudge_cap}  "
-        f"breaker={config.breaker_cap}/{config.breaker_cooldown_seconds:g}s  "
-        f"active_ttl={config.active_ttl_rotations}",
+        f"team_budget={config.team_budget_max:g}/"
+        f"+{config.team_budget_earn_per_hour:g}per-h  "
+        f"quiet_task={config.quiet_task_seconds:g}s  "
+        f"breaker={config.breaker_cap}/{config.breaker_cooldown_seconds:g}s",
         None,
     ))
     return rows
@@ -478,20 +479,25 @@ def _rig_rows(
 
 def _activity_rows(node: str) -> list[tuple[bool | None, str, str, str | None]]:
     rows: list[tuple[bool | None, str, str, str | None]] = []
-    open_tasks = tasks.list_tasks(node)
+    for name in state.members_with_queue(node):
+        rows.append((
+            None, "queued",
+            f"{name}  {state.queue_depth(node, name)} message(s) waiting",
+            None,
+        ))
+    open_tasks = [
+        t for t in tasks.list_tasks(node) if t.get("status") == tasks.STATUS_OPEN
+    ]
     for task in open_tasks:
         rows.append((
-            None, "task",
+            None, "thread",
             f"{task['id']}  creator={task.get('creator', '?')}  "
-            f"turns={task.get('turns', 0)}  "
-            f"used={task.get('used', 0.0):.2f}/{task.get('budget', 1.0):.2f}  "
             f"status={task.get('status', '?')}"
-            + ("  synthesized" if task.get("synthesized") else ""),
+            + ("  answered" if task.get("answered") else ""),
             None,
         ))
     if not open_tasks:
-        rows.append((None, "tasks", "none", None))
-    rows.append((None, "pending", f"{len(state.list_pending(node))} deferred message(s)", None))
+        rows.append((None, "threads", "none open", None))
     roll = verdict.rollup_dead_letters(state.list_dead_letters(node))
     if not roll.routine_total and not roll.signal_total:
         rows.append((None, "dead letters", "0", None))
@@ -516,15 +522,6 @@ def _activity_rows(node: str) -> list[tuple[bool | None, str, str, str | None]]:
             f"{len(records)} {reason} ({worst}{others}) — "
             f"{verdict.REASON_GLOSS.get(reason, reason)}",
             f"ls {state.dead_letter_dir(node)}",
-        ))
-    active = state.load_active(node)
-    for agent in sorted(active):
-        entry = active[agent] if isinstance(active[agent], dict) else {}
-        rows.append((
-            None, "watching",
-            f"{agent}  ttl={entry.get('ttl', '?')}"
-            + (f"  last_nudge={entry['last_nudge_at']}" if entry.get("last_nudge_at") else ""),
-            None,
         ))
     return rows
 
@@ -702,9 +699,12 @@ def cmd_seat(args: argparse.Namespace) -> int:
         else:
             to = node
         sender = f"{node}:{human.name.lower()}"
-        drain_until_quiet(ctx)
         handle_message(ctx, sender, to, text)
-        drain_until_quiet(ctx)
+        from dispatch import resting_note
+
+        note = resting_note(ctx, to)
+        if note:
+            print(note)
         return 0
 
     if args.action == "inbox":
@@ -852,10 +852,8 @@ def cmd_task(args: argparse.Namespace) -> int:
         for task in listing:
             print(
                 f"{task['id']}  creator={task.get('creator', '?')}  "
-                f"turns={task.get('turns', 0)}  "
-                f"used={task.get('used', 0.0):.2f}/{task.get('budget', 1.0):.2f}  "
                 f"status={task.get('status', '?')}"
-                + ("  synthesized" if task.get("synthesized") else "")
+                + ("  answered" if task.get("answered") else "")
             )
         return 0
     if not args.id:

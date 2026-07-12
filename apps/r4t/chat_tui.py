@@ -51,8 +51,10 @@ KIND_STYLE = {"in": "cyan", "you": "green", "sys": "yellow", "act": "dim"}
 LEVEL_STYLE = {verdict.OK: "green", verdict.WARN: "yellow", verdict.BAD: "red"}
 
 
-def budget_bar(used: float, budget: float, width: int = 8) -> str:
-    frac = 0.0 if budget <= 0 else min(1.0, used / budget)
+def budget_bar(level: float, budget: float, width: int = 8) -> str:
+    """Fill by how much spend budget is LEFT: a full bar is a fresh member,
+    an empty bar is a resting one."""
+    frac = 0.0 if budget <= 0 else max(0.0, min(1.0, level / budget))
     filled = round(frac * width)
     return "█" * filled + "░" * (width - filled)
 
@@ -141,10 +143,27 @@ class ChatApp(App):
         state.touch_seat_presence(self.ctx.node, self.human.name)
         self._pump_feed()
 
+    def _member_budget_rows(self) -> list[tuple[str, float, float]]:
+        """(name, level, max) for the members you're talking to. The target is
+        a canonical address (bare node = leader); show that member's bucket."""
+        if self.rig_config is None:
+            return []
+        _, sub = self.target.partition(":")[0], self.target.partition(":")[2]
+        member = self.roster.find(sub) if sub else self.roster.leader()
+        rows: list[tuple[str, float, float]] = []
+        if member is not None and not member.is_human and not member.errors:
+            rig, _err, _pinned = self.rig_config.rig_for(member)
+            if rig is not None:
+                level = state.budget_level(
+                    self.ctx.node, member.name, rig.budget_max, rig.budget_earn_per_hour
+                )
+                rows.append((member.name, level, rig.budget_max))
+        return rows
+
     def _refresh_header(self) -> None:
         verdicts = verdict.team_verdicts(self.ctx.node, self.roster, self.rig_config)
         worst = verdict.worst_level(verdicts)
-        open_tasks = [
+        open_threads = [
             t for t in taskmod.list_tasks(self.ctx.node)
             if t.get("status") == taskmod.STATUS_OPEN
         ]
@@ -152,7 +171,7 @@ class ChatApp(App):
         header = Text()
         header.append(self.ctx.node, style="bold")
         header.append(f" · seat {self.human.name} → {self.target}", style="")
-        header.append(f" · {len(open_tasks)} open task(s)", style="dim")
+        header.append(f" · {len(open_threads)} open thread(s)", style="dim")
         header.append("   ")
         header.append(
             f"{verdict.MARKS[worst]} "
@@ -168,16 +187,14 @@ class ChatApp(App):
             header.append(
                 f"\n… {len(shown) - MAX_HEADER_VERDICTS} more (r4t status)", style="dim"
             )
-        for t in open_tasks[:MAX_HEADER_TASKS]:
-            used = float(t.get("used", 0.0))
-            budget = float(t.get("budget", 1.0) or 1.0)
+        for name, level, budget_max in self._member_budget_rows()[:MAX_HEADER_TASKS]:
+            depth = state.queue_depth(self.ctx.node, name)
             header.append("\n")
-            header.append(budget_bar(used, budget), style="magenta")
-            header.append(
-                f" {100 * used / budget:3.0f}% {t.get('id', '?')}"
-                f"  turns={t.get('turns', 0)} creator={t.get('creator', '?')}",
-                style="dim",
-            )
+            header.append(budget_bar(level, budget_max), style="magenta")
+            tail = f" {name} budget {level:.1f}/{budget_max:g}"
+            if depth:
+                tail += f"  {depth} queued"
+            header.append(tail, style="dim")
         self.query_one("#header", Static).update(header)
 
     # ---------- sending ----------
@@ -186,7 +203,9 @@ class ChatApp(App):
         while True:
             to, text = self.sends.get()
             try:
-                send_as_human(self.ctx, self.human, to, text)
+                note = send_as_human(self.ctx, self.human, to, text)
+                if note:
+                    self.call_from_thread(self._emit, "sys", note)
             except Exception as e:  # noqa: BLE001 — surface, don't kill the seat
                 self.call_from_thread(self._emit, "sys", f"send failed: {e}")
 

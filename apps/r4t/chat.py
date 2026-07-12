@@ -84,14 +84,16 @@ def resolve_target(roster: Roster, node: str, arg: str) -> str | None:
     return None
 
 
-def send_as_human(ctx: DispatchContext, human: Member, to: str, text: str) -> None:
-    """Speak as the seat: drain anything parked, run the recipient's turn
-    synchronously, then drain the fallout. Blocks for the whole exchange —
-    callers own threading."""
+def send_as_human(ctx: DispatchContext, human: Member, to: str, text: str) -> str | None:
+    """Speak as the seat: enqueue the message, then run the recipient's turn
+    synchronously (and drain the fallout). Blocks for the whole exchange —
+    callers own threading. Returns a note when the recipient is resting (the
+    message is safely queued and runs when the bucket refills), else None."""
+    from dispatch import resting_note
+
     sender = f"{ctx.node}:{human.name.lower()}"
-    drain_until_quiet(ctx)
     handle_message(ctx, sender, to, text)
-    drain_until_quiet(ctx)
+    return resting_note(ctx, to)
 
 
 class SeatFeed:
@@ -154,11 +156,10 @@ def format_tasks(node: str) -> list[str]:
     for t in taskmod.list_tasks(node):
         rows.append(
             f"{t.get('id', '?')}  {t.get('status', '?'):8}"
-            f"  turns={t.get('turns', 0)}"
-            f"  used={t.get('used', 0):.2f}/{t.get('budget', 0):.2f}"
-            f"  creator={t.get('creator', '?')}"
+            + ("  answered" if t.get("answered") else "          ")
+            + f"  creator={t.get('creator', '?')}"
         )
-    return rows or ["(no open tasks)"]
+    return rows or ["(no threads)"]
 
 
 def format_who(node: str, roster: Roster, human: Member) -> list[str]:
@@ -218,7 +219,9 @@ class ChatSession:
         while True:
             to, text = self.sends.get()
             try:
-                send_as_human(self.ctx, self.human, to, text)
+                note = send_as_human(self.ctx, self.human, to, text)
+                if note:
+                    self.events.put(("sys", note))
             except Exception as e:  # noqa: BLE001 — surface, don't kill the seat
                 self.events.put(("sys", f"send failed: {e}"))
 

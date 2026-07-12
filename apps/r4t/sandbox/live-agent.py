@@ -70,11 +70,13 @@ def role_name(prompt: str) -> str:
 
 
 def incoming_block(prompt: str) -> str:
-    return prompt.split("## Incoming message", 1)[-1].split("## How to work", 1)[0]
+    return prompt.split("## Messages since your last turn", 1)[-1].split(
+        "## How to work", 1
+    )[0]
 
 
 def sender_from(prompt: str) -> str:
-    match = re.search(r"(?m)^From: (\S+)$", incoming_block(prompt))
+    match = re.search(r"(?m)^From: (\S+)", incoming_block(prompt))
     return match.group(1) if match else ""
 
 

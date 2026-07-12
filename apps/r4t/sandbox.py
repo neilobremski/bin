@@ -182,7 +182,7 @@ def _final_answer(a8s_home: Path) -> dict | None:
 def _busy(a8s_home: Path, repo: Path) -> bool:
     if state.live_locks(TEAM):
         return True
-    if state.list_pending(TEAM):
+    if any(state.queue_depth(TEAM, m) for m in state.members_with_queue(TEAM)):
         return True
     for d in (
         a8s_home / "agents" / NODE / "inbox",
@@ -557,7 +557,10 @@ def run_sandbox(
                     "BREAKER" in line and "tripped" in line
                     for line in _governance_lines()
                 )
-                or _dead_letter_counts().get("breaker-open", 0) < 1
+                or not any(
+                    "BREAKER" in line and "breaker open" in line
+                    for line in _governance_lines()
+                )
             )
             if final is not None and quiet_polls >= 2 and not breaker_pending:
                 _log("quiescent with final answer")
@@ -581,13 +584,12 @@ def run_sandbox(
         program_ok, program_detail = _run_program(repo)
         turns = len(_velocity_rows())
         dead = _dead_letter_counts()
-        suppressions = dead.get("pair-repeat", 0) + dead.get("bulk-window", 0)
 
         checks: list[tuple[str, object, str]] = []
         if break_member:
             gov = _governance_lines()
             tripped = any("BREAKER" in line and "tripped" in line for line in gov)
-            blocked = dead.get("breaker-open", 0)
+            held = any("BREAKER" in line and "breaker open" in line for line in gov)
             checks += [
                 (
                     "Breaker tripped",
@@ -595,9 +597,9 @@ def run_sandbox(
                     f"{break_member} pinned to an always-failing rig (breaker_cap 2)",
                 ),
                 (
-                    "Breaker blocked message(s)",
-                    blocked >= 1,
-                    f"{blocked} breaker-open dead letter(s)",
+                    "Breaker held queued message(s)",
+                    held,
+                    "messages hold in the queue while the breaker is open — none dropped",
                 ),
             ]
         else:
@@ -618,8 +620,6 @@ def run_sandbox(
             ("Turn count within budget", turns <= MAX_TURNS, f"{turns} turn(s) <= {MAX_TURNS}"),
             ("Zero orphan processes", not orphans, "; ".join(orphans) or "clean"),
             ("Dead letters", sum(dead.values()), json.dumps(dead) if dead else "none"),
-            ("Suppressions", suppressions, ""),
-            ("Hop cuts", dead.get("hop-cut", 0), ""),
         ]
 
         report = _build_report(
