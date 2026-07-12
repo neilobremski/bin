@@ -117,6 +117,17 @@ data structure — a durable per-member queue.
   laterally only because the prompt advertised the full roster).
 - Hop limits retire inside a cell/tree (a tree cannot loop).
 
+### Budget tempo (Neil, from the park, 2026-07-12)
+
+Rigs/members declare **ratios** (relative spend rates); one team-level
+**tempo** knob scales them all — observe and tune overall speed with a
+single number instead of editing per-rig earn rates. Wanted: commands
+to SET and OBSERVE refill speeds (e.g. `r4t tempo`, `r4t tempo 2x`;
+status shows effective per-member rates). Finding the right amounts
+takes time — make the tuning loop cheap. Evidenced live: the M1 run
+bottomed the default 16/8 cell bucket and the mid-run fix was a raw
+JSON edit.
+
 ### UI polish queued from the first d5n run
 
 - TUI composer gains command parity with the line UI; unknown commands
