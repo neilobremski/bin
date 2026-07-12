@@ -110,6 +110,24 @@ data structure — a durable per-member queue.
   reach anyone).
 - Hop limits retire inside a cell/tree (a tree cannot loop).
 
-## Phase 3 — mission/milestone doc (design still under discussion)
+## Phase 3 — mission/milestone doc
 
-Placeholder — do not build yet.
+Decided 2026-07-12 (nested intent, per commander's-intent doctrine):
+
+- `MISSION.md` at the repo root, HUMAN-owned, ≤1 page: purpose + end
+  state + current milestone, never the how. It outranks every other
+  document in the repo. Changes only at milestone boundaries, and a
+  change triggers the briefback ritual: the top lead restates the
+  intent in their own words to the human before work resumes.
+- **Injection is leads-only.** Members with reports get MISSION.md in
+  every turn prompt; ICs receive their portion as ordinary messages
+  from their lead, restated at the resolution the receiver can hold
+  (a dumb-rig member's whole world is its lead's message — by design).
+  Any member with tools may read the file directly; no machinery for
+  that.
+- Intent flows edge-by-edge down the tree, restated at every hop —
+  "who gets the mission" has the same answer as "who reports to whom".
+- Deliberately NOT building: per-rig `mission:` knobs, mechanized
+  milestone tracking (status fields, staleness verdicts). Milestones
+  stay prose; the human interprets them. Revisit only if d5n shows
+  specialist drift.
