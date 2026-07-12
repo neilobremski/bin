@@ -19,6 +19,7 @@ Why each governance layer exists, with prior art:
 cd /path/to/your/repo
 r4t init                              # ROSTER.md + ~/.config/r4t/rigs.json
 r4t rig add worker opencode       # when roster members need extra rigs
+r4t rig swap worker agy           # switch a rig's preset, keep its settings
 r4t roster check                      # lint roster ↔ harness mappings
 # register with a8s (exact commands printed by r4t init)
 ```

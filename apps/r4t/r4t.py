@@ -39,6 +39,7 @@ from rig import (
     load_rig_config,
     preset_names,
     resolve_config_path,
+    swap_preset_rig,
 )
 from notify import resolve_tell_fn, simulate_enabled
 from roster import Member, Roster, RosterError, load_roster, resolve_roster_path
@@ -744,6 +745,7 @@ RIG_COMMAND_HELP = [
     ("rig list", "Rig invoke lines, limits, and roster rig resolution"),
     ("rig presets", "Named CLI presets aligned with a8s definitions"),
     ("rig add <rig> <preset>", "Add a rig (creates the config if needed; --model M, --force)"),
+    ("rig swap <rig> <preset>", "Switch an existing rig to a preset, keeping its settings"),
 ]
 
 
@@ -816,6 +818,25 @@ def cmd_rig_add(args: argparse.Namespace) -> int:
     print(f"added rig {rig_key!r} ({args.preset}) to {config_path}")
     print(f"  invoke: {' '.join(invoke)}")
     print(f"Reference it from ROSTER.md: `- **Rig:** {rig_key}`")
+    return 0
+
+
+def cmd_rig_swap(args: argparse.Namespace) -> int:
+    config_path = resolve_config_path(args.rig_config)
+    preset_key = args.preset.strip().lower()
+    try:
+        rig_key = swap_preset_rig(
+            config_path,
+            args.rig,
+            args.preset,
+            model=args.model,
+        )
+        invoke = build_preset_invoke(preset_key, model=args.model)
+    except RigError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    print(f"swapped rig {rig_key!r} to {args.preset} in {config_path}")
+    print(f"  invoke: {' '.join(invoke)}")
     return 0
 
 
@@ -1136,6 +1157,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Harness config path (default: ~/.config/r4t/rigs.json).",
     )
     rig_add_p.set_defaults(func=cmd_rig_add)
+
+    rig_swap_p = rig_sub.add_parser(
+        "swap",
+        help="Switch an existing rig to a preset, keeping its other settings.",
+    )
+    rig_swap_p.add_argument(
+        "rig",
+        help="Symbolic rig name already present in the rig config.",
+    )
+    rig_swap_p.add_argument(
+        "preset",
+        choices=preset_names(),
+        help="CLI preset name (see `r4t rig presets`).",
+    )
+    rig_swap_p.add_argument(
+        "--model",
+        metavar="MODEL",
+        help="Model name for presets that need it (e.g. opencode-ollama).",
+    )
+    rig_swap_p.add_argument(
+        "--rig-config",
+        help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    rig_swap_p.set_defaults(func=cmd_rig_swap)
 
     task_p = sub.add_parser("task", help="Task ledger commands.")
     task_p.add_argument("action", choices=["list", "show"])

@@ -25,6 +25,7 @@ from rig import (
     format_preset_invoke,
     load_rig_config,
     preset_names,
+    swap_preset_rig,
 )
 from roster import Member
 
@@ -330,6 +331,60 @@ class TestHarnessPresets:
         path = tmp_path / "rigs.json"
         with pytest.raises(RigError, match="unknown preset"):
             add_preset_rig(path, "worker", "gemini")
+
+    def test_swap_preset_rig_preserves_settings(self, tmp_path):
+        path = write_config(tmp_path, {
+            "worker": {
+                "invoke": ["x", "{prompt}"],
+                "concurrency": 3,
+                "timeout_seconds": 120,
+                "max_turns_per_task": 10,
+                "hop_limit": 2,
+            },
+        })
+        rig_key = swap_preset_rig(path, "worker", "agy")
+        assert rig_key == "worker"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert raw["worker"]["concurrency"] == 3
+        assert raw["worker"]["timeout_seconds"] == 120
+        assert raw["worker"]["max_turns_per_task"] == 10
+        assert raw["worker"]["hop_limit"] == 2
+        assert "swap" in raw["worker"]["_notes"].lower()
+        config = load_rig_config(path)
+        assert config.rigs["worker"].argv("hi")[0] == "agy"
+        assert config.rigs["worker"].concurrency == 3
+
+    def test_swap_preset_rig_missing_rig(self, tmp_path):
+        path = write_config(tmp_path, {"other": {"invoke": ["x", "{prompt}"]}})
+        with pytest.raises(RigError, match="no rig 'worker' to swap"):
+            swap_preset_rig(path, "worker", "claude")
+
+    def test_swap_preset_rig_missing_config(self, tmp_path):
+        with pytest.raises(RigError, match="no rig"):
+            swap_preset_rig(tmp_path / "rigs.json", "worker", "claude")
+
+    def test_swap_unknown_preset(self, tmp_path):
+        path = write_config(tmp_path, {"worker": {"invoke": ["x", "{prompt}"]}})
+        with pytest.raises(RigError, match="unknown preset"):
+            swap_preset_rig(path, "worker", "gemini")
+
+    def test_swap_preset_rig_requires_model(self, tmp_path):
+        path = write_config(tmp_path, {"worker": {"invoke": ["x", "{prompt}"]}})
+        with pytest.raises(RigError, match="requires --model"):
+            swap_preset_rig(path, "worker", "opencode-ollama")
+
+    def test_swap_preset_rig_materializes_model(self, tmp_path):
+        path = write_config(tmp_path, {
+            "worker": {"invoke": ["x", "{prompt}"], "max_sends_per_turn": 4},
+        })
+        swap_preset_rig(path, "worker", "opencode-ollama", model="qwen2.5-coder:7b")
+        config = load_rig_config(path)
+        argv = config.rigs["worker"].argv("hi")
+        assert argv[4] == "qwen2.5-coder:7b"
+        assert "{model}" not in argv
+        assert config.rigs["worker"].max_sends_per_turn == 4
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert "qwen2.5-coder:7b" in raw["worker"]["_notes"]
 
     def test_opencode_and_agy_presets_avoid_skip_permissions(self):
         opencode = " ".join(HARNESS_PRESETS["opencode"]["invoke"])

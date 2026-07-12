@@ -72,6 +72,7 @@ r4t rig add reviewer claude                # add rig "reviewer" from preset
 r4t rig add worker opencode
 r4t rig add local opencode-ollama --model qwen2.5-coder:7b
 r4t rig add lead cursor --force            # replace an existing rig
+r4t rig swap lead agy                      # switch preset, keep settings
 ```
 
 Each preset documents its **headless** entry point (`-p`, `--print`, `run

@@ -359,6 +359,37 @@ def add_preset_rig(
     return rig_key
 
 
+def swap_preset_rig(
+    path: Path,
+    rig_name: str,
+    preset: str,
+    *,
+    model: str | None = None,
+) -> str:
+    """Switch an existing rig's invoke to a preset's, preserving every other
+    key (concurrency, timeout_seconds, ...). Returns rig key."""
+    rig_key = _validate_rig_name(rig_name)
+    preset_key = preset.strip().lower()
+    if preset_key not in HARNESS_PRESETS:
+        known = ", ".join(preset_names())
+        raise RigError(f"unknown preset {preset!r}; choose one of: {known}")
+    payload = _load_config_payload(path)
+    existing = payload.get(rig_key)
+    if not isinstance(existing, dict):
+        raise RigError(
+            f"no rig {rig_key!r} to swap in {path} "
+            f"(try: r4t rig add {rig_key} {preset_key})"
+        )
+    invoke = build_preset_invoke(preset_key, model=model)
+    note = f"Swapped to preset {preset_key!r} by `r4t rig swap`."
+    if model:
+        note += f" model={model.strip()}."
+    existing["_notes"] = note
+    existing["invoke"] = invoke
+    atomic_write_json(path, payload)
+    return rig_key
+
+
 def resolve_config_path(raw: str | None) -> Path:
     if raw:
         return Path(raw).expanduser().resolve()
