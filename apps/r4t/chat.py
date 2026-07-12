@@ -10,7 +10,9 @@ traffic crossing the wall.
 
 `r4t seat` exposes the same mailbox and voice as discrete commands — that
 is the surface for orchestrators impersonating the human; chat is the
-human-facing view over it.
+human-facing view over it. This module is the line UI plus the shared
+seat machinery (SeatFeed, sending, target resolution); chat_tui.py is the
+Textual front end over the same pieces.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ import queue
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import state
 import tasks as taskmod
@@ -27,6 +29,23 @@ from dispatch import DispatchContext, drain_until_quiet, handle_message
 from roster import Member, Roster, RosterError, load_roster
 
 POLL_SECONDS = 0.5
+
+
+class SeatError(Exception):
+    pass
+
+
+def load_seat(ctx: DispatchContext) -> tuple[Roster, Member]:
+    try:
+        roster = load_roster(ctx.roster_path)
+    except RosterError as e:
+        raise SeatError(str(e)) from e
+    human = next((m for m in roster.members if m.is_human), None)
+    if human is None:
+        raise SeatError(
+            "no human member in the roster — add one to ROSTER.md (Status: Human)"
+        )
+    return roster, human
 
 
 def render_envelope(envelope: dict) -> str:
@@ -52,6 +71,82 @@ def filter_log_line(line: str) -> str | None:
     if line.startswith("### Output ("):
         return f"done: {line[len('### Output ('):].rstrip(')')}"
     return None
+
+
+def resolve_target(roster: Roster, node: str, arg: str) -> str | None:
+    """A /to argument as a dispatchable address: bare team name = leader,
+    a member name = that member; None when nothing in the roster matches."""
+    arg = arg.strip().lower()
+    if not arg or arg == node:
+        return node
+    if any(not m.is_human and m.name.lower() == arg for m in roster.members):
+        return f"{node}:{arg}"
+    return None
+
+
+def send_as_human(ctx: DispatchContext, human: Member, to: str, text: str) -> None:
+    """Speak as the seat: drain anything parked, run the recipient's turn
+    synchronously, then drain the fallout. Blocks for the whole exchange —
+    callers own threading."""
+    sender = f"{ctx.node}:{human.name.lower()}"
+    drain_until_quiet(ctx)
+    handle_message(ctx, sender, to, text)
+    drain_until_quiet(ctx)
+
+
+class SeatFeed:
+    """Polls the seat inbox and the team's daily log into (kind, payload)
+    events: 'in' = the raw envelope dict parked for the human (marked read
+    on read) — consumers render it (the line UI flattens, the TUI draws
+    markdown); 'act' = compacted activity line as text. Log history before
+    the first poll is skipped; unread inbox backlog is always delivered."""
+
+    def __init__(self, node: str, human_name: str):
+        self.node = node
+        self.human_name = human_name
+        self.log_path = None
+        self.log_offset = 0
+
+    def poll_inbox(self) -> list[tuple[str, dict]]:
+        events: list[tuple[str, dict]] = []
+        for path in state.list_seat_messages(self.node, self.human_name):
+            try:
+                envelope = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            events.append(("in", envelope))
+            state.mark_seat_read(self.node, self.human_name, path)
+        return events
+
+    def poll_log(self) -> list[tuple[str, str]]:
+        # append_log names day files by UTC date — matching local time here
+        # would watch a file that stops receiving writes after UTC midnight.
+        path = state.team_dir(self.node) / "log" / (
+            datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".md"
+        )
+        if path != self.log_path:
+            self.log_path = path
+            self.log_offset = path.stat().st_size if path.is_file() else 0
+            return []
+        if not path.is_file():
+            return []
+        size = path.stat().st_size
+        if size <= self.log_offset:
+            self.log_offset = min(self.log_offset, size)
+            return []
+        with path.open("r", encoding="utf-8") as f:
+            f.seek(self.log_offset)
+            chunk = f.read()
+            self.log_offset = f.tell()
+        events: list[tuple[str, str]] = []
+        for line in chunk.splitlines():
+            event = filter_log_line(line)
+            if event:
+                events.append(("act", event))
+        return events
+
+    def poll(self) -> list[tuple[str, object]]:
+        return [*self.poll_inbox(), *self.poll_log()]
 
 
 def format_tasks(node: str) -> list[str]:
@@ -99,10 +194,9 @@ class ChatSession:
         self.roster = roster
         self.human = human
         self.target = ctx.node
+        self.feed = SeatFeed(ctx.node, human.name)
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.sends: queue.Queue[tuple[str, str]] = queue.Queue()
-        self.log_path = None
-        self.log_offset = 0
         self.tty = sys.stdout.isatty()
 
     # ---------- output ----------
@@ -118,50 +212,13 @@ class ChatSession:
                 print(f"{stamp} {line}")
         sys.stdout.flush()
 
-    # ---------- polling ----------
-
-    def poll_inbox(self) -> None:
-        for path in state.list_seat_messages(self.ctx.node, self.human.name):
-            try:
-                envelope = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            self.events.put(("in", render_envelope(envelope)))
-            state.mark_seat_read(self.ctx.node, self.human.name, path)
-
-    def poll_log(self) -> None:
-        path = state.team_dir(self.ctx.node) / "log" / (
-            datetime.now().strftime("%Y-%m-%d") + ".md"
-        )
-        if path != self.log_path:
-            self.log_path = path
-            self.log_offset = path.stat().st_size if path.is_file() else 0
-            return
-        if not path.is_file():
-            return
-        size = path.stat().st_size
-        if size <= self.log_offset:
-            self.log_offset = min(self.log_offset, size)
-            return
-        with path.open("r", encoding="utf-8") as f:
-            f.seek(self.log_offset)
-            chunk = f.read()
-            self.log_offset = f.tell()
-        for line in chunk.splitlines():
-            event = filter_log_line(line)
-            if event:
-                self.events.put(("act", event))
-
     # ---------- sending ----------
 
     def _send_worker(self) -> None:
-        sender = f"{self.ctx.node}:{self.human.name.lower()}"
         while True:
             to, text = self.sends.get()
             try:
-                drain_until_quiet(self.ctx)
-                handle_message(self.ctx, sender, to, text)
-                drain_until_quiet(self.ctx)
+                send_as_human(self.ctx, self.human, to, text)
             except Exception as e:  # noqa: BLE001 — surface, don't kill the seat
                 self.events.put(("sys", f"send failed: {e}"))
 
@@ -185,17 +242,13 @@ class ChatSession:
             if cmd == "/help":
                 self.emit("sys", HELP)
             elif cmd == "/to":
-                arg = arg.strip().lower()
-                if not arg or arg == self.ctx.node:
-                    self.target = self.ctx.node
-                elif any(
-                    not m.is_human and m.name.lower() == arg
-                    for m in self.roster.members
-                ):
-                    self.target = f"{self.ctx.node}:{arg}"
-                else:
-                    self.emit("sys", f"no AI member named {arg!r} in the roster")
+                target = resolve_target(self.roster, self.ctx.node, arg)
+                if target is None:
+                    self.emit(
+                        "sys", f"no AI member named {arg.strip().lower()!r} in the roster"
+                    )
                     return True
+                self.target = target
                 self.emit("sys", f"target: {self.target}")
             elif cmd == "/who":
                 self.emit(
@@ -213,6 +266,11 @@ class ChatSession:
 
     # ---------- main loop ----------
 
+    def _pump_feed(self) -> None:
+        for kind, payload in self.feed.poll():
+            text = render_envelope(payload) if kind == "in" else payload
+            self.events.put((kind, text))
+
     def run(self) -> int:
         self.emit(
             "sys",
@@ -220,8 +278,7 @@ class ChatSession:
             f" {self.target} (leader). /help for commands.",
         )
         state.touch_seat_presence(self.ctx.node, self.human.name)
-        self.poll_log()
-        self.poll_inbox()
+        self._pump_feed()
 
         threading.Thread(target=self._send_worker, daemon=True).start()
         lines: queue.Queue[str] = queue.Queue()
@@ -235,8 +292,7 @@ class ChatSession:
                 except queue.Empty:
                     pass
                 state.touch_seat_presence(self.ctx.node, self.human.name)
-                self.poll_inbox()
-                self.poll_log()
+                self._pump_feed()
                 try:
                     while True:
                         kind, text = self.events.get_nowait()
@@ -253,16 +309,8 @@ class ChatSession:
 
 def run_chat(ctx: DispatchContext) -> int:
     try:
-        roster = load_roster(ctx.roster_path)
-    except RosterError as e:
+        roster, human = load_seat(ctx)
+    except SeatError as e:
         print(f"r4t chat: {e}", file=sys.stderr)
-        return 2
-    human = next((m for m in roster.members if m.is_human), None)
-    if human is None:
-        print(
-            "r4t chat: no human member in the roster — add one to ROSTER.md "
-            "(Status: Human)",
-            file=sys.stderr,
-        )
         return 2
     return ChatSession(ctx, roster, human).run()

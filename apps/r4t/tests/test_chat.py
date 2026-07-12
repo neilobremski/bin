@@ -101,10 +101,11 @@ def test_plain_line_queues_send(session, capsys):
 
 def test_poll_inbox_consumes_and_renders(session, r4t_home):
     state.park_seat_message(NODE, "Neil", "acme:gerry", "[r4t task=01KX0000000000000000000000 hop=1 auto] hi")
-    session.poll_inbox()
-    assert drain_events(session) == [("in", "acme:gerry: hi")]
-    session.poll_inbox()
-    assert drain_events(session) == []
+    events = session.feed.poll_inbox()
+    assert [(kind, render_envelope(e)) for kind, e in events] == [
+        ("in", "acme:gerry: hi")
+    ]
+    assert session.feed.poll_inbox() == []
     assert len(state.list_seat_messages(NODE, "neil", read=True)) == 1
 
 

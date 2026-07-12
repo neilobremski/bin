@@ -1,0 +1,243 @@
+"""Team health verdicts and dead-letter rollup — the shared brain behind
+`r4t status` and the chat header.
+
+Everything here is read-only over team state. Callers render the marks;
+levels are `ok`/`warn`/`bad`. Thresholds are heuristics tuned for an
+operator glancing at a team, not alerting SLOs.
+"""
+from __future__ import annotations
+
+import csv
+import time
+from dataclasses import dataclass
+from datetime import datetime
+
+import state
+import tasks as taskmod
+
+OK = "ok"
+WARN = "warn"
+BAD = "bad"
+MARKS = {OK: "✓", WARN: "⚠", BAD: "✗"}
+
+RECENT_WINDOW_SECONDS = 600.0
+RUNAWAY_TURNS_PER_WINDOW = 20
+BUDGET_HOT_RATIO = 0.75
+SIGNAL_RECENT_SECONDS = 3600.0
+
+ROUTINE_REASONS = {"task-closed", "hop-cut"}
+
+REASON_GLOSS = {
+    "task-closed": "in-flight replies to already-closed tasks",
+    "hop-cut": "chains clipped at hop_limit",
+    "pair-repeat": "the same message looping between two agents; suppression held it",
+    "bucket-muted": "sender was out of reply privilege after violations",
+    "breaker-open": "harness kept failing; the breaker blocked the turn",
+    "budget-exhausted": "task hit its turn budget and closed through synthesis",
+    "quota": "one turn tried to send past max_sends_per_turn",
+    "bulk-window": "room re-broadcast held to once per window",
+}
+
+
+@dataclass
+class Verdict:
+    level: str
+    text: str
+    hint: str | None = None
+
+
+@dataclass
+class Rollup:
+    routine: dict[str, int]
+    signals: dict[str, list[dict]]
+
+    @property
+    def routine_total(self) -> int:
+        return sum(self.routine.values())
+
+    @property
+    def signal_total(self) -> int:
+        return sum(len(v) for v in self.signals.values())
+
+
+def _ts(iso: object) -> float:
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def rollup_dead_letters(records: list[dict]) -> Rollup:
+    routine: dict[str, int] = {}
+    signals: dict[str, list[dict]] = {}
+    for record in records:
+        reason = str(record.get("reason", "?"))
+        if reason in ROUTINE_REASONS:
+            routine[reason] = routine.get(reason, 0) + 1
+        else:
+            signals.setdefault(reason, []).append(record)
+    return Rollup(routine, signals)
+
+
+def recent_turns(
+    node: str, now: float, window: float = RECENT_WINDOW_SECONDS
+) -> tuple[int, set[str]]:
+    """(turn count, distinct task ids) from velocity.csv within the window."""
+    path = state.team_dir(node) / "velocity.csv"
+    if not path.is_file():
+        return 0, set()
+    count, seen = 0, set()
+    try:
+        with path.open(encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                if now - _ts(row.get("timestamp", "")) <= window:
+                    count += 1
+                    seen.add(row.get("task", "?"))
+    except OSError:
+        return 0, set()
+    return count, seen
+
+
+def team_verdicts(
+    node: str, roster=None, config=None, *, now: float | None = None
+) -> list[Verdict]:
+    """One plain-English line per operator concern: is anything waiting on
+    the human, is the team runaway, is a member broken/muted/stalled, did a
+    task starve on hops. Roster/config are optional; concerns that need
+    them are skipped when they are unavailable."""
+    now = time.time() if now is None else now
+    out: list[Verdict] = []
+    open_tasks = [
+        t for t in taskmod.list_tasks(node)
+        if t.get("status") == taskmod.STATUS_OPEN
+    ]
+    dead = state.list_dead_letters(node)
+
+    human = None
+    if roster is not None:
+        human = next((m for m in roster.members if m.is_human), None)
+    if human is not None:
+        unread = len(state.list_seat_messages(node, human.name))
+        if unread:
+            out.append(Verdict(
+                BAD, f"{unread} message(s) waiting on YOU",
+                f"r4t seat inbox --node {node}",
+            ))
+        else:
+            out.append(Verdict(OK, "nothing waiting on you"))
+
+    turns, active_tasks = recent_turns(node, now)
+    live = state.live_locks(node, prune=False)
+    hot = [
+        t for t in open_tasks
+        if float(t.get("budget", 0.0) or 0.0)
+        and float(t.get("used", 0.0)) / float(t["budget"]) >= BUDGET_HOT_RATIO
+    ]
+    if turns >= RUNAWAY_TURNS_PER_WINDOW:
+        out.append(Verdict(
+            WARN,
+            f"hot: {turns} turns in the last 10m across "
+            f"{len(active_tasks)} task(s)",
+            "watch it live: r4t chat",
+        ))
+    else:
+        detail = f"{turns} turn(s) last 10m"
+        if live:
+            detail += f", {len(live)} live now"
+        if not hot:
+            detail += "; budgets healthy"
+        out.append(Verdict(OK, f"no runaway signs ({detail})"))
+    for t in hot:
+        pct = 100.0 * float(t.get("used", 0.0)) / float(t["budget"])
+        out.append(Verdict(
+            WARN,
+            f"task {t['id']} at {pct:.0f}% of its turn budget "
+            f"(creator {t.get('creator', '?')})",
+            "at 100% it closes through forced leader synthesis",
+        ))
+
+    if roster is not None and config is not None:
+        flagged = 0
+        members = [m for m in roster.members if not m.is_human and not m.errors]
+        for m in members:
+            blocked, failures = state.breaker_open(
+                node, m.name, config.breaker_cap, config.breaker_cooldown_seconds
+            )
+            if blocked:
+                rig, _err, _pinned = config.rig_for(m)
+                out.append(Verdict(
+                    BAD,
+                    f"{m.name} broken — {failures} straight harness failures; "
+                    "turns paused",
+                    f"fix the {rig.name if rig else '?'} rig; "
+                    "a deliberate message retries it",
+                ))
+                flagged += 1
+                continue
+            level = state.bucket_level(node, m.name, config.bucket_max)
+            if state.bucket_muted(level, config.bucket_max):
+                out.append(Verdict(
+                    BAD,
+                    f"{m.name} muted — reply bucket drained to "
+                    f"{level:.1f}/{config.bucket_max:g}",
+                    "self-heals: clean turns re-earn reply privilege",
+                ))
+                flagged += 1
+                continue
+            key = m.name.lower()
+            for t in open_tasks:
+                count = int((t.get("nudges") or {}).get(key, 0))
+                if not count:
+                    continue
+                left = max(0, config.nudge_cap - count)
+                tail = (
+                    f", {left} nudge(s) left" if left
+                    else "; next silence closes the task"
+                )
+                out.append(Verdict(
+                    WARN,
+                    f"{m.name} stalled on task {t['id']} — "
+                    f"nudged {count}/{config.nudge_cap}{tail}",
+                ))
+                flagged += 1
+        if members and not flagged:
+            out.append(Verdict(OK, f"all {len(members)} member(s) healthy"))
+
+    open_ids = {t["id"] for t in open_tasks}
+    cuts: dict[str, int] = {}
+    for record in dead:
+        if record.get("reason") == "hop-cut" and record.get("task") in open_ids:
+            task_id = str(record["task"])
+            cuts[task_id] = cuts.get(task_id, 0) + int(record.get("count", 1) or 1)
+    for task_id in sorted(cuts):
+        out.append(Verdict(
+            WARN,
+            f"task {task_id} ran out of hops relaying through the leader "
+            f"({cuts[task_id]} message(s) cut)",
+            "weak-rig teams star through the leader (~2 hops per delegation)"
+            " — raise hop_limit",
+        ))
+
+    roll = rollup_dead_letters(dead)
+    for reason in sorted(roll.signals):
+        recent = [
+            r for r in roll.signals[reason]
+            if now - _ts(r.get("time", "")) <= SIGNAL_RECENT_SECONDS
+        ]
+        if recent:
+            out.append(Verdict(
+                WARN,
+                f"{len(recent)} {reason} dead letter(s) in the last hour — "
+                f"{REASON_GLOSS.get(reason, reason)}",
+                f"ls {state.dead_letter_dir(node)}",
+            ))
+    return out
+
+
+def worst_level(verdicts: list[Verdict]) -> str:
+    levels = {v.level for v in verdicts}
+    if BAD in levels:
+        return BAD
+    if WARN in levels:
+        return WARN
+    return OK

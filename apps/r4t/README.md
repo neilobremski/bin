@@ -76,9 +76,20 @@ a8s start acme-node
 tell acme:gerry "Ship the payload refactor; report when reviewed."
 ```
 
-Watch it: `a8s logs acme-node -f` (traffic + every governance decision line),
-`r4t status --node acme` (locks, buckets, tasks, dead letters), and the
-dead-letter dir under `~/.config/r4t/teams/acme/`.
+Watch it — one surface per way of looking:
+
+- `r4t status` — the snapshot. Leads with plain-English health verdicts
+  (waiting on you? runaway? member broken/muted/stalled? task starved on
+  hops?), then locks, buckets, tasks, and dead letters rolled up by meaning.
+- `r4t logs -f` — the stream. The team's own event log: every governance
+  decision and turn boundary, including walled-garden traffic that never
+  reaches a8s. `--full` includes prompts and transcripts.
+- `r4t chat` — the human, interactively (see the seat section below).
+- `r4t seat` — an orchestrating agent, programmatically.
+
+The first dispatch stamps the repo root into team state, so `--node` works
+from any directory — and from inside a team repo the `--node` flag itself
+is optional. (`a8s logs acme-node -f` still shows the cross-wall view.)
 
 ## The seat: being the human in the roster
 
@@ -97,12 +108,18 @@ r4t seat send --to phil "…" # or to a member (runs their turn synchronously)
 
 `r4t seat` is the scriptable surface — an orchestrating agent impersonates
 the human with it directly. `r4t chat` is the human view over the same
-mailbox: one window interleaving seat messages, turn starts/completions,
-and governance events, with an input line (`/to`, `/who`, `/tasks`,
-`/quit`). While chat (or anything touching the presence file) is attached,
-dispatch skips the `Address:` doorbell; detach and the doorbell rings
-again. Training wheels, not a replacement for autonomy — everything still
-flows through normal dispatch and governance.
+mailbox: a full-screen TUI with a health header fed by the same verdict
+engine as `r4t status` (worst-level summary, live warnings, open-task
+budget bars), a conversation pane beside a fly-on-the-wall activity pane
+(turn starts/completions and every governance decision line), and an
+input line (`/to`, `/who`, `/tasks`, `/quit`). The TUI needs
+[textual](https://textual.textualize.io/) (`python3 -m pip install
+textual`); without it — or with `--plain`, or piped — chat falls back to
+a line UI over the same feed. While chat (or anything touching the
+presence file) is attached, dispatch skips the `Address:` doorbell;
+detach and the doorbell rings again. Training wheels, not a replacement
+for autonomy — everything still flows through normal dispatch and
+governance.
 
 ## Governance knobs
 
@@ -186,6 +203,8 @@ python3 -m pytest apps/r4t/tests/     # from anywhere in ~/bin — the repo
 Layout: `r4t.py` (CLI) · `dispatch.py` (turns, staging release, forced
 synthesis, idle recovery) · `tasks.py` (header + ledger) · `state.py`
 (all on-disk state under `$R4T_HOME`) · `harness.py` (rig config) ·
-`roster.py` · `sandbox.py` + `sandbox/` (the end-to-end harness).
+`roster.py` · `verdict.py` (health verdicts + dead-letter rollup, shared
+by status and chat) · `chat.py` (seat feed + line UI) · `chat_tui.py`
+(Textual front end) · `sandbox.py` + `sandbox/` (the end-to-end harness).
 Observability rides on a8s: traffic in the a8s txlog/convo, r4t decision
 lines in the node log via dispatch stdout, r4t-only state via `r4t status`.

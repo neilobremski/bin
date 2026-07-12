@@ -209,7 +209,8 @@ def build_prompt(
         f"    - reply to the sender: tell {_display_name(ctx.node, sender)} \"<message>\"",
         "    - a teammate: tell <name> \"<message>\". Teammates:",
         *(teammates or ["    - (none)"]),
-        "    - group discussion: tell chatroom '#<room> <message>'",
+        "- Speak to teammates directly and one at a time — do not post to "
+        "chat rooms or broadcast channels.",
         "- Never use `tell --sync` with teammates — it blocks your turn "
         "waiting for a reply that arrives by waking you instead.",
         "- Do not send acknowledgment-only messages. If you have nothing "
