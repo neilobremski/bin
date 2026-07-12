@@ -108,7 +108,22 @@ data structure — a durable per-member queue.
   note ("forwarded: Phil tried to reach Marketing"). The human seat is
   exempt (walk-the-factory-floor comes later, but the seat can always
   reach anyone).
+- **Information hiding (Neil, 2026-07-12, from the live d5n run):**
+  the turn prompt lists only tree-adjacent names — your lead, your
+  reports, your cell-mates — never the whole roster. Lateral contact
+  becomes informationally unthinkable, not just structurally rerouted.
+  Cross-cell channels are created by introduction: a lead mentioning a
+  name in a message IS the grant (observed live: Rook messaged Cass
+  laterally only because the prompt advertised the full roster).
 - Hop limits retire inside a cell/tree (a tree cannot loop).
+
+### UI polish queued from the first d5n run
+
+- TUI composer gains command parity with the line UI; unknown commands
+  say so instead of vanishing. `/tasks` renamed `/threads`.
+- Chat message headers carry the rig slug: `d5n:vela (specialist)`.
+- Later ("gemba mode"): scope a chat session to one cell — see that
+  cell's traffic, message its members directly, then step back out.
 
 ## Phase 3 — mission/milestone doc
 
