@@ -12,16 +12,17 @@ optional — every knob has a sane default; see README.md for the table):
   line (an in-repo roster edit can't upgrade a pinned agent).
 - `"throttle"` — team-wide `max_concurrent` + `min_seconds_between_turn_starts`
   gates, enforced before any rig check.
-- `"active_ttl_rotations"` — idle passes an agent stays on the crash-recovery
-  watch list after its last dispatch.
-- `"suppression_window_seconds"` — content-keyed pair suppression window.
-- `"bucket_max"` / `"bucket_earn_ratio"` — reply-privilege token bucket.
-- `"nudge_cap"` — idle nudges per agent per task before forced synthesis.
-- `"breaker_cap"` / `"breaker_cooldown_seconds"` — per-agent failure breaker:
+- `"team_budget_max"` / `"team_budget_earn_per_hour"` — the shared team spend
+  bucket. A turn costs 1 team unit; when it is empty no member runs.
+- `"quiet_task_seconds"` — a thread quiet this long with its originator still
+  unanswered wakes the leader with a nudge to reply with current state.
+- `"breaker_cap"` / `"breaker_cooldown_seconds"` — per-member failure breaker:
   consecutive failed turns (nonzero exit or timeout) that trip it, and how
   long turns stay paused per failure before one probe turn is let through.
-- `"rebroadcast_senders"` — sender names whose inbound traffic is classed
-  bulk (h4l rooms etc.).
+
+Per-rig keys (defaults for every member on that rig; per-member override
+later): `budget_max` / `budget_earn_per_hour` — the member spend bucket. A
+turn costs 1 member unit; when it is empty the member is resting.
 
 Keys starting with `_` anywhere are ignored so shipped examples can carry
 notes.
@@ -40,15 +41,11 @@ PROMPT_PLACEHOLDER = "{prompt}"
 RESERVED_CONFIG_KEYS = frozenset({
     "pins",
     "throttle",
-    "active_ttl_rotations",
-    "suppression_window_seconds",
-    "bucket_max",
-    "bucket_earn_ratio",
-    "nudge_cap",
+    "team_budget_max",
+    "team_budget_earn_per_hour",
     "breaker_cap",
     "breaker_cooldown_seconds",
     "quiet_task_seconds",
-    "rebroadcast_senders",
 })
 
 HARNESS_PRESETS: dict[str, dict] = {
@@ -158,20 +155,16 @@ HARNESS_PRESETS: dict[str, dict] = {
 
 DEFAULT_TIMEOUT_SECONDS = 900
 DEFAULT_CONCURRENCY = 1
-DEFAULT_MAX_TURNS_PER_TASK = 25
-DEFAULT_HOP_LIMIT = 4
 DEFAULT_MAX_SENDS_PER_TURN = 6
-DEFAULT_ACTIVE_TTL_ROTATIONS = 3
+DEFAULT_BUDGET_MAX = 8.0
+DEFAULT_BUDGET_EARN_PER_HOUR = 4.0
 DEFAULT_MAX_CONCURRENT = 1
 DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS = 15.0
-DEFAULT_SUPPRESSION_WINDOW_SECONDS = 600.0
-DEFAULT_BUCKET_MAX = 8.0
-DEFAULT_BUCKET_EARN_RATIO = 0.1
-DEFAULT_NUDGE_CAP = 2
+DEFAULT_TEAM_BUDGET_MAX = 16.0
+DEFAULT_TEAM_BUDGET_EARN_PER_HOUR = 8.0
 DEFAULT_BREAKER_CAP = 5
 DEFAULT_BREAKER_COOLDOWN_SECONDS = 600.0
 DEFAULT_QUIET_TASK_SECONDS = 1800.0
-DEFAULT_REBROADCAST_SENDERS = ("chatroom",)
 
 
 class RigError(Exception):
@@ -194,9 +187,9 @@ class Rig:
     invoke: list = field(default_factory=list)
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     concurrency: int = DEFAULT_CONCURRENCY
-    max_turns_per_task: int = DEFAULT_MAX_TURNS_PER_TASK
-    hop_limit: int = DEFAULT_HOP_LIMIT
     max_sends_per_turn: int = DEFAULT_MAX_SENDS_PER_TURN
+    budget_max: float = DEFAULT_BUDGET_MAX
+    budget_earn_per_hour: float = DEFAULT_BUDGET_EARN_PER_HOUR
     error: str | None = None
 
     def pool(self) -> list[list[str]]:
@@ -223,15 +216,11 @@ class RigConfig:
     rigs: dict[str, Rig] = field(default_factory=dict)
     pins: dict[str, str] = field(default_factory=dict)
     throttle: Throttle = field(default_factory=Throttle)
-    active_ttl_rotations: int = DEFAULT_ACTIVE_TTL_ROTATIONS
-    suppression_window_seconds: float = DEFAULT_SUPPRESSION_WINDOW_SECONDS
-    bucket_max: float = DEFAULT_BUCKET_MAX
-    bucket_earn_ratio: float = DEFAULT_BUCKET_EARN_RATIO
-    nudge_cap: int = DEFAULT_NUDGE_CAP
+    team_budget_max: float = DEFAULT_TEAM_BUDGET_MAX
+    team_budget_earn_per_hour: float = DEFAULT_TEAM_BUDGET_EARN_PER_HOUR
     breaker_cap: int = DEFAULT_BREAKER_CAP
     breaker_cooldown_seconds: float = DEFAULT_BREAKER_COOLDOWN_SECONDS
     quiet_task_seconds: float = DEFAULT_QUIET_TASK_SECONDS
-    rebroadcast_senders: tuple[str, ...] = DEFAULT_REBROADCAST_SENDERS
     missing: bool = False
 
     def rig_for(self, member: Member) -> tuple[Rig | None, str | None, bool]:
@@ -448,22 +437,20 @@ def _parse_rig(name: str, raw: object) -> Rig:
     if err:
         problems.append(f"concurrency: {err}")
     rig.concurrency = int(concurrency)
-    max_turns, err = _positive_number(
-        raw.get("max_turns_per_task"), DEFAULT_MAX_TURNS_PER_TASK
-    )
-    if err:
-        problems.append(f"max_turns_per_task: {err}")
-    rig.max_turns_per_task = int(max_turns)
-    hop_limit, err = _positive_number(raw.get("hop_limit"), DEFAULT_HOP_LIMIT)
-    if err:
-        problems.append(f"hop_limit: {err}")
-    rig.hop_limit = int(hop_limit)
     max_sends, err = _positive_number(
         raw.get("max_sends_per_turn"), DEFAULT_MAX_SENDS_PER_TURN
     )
     if err:
         problems.append(f"max_sends_per_turn: {err}")
     rig.max_sends_per_turn = int(max_sends)
+    rig.budget_max, err = _positive_number(raw.get("budget_max"), DEFAULT_BUDGET_MAX)
+    if err:
+        problems.append(f"budget_max: {err}")
+    rig.budget_earn_per_hour, err = _positive_number(
+        raw.get("budget_earn_per_hour"), DEFAULT_BUDGET_EARN_PER_HOUR
+    )
+    if err:
+        problems.append(f"budget_earn_per_hour: {err}")
 
     if problems:
         rig.error = "; ".join(problems)
@@ -522,16 +509,15 @@ def load_rig_config(path: Path) -> RigConfig:
         if key == "throttle":
             config.throttle = _parse_throttle(value)
             continue
-        if key in ("active_ttl_rotations", "nudge_cap", "breaker_cap"):
+        if key == "breaker_cap":
             n = _non_negative_number(value, 0, key)
             if n <= 0:
                 raise RigError(f"{key} must be positive, got {value!r}")
             setattr(config, key, int(n))
             continue
         if key in (
-            "suppression_window_seconds",
-            "bucket_max",
-            "bucket_earn_ratio",
+            "team_budget_max",
+            "team_budget_earn_per_hour",
             "breaker_cooldown_seconds",
             "quiet_task_seconds",
         ):
@@ -539,11 +525,6 @@ def load_rig_config(path: Path) -> RigConfig:
             if n <= 0:
                 raise RigError(f"{key} must be positive, got {value!r}")
             setattr(config, key, n)
-            continue
-        if key == "rebroadcast_senders":
-            if not isinstance(value, list) or not all(isinstance(s, str) for s in value):
-                raise RigError(f"{key} must be a list of sender names")
-            config.rebroadcast_senders = tuple(s.strip().lower() for s in value if s.strip())
             continue
         config.rigs[key.lower()] = _parse_rig(key, value)
     return config

@@ -87,19 +87,21 @@ def base_config(script) -> dict:
     return {
         "_comment": "test config — throttle gates off so unit turns run back to back",
         "throttle": {"max_concurrent": 0, "min_seconds_between_turn_starts": 0},
+        "team_budget_max": 200,
+        "team_budget_earn_per_hour": 100,
         "leader": {
             "invoke": [sys.executable, str(script), "{prompt}"],
             "timeout_seconds": 30,
             "concurrency": 2,
-            "max_turns_per_task": 4,
-            "hop_limit": 4,
+            "budget_max": 100,
+            "budget_earn_per_hour": 50,
         },
         "junior-dev": {
             "invoke": [sys.executable, str(script), "{prompt}"],
             "timeout_seconds": 30,
             "concurrency": 1,
-            "max_turns_per_task": 2,
-            "hop_limit": 2,
+            "budget_max": 100,
+            "budget_earn_per_hour": 50,
         },
         "pins": {"_comment": "x", "gerry": "leader"},
     }
@@ -154,9 +156,7 @@ def chatty_harness(tmp_path):
 def chatty_config(tmp_path, chatty_harness):
     script, _out = chatty_harness
     config = base_config(script)
-    config["junior-dev"]["max_turns_per_task"] = 10
     config["junior-dev"]["max_sends_per_turn"] = 2
-    config["junior-dev"]["hop_limit"] = 6
     path = tmp_path / "chatty-rigs.json"
     path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     return path

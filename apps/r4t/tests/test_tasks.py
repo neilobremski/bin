@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import tasks
 from tasks import (
-    charge_turn,
+    close_task,
     ensure_task,
     expire_tasks,
     format_header,
     load_task,
     new_task,
     normalize_content,
-    pair_key,
     parse_header,
-    reset_budget,
     save_task,
 )
 from ulid import new as new_ulid
@@ -74,20 +72,6 @@ class TestNormalization:
         header = format_header(new_ulid(), 1, auto=True)
         assert normalize_content(f"{header}  Hello   WORLD\n\nagain ") == "hello world again"
 
-    def test_pair_key_matches_reworded_whitespace(self):
-        a = pair_key("acme:phil", "gerry", "Deploy   the fix")
-        b = pair_key(
-            "ACME:PHIL", "Gerry", f"{format_header(new_ulid(), 3, auto=True)} deploy the fix"
-        )
-        assert a == b
-
-    def test_pair_key_distinguishes_parties_and_kind(self):
-        base = pair_key("a", "b", "x")
-        assert pair_key("a", "c", "x") != base
-        assert pair_key("c", "b", "x") != base
-        assert pair_key("a", "b", "y") != base
-        assert pair_key("a", "b", "x", kind="bulk") != base
-
 
 class TestLedger:
     def test_ensure_creates_and_persists(self, r4t_home):
@@ -95,38 +79,20 @@ class TestLedger:
         task = ensure_task(NODE, task_id, "gerry")
         assert task["creator"] == "gerry"
         assert task["status"] == tasks.STATUS_OPEN
-        assert not task["synthesized"]
+        assert not task["answered"]
         again = ensure_task(NODE, task_id, "someone-else")
         assert again["creator"] == "gerry"
 
-    def test_charge_weighted_by_rig(self):
-        task = new_task(new_ulid(), "gerry")
-        for _ in range(4):
-            assert charge_turn(task, 4)
-        assert not charge_turn(task, 4)
-        assert task["turns"] == 4
+    def test_close_marks_answered(self, r4t_home):
+        task_id = new_ulid()
+        ensure_task(NODE, task_id, "gerry")
+        close_task(NODE, task_id)
+        task = load_task(NODE, task_id)
+        assert task["status"] == tasks.STATUS_CLOSED
+        assert task["answered"]
 
-    def test_mixed_rig_weighting(self):
-        task = new_task(new_ulid(), "gerry")
-        assert charge_turn(task, 2)  # 0.5
-        assert charge_turn(task, 4)  # 0.75
-        assert charge_turn(task, 4)  # 1.0 exactly
-        assert not charge_turn(task, 4)
-
-    def test_reset_budget_relicenses_spent_task(self):
-        task = new_task(new_ulid(), "gerry")
-        while charge_turn(task, 2):
-            pass
-        task["status"] = tasks.STATUS_CLOSED
-        task["synthesized"] = True
-        assert reset_budget(task)
-        assert task["used"] == 0.0
-        assert task["status"] == tasks.STATUS_OPEN
-        assert not task["synthesized"]
-        assert charge_turn(task, 2)
-
-    def test_reset_budget_noop_on_fresh_task(self):
-        assert not reset_budget(new_task(new_ulid(), "gerry"))
+    def test_close_missing_is_noop(self, r4t_home):
+        close_task(NODE, new_ulid())  # no exception
 
     def test_corrupt_ledger_returns_none(self, r4t_home):
         task_id = new_ulid()
