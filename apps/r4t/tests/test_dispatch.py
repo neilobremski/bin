@@ -85,6 +85,59 @@ def empty_member_budget(ctx, name):
     state.budget_charge(NODE, name, rig.budget_max, rig.budget_earn_per_hour, rig.budget_max + 5)
 
 
+TREE_ROSTER = textwrap.dedent(
+    """\
+    # Tree Team
+
+    ### Vic
+    - **Status:** AI
+    - **Rig:** leader
+    - **Leader:** yes
+    - **Cell:** lead
+    - **Lead:** Ned
+
+    ### Ned
+    - **Status:** Human
+    - **Address:** ned
+
+    ### Ann
+    - **Status:** AI
+    - **Rig:** junior-dev
+    - **Cell:** design
+    - **Lead:** Vic
+
+    ### Bea
+    - **Status:** AI
+    - **Rig:** junior-dev
+    - **Cell:** design
+    - **Lead:** Ann
+
+    ### Cal
+    - **Status:** AI
+    - **Rig:** junior-dev
+    - **Cell:** build
+    - **Lead:** Vic
+    """
+)
+
+
+@pytest.fixture
+def tree_ctx(r4t_home, tmp_path, chatty_config, tells):
+    from dispatch import DispatchContext
+
+    root = tmp_path / "tree-repo"
+    root.mkdir()
+    (root / "ROSTER.md").write_text(TREE_ROSTER, encoding="utf-8")
+    _sent, capture = tells
+    return DispatchContext(
+        root=root,
+        node=NODE,
+        roster_path=root / "ROSTER.md",
+        config_path=chatty_config,
+        tell_fn=capture,
+    )
+
+
 class TestSplitRecipient:
     def test_sub_address(self):
         assert split_recipient("acme:phil") == ("acme", "phil")
@@ -883,6 +936,57 @@ class TestRunHarness:
         assert any("failed to start" in b for _, b in sent)
 
 
+class TestTeammateScoping:
+    def test_flat_roster_lists_whole_team(self, ctx):
+        roster = load_roster(ctx.roster_path)
+        lines = "\n".join(dispatch._teammate_lines(ctx, roster, roster.find("phil")))
+        assert "Gerry" in lines and "Neil" in lines
+        assert "Broken" not in lines  # errored member is excluded
+
+    def test_tree_roster_hides_non_adjacent(self, tree_ctx):
+        roster = load_roster(tree_ctx.roster_path)
+        lines = "\n".join(dispatch._teammate_lines(tree_ctx, roster, roster.find("ann")))
+        assert "Vic" in lines and "Bea" in lines and "Ned" in lines
+        assert "Cal" not in lines  # the build cell is invisible to a design IC
+
+
+class TestTreeEnforcement:
+    def test_non_adjacent_tell_reroutes_to_lead(self, tree_ctx, monkeypatch):
+        monkeypatch.setenv("CHATTY_TO", "Cal")
+        monkeypatch.setenv("CHATTY_BODY", "hey can you help with build")
+        # Vic wakes Ann; Ann tries to reach Cal (build cell) — not tree-adjacent.
+        assert run_one(tree_ctx, "acme:vic", "acme:ann", "work the design") == 1
+        assert state.queue_depth(NODE, "cal") == 0  # Cal never hears from Ann
+        assert state.queue_depth(NODE, "vic") == 1  # rerouted up to Ann's lead
+        assert "REROUTED" in read_log()
+        rerouted = state.claim_queue(NODE, "vic")
+        assert rerouted[0]["body"].startswith("[r4t rerouted: Ann -> Cal]")
+
+    def test_reply_to_batch_sender_is_never_rerouted(self, tree_ctx, monkeypatch):
+        monkeypatch.setenv("CHATTY_TO", "Cal")
+        monkeypatch.setenv("CHATTY_BODY", "here is the answer you asked for")
+        # Cal (non-adjacent) messaged Ann this turn; answering Cal is allowed.
+        assert run_one(tree_ctx, "acme:cal", "acme:ann", "quick design question") == 1
+        assert state.queue_depth(NODE, "cal") == 1  # reply delivered to Cal
+        assert state.queue_depth(NODE, "vic") == 0
+        assert "REROUTED" not in read_log()
+
+    def test_seat_is_always_reachable(self, tree_ctx, monkeypatch):
+        monkeypatch.setenv("CHATTY_TO", "Ned")
+        monkeypatch.setenv("CHATTY_BODY", "status update for the seat")
+        assert run_one(tree_ctx, "acme:vic", "acme:ann", "report up") == 1
+        parked = seat_messages("ned")
+        assert parked and "status update" in parked[0]["content"]
+        assert "REROUTED" not in read_log()
+
+    def test_adjacent_tell_passes_through(self, tree_ctx, monkeypatch):
+        monkeypatch.setenv("CHATTY_TO", "Bea")
+        monkeypatch.setenv("CHATTY_BODY", "cell-mate, take a look")
+        assert run_one(tree_ctx, "acme:vic", "acme:ann", "work the design") == 1
+        assert state.queue_depth(NODE, "bea") == 1  # same-cell delivery, no reroute
+        assert "REROUTED" not in read_log()
+
+
 class TestCli:
     def run(self, *argv):
         return r4t_main(list(argv))
@@ -1048,6 +1152,34 @@ class TestCli:
         rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
         assert rc == 1
         assert "no leader" in capsys.readouterr().out
+
+    def test_roster_check_warns_on_oversized_cell(self, r4t_home, tmp_path, rig_config, capsys):
+        root = tmp_path / "bigcell"
+        root.mkdir()
+        text = "### Boss\n- **Status:** AI\n- **Rig:** leader\n- **Leader:** yes\n- **Cell:** hq\n"
+        for i in range(7):
+            text += (
+                f"### M{i}\n- **Status:** AI\n- **Rig:** junior-dev\n"
+                f"- **Cell:** c\n- **Lead:** Boss\n"
+            )
+        (root / "ROSTER.md").write_text(text, encoding="utf-8")
+        rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
+        out = capsys.readouterr().out
+        assert rc == 0  # a warning does not fail the check
+        assert "warning" in out and "soft cap 6" in out
+        assert "1 warning(s)" in out
+
+    def test_roster_check_errors_on_unknown_lead(self, r4t_home, tmp_path, rig_config, capsys):
+        root = tmp_path / "badlead"
+        root.mkdir()
+        (root / "ROSTER.md").write_text(
+            "### Boss\n- **Status:** AI\n- **Rig:** leader\n- **Leader:** yes\n"
+            "### Kid\n- **Status:** AI\n- **Rig:** junior-dev\n- **Lead:** Ghost\n",
+            encoding="utf-8",
+        )
+        rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
+        assert rc == 1
+        assert "Ghost" in capsys.readouterr().out
 
 
 class TestDefault:

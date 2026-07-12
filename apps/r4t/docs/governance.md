@@ -134,6 +134,43 @@ state — NOT to force-finish the work. The human, or the leader, decides what
 Prior art: Erlang/OTP supervision — a bounded, rate-limited recovery action
 rather than an unbounded retry loop.
 
+### 8. The tree (information hiding + hard rerouting)
+
+A team is not a flat pool of peers; it is a tree of small **cells**, each
+with one lead, composing up to a single top lead. The roster declares it: an
+AI member's `Cell:` line names its cell and its `Lead:` line names the member
+it reports to (the top lead's `Lead:` is the human). Two mechanisms make the
+tree structural rather than merely advisory, and both switch on only when the
+roster declares `Lead:` lines — a flat roster (no `Lead:` lines anywhere) is
+treated as one cell under the leader and behaves exactly as before.
+
+- **Information hiding.** A member's turn prompt lists only its
+  tree-adjacent names — its lead, its direct reports, its cell-mates — plus
+  the human seat, which is always reachable. It never sees the whole roster.
+  Lateral contact becomes informationally *unthinkable*, not just structurally
+  blocked: an IC in the design cell has no idea the build cell's members exist
+  by name. Cross-cell contact is created by introduction — a lead mentioning
+  a name in a message is the grant — which keeps the channel social, relayed
+  through a lead, rather than a standing back-channel.
+- **Hard rerouting.** If a member does address someone outside its adjacency
+  (a stale name from history, say), the release path reroutes that tell to the
+  member's lead with a mechanical prefix (`[r4t rerouted: Ann -> Cal] …`) and
+  logs a `REROUTED` event. Replies to whoever messaged the member this turn,
+  and any message to the human seat, are never rerouted — answering must
+  always get through.
+
+Why this shape: span-of-control research converges on cells of ~4–6 (soft
+warning past 6, hard cap 10) and trees no deeper than ~2–3 levels; `roster
+check` lints those bounds. And the live evidence is direct — in the first d5n
+run the turn prompt advertised the full roster, and a build-cell lead (Rook)
+messaged a design-cell lead (Cass) laterally *because the name was in front of
+him*. The tree held voluntarily otherwise, but "voluntarily" is not a control.
+Information hiding removes the temptation; rerouting removes the option.
+
+Prior art: Team Topologies (Skelton/Pais) — explicit, bounded interaction
+modes rather than ad-hoc cross-team chatter; the parametric bounds trace to
+Hackman's team-size work and the US Army's fire-team/squad structure.
+
 ## Disposal and observability
 
 Undeliverable mail and per-turn send-quota overflow are never silently

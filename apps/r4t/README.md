@@ -128,6 +128,43 @@ detach and the doorbell rings again. Training wheels, not a replacement
 for autonomy — everything still flows through normal dispatch and
 governance.
 
+## The tree: cells, leads, and information hiding
+
+A team is a tree of small **cells**, not a flat pool of peers. Give each AI
+member a `Cell:` line (its cell) and a `Lead:` line (the member it reports
+to); the top lead reports to the human:
+
+```markdown
+### Cass
+- **Status:** AI
+- **Rig:** specialist
+- **Cell:** design
+- **Lead:** Vela
+```
+
+Once any `Lead:` line is present the tree becomes structural, not advisory:
+
+- **Information hiding.** A member's turn prompt lists only its tree-adjacent
+  names — its lead, its direct reports, its cell-mates — plus the human seat.
+  It never sees the whole roster, so lateral contact is unthinkable rather
+  than merely discouraged.
+- **Hard rerouting.** A tell to anyone outside that adjacency is rerouted to
+  the member's lead (`[r4t rerouted: Ann -> Cal] …`, logged `REROUTED`).
+  Replies to whoever messaged you this turn, and anything to the human seat,
+  always get through — answering never reroutes.
+
+`r4t roster check` lints the shape: every `Lead:` must name a real member,
+exactly one member is the leader, a cell warns past 6 AI members and errors
+past 10, and a tree deeper than 2 levels below the top lead warns (the
+span-of-control bounds from the org research). A roster with **no** `Lead:`
+lines is a flat team — one cell under the leader — and none of this applies.
+
+Why: in the first live run a full-roster prompt let a build-cell lead message
+a design-cell lead laterally *because the name was in front of him*. The tree
+held voluntarily, but voluntary is not a control — information hiding removes
+the temptation, rerouting removes the option. See
+[docs/governance.md](docs/governance.md) §8 for the evidence.
+
 ## Governance knobs
 
 All keys live in the out-of-repo rig config (`~/.config/r4t/rigs.json`).

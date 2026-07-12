@@ -407,6 +407,8 @@ def _roster_rows(
         detail = f"rig={rig.name}" + (" (pinned)" if pinned else "")
         if m.cell:
             detail += f"  cell={m.cell}"
+        if m.lead:
+            detail += f"  lead={m.lead}"
         level = state.budget_level(
             node, m.name, rig.budget_max, rig.budget_earn_per_hour
         )
@@ -916,11 +918,21 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
             f"(first one wins: {leaders[0].name})"
         )
         problems += 1
+    warnings = 0
+    for severity, message in roster.tree_problems():
+        if severity == "error":
+            print(message)
+            problems += 1
+        else:
+            print(f"warning: {message}")
+            warnings += 1
     if problems:
         print(f"{problems} problem(s)")
         return 1
+    tail = f", {warnings} warning(s)" if warnings else ""
     print(
-        f"{roster_path}: OK ({len(roster.members)} member(s), leader {leaders[0].name})"
+        f"{roster_path}: OK ({len(roster.members)} member(s), "
+        f"leader {leaders[0].name}{tail})"
     )
     return 0
 

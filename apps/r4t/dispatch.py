@@ -52,6 +52,7 @@ HISTORY_BODY_MAX = 2000
 DRAIN_MAX_PASSES = 20
 
 RAN = "ran"
+REROUTED = "rerouted"
 DEFERRED = "deferred"
 RESTING = "resting"
 DEAD = "dead-letter"
@@ -173,10 +174,16 @@ def _dispatchable_names(roster: Roster) -> list[str]:
 
 
 def _teammate_lines(ctx: DispatchContext, roster: Roster, member: Member) -> list[str]:
+    # Information hiding: when the roster declares a tree, a member sees only
+    # its tree-adjacent names (lead, reports, cell-mates) plus the human seat —
+    # lateral contact becomes informationally unthinkable, not just rerouted.
+    # A flat roster (no Lead lines) still lists the whole team, as before.
+    if roster.declares_tree:
+        pool = roster.adjacent(member)
+    else:
+        pool = [m for m in roster.members if m.name.lower() != member.name.lower()]
     lines: list[str] = []
-    for m in roster.members:
-        if m.name.lower() == member.name.lower():
-            continue
+    for m in pool:
         if m.is_human:
             lines.append(
                 f"    - {m.name} (Human, tell {m.name.lower()}) — {m.role}".rstrip(" —")
@@ -499,6 +506,21 @@ def _release_one(
     )
 
 
+def _reachable_names(
+    ctx: DispatchContext, roster: Roster, member: Member, batch: list[dict]
+) -> set[str]:
+    """Names this member may address intra-team without rerouting: its
+    tree-adjacent members (lead, reports, cell-mates), every human seat, and
+    whoever messaged it this turn (answering a batch sender never reroutes)."""
+    names = {m.name.lower() for m in roster.adjacent(member)}
+    for m in roster.members:
+        if m.is_human:
+            names.add(m.name.lower())
+    for env in batch:
+        names.add(_display_name(ctx.node, str(env.get("from", ""))).strip().lower())
+    return names
+
+
 def release_staging(
     ctx: DispatchContext,
     config: RigConfig,
@@ -527,6 +549,10 @@ def release_staging(
         newest = pair
     if newest is None:
         newest = (tasks.new_task_id(), 0)
+
+    reachable = (
+        _reachable_names(ctx, roster, member, batch) if roster.declares_tree else None
+    )
 
     released = 0
     violations = 0
@@ -559,6 +585,32 @@ def release_staging(
                 f"(> max_sends_per_turn {rig.max_sends_per_turn})",
             )
             continue
+
+        # Hard tree enforcement: an intra-team tell to a member who is not
+        # tree-adjacent (and did not message the sender this turn) reroutes to
+        # the sender's lead. The human seat and batch senders are always
+        # reachable — answering must never reroute. Unknown names fall through
+        # to the normal unknown-recipient dead letter, not to the lead.
+        if reachable is not None and _is_internal(ctx.node, to):
+            target = _display_name(ctx.node, to).strip().lower()
+            recipient = roster.find(target)
+            if (
+                recipient is not None
+                and not recipient.is_human
+                and target not in reachable
+            ):
+                lead = (roster.find(member.lead) if member.lead else None) or roster.leader()
+                if lead is not None and lead.name.lower() != member.name.lower():
+                    original = recipient.name
+                    body = f"[r4t rerouted: {member.name} -> {original}] {body}"
+                    to = _canonical_recipient(ctx.node, roster, lead.name)
+                    envelope["to"] = to
+                    envelope["content"] = body
+                    state.append_log(
+                        ctx.node,
+                        f"r4t: REROUTED {sender_addr} -> {original} "
+                        f"(not tree-adjacent) redirected to lead {lead.name.lower()}",
+                    )
 
         key = _display_name(ctx.node, to).strip().lower()
         thread_id, in_hop = consumed.get(key, newest)
