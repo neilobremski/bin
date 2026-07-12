@@ -41,6 +41,7 @@ class Member:
     role: str = ""
     leader: bool = False
     address: str | None = None
+    cell: str = ""
     persona: str = ""
     errors: list[str] = field(default_factory=list)
 
@@ -113,6 +114,7 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
     m.role = fields.get("role", fields.get("mandate", ""))
     m.leader = _is_true(fields.get("leader", ""))
     m.address = fields.get("address") or None
+    m.cell = fields.get("cell", "")
 
     rig = fields.get("rig", "")
     if rig:

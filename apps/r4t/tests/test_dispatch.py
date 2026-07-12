@@ -413,8 +413,8 @@ class TestBudgets:
         handle_message(ctx, "gerry", "acme:phil", "job")
         assert member_budget(ctx, "phil") == pytest.approx(99.0, abs=0.3)
         team = state.budget_level(
-            NODE, state.TEAM_BUDGET_KEY,
-            config.team_budget_max, config.team_budget_earn_per_hour,
+            NODE, state.CELL_BUDGET_KEY,
+            config.cell_budget_max, config.cell_budget_earn_per_hour,
         )
         assert team == pytest.approx(199.0, abs=0.3)
 
@@ -425,12 +425,12 @@ class TestBudgets:
         assert state.queue_depth(NODE, "phil") == 1
         assert "RESTING phil" in read_log()
 
-    def test_empty_team_budget_rests_everyone(self, ctx, fake_harness):
+    def test_empty_cell_budget_rests_everyone(self, ctx, fake_harness):
         config = load_rig_config(ctx.config_path)
         state.budget_charge(
-            NODE, state.TEAM_BUDGET_KEY,
-            config.team_budget_max, config.team_budget_earn_per_hour,
-            config.team_budget_max + 5,
+            NODE, state.CELL_BUDGET_KEY,
+            config.cell_budget_max, config.cell_budget_earn_per_hour,
+            config.cell_budget_max + 5,
         )
         handle_message(ctx, "gerry", "acme:phil", "job")
         assert not harness_calls(fake_harness)
@@ -924,7 +924,8 @@ class TestCli:
         assert "Rigs  (your configuration:" in out
         assert "Activity" in out
         assert "rig=leader (pinned)" in out
-        assert "budget=100.0/100" in out
+        assert "cell=leadership" in out
+        assert "budget=100/100" in out
         assert "✓ Phil" in out and "rig=junior-dev" in out
         assert "Human  address=neil" in out
         assert "✗ Broken" in out and "disabled:" in out

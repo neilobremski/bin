@@ -22,6 +22,7 @@ ROSTER_TEXT = textwrap.dedent(
     - **Status:** AI
     - **Rig:** leader
     - **Role:** Technical Producer
+    - **Cell:** leadership
     - **Leader:** yes
 
     The Orchestrator. Defends the schedule.
@@ -87,8 +88,8 @@ def base_config(script) -> dict:
     return {
         "_comment": "test config — throttle gates off so unit turns run back to back",
         "throttle": {"max_concurrent": 0, "min_seconds_between_turn_starts": 0},
-        "team_budget_max": 200,
-        "team_budget_earn_per_hour": 100,
+        "cell_budget_max": 200,
+        "cell_budget_earn_per_hour": 100,
         "leader": {
             "invoke": [sys.executable, str(script), "{prompt}"],
             "timeout_seconds": 30,

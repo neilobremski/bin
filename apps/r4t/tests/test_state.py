@@ -6,7 +6,7 @@ import time
 import state
 from state import (
     AgentLock,
-    TEAM_BUDGET_KEY,
+    CELL_BUDGET_KEY,
     append_history,
     budget_charge,
     budget_level,
@@ -14,6 +14,7 @@ from state import (
     claim_queue,
     count_rig_locks,
     enqueue,
+    fmt_budget,
     history_path,
     list_dead_letters,
     list_queue,
@@ -252,11 +253,19 @@ class TestBudgets:
         budget_charge(NODE, "phil", 8.0, 4.0, 0.0, now=start + 3600)
         assert budget_seconds_until(NODE, "phil", 8.0, 4.0, now=start + 3600) == 0.0
 
-    def test_team_bucket_is_independent(self, r4t_home):
+    def test_cell_bucket_is_independent(self, r4t_home):
         now = 1_000_000.0
-        budget_charge(NODE, TEAM_BUDGET_KEY, 16.0, 0.0, 5.0, now=now)
-        assert budget_level(NODE, TEAM_BUDGET_KEY, 16.0, 0.0, now=now) == 11.0
+        budget_charge(NODE, CELL_BUDGET_KEY, 16.0, 0.0, 5.0, now=now)
+        assert budget_level(NODE, CELL_BUDGET_KEY, 16.0, 0.0, now=now) == 11.0
         assert budget_level(NODE, "phil", 8.0, 0.0, now=now) == 8.0
+
+
+class TestFmtBudget:
+    def test_whole_number_drops_decimal(self):
+        assert fmt_budget(8.0) == "8"
+
+    def test_fraction_keeps_one_decimal(self):
+        assert fmt_budget(7.5) == "7.5"
 
 
 class TestStaging:

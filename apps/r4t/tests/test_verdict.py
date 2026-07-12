@@ -111,14 +111,14 @@ class TestRunawayVerdict:
         verdicts = verdict.team_verdicts(NODE, roster, config, now=later)
         assert any("no runaway signs" in v.text for v in verdicts)
 
-    def test_team_budget_spent_warns(self, r4t_home, roster, config):
+    def test_cell_budget_spent_warns(self, r4t_home, roster, config):
         empty_budget(
-            NODE, state.TEAM_BUDGET_KEY,
-            config.team_budget_max, config.team_budget_earn_per_hour,
+            NODE, state.CELL_BUDGET_KEY,
+            config.cell_budget_max, config.cell_budget_earn_per_hour,
         )
         verdicts = verdict.team_verdicts(NODE, roster, config)
         warn = by_level(verdicts, verdict.WARN)
-        assert any("team budget spent" in v.text for v in warn)
+        assert any("cell budget spent" in v.text for v in warn)
 
 
 class TestMemberVerdicts:

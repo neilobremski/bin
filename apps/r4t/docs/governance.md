@@ -83,12 +83,12 @@ pivots to the current state instead of burning a turn reacting to each
 message in sequence. It is both a quota saver and a storm damper — a burst
 of N arrivals costs one turn, not N.
 
-### 4. Spend budgets (member + team)
+### 4. Spend budgets (member + cell)
 
 A bifurcated token bucket, refilled lazily by elapsed wall-clock time. Each
 member has its own bucket (`budget_max` / `budget_earn_per_hour`) and the
-whole team shares one (`team_budget_max` / `team_budget_earn_per_hour`). A
-turn costs 1 member unit AND 1 team unit, regardless of how many messages it
+whole cell shares one (`cell_budget_max` / `cell_budget_earn_per_hour`). A
+turn costs 1 member unit AND 1 cell unit, regardless of how many messages it
 consumes. Both must hold ≥1 for a member to run; an empty bucket means the
 member is *resting* — its queue holds and it runs again when the bucket
 refills. Put frontier rigs on a low budget (they run slowly and smartly) and

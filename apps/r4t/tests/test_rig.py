@@ -12,8 +12,8 @@ from rig import (
     DEFAULT_MAX_CONCURRENT,
     DEFAULT_MAX_SENDS_PER_TURN,
     DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS,
-    DEFAULT_TEAM_BUDGET_EARN_PER_HOUR,
-    DEFAULT_TEAM_BUDGET_MAX,
+    DEFAULT_CELL_BUDGET_EARN_PER_HOUR,
+    DEFAULT_CELL_BUDGET_MAX,
     DEFAULT_TIMEOUT_SECONDS,
     HARNESS_PRESETS,
     RigError,
@@ -61,9 +61,9 @@ class TestLoading:
             == DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS
             == 15.0
         )
-        assert config.team_budget_max == DEFAULT_TEAM_BUDGET_MAX == 16.0
+        assert config.cell_budget_max == DEFAULT_CELL_BUDGET_MAX == 16.0
         assert (
-            config.team_budget_earn_per_hour == DEFAULT_TEAM_BUDGET_EARN_PER_HOUR == 8.0
+            config.cell_budget_earn_per_hour == DEFAULT_CELL_BUDGET_EARN_PER_HOUR == 8.0
         )
         assert config.breaker_cap == 5
         assert config.breaker_cooldown_seconds == 600.0
@@ -95,8 +95,8 @@ class TestLoading:
                 {
                     "t": {"invoke": ["x", "{prompt}"]},
                     "throttle": {"max_concurrent": 0, "min_seconds_between_turn_starts": 0},
-                    "team_budget_max": 4,
-                    "team_budget_earn_per_hour": 2,
+                    "cell_budget_max": 4,
+                    "cell_budget_earn_per_hour": 2,
                     "breaker_cap": 2,
                     "breaker_cooldown_seconds": 30,
                     "quiet_task_seconds": 60,
@@ -105,16 +105,16 @@ class TestLoading:
         )
         assert config.throttle.max_concurrent == 0
         assert config.throttle.min_seconds_between_turn_starts == 0
-        assert config.team_budget_max == 4
-        assert config.team_budget_earn_per_hour == 2
+        assert config.cell_budget_max == 4
+        assert config.cell_budget_earn_per_hour == 2
         assert config.breaker_cap == 2
         assert config.breaker_cooldown_seconds == 30
         assert config.quiet_task_seconds == 60
 
     def test_bad_governance_values_raise(self, tmp_path):
         for key, value in (
-            ("team_budget_max", 0),
-            ("team_budget_earn_per_hour", -1),
+            ("cell_budget_max", 0),
+            ("cell_budget_earn_per_hour", -1),
             ("breaker_cap", 0),
             ("breaker_cooldown_seconds", -5),
             ("quiet_task_seconds", 0),

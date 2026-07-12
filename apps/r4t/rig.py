@@ -12,8 +12,8 @@ optional — every knob has a sane default; see README.md for the table):
   line (an in-repo roster edit can't upgrade a pinned agent).
 - `"throttle"` — team-wide `max_concurrent` + `min_seconds_between_turn_starts`
   gates, enforced before any rig check.
-- `"team_budget_max"` / `"team_budget_earn_per_hour"` — the shared team spend
-  bucket. A turn costs 1 team unit; when it is empty no member runs.
+- `"cell_budget_max"` / `"cell_budget_earn_per_hour"` — the shared cell spend
+  bucket. A turn costs 1 cell unit; when it is empty no member runs.
 - `"quiet_task_seconds"` — a thread quiet this long with its originator still
   unanswered wakes the leader with a nudge to reply with current state.
 - `"breaker_cap"` / `"breaker_cooldown_seconds"` — per-member failure breaker:
@@ -41,8 +41,8 @@ PROMPT_PLACEHOLDER = "{prompt}"
 RESERVED_CONFIG_KEYS = frozenset({
     "pins",
     "throttle",
-    "team_budget_max",
-    "team_budget_earn_per_hour",
+    "cell_budget_max",
+    "cell_budget_earn_per_hour",
     "breaker_cap",
     "breaker_cooldown_seconds",
     "quiet_task_seconds",
@@ -160,8 +160,8 @@ DEFAULT_BUDGET_MAX = 8.0
 DEFAULT_BUDGET_EARN_PER_HOUR = 4.0
 DEFAULT_MAX_CONCURRENT = 1
 DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS = 15.0
-DEFAULT_TEAM_BUDGET_MAX = 16.0
-DEFAULT_TEAM_BUDGET_EARN_PER_HOUR = 8.0
+DEFAULT_CELL_BUDGET_MAX = 16.0
+DEFAULT_CELL_BUDGET_EARN_PER_HOUR = 8.0
 DEFAULT_BREAKER_CAP = 5
 DEFAULT_BREAKER_COOLDOWN_SECONDS = 600.0
 DEFAULT_QUIET_TASK_SECONDS = 1800.0
@@ -216,8 +216,8 @@ class RigConfig:
     rigs: dict[str, Rig] = field(default_factory=dict)
     pins: dict[str, str] = field(default_factory=dict)
     throttle: Throttle = field(default_factory=Throttle)
-    team_budget_max: float = DEFAULT_TEAM_BUDGET_MAX
-    team_budget_earn_per_hour: float = DEFAULT_TEAM_BUDGET_EARN_PER_HOUR
+    cell_budget_max: float = DEFAULT_CELL_BUDGET_MAX
+    cell_budget_earn_per_hour: float = DEFAULT_CELL_BUDGET_EARN_PER_HOUR
     breaker_cap: int = DEFAULT_BREAKER_CAP
     breaker_cooldown_seconds: float = DEFAULT_BREAKER_COOLDOWN_SECONDS
     quiet_task_seconds: float = DEFAULT_QUIET_TASK_SECONDS
@@ -516,8 +516,8 @@ def load_rig_config(path: Path) -> RigConfig:
             setattr(config, key, int(n))
             continue
         if key in (
-            "team_budget_max",
-            "team_budget_earn_per_hour",
+            "cell_budget_max",
+            "cell_budget_earn_per_hour",
             "breaker_cooldown_seconds",
             "quiet_task_seconds",
         ):

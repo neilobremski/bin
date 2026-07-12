@@ -10,7 +10,7 @@ the prompt renders every queued message at once, so an agent that sees
 instead of burning a turn per message.
 
 Runnability is governed autonomously — no human gates. A member runs when its
-own spend bucket and the shared team bucket both hold at least 1 unit (a turn
+own spend bucket and the shared cell bucket both hold at least 1 unit (a turn
 costs 1 of each), its failure breaker is closed, and the team throttle
 (max_concurrent, cadence) admits another start. An empty bucket means the
 member is *resting*: its queue holds and it runs again when the bucket
@@ -782,20 +782,20 @@ def _runnable(
         )
     m = state.budget_level(ctx.node, member.name, rig.budget_max, rig.budget_earn_per_hour)
     t = state.budget_level(
-        ctx.node, state.TEAM_BUDGET_KEY,
-        config.team_budget_max, config.team_budget_earn_per_hour,
+        ctx.node, state.CELL_BUDGET_KEY,
+        config.cell_budget_max, config.cell_budget_earn_per_hour,
     )
     if m < 1.0:
         wait = state.budget_seconds_until(
             ctx.node, member.name, rig.budget_max, rig.budget_earn_per_hour
         )
-        return False, f"resting (member budget {m:.1f}, ready in ~{wait / 60:.0f} min)"
+        return False, f"resting (member budget {state.fmt_budget(m)}, ready in ~{wait / 60:.0f} min)"
     if t < 1.0:
         wait = state.budget_seconds_until(
-            ctx.node, state.TEAM_BUDGET_KEY,
-            config.team_budget_max, config.team_budget_earn_per_hour,
+            ctx.node, state.CELL_BUDGET_KEY,
+            config.cell_budget_max, config.cell_budget_earn_per_hour,
         )
-        return False, f"resting (team budget {t:.1f}, ready in ~{wait / 60:.0f} min)"
+        return False, f"resting (cell budget {state.fmt_budget(t)}, ready in ~{wait / 60:.0f} min)"
     return True, ""
 
 
@@ -843,8 +843,8 @@ def _run_member_turn(
                     ctx.node, member.name, rig.budget_max, rig.budget_earn_per_hour
                 )
                 state.budget_charge(
-                    ctx.node, state.TEAM_BUDGET_KEY,
-                    config.team_budget_max, config.team_budget_earn_per_hour,
+                    ctx.node, state.CELL_BUDGET_KEY,
+                    config.cell_budget_max, config.cell_budget_earn_per_hour,
                 )
                 state.stamp_last_turn_start(ctx.node)
     finally:

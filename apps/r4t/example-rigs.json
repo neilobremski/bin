@@ -13,8 +13,8 @@
     "max_concurrent": 1,
     "min_seconds_between_turn_starts": 15
   },
-  "team_budget_max": 16,
-  "team_budget_earn_per_hour": 8,
+  "cell_budget_max": 16,
+  "cell_budget_earn_per_hour": 8,
   "quiet_task_seconds": 1800,
   "breaker_cap": 5,
   "breaker_cooldown_seconds": 600,

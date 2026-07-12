@@ -631,13 +631,20 @@ def list_dead_letters(node: str) -> list[dict]:
 # ---------- spend budgets (a turn costs 1 unit; empty = resting) ----------
 #
 # A bifurcated token bucket, refilled lazily by elapsed wall-clock time: each
-# member has its own bucket, and the whole team shares one. A turn costs 1
-# member unit AND 1 team unit, regardless of how many queued messages it
+# member has its own bucket, and the whole cell shares one. A turn costs 1
+# member unit AND 1 cell unit, regardless of how many queued messages it
 # consumes — batching is rewarded by construction. An empty bucket means the
 # member is not runnable ("resting"); the queue simply holds. Nothing is muted,
 # nothing is dropped.
 
-TEAM_BUDGET_KEY = "__team__"
+CELL_BUDGET_KEY = "__cell__"
+
+
+def fmt_budget(value: float) -> str:
+    """Budget level as a clean number: 8.0 -> "8", 7.5 -> "7.5"."""
+    if value == int(value):
+        return str(int(value))
+    return f"{value:.1f}"
 
 
 def buckets_path(node: str) -> Path:

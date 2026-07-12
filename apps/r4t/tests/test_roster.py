@@ -28,6 +28,14 @@ class TestParsing:
         assert not gerry.errors
         assert "Defends the schedule" in gerry.persona
 
+    def test_cell_captured_when_declared(self, repo):
+        gerry = load_roster(repo / "ROSTER.md").find("gerry")
+        assert gerry.cell == "leadership"
+
+    def test_cell_empty_when_absent(self, repo):
+        phil = load_roster(repo / "ROSTER.md").find("phil")
+        assert phil.cell == ""
+
     def test_lookup_is_case_insensitive(self, repo):
         roster = load_roster(repo / "ROSTER.md")
         assert roster.find("PHIL") is not None

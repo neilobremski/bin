@@ -100,7 +100,7 @@ def team_verdicts(
 ) -> list[Verdict]:
     """One plain-English line per operator concern: is anything waiting on
     the human, is the team runaway, is a member broken or resting with work
-    queued, is the shared team budget spent, is any queue backing up.
+    queued, is the shared cell budget spent, is any queue backing up.
     Roster/config are optional; concerns that need them are skipped when they
     are unavailable."""
     now = time.time() if now is None else now
@@ -141,19 +141,19 @@ def team_verdicts(
 
     if config is not None:
         team_level = state.budget_level(
-            node, state.TEAM_BUDGET_KEY,
-            config.team_budget_max, config.team_budget_earn_per_hour, now=now,
+            node, state.CELL_BUDGET_KEY,
+            config.cell_budget_max, config.cell_budget_earn_per_hour, now=now,
         )
         if team_level < 1.0:
             wait = state.budget_seconds_until(
-                node, state.TEAM_BUDGET_KEY,
-                config.team_budget_max, config.team_budget_earn_per_hour, now=now,
+                node, state.CELL_BUDGET_KEY,
+                config.cell_budget_max, config.cell_budget_earn_per_hour, now=now,
             )
             out.append(Verdict(
                 WARN,
-                f"team budget spent ({team_level:.1f}/{config.team_budget_max:g}) "
+                f"cell budget spent ({state.fmt_budget(team_level)}/{state.fmt_budget(config.cell_budget_max)}) "
                 f"— everyone rests, ready in ~{wait / 60:.0f} min",
-                "raise team_budget_max/team_budget_earn_per_hour to run faster",
+                "raise cell_budget_max/cell_budget_earn_per_hour to run faster",
             ))
 
     if roster is not None and config is not None:

@@ -191,7 +191,7 @@ class ChatApp(App):
             depth = state.queue_depth(self.ctx.node, name)
             header.append("\n")
             header.append(budget_bar(level, budget_max), style="magenta")
-            tail = f" {name} budget {level:.1f}/{budget_max:g}"
+            tail = f" {name} budget {state.fmt_budget(level)}/{state.fmt_budget(budget_max)}"
             if depth:
                 tail += f"  {depth} queued"
             header.append(tail, style="dim")

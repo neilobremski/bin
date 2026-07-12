@@ -174,8 +174,8 @@ def _print_rig_summary(config_path: Path, roster_path: Path | None = None) -> No
         f"{config.throttle.min_seconds_between_turn_starts:g}"
     )
     print(
-        f"  governance: team_budget={config.team_budget_max:g}/"
-        f"+{config.team_budget_earn_per_hour:g}per-h "
+        f"  governance: cell_budget={config.cell_budget_max:g}/"
+        f"+{config.cell_budget_earn_per_hour:g}per-h "
         f"quiet_task={config.quiet_task_seconds:g}s "
         f"breaker_cap={config.breaker_cap} "
         f"breaker_cooldown={config.breaker_cooldown_seconds:g}s"
@@ -405,10 +405,12 @@ def _roster_rows(
             rows.append((False, m.name, f"{state_text}{suffix}", hint or None))
             continue
         detail = f"rig={rig.name}" + (" (pinned)" if pinned else "")
+        if m.cell:
+            detail += f"  cell={m.cell}"
         level = state.budget_level(
             node, m.name, rig.budget_max, rig.budget_earn_per_hour
         )
-        detail += f"  budget={level:.1f}/{rig.budget_max:g}"
+        detail += f"  budget={state.fmt_budget(level)}/{state.fmt_budget(rig.budget_max)}"
         depth = state.queue_depth(node, m.name)
         if depth:
             detail += f"  {depth} queued"
@@ -468,8 +470,8 @@ def _rig_rows(
     ))
     rows.append((
         None, "governance",
-        f"team_budget={config.team_budget_max:g}/"
-        f"+{config.team_budget_earn_per_hour:g}per-h  "
+        f"cell_budget={config.cell_budget_max:g}/"
+        f"+{config.cell_budget_earn_per_hour:g}per-h  "
         f"quiet_task={config.quiet_task_seconds:g}s  "
         f"breaker={config.breaker_cap}/{config.breaker_cooldown_seconds:g}s",
         None,

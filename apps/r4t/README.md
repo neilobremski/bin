@@ -35,7 +35,7 @@ fail closed — see the [tutorial](docs/tutorial.md#missing-rig-no-default--fail
 2. r4t parses the `[r4t task=<ulid> hop=<n> auto]` header (a thread label,
    creating a new thread if absent) and ENQUEUES the message into Phil's
    durable queue — unconditionally. When Phil is runnable (both his spend
-   bucket and the team bucket hold ≥1, his breaker is closed, the throttle
+   bucket and the cell bucket hold ≥1, his breaker is closed, the throttle
    admits a start), ONE turn drains his whole queue: the prompt carries his
    persona, rolling history, and every waiting message at once.
 3. The harness's `$TELL_OUTBOX_DIR` points at a per-turn staging dir, so
@@ -135,7 +135,7 @@ Per-rig keys go inside a rig block; the rest are top-level. Rationale and
 prior art per layer: [docs/governance.md](docs/governance.md).
 
 The economics are budgets, not cuts: a member runs while its own spend
-bucket and the shared team bucket both hold ≥1 unit (a turn costs 1 of
+bucket and the shared cell bucket both hold ≥1 unit (a turn costs 1 of
 each). An empty bucket means the member is *resting* — its queue holds and
 it runs again when the bucket refills. Messages are never dropped for lack
 of budget.
@@ -146,7 +146,7 @@ of budget.
 | `max_sends_per_turn` (rig) | 6 | Envelopes released per turn; excess dead-letters | Runaway fan-out width |
 | `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed | Hung harnesses |
 | `concurrency` (rig) | 1 | Live turns within one rig | Rig-wide pile-ups |
-| `team_budget_max` / `team_budget_earn_per_hour` | 16 / 8 | Shared team spend bucket; a turn also costs 1 team unit. When empty, everyone rests | Whole-team money burn |
+| `cell_budget_max` / `cell_budget_earn_per_hour` | 16 / 8 | Shared cell spend bucket; a turn also costs 1 cell unit. When empty, everyone rests | Whole-cell money burn |
 | `throttle.max_concurrent` | 1 | Live turns across ALL rigs | Team-wide pile-ups |
 | `throttle.min_seconds_between_turn_starts` | 15 | Cadence floor between turn starts; a member that can't start yet keeps its queue and runs later | Invisible burn — a storm degrades into a watchable drip |
 | `quiet_task_seconds` | 1800 | Backstop: an open thread whose originator has not been answered and that has seen no activity for this long wakes the leader with a nudge to report current state | A thread that dangles — a turn "succeeds" without replying and the originator never hears back |
