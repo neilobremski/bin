@@ -211,7 +211,7 @@ def build_prompt(
         *(teammates or ["    - (none)"]),
         "- Speak to teammates directly and one at a time — do not post to "
         "chat rooms or broadcast channels.",
-        "- Never use `tell --sync` with teammates — it blocks your turn "
+        "- Never use `tells` to wait for teammates — it blocks your turn "
         "waiting for a reply that arrives by waking you instead.",
         "- Do not send acknowledgment-only messages. If you have nothing "
         "substantive to add, send nothing — silence is fine.",

@@ -91,7 +91,7 @@ class TestDispatchEndToEnd:
         prompt = read_prompt(harness_calls(fake_harness)[0])
         assert "Never wait for a reply inside a turn" in prompt
         assert "END your turn" in prompt
-        assert "tell --sync" in prompt
+        assert "Never use `tells`" in prompt
         assert "silence is fine" in prompt
         assert "[r4t task=" not in prompt  # headers are stamped mechanically
 
