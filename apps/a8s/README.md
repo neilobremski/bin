@@ -178,6 +178,7 @@ agent unbinds any prefixes pointing at it.
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s tell <name> <msg>`                                                     | Routed message via `_write_outbox` into the sender's configured outbox. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose root encloses CWD; router force-stamps `from` from outbox ownership.                                                                                           |
 | `tell <name> <msg>` (top-level shim, `[~/bin/tell](/Users/neilo/bin/tell)`) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Requires `TELL_OUTBOX_DIR` (a8s injects it on wake). Drops a JSON envelope — no `~/.a8s` access required. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: `[docs/tell.md](docs/tell.md)`.          |
+| `tells [--timeout SEC]` (top-level shim, `[~/bin/tells](/Users/neilo/bin/tells)`) | Receive-side complement of `tell` (`apps/a8s/tells.py`). Resolves the node from `TELL_OUTBOX_DIR`, then blocks up to `--timeout` (default 5s) for new envelopes in `.inbox`, prints each `sender: body`, and exits 0; exit 1 on timeout. Non-destructive; Windows: `tells.cmd`. |
 | `a8s logs <name>... [--tail N] [-f]`                                        | Read per-agent log files; one agent in append order, multiple merge by ISO timestamp. `-f` follows.                                                                                                                                                                                                                       |
 | `a8s convo <name> [--limit N]`                                              | Markdown conversation history for an agent (messages to or from). Default `--limit 10`. Outbound headings use `##`, inbound use `###`. Archive: `~/.a8s/conversations.jsonl` (machine-wide; rotates at `convo_max_limit`, default 1000 — `a8s config`). |
 | `a8s drain <name>`                                                          | Move pending inbox JSON to trash without waking the agent.                                                                                                                                                                                                                                                                |
@@ -442,11 +443,12 @@ apps/a8s/
 │   ├── __init__.py   abstract publish/subscribe/start/stop interface
 │   └── mqtt.py       MQTT transport (paho-mqtt impl; persistent session, QoS 1)
 ├── tell.py           outbox drop + CLI (stdin, --attach)
+├── tells.py          wait for the next inbound message (receive side)
 ├── commands.py       every cmd_*
 ├── cli.py            COMMANDS table, dispatch, main
 ├── definitions/      built-in JSONs (claude/cursor/codex/default)
 ├── dummy-cli         fallback bash script
-├── skills/           tell skill (installable into Claude / Cursor / Codex)
+├── skills/           tell + tells skills (installable into Claude / Cursor / Codex)
 └── tests/
     ├── agents/       per-tool fixture dirs (CLAUDE/GEMINI/CODEX/Llama)
     ├── fixtures/     mock-cli + mock.json for end-to-end tests

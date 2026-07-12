@@ -1097,6 +1097,15 @@ def cmd_tell(args: list[str]) -> int:
     return tell_main(args)
 
 
+def cmd_tells(args: list[str]) -> int:
+    """`a8s tells [--timeout SEC]` — block until the next message lands in this
+    node's inbox, print each new envelope, and exit 0; exit 1 on timeout. The
+    receive-side complement of `tell`, resolved from the same `TELL_OUTBOX_DIR`."""
+    from tells import tells_main
+
+    return tells_main(args)
+
+
 # ---------- drain ----------
 
 def cmd_drain(args: list[str]) -> int:

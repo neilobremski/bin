@@ -8,7 +8,7 @@ description: "Send a message to a recipient by name using the `tell` shell comma
 Use the `tell` shell command (on PATH) to send a message to a recipient by name.
 
 ```
-tell [--sync] [--timeout SEC] [--attach PATH] <name> [<message...>]
+tell [--attach PATH] <name> [<message...>]
 ```
 
 **Invoke `tell` through your shell tool.** Printing `tell BOB "hello"` as assistant text does not send anything — only a real shell invocation delivers the message.
@@ -21,7 +21,6 @@ tell [--sync] [--timeout SEC] [--attach PATH] <name> [<message...>]
 ## Options
 
 - **`--attach PATH` / `--file PATH`** — attach a file (repeatable). Flags may appear before or after the recipient name, before the message body.
-- **`--sync`** — block until the recipient replies (or until `--timeout`, default 300s). Reply body is printed to stdout. Ctrl-C aborts and exits 130.
 - **Stdin** — pass `-` to read stdin explicitly, or pipe with no message argument:
 
 ```
@@ -33,7 +32,7 @@ cat report.md | tell GEMINI -
 
 ## Timing
 
-The command returns immediately (except with `--sync`). Delivery is asynchronous — the recipient may act seconds, minutes, or longer later. Do not block waiting for a reply unless you used `--sync`. If a reply is essential without `--sync`, ask the user how to proceed.
+The command returns immediately. Delivery is asynchronous — the recipient may act seconds, minutes, or longer later. To wait for a reply, use the `tells` command (see the `tells` skill); if a reply is essential and you cannot wait, ask the user how to proceed.
 
 ## Examples
 
@@ -41,7 +40,6 @@ The command returns immediately (except with `--sync`). Delivery is asynchronous
 tell GEMINI --attach /tmp/note.txt please summarize the attached note
 tell w heads up — running the migration tonight
 git diff | tell CLAUDE review these changes
-tell NEIL --sync "ping" --timeout 60
 ```
 
 ## Failures

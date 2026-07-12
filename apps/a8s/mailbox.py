@@ -66,7 +66,6 @@ from core import (
 )
 from network import seen_id_append
 from registry import load_namespaces, resolve_name
-from sync_listen import A8S_CONTROL, expire_stale_listeners_for_participants, handle_a8s_command, try_sync_capture
 from services import StorageError, StorageService
 import txlog
 from ulid import new as new_ulid
@@ -552,11 +551,6 @@ def _process_pending(
             _trash_pending(sender, f)
             _drop_sidecar(f)
             continue
-        if recipient_name == A8S_CONTROL:
-            handle_a8s_command(sender, msg)
-            _trash_pending(sender, f)
-            _drop_sidecar(f)
-            continue
         # ----- LOCAL ROUTING -----
         local_target_known = False
         if not sidecar["local_delivered"]:
@@ -580,7 +574,6 @@ def _process_pending(
                         recipients.append(rp)
                 if recipients:
                     staged: list[tuple[Path, Path]] = []
-                    sync_captured = 0
                     stage_failed = False
                     try:
                         for recipient in recipients:
@@ -589,9 +582,6 @@ def _process_pending(
                             if final.is_file():
                                 continue
                             routed_msg = _build_routed_message(msg, sender, recipient)
-                            if try_sync_capture(recipient, routed_msg):
-                                sync_captured += 1
-                                continue
                             staging = inbox_tmp_dir(recipient.name) / f.name
                             with staging.open("w", encoding="utf-8") as out_f:
                                 json.dump(routed_msg, out_f, indent=2)
@@ -608,13 +598,13 @@ def _process_pending(
                         try:
                             if staged:
                                 _commit_staged_inboxes(staged)
-                            if staged or sync_captured:
+                            if staged:
                                 sidecar["local_delivered"] = True
                                 local_msg_id = msg.get("id", "")
                                 if local_msg_id:
                                     seen_id_append(local_msg_id)
                                 msg_id = msg.get("id", "")
-                                delivered = sync_captured + len(staged)
+                                delivered = len(staged)
                                 if kind == "alias":
                                     out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (alias of {len(recipients)}): {preview}")
                                     for recipient in recipients:
@@ -754,7 +744,6 @@ def route_outboxes(
     if configured_remote_ids is None:
         configured_remote_ids = []
     _ingest_outboxes(senders)
-    expire_stale_listeners_for_participants(all_agents)
     routed = 0
     for sender in senders:
         routed += _process_pending(

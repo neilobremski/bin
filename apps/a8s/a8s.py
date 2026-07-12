@@ -10,8 +10,8 @@ This file is the script entry point; functionality lives in sibling modules:
   mailbox.py      inbox/outbox/trash routing + queue helpers
   definitions.py  invoke* verbs, prompt formatting, definition loading
   daemon.py       wake subprocess, pid attachment, signal handling
-  sync_listen.py  tell --sync file-drop protocol (!a8s control envelopes)
-  tell.py          outbox drop + CLI parsing (stdin, --attach, --sync)
+  tell.py          outbox drop + CLI parsing (stdin, --attach)
+  tells.py         wait for the next inbound message (receive-side of tell)
   commands.py     every cmd_* function
   cli.py          COMMANDS table, dispatch, main
 
@@ -21,7 +21,7 @@ Surface (CLI):
   alias / unalias / aliases   group resolution
   start / run / step          handler attachment (1+ agents per process)
   stop / kill / exit / ls     handler control
-  prompt / tell / clear       message queueing
+  tell / tells                send a message / wait for the next one
   install                     install canonical skills
   install-client              install standalone tell to /usr/local
   logs <name>... [--tail N] [-f]   per-agent log readout (merge-sorted)

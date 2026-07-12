@@ -32,6 +32,7 @@ from commands import (
     cmd_stop,
     cmd_storage,
     cmd_tell,
+    cmd_tells,
     cmd_unalias,
     cmd_unnamespace,
     cmd_unremote,
@@ -59,6 +60,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("exit",     "",                          "Stop every running agent."),
     ("ls",       "",                          "List running agents."),
     ("tell",     "<name> [<message>]",       "Send a message to an agent or alias."),
+    ("tells",    "[--timeout SEC]",          "Wait for the next inbound message to this node."),
     ("drain",    "<name>",                   "Move local inbox to trash without invoking."),
     ("config",   "[get|set|unset ...]",      "List all knobs or edit ~/.a8s/settings.json."),
     ("convo",    "<name> [--limit N]",       "Show markdown conversation history for an agent."),
@@ -126,6 +128,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_ls()
     if cmd == "tell":
         return cmd_tell(args)
+    if cmd == "tells":
+        return cmd_tells(args)
     if cmd == "drain":
         return cmd_drain(args)
     if cmd == "config":
