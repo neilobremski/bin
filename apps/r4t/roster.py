@@ -42,6 +42,7 @@ class Member:
     leader: bool = False
     address: str | None = None
     cell: str = ""
+    lead: str = ""
     persona: str = ""
     errors: list[str] = field(default_factory=list)
 
@@ -74,6 +75,106 @@ class Roster:
 
     def names(self) -> list[str]:
         return [m.name for m in self.members]
+
+    @property
+    def declares_tree(self) -> bool:
+        """True once any AI member carries a `Lead:` line. A roster without
+        Lead lines is a flat team — one cell under the leader — and every
+        tree behavior (information hiding, hard rerouting, tree lint) is off."""
+        return any(m.lead for m in self.members if not m.is_human)
+
+    def _ai_members(self) -> list[Member]:
+        return [m for m in self.members if not m.is_human and not m.errors]
+
+    def reports_to(self, member: Member) -> list[Member]:
+        """AI members whose `Lead:` names this member (its direct reports)."""
+        key = member.name.lower()
+        return [m for m in self._ai_members() if m.lead.lower() == key]
+
+    def adjacent(self, member: Member) -> list[Member]:
+        """The members a tree node may reach directly: its lead, its direct
+        reports, and its cell-mates — plus every roster human (the seat is
+        always visible and reachable). Excludes the member itself and errored
+        AI members. Order: lead, reports, remaining cell-mates, humans."""
+        picked: dict[str, Member] = {}
+
+        def add(m: Member) -> None:
+            if m.name.lower() != member.name.lower():
+                picked.setdefault(m.name.lower(), m)
+
+        if member.lead:
+            led = self.find(member.lead)
+            if led is not None and not led.is_human and not led.errors:
+                add(led)
+        for m in self.reports_to(member):
+            add(m)
+        if member.cell:
+            for m in self._ai_members():
+                if m.cell.lower() == member.cell.lower():
+                    add(m)
+        for m in self.members:
+            if m.is_human:
+                add(m)
+        return list(picked.values())
+
+    def _max_tree_depth(self) -> int:
+        """Deepest Lead chain measured in hops below the top lead (the AI
+        member marked Leader). The top lead is depth 0; a member reporting to
+        it is depth 1. Cycles and members that never reach the top are skipped
+        rather than counted."""
+        top = self.leader()
+        if top is None:
+            return 0
+        top_key = top.name.lower()
+        by_name = {m.name.lower(): m for m in self._ai_members()}
+        best = 0
+        for m in self._ai_members():
+            depth = 0
+            seen: set[str] = set()
+            cur: Member | None = m
+            while cur is not None and cur.name.lower() != top_key:
+                if cur.name.lower() in seen or not cur.lead:
+                    depth = 0  # broken chain — not a real path to the top
+                    break
+                seen.add(cur.name.lower())
+                cur = by_name.get(cur.lead.lower())
+                depth += 1
+            if cur is not None and cur.name.lower() == top_key:
+                best = max(best, depth)
+        return best
+
+    def tree_problems(self) -> list[tuple[str, str]]:
+        """Lint the declared tree, returning (severity, message) pairs where
+        severity is "error" or "warn". Empty for flat rosters (no Lead lines):
+        those keep working exactly as before, no new warnings. Checks: a Lead
+        must name a roster member; a cell over 6 AI members warns and over 10
+        errors (the ORG-LESSONS span-of-control numbers); a tree deeper than 2
+        levels below the top lead warns."""
+        if not self.declares_tree:
+            return []
+        out: list[tuple[str, str]] = []
+        ai = self._ai_members()
+        member_names = {m.name.lower() for m in self.members}
+        for m in ai:
+            if m.lead and m.lead.lower() not in member_names:
+                out.append(("error", f"{m.name}: Lead {m.lead!r} is not a roster member"))
+        cells: dict[str, list[Member]] = {}
+        for m in ai:
+            if m.cell:
+                cells.setdefault(m.cell.lower(), []).append(m)
+        for cell, mem in sorted(cells.items()):
+            n = len(mem)
+            if n > 10:
+                out.append(("error", f"cell {cell!r} has {n} AI members (hard cap 10)"))
+            elif n > 6:
+                out.append(("warn", f"cell {cell!r} has {n} AI members (soft cap 6)"))
+        depth = self._max_tree_depth()
+        if depth > 2:
+            out.append((
+                "warn",
+                f"tree depth {depth} exceeds 2 levels below the top lead",
+            ))
+        return out
 
 
 def resolve_roster_path(root: Path, raw: str | None) -> Path:
@@ -115,6 +216,7 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
     m.leader = _is_true(fields.get("leader", ""))
     m.address = fields.get("address") or None
     m.cell = fields.get("cell", "")
+    m.lead = fields.get("lead", "")
 
     rig = fields.get("rig", "")
     if rig:
