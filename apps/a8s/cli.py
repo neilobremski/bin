@@ -7,7 +7,6 @@ import sys
 import settings as sm
 from commands import (
     cmd_add,
-    cmd_agents,
     cmd_alias,
     cmd_aliases,
     cmd_define,
@@ -22,6 +21,7 @@ from commands import (
     cmd_kill,
     cmd_logs,
     cmd_ls,
+    cmd_ps,
     cmd_namespace,
     cmd_namespaces,
     cmd_remote,
@@ -41,10 +41,10 @@ from commands import (
 
 
 COMMANDS: list[tuple[str, str, str]] = [
-    ("add",      "<name> <dir> [<def>]",      "Register an agent."),
-    ("remove",   "<name>",                    "Unregister an agent and delete its mailbox."),
-    ("agents",   "",                          "List registered agents."),
-    ("discover", "<path>",                    "Scan a path for agents and suggest `add` commands."),
+    ("add",      "<name> <dir> [<def>]",      "Register a node."),
+    ("remove",   "<name>",                    "Unregister a node and delete its mailbox."),
+    ("ls",       "[-q]",                      "List all registered nodes, running or not."),
+    ("discover", "<path>",                    "Scan a path for nodes and suggest `add` commands."),
     ("define",   "<name> [<path>]",           "Show or set an agent's command definition."),
     ("alias",    "[<name> [<member>]]",       "Group agents under an alias name; show one with `<name>`."),
     ("unalias",  "<alias> [<member>]",        "Remove a member from an alias, or the whole alias."),
@@ -58,7 +58,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("stop",     "<name>",                    "Stop a running agent."),
     ("kill",     "<name>",                    "Force-stop a running agent."),
     ("exit",     "",                          "Stop every running agent."),
-    ("ls",       "",                          "List running agents."),
+    ("ps",       "[-q]",                      "List running node processes."),
     ("tell",     "<name> [<message>]",       "Send a message to an agent or alias."),
     ("tells",    "[--timeout SEC]",          "Wait for the next inbound message to this node."),
     ("drain",    "<name>",                   "Move local inbox to trash without invoking."),
@@ -94,8 +94,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_add(args)
     if cmd == "remove":
         return cmd_remove(args)
-    if cmd == "agents":
-        return cmd_agents()
+    if cmd == "ls":
+        return cmd_ls(args)
     if cmd == "discover":
         return cmd_discover(args)
     if cmd == "define":
@@ -124,8 +124,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_kill(args)
     if cmd == "exit":
         return cmd_exit()
-    if cmd == "ls":
-        return cmd_ls()
+    if cmd == "ps":
+        return cmd_ps(args)
     if cmd == "tell":
         return cmd_tell(args)
     if cmd == "tells":
