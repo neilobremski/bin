@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,40 @@ def parse(text: str):
     return parse_roster(text, Path("ROSTER.md"))
 
 
+TREE_TEXT = textwrap.dedent(
+    """\
+    ### Vic
+    - **Status:** AI
+    - **Rig:** r
+    - **Leader:** yes
+    - **Cell:** lead
+    - **Lead:** Ned
+
+    ### Ned
+    - **Status:** Human
+    - **Address:** ned
+
+    ### Ann
+    - **Status:** AI
+    - **Rig:** r
+    - **Cell:** design
+    - **Lead:** Vic
+
+    ### Bea
+    - **Status:** AI
+    - **Rig:** r
+    - **Cell:** design
+    - **Lead:** Ann
+
+    ### Cal
+    - **Status:** AI
+    - **Rig:** r
+    - **Cell:** build
+    - **Lead:** Vic
+    """
+)
+
+
 class TestParsing:
     def test_basic_fields(self, repo):
         roster = load_roster(repo / "ROSTER.md")
@@ -27,6 +62,14 @@ class TestParsing:
         assert gerry.leader
         assert not gerry.errors
         assert "Defends the schedule" in gerry.persona
+
+    def test_cell_captured_when_declared(self, repo):
+        gerry = load_roster(repo / "ROSTER.md").find("gerry")
+        assert gerry.cell == "leadership"
+
+    def test_cell_empty_when_absent(self, repo):
+        phil = load_roster(repo / "ROSTER.md").find("phil")
+        assert phil.cell == ""
 
     def test_lookup_is_case_insensitive(self, repo):
         roster = load_roster(repo / "ROSTER.md")
@@ -134,3 +177,81 @@ class TestPathResolution:
     def test_missing_file_raises(self, tmp_path):
         with pytest.raises(RosterError):
             load_roster(tmp_path / "nope.md")
+
+
+class TestTree:
+    def test_lead_parsed(self):
+        r = parse(TREE_TEXT)
+        assert r.find("ann").lead == "Vic"
+        assert r.find("vic").lead == "Ned"
+
+    def test_lead_empty_when_absent(self):
+        assert parse("### A\n- **Status:** AI\n- **Rig:** r\n").find("a").lead == ""
+
+    def test_declares_tree_only_with_lead_lines(self):
+        assert parse(TREE_TEXT).declares_tree
+        flat = parse(
+            "### A\n- **Status:** AI\n- **Rig:** r\n- **Leader:** yes\n- **Cell:** x\n"
+            "### B\n- **Status:** AI\n- **Rig:** r\n- **Cell:** x\n"
+        )
+        assert not flat.declares_tree
+
+    def test_reports_to(self):
+        r = parse(TREE_TEXT)
+        assert {m.name for m in r.reports_to(r.find("vic"))} == {"Ann", "Cal"}
+        assert {m.name for m in r.reports_to(r.find("ann"))} == {"Bea"}
+
+    def test_adjacent_is_lead_reports_cellmates_and_seat(self):
+        r = parse(TREE_TEXT)
+        adj = {m.name for m in r.adjacent(r.find("ann"))}
+        # lead (Vic), report+cell-mate (Bea), human seat (Ned) — never Cal
+        assert adj == {"Vic", "Bea", "Ned"}
+        assert "Cal" not in adj
+
+    def test_adjacent_top_lead_sees_reports_and_seat(self):
+        r = parse(TREE_TEXT)
+        adj = {m.name for m in r.adjacent(r.find("vic"))}
+        assert {"Ann", "Cal", "Ned"} <= adj
+        assert "Bea" not in adj  # Bea is two levels down, not adjacent
+
+    def test_tree_text_is_clean(self):
+        assert parse(TREE_TEXT).tree_problems() == []
+
+    def test_flat_roster_has_no_tree_problems(self):
+        # Cell lines but no Lead lines anywhere: many members, still flat.
+        text = "### Top\n- **Status:** AI\n- **Rig:** r\n- **Leader:** yes\n"
+        for i in range(12):
+            text += f"### M{i}\n- **Status:** AI\n- **Rig:** r\n"
+        assert parse(text).tree_problems() == []
+
+    def test_unknown_lead_is_error(self):
+        r = parse(
+            "### Top\n- **Status:** AI\n- **Rig:** r\n- **Leader:** yes\n"
+            "### Kid\n- **Status:** AI\n- **Rig:** r\n- **Lead:** Ghost\n"
+        )
+        assert any(s == "error" and "Ghost" in msg for s, msg in r.tree_problems())
+
+    def test_cell_over_six_warns(self):
+        text = "### Top\n- **Status:** AI\n- **Rig:** r\n- **Leader:** yes\n- **Cell:** hq\n"
+        for i in range(7):
+            text += f"### M{i}\n- **Status:** AI\n- **Rig:** r\n- **Cell:** c\n- **Lead:** Top\n"
+        probs = parse(text).tree_problems()
+        assert any(s == "warn" and "soft cap 6" in msg for s, msg in probs)
+        assert not any(s == "error" for s, _ in probs)
+
+    def test_cell_over_ten_errors(self):
+        text = "### Top\n- **Status:** AI\n- **Rig:** r\n- **Leader:** yes\n- **Cell:** hq\n"
+        for i in range(11):
+            text += f"### M{i}\n- **Status:** AI\n- **Rig:** r\n- **Cell:** c\n- **Lead:** Top\n"
+        assert any(
+            s == "error" and "hard cap 10" in msg for s, msg in parse(text).tree_problems()
+        )
+
+    def test_depth_over_two_warns(self):
+        r = parse(
+            "### L0\n- **Status:** AI\n- **Rig:** r\n- **Leader:** yes\n"
+            "### L1\n- **Status:** AI\n- **Rig:** r\n- **Lead:** L0\n"
+            "### L2\n- **Status:** AI\n- **Rig:** r\n- **Lead:** L1\n"
+            "### L3\n- **Status:** AI\n- **Rig:** r\n- **Lead:** L2\n"
+        )
+        assert any(s == "warn" and "depth" in msg for s, msg in r.tree_problems())

@@ -15,7 +15,9 @@ from commands import (
     cmd_alias,
     cmd_kill,
     cmd_logs,
+    cmd_ls,
     cmd_namespace,
+    cmd_ps,
     cmd_namespaces,
     cmd_remote,
     cmd_remove,
@@ -445,6 +447,107 @@ class TestCmdKillPerAgent:
         assert rc == 0
         out = capsys.readouterr().out
         assert "not running" in out
+
+
+def _claim(name: str) -> None:
+    """Write a live pid file so `name` reads as running (the pytest process
+    is alive, so its own pid passes the liveness check)."""
+    p = pid_path(name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(str(os.getpid()))
+
+
+class TestCmdLs:
+    """`a8s ls` lists every registered node, running or not — docker-style."""
+
+    def test_empty_registry_prints_hint(self, fake_home, capsys):
+        rc = cmd_ls([])
+        assert rc == 0
+        assert "no nodes registered" in capsys.readouterr().out
+
+    def test_lists_running_and_stopped(self, fake_home, tmp_path, capsys):
+        a = tmp_path / "a"; a.mkdir()
+        b = tmp_path / "b"; b.mkdir()
+        save_registry({"claude": {"root": str(a)}, "gemini": {"root": str(b)}})
+        _claim("claude")  # gemini left stopped
+        rc = cmd_ls([])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "NAME" in out and "STATUS" in out and "ROOT" in out
+        assert f"running (pid {os.getpid()})" in out
+        assert "stopped" in out
+        # Both nodes appear.
+        assert "claude" in out and "gemini" in out
+
+    def test_quiet_prints_names_only(self, fake_home, tmp_path, capsys):
+        a = tmp_path / "a"; a.mkdir()
+        b = tmp_path / "b"; b.mkdir()
+        save_registry({"claude": {"root": str(a)}, "gemini": {"root": str(b)}})
+        _claim("claude")
+        rc = cmd_ls(["-q"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert out.splitlines() == ["claude", "gemini"]
+        # No header, no status decoration.
+        assert "STATUS" not in out and "running" not in out
+
+    def test_namespace_column_appears_when_bound(self, fake_home, tmp_path, capsys):
+        a = tmp_path / "a"; a.mkdir()
+        save_registry({"claude": {"root": str(a)}})
+        save_namespaces({"acme": "claude"})
+        rc = cmd_ls([])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "NAMESPACES" in out
+        assert "acme:" in out
+
+    def test_no_namespace_column_when_none_bound(self, fake_home, tmp_path, capsys):
+        a = tmp_path / "a"; a.mkdir()
+        save_registry({"claude": {"root": str(a)}})
+        rc = cmd_ls([])
+        assert rc == 0
+        assert "NAMESPACES" not in capsys.readouterr().out
+
+
+class TestCmdPs:
+    """`a8s ps` lists only running node processes — docker-style."""
+
+    def test_lists_running_only(self, fake_home, tmp_path, capsys):
+        a = tmp_path / "a"; a.mkdir()
+        b = tmp_path / "b"; b.mkdir()
+        save_registry({"claude": {"root": str(a)}, "gemini": {"root": str(b)}})
+        _claim("gemini")  # claude left stopped
+        rc = cmd_ps([])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "NAME" in out and "PID" in out and "UPTIME" in out
+        assert "gemini" in out
+        assert "claude" not in out
+
+    def test_quiet_prints_names_only(self, fake_home, tmp_path, capsys):
+        a = tmp_path / "a"; a.mkdir()
+        save_registry({"claude": {"root": str(a)}})
+        _claim("claude")
+        rc = cmd_ps(["-q"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert out.splitlines() == ["claude"]
+        assert "PID" not in out
+
+    def test_empty_state_hints_at_ls(self, fake_home, tmp_path, capsys):
+        a = tmp_path / "a"; a.mkdir()
+        save_registry({"claude": {"root": str(a)}})  # registered but stopped
+        rc = cmd_ps([])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "no nodes running" in out
+        assert "a8s ls" in out
+
+    def test_quiet_empty_is_silent(self, fake_home, tmp_path, capsys):
+        save_registry({})
+        rc = cmd_ps(["-q"])
+        assert rc == 0
+        assert capsys.readouterr().out == ""
 
 
 class TestCmdRemote:

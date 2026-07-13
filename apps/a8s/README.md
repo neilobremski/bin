@@ -74,10 +74,17 @@ a8s alias devs GEMINI
 # Background daemon handling both members of the alias in one process.
 a8s start devs
 
-# See what's running.
+# See every registered node (running or not).
 a8s ls
-#   CLAUDE  PID 12345  /Users/me/projects/code-review
-#   GEMINI  PID 12345  /Users/me/projects/research
+#   NAME     STATUS                KIND      ROOT
+#   CLAUDE   running (pid 12345)   claude    /Users/me/projects/code-review
+#   GEMINI   running (pid 12345)   gemini    /Users/me/projects/research
+
+# See just the running node processes.
+a8s ps
+#   NAME     PID     UPTIME   ROOT
+#   CLAUDE   12345   2h       /Users/me/projects/code-review
+#   GEMINI   12345   2h       /Users/me/projects/research
 
 # Send messages. Woken agents get `TELL_OUTBOX_DIR` from a8s; manual tell
 # requires `export TELL_OUTBOX_DIR=…/.outbox` (see docs/tell.md).
@@ -105,7 +112,7 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 | `a8s remove <name>`            | Unregister an agent. Wipes `~/.a8s/agents/<NAME>/` and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running. |
 | `a8s define <name> [<path>]`   | Show or set the agent's definition file.                                                                                                                       |
 | `a8s discover <path>`          | Walk a path for marker files; print suggested `add`+`define` commands. Read-only.                                                                              |
-| `a8s agents`                   | List every registered agent and its definition.                                                                                                                |
+| `a8s ls [-q]`                  | List every registered node, running or not: NAME, STATUS (`running (pid N)` / `stopped`), KIND, ROOT, and bound namespaces. `-q` prints just names.             |
 
 
 ### Aliases
@@ -168,7 +175,7 @@ agent unbinds any prefixes pointing at it.
 | `a8s stop <name>`  | SIGTERM the handler. Aliases dedupe by PID — one signal per multi-agent handler. Graceful detach.                                                                                                                                                                                   |
 | `a8s kill <name>`  | Per-agent force-detach: writes a kill-request, SIGUSR1s the holder. Holder kills the in-flight wake subprocess iff it's for that agent and releases the attachment; siblings keep running. Falls back to whole-process SIGTERM only if the holder doesn't honor the request in 10s. |
 | `a8s exit`         | SIGTERM every running handler.                                                                                                                                                                                                                                                      |
-| `a8s ls`           | List only running agents and their handler PIDs.                                                                                                                                                                                                                                    |
+| `a8s ps [-q]`      | List only running node processes: NAME, PID, UPTIME, ROOT. `-q` prints just names. Empty state hints at `a8s ls`.                                                                                                                                                                    |
 
 
 ### Messaging
@@ -178,6 +185,7 @@ agent unbinds any prefixes pointing at it.
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s tell <name> <msg>`                                                     | Routed message via `_write_outbox` into the sender's configured outbox. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose root encloses CWD; router force-stamps `from` from outbox ownership.                                                                                           |
 | `tell <name> <msg>` (top-level shim, `[~/bin/tell](/Users/neilo/bin/tell)`) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Requires `TELL_OUTBOX_DIR` (a8s injects it on wake). Drops a JSON envelope — no `~/.a8s` access required. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: `[docs/tell.md](docs/tell.md)`.          |
+| `tells [--timeout SEC]` (top-level shim, `[~/bin/tells](/Users/neilo/bin/tells)`) | Receive-side complement of `tell` (`apps/a8s/tells.py`). Resolves the node from `TELL_OUTBOX_DIR`, then blocks up to `--timeout` (default 5s) for new envelopes in `.inbox`, prints each `sender: body`, and exits 0; exit 1 on timeout. Non-destructive; Windows: `tells.cmd`. |
 | `a8s logs <name>... [--tail N] [-f]`                                        | Read per-agent log files; one agent in append order, multiple merge by ISO timestamp. `-f` follows.                                                                                                                                                                                                                       |
 | `a8s convo <name> [--limit N]`                                              | Markdown conversation history for an agent (messages to or from). Default `--limit 10`. Outbound headings use `##`, inbound use `###`. Archive: `~/.a8s/conversations.jsonl` (machine-wide; rotates at `convo_max_limit`, default 1000 — `a8s config`). |
 | `a8s drain <name>`                                                          | Move pending inbox JSON to trash without waking the agent.                                                                                                                                                                                                                                                                |
@@ -216,7 +224,7 @@ Env vars apply only when a key is absent from `settings.json` (e.g. `A8S_CONVO_M
 | `a8s unremote <name>`                                          | Forget a remote. Running daemons keep using the prior config until restart.                                                                                                                                                                                                                                                                                                                                                            |
 
 
-Remotes are git-shaped: an explicit list of places to fan messages out to. a8s only crosses cluster boundaries on `tell` / `prompt` — everything else (`a8s logs`, `a8s ls`, `a8s agents`) is strictly local. If you want cross-cluster log access, register an a8s connector that turns inbound tells into local `a8s logs` calls; a8s itself just enables the message + invocation path.
+Remotes are git-shaped: an explicit list of places to fan messages out to. a8s only crosses cluster boundaries on `tell` / `prompt` — everything else (`a8s logs`, `a8s ls`, `a8s ps`) is strictly local. If you want cross-cluster log access, register an a8s connector that turns inbound tells into local `a8s logs` calls; a8s itself just enables the message + invocation path.
 
 Configure as many remotes as you want and a8s publishes to all of them in parallel; receivers dedupe by ULID, so adding redundant brokers improves delivery without producing duplicate inbox writes. A message to an unknown-locally recipient publishes to all configured remotes and is delivered by whichever cluster has the recipient registered locally. Per-message exponential backoff (30s → 1m → 2m → 5m → 15m → 30m → 1h → 6h → 24h) retries unreachable remotes; after the schedule is exhausted the message is moved to the sender's trash with a "discarded after backoff" log.
 
@@ -442,11 +450,12 @@ apps/a8s/
 │   ├── __init__.py   abstract publish/subscribe/start/stop interface
 │   └── mqtt.py       MQTT transport (paho-mqtt impl; persistent session, QoS 1)
 ├── tell.py           outbox drop + CLI (stdin, --attach)
+├── tells.py          wait for the next inbound message (receive side)
 ├── commands.py       every cmd_*
 ├── cli.py            COMMANDS table, dispatch, main
 ├── definitions/      built-in JSONs (claude/cursor/codex/default)
 ├── dummy-cli         fallback bash script
-├── skills/           tell skill (installable into Claude / Cursor / Codex)
+├── skills/           tell + tells skills (installable into Claude / Cursor / Codex)
 └── tests/
     ├── agents/       per-tool fixture dirs (CLAUDE/GEMINI/CODEX/Llama)
     ├── fixtures/     mock-cli + mock.json for end-to-end tests

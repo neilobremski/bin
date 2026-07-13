@@ -1,22 +1,32 @@
-"""Dispatch — handle one delivered a8s message for a team node.
+"""Dispatch — enqueue delivered mail, then drain member queues as batch turns.
 
-Stateless per invocation: load state, govern, run one harness turn, exit.
-The agent replies with the unmodified `tell` — dispatch points the harness
+Every inbound message to a member ENQUEUES, unconditionally, into that
+member's durable queue (state.enqueue). No gate ever drops or dead-letters a
+deliverable message; dead letters are for undeliverable mail only (unknown
+recipient, disabled member, no rig). A separate drain loop picks a runnable
+member with a non-empty queue and runs ONE turn that drains the WHOLE queue:
+the prompt renders every queued message at once, so an agent that sees
+"teammates discussed X, then the lead overrode with Y" pivots in one reading
+instead of burning a turn per message.
+
+Runnability is governed autonomously — no human gates. A member runs when its
+own spend bucket and the shared cell bucket both hold at least 1 unit (a turn
+costs 1 of each), its failure breaker is closed, and the team throttle
+(max_concurrent, cadence) admits another start. An empty bucket means the
+member is *resting*: its queue holds and it runs again when the bucket
+refills. Nothing is lost.
+
+The agent replies with the unmodified `tell`. Dispatch points the harness
 subprocess's $TELL_OUTBOX_DIR at a per-turn staging dir and releases the
 staged envelopes afterwards: attribution (only this turn wrote there), the
-task/hop header stamped mechanically, send quota, class marking, pair
-suppression, then move into the node's real outbox (external) or the
-pending queue (intra-team, which a8s would drop as a self-send).
-
-Everything governs autonomously — no human gates. Suppressed, cut, and
-excess messages dead-letter with an audit record; budget exhaustion closes
-the task through one forced-synthesis leader turn. Mechanisms and prior
-art: docs/governance.md.
+thread/hop header stamped mechanically, per-turn send quota, then either the
+node's real outbox (external) or straight onto the recipient member's queue
+(intra-team). A reply is attributed to the thread of the message it answers.
 
 Requeueing note: a8s trashes the inbox message BEFORE spawning the wake
-subprocess and only logs its exit code (daemon.wake_once), so exiting
-nonzero does NOT redeliver. Deferred messages (concurrency/throttle) park
-in the team's pending/ dir and drain on later dispatch and idle passes.
+subprocess and only logs its exit code (daemon.wake_once), so exiting nonzero
+does NOT redeliver. That is fine — the message is already durably queued
+before any turn runs.
 """
 from __future__ import annotations
 
@@ -42,10 +52,13 @@ HISTORY_BODY_MAX = 2000
 DRAIN_MAX_PASSES = 20
 
 RAN = "ran"
+REROUTED = "rerouted"
 DEFERRED = "deferred"
+RESTING = "resting"
 DEAD = "dead-letter"
-SYNTHESIS = "synthesis"
+QUEUED = "queued"
 SKIPPED = "skipped"
+BREAKER = "breaker"
 
 
 @dataclass
@@ -81,10 +94,10 @@ def _display_name(node: str, addr: str) -> str:
 def _canonical_recipient(node: str, roster: Roster, to: str) -> str:
     """Agents address the walled garden by bare first name; the wire uses
     `node:name`. Bare roster names — humans included — canonicalize to
-    internal form; anything else (`chatroom`, external addresses, unknown
-    names) passes through untouched. Human members are internal on purpose:
-    their mail parks in the node's seat mailbox, and `Address:` is only a
-    doorbell copy when no seat session is attached."""
+    internal form; anything else (external addresses, unknown names) passes
+    through untouched. Human members are internal on purpose: their mail parks
+    in the node's seat mailbox, and `Address:` is only a doorbell copy when no
+    seat session is attached."""
     t = to.strip()
     if ":" in t:
         prefix, _, sub = t.partition(":")
@@ -97,6 +110,13 @@ def _canonical_recipient(node: str, roster: Roster, to: str) -> str:
     if member is None:
         return t
     return f"{node}:{member.name.lower()}"
+
+
+def _same_recipient(node: str, roster: Roster, a: str, b: str) -> bool:
+    return (
+        _canonical_recipient(node, roster, a).strip().lower()
+        == _canonical_recipient(node, roster, b).strip().lower()
+    )
 
 
 def _human_member(node: str, roster: Roster, addr: str) -> Member | None:
@@ -154,10 +174,16 @@ def _dispatchable_names(roster: Roster) -> list[str]:
 
 
 def _teammate_lines(ctx: DispatchContext, roster: Roster, member: Member) -> list[str]:
+    # Information hiding: when the roster declares a tree, a member sees only
+    # its tree-adjacent names (lead, reports, cell-mates) plus the human seat —
+    # lateral contact becomes informationally unthinkable, not just rerouted.
+    # A flat roster (no Lead lines) still lists the whole team, as before.
+    if roster.declares_tree:
+        pool = roster.adjacent(member)
+    else:
+        pool = [m for m in roster.members if m.name.lower() != member.name.lower()]
     lines: list[str] = []
-    for m in roster.members:
-        if m.name.lower() == member.name.lower():
-            continue
+    for m in pool:
         if m.is_human:
             lines.append(
                 f"    - {m.name} (Human, tell {m.name.lower()}) — {m.role}".rstrip(" —")
@@ -169,52 +195,90 @@ def _teammate_lines(ctx: DispatchContext, roster: Roster, member: Member) -> lis
     return lines
 
 
+def _mission_section(ctx: DispatchContext, roster: Roster, member: Member) -> list[str]:
+    """MISSION.md is injected verbatim into a lead's turn prompt and no one
+    else's. A member is a lead when it has direct reports (tree rosters); a
+    flat roster with no tree declared treats the marked Leader as the only
+    lead. ICs never see the file injected — their lead restates the intent at
+    the resolution they can hold. Missing MISSION.md means no section, no error.
+    """
+    try:
+        text = (ctx.root / "MISSION.md").read_text(encoding="utf-8").strip()
+    except OSError:
+        return []
+    if not text:
+        return []
+    if roster.declares_tree:
+        is_lead = bool(roster.reports_to(member))
+    else:
+        is_lead = member.leader and not member.is_human
+    if not is_lead:
+        return []
+    return [
+        "## The mission (MISSION.md — outranks every other document)",
+        text,
+        "",
+    ]
+
+
 def build_prompt(
     ctx: DispatchContext,
     roster: Roster,
     member: Member,
-    sender: str,
-    body: str,
+    batch: list[dict],
 ) -> str:
     history = state.read_history(ctx.node, member.name)
-    if len(body) > PROMPT_BODY_MAX:
-        body = body[:PROMPT_BODY_MAX] + "\n[... message truncated by r4t ...]"
     teammates = _teammate_lines(ctx, roster, member)
+    message_lines: list[str] = []
+    for env in batch:
+        sender = _display_name(ctx.node, str(env.get("from", "?")))
+        thread = str(env.get("task", "")) or "?"
+        repeats = int(env.get("repeats", 1) or 1)
+        body = str(env.get("body", "")).strip() or "(empty message)"
+        if len(body) > PROMPT_BODY_MAX:
+            body = body[:PROMPT_BODY_MAX] + "\n[... message truncated by r4t ...]"
+        header = f"From: {sender} (thread {thread})"
+        if repeats > 1:
+            header += f" (sent {repeats} times)"
+        message_lines.append(header)
+        message_lines.append("")
+        message_lines.append(body)
+        message_lines.append("")
     parts = [
         f"You are {member.name}, a member of the {ctx.node} team, working in "
         f"the team repo at {ctx.root.resolve()} (your current directory). "
         "Write files here with relative paths only.",
         "",
+        *_mission_section(ctx, roster, member),
         "## Who you are (from the team roster)",
         member.persona or f"### {member.name}",
         "",
         "## Your conversation so far (messages you received and sent)",
         history.strip() or "(no prior messages — this is your first recorded turn)",
         "",
-        "## Incoming message",
-        f"From: {_display_name(ctx.node, sender)}",
-        "",
-        body or "(empty message)",
-        "",
+        "## Messages since your last turn",
+        *(message_lines or ["(none)"]),
         "## How to work",
-        "- This is one turn: you were woken for the message above, and your "
-        "process ends when you finish. You will be woken again when replies "
-        "arrive.",
+        "- This is one turn: you were woken with every message above at once. "
+        "Read them together and act on the current state, not each message in "
+        "sequence. Your process ends when you finish; you are woken again when "
+        "more messages arrive.",
         "- Never wait for a reply inside a turn. If you need work from "
         "teammates, message them and END your turn without answering the "
         "original request; when their replies wake you later, answer the "
         "person who asked once you have enough.",
         "- Send messages with the `tell` shell command (run it via your shell "
         "tool — printing it as text sends nothing):",
-        f"    - reply to the sender: tell {_display_name(ctx.node, sender)} \"<message>\"",
+        "    - reply to whoever asked: tell <name> \"<message>\"",
         "    - a teammate: tell <name> \"<message>\". Teammates:",
         *(teammates or ["    - (none)"]),
         "- Speak to teammates directly and one at a time — do not post to "
         "chat rooms or broadcast channels.",
-        "- Never use `tell --sync` with teammates — it blocks your turn "
-        "waiting for a reply that arrives by waking you instead.",
         "- Do not send acknowledgment-only messages. If you have nothing "
         "substantive to add, send nothing — silence is fine.",
+        "- Your tell's body is the only thing the recipient sees — anything you "
+        "write around it (framing, notes, your reasoning) is lost.",
+        "- Repo work is not done until it is committed.",
     ]
     return "\n".join(parts)
 
@@ -281,6 +345,120 @@ def _throttle_block(ctx: DispatchContext, config: RigConfig) -> str | None:
     return None
 
 
+# ---------- ingress (enqueue only; never runs a turn) ----------
+
+def _ingest(
+    ctx: DispatchContext,
+    sender: str,
+    to: str,
+    message: str,
+    *,
+    trusted_header: bool,
+    roster: Roster | None = None,
+    config: RigConfig | None = None,
+) -> str:
+    """Resolve the recipient and enqueue. Humans park in the seat; undeliverable
+    mail dead-letters with an audit record; a deliverable message to an AI
+    member enqueues unconditionally (duplicate-collapsed) and returns QUEUED."""
+    _, sub = split_recipient(to)
+
+    if roster is None:
+        roster = _load_roster(ctx, sender)
+    if roster is None:
+        return SKIPPED
+
+    if sub:
+        member = roster.find(sub)
+        if member is None:
+            names = ", ".join(_dispatchable_names(roster)) or "(none)"
+            _tell_error(
+                ctx, sender,
+                f"no team member named {sub!r}. Dispatchable members: {names}.",
+            )
+            state.record_dead_letter(
+                ctx.node, reason="unknown-recipient", sender=sender, to=to,
+                task="", content=message,
+            )
+            return DEAD
+    else:
+        member = roster.leader()
+        if member is None:
+            names = ", ".join(_dispatchable_names(roster)) or "(none)"
+            _tell_error(
+                ctx, sender,
+                "no leader is marked in the roster, so bare messages to "
+                f"{ctx.node} have no recipient. Address a member directly "
+                f"(members: {names}).",
+            )
+            state.record_dead_letter(
+                ctx.node, reason="no-leader", sender=sender, to=to,
+                task="", content=message,
+            )
+            return DEAD
+
+    if member.is_human:
+        _park_seat(ctx, member, sender, message)
+        return SKIPPED
+
+    if member.errors:
+        _tell_error(
+            ctx, sender,
+            f"{member.name} is disabled by a roster problem: {member.error}. "
+            f"Fix {ctx.roster_path.name} and resend.",
+        )
+        state.record_dead_letter(
+            ctx.node, reason="member-disabled", sender=sender, to=to,
+            task="", content=message,
+        )
+        return DEAD
+
+    if config is None:
+        config = _load_config(ctx, sender)
+    if config is None:
+        return SKIPPED
+    rig, err, _pinned = config.rig_for(member)
+    if rig is None:
+        _tell_error(ctx, sender, f"{member.name} cannot run: {err}")
+        state.record_dead_letter(
+            ctx.node, reason="no-rig", sender=sender, to=to,
+            task="", content=message,
+        )
+        return DEAD
+
+    if trusted_header:
+        thread_id, hop, auto, body = tasks.parse_header(message)
+    else:
+        # Ingress protocol: headers never legitimately arrive from outside the
+        # garden (egress strips them), so an external header is either noise or
+        # a forgery aimed at an existing thread — treat the whole message as
+        # content and open a fresh thread.
+        thread_id, hop, auto, body = None, 0, False, (message or "").strip()
+    if thread_id is None:
+        thread_id = tasks.new_task_id()
+        hop = 0
+    tasks.ensure_task(ctx.node, thread_id, sender)
+
+    state.enqueue(
+        ctx.node,
+        member.name,
+        {
+            "from": sender,
+            "to": _canonical_recipient(ctx.node, roster, to),
+            "task": thread_id,
+            "hop": hop,
+            "auto": auto,
+            "body": body,
+        },
+    )
+    state.update_meta(ctx.node, member.name, last_inbound_at=state.utc_now())
+    state.append_log(
+        ctx.node,
+        f"r4t: QUEUED {sender} -> {member.name.lower()} thread={thread_id} "
+        f"hop={hop} (depth {state.queue_depth(ctx.node, member.name)})",
+    )
+    return QUEUED
+
+
 # ---------- staging release ----------
 
 def _real_outbox(ctx: DispatchContext) -> Path:
@@ -296,41 +474,36 @@ def _release_one(
     staging: Path,
     envelope: dict,
     sender_addr: str,
-    task_id: str,
+    thread_id: str,
     next_hop: int,
     body: str,
-    synthesis_response: bool,
+    roster: Roster,
+    config: RigConfig,
 ) -> None:
     to = str(envelope.get("to", "")).strip()
     if _is_internal(ctx.node, to):
-        state.park_pending(
-            ctx.node,
-            {
-                "from": sender_addr,
-                "to": to,
-                "task": task_id,
-                "hop": next_hop,
-                "auto": True,
-                "body": body,
-                "synthesis_response": synthesis_response,
-            },
+        header = tasks.format_header(thread_id, next_hop, auto=True)
+        _ingest(
+            ctx, sender_addr, to, f"{header} {body}",
+            trusted_header=True, roster=roster, config=config,
         )
         bundle = staging / str(envelope.get("id", ""))
         if bundle.is_dir():
             shutil.rmtree(bundle, ignore_errors=True)
             state.append_log(
                 ctx.node,
-                f"r4t: WARN attachments dropped on intra-team route {sender_addr} -> {to}",
+                f"r4t: WARN attachments dropped on intra-team route "
+                f"{sender_addr} -> {to}",
             )
         state.append_log(
             ctx.node,
-            f"r4t: RELEASED-internal {sender_addr} -> {to} task={task_id} hop={next_hop}",
+            f"r4t: RELEASED-internal {sender_addr} -> {to} thread={thread_id} "
+            f"hop={next_hop}",
         )
         return
-    # Egress protocol: the r4t header never leaves the garden. Other a8s
-    # nodes must not need to know whether a name is one agent, a human, a
-    # device, or a whole roster — class marking survives as envelope
-    # metadata only.
+    # Egress protocol: the r4t header never leaves the garden. Other a8s nodes
+    # must not need to know whether a name is one agent, a human, a device, or
+    # a whole roster — class marking survives as envelope metadata only.
     envelope["content"] = body
     envelope["x_r4t_class"] = "auto"
     envelope["from"] = sender_addr
@@ -359,8 +532,23 @@ def _release_one(
     state.atomic_write_json(outbox / f"{msg_id}.json", envelope)
     state.append_log(
         ctx.node,
-        f"r4t: RELEASED {sender_addr} -> {to} task={task_id} hop={next_hop}",
+        f"r4t: RELEASED {sender_addr} -> {to} thread={thread_id} hop={next_hop}",
     )
+
+
+def _reachable_names(
+    ctx: DispatchContext, roster: Roster, member: Member, batch: list[dict]
+) -> set[str]:
+    """Names this member may address intra-team without rerouting: its
+    tree-adjacent members (lead, reports, cell-mates), every human seat, and
+    whoever messaged it this turn (answering a batch sender never reroutes)."""
+    names = {m.name.lower() for m in roster.adjacent(member)}
+    for m in roster.members:
+        if m.is_human:
+            names.add(m.name.lower())
+    for env in batch:
+        names.add(_display_name(ctx.node, str(env.get("from", ""))).strip().lower())
+    return names
 
 
 def release_staging(
@@ -369,26 +557,35 @@ def release_staging(
     roster: Roster,
     member: Member,
     rig: Rig,
-    task_id: str,
-    hop: int,
-    *,
-    bulk_source: str | None = None,
-    synthesis_response: bool = False,
+    batch: list[dict],
 ) -> dict:
-    """Process the turn's staged envelopes in send order: quota, pair
-    suppression, bulk once-per-window, header stamp + auto class mark,
-    outbound history, then release (real outbox or intra-team pending).
+    """Process the turn's staged envelopes in send order: per-turn send quota,
+    thread attribution, outbound history, then release (real outbox or the
+    recipient member's queue). A reply is attributed to the thread of the
+    message it answers — the newest queued message from that recipient in this
+    batch; a message to someone the batch did not include rides the batch's
+    newest thread. A substantive reply to a thread's originator closes it.
     Returns {"released": n, "violations": n}."""
     staging = state.staging_dir(ctx.node, member.name)
     sender_addr = f"{ctx.node}:{member.name.lower()}"
-    next_hop = hop + 1
     outbox = _real_outbox(ctx)
+
+    consumed: dict[str, tuple[str, int]] = {}
+    newest: tuple[str, int] | None = None
+    for env in batch:
+        key = _display_name(ctx.node, str(env.get("from", ""))).strip().lower()
+        pair = (str(env.get("task", "")), int(env.get("hop", 0) or 0))
+        consumed[key] = pair
+        newest = pair
+    if newest is None:
+        newest = (tasks.new_task_id(), 0)
+
+    reachable = (
+        _reachable_names(ctx, roster, member, batch) if roster.declares_tree else None
+    )
+
     released = 0
     violations = 0
-    answered = False
-    internal_released = False
-    synthesis_available = synthesis_response
-    synthesis_creator = str((tasks.load_task(ctx.node, task_id) or {}).get("creator", ""))
     for i, path in enumerate(state.staged_envelopes(ctx.node, member.name)):
         try:
             envelope = json.loads(path.read_text(encoding="utf-8"))
@@ -409,112 +606,72 @@ def release_staging(
             path.unlink(missing_ok=True)
             violations += 1
             state.record_dead_letter(
-                ctx.node,
-                reason="quota",
-                sender=sender_addr,
-                to=to,
-                task=task_id,
-                content=body,
+                ctx.node, reason="quota", sender=sender_addr, to=to,
+                task=newest[0], content=body,
             )
             state.append_log(
                 ctx.node,
-                f"r4t: QUOTA {sender_addr} -> {to} task={task_id} "
+                f"r4t: QUOTA {sender_addr} -> {to} "
                 f"(> max_sends_per_turn {rig.max_sends_per_turn})",
             )
             continue
-        repeated, count = state.suppression_check(
-            ctx.node,
-            tasks.pair_key(sender_addr, to, body),
-            config.suppression_window_seconds,
-        )
-        if repeated:
-            path.unlink(missing_ok=True)
-            violations += 1
-            state.record_dead_letter(
-                ctx.node,
-                reason="pair-repeat",
-                sender=sender_addr,
-                to=to,
-                task=task_id,
-                content=body,
-                count=count,
-            )
-            state.append_log(
-                ctx.node,
-                f"r4t: SUPPRESSED {sender_addr} -> {to} task={task_id} repeat={count}",
-            )
-            continue
-        if bulk_source and to.lower() == bulk_source:
-            repeated, count = state.suppression_check(
-                ctx.node,
-                tasks.pair_key(sender_addr, to, "", kind="bulk"),
-                config.suppression_window_seconds,
-            )
-            if repeated:
-                path.unlink(missing_ok=True)
-                violations += 1
-                state.record_dead_letter(
-                    ctx.node,
-                    reason="bulk-window",
-                    sender=sender_addr,
-                    to=to,
-                    task=task_id,
-                    content=body,
-                    count=count,
-                )
-                state.append_log(
-                    ctx.node,
-                    f"r4t: BULK-WINDOW {sender_addr} -> {to} task={task_id} repeat={count}",
-                )
-                continue
+
+        # Hard tree enforcement: an intra-team tell to a member who is not
+        # tree-adjacent (and did not message the sender this turn) reroutes to
+        # the sender's lead. The human seat and batch senders are always
+        # reachable — answering must never reroute. Unknown names fall through
+        # to the normal unknown-recipient dead letter, not to the lead.
+        if reachable is not None and _is_internal(ctx.node, to):
+            target = _display_name(ctx.node, to).strip().lower()
+            recipient = roster.find(target)
+            if (
+                recipient is not None
+                and not recipient.is_human
+                and target not in reachable
+            ):
+                lead = (roster.find(member.lead) if member.lead else None) or roster.leader()
+                if lead is not None and lead.name.lower() != member.name.lower():
+                    original = recipient.name
+                    body = f"[r4t rerouted: {member.name} -> {original}] {body}"
+                    to = _canonical_recipient(ctx.node, roster, lead.name)
+                    envelope["to"] = to
+                    envelope["content"] = body
+                    state.append_log(
+                        ctx.node,
+                        f"r4t: REROUTED {sender_addr} -> {original} "
+                        f"(not tree-adjacent) redirected to lead {lead.name.lower()}",
+                    )
+
+        key = _display_name(ctx.node, to).strip().lower()
+        thread_id, in_hop = consumed.get(key, newest)
+        next_hop = in_hop + 1
+
         state.append_history(
             ctx.node,
             member.name,
             f"## {state.utc_now()} to {_display_name(ctx.node, to)}\n\n"
             + (body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"),
         )
-        final_response = (
-            synthesis_available
-            and _is_internal(ctx.node, to)
-            and to.lower() == synthesis_creator.lower()
-        )
         _release_one(
-            ctx, outbox, staging, envelope, sender_addr, task_id, next_hop,
-            body, final_response,
+            ctx, outbox, staging, envelope, sender_addr, thread_id, next_hop,
+            body, roster, config,
         )
         path.unlink(missing_ok=True)
-        synthesis_available = synthesis_available and not final_response
         released += 1
-        # Humans are terminal: a release to them wakes no further turns, so
-        # it neither counts as internal delegation nor keeps the task alive.
-        if _is_internal(ctx.node, to) and _human_member(ctx.node, roster, to) is None:
-            internal_released = True
-        elif (
-            not synthesis_response
-            and synthesis_creator
-            and (
-                not _is_internal(ctx.node, synthesis_creator)
-                or _human_member(ctx.node, roster, synthesis_creator) is not None
-            )
-            and to.lower()
-            == _canonical_recipient(ctx.node, roster, synthesis_creator).lower()
+
+        task = tasks.load_task(ctx.node, thread_id)
+        if (
+            task is not None
+            and task.get("status") != tasks.STATUS_CLOSED
+            and _same_recipient(ctx.node, roster, to, str(task.get("creator", "")))
         ):
-            answered = True
-    shutil.rmtree(staging, ignore_errors=True)
-    # A reply to the creator only counts as THE answer when the turn
-    # delegated nothing internally — a leader that acks the human while
-    # farming out work has an alive task, and closing it would dead-letter
-    # every sibling delegation released this same turn.
-    if answered and not internal_released:
-        task = tasks.load_task(ctx.node, task_id)
-        if task is not None and task.get("status") != tasks.STATUS_CLOSED:
-            task["status"] = tasks.STATUS_CLOSED
-            tasks.save_task(ctx.node, task)
+            tasks.close_task(ctx.node, thread_id)
             state.append_log(
                 ctx.node,
-                f"r4t: ANSWERED task={task_id} {sender_addr} -> {synthesis_creator} "
-                "(task closed)",
+                f"r4t: ANSWERED thread={thread_id} {sender_addr} -> {to} "
+                "(originator answered, thread closed)",
             )
+    shutil.rmtree(staging, ignore_errors=True)
     return {"released": released, "violations": violations}
 
 
@@ -534,9 +691,8 @@ _HARNESS_NOISE_RE = re.compile(
 
 def clean_transcript(output: str) -> str:
     """Reduce a harness transcript to what the model actually said: strip
-    ANSI escapes, then drop harness chrome — the rig banner, tool-trace
-    lines, cwd-reset notices. Heuristic by design; noise that slips through
-    goes out once and pair suppression catches recurrence."""
+    ANSI escapes, then drop harness chrome — the rig banner, tool-trace lines,
+    cwd-reset notices. Heuristic by design."""
     text = _ANSI_RE.sub("", output)
     kept = [
         line for line in text.splitlines()
@@ -551,41 +707,37 @@ def _run_turn(
     roster: Roster,
     member: Member,
     rig: Rig,
-    sender: str,
-    body: str,
-    task_id: str,
-    hop: int,
     run_fn,
-    *,
-    bulk_source: str | None = None,
-    synthesis_response: bool = False,
 ) -> None:
-    prompt = build_prompt(ctx, roster, member, sender, body)
+    batch = state.claim_queue(ctx.node, member.name)
+    if not batch:
+        return
+    newest_thread = str(batch[-1].get("task", "")) or "?"
+    newest_hop = int(batch[-1].get("hop", 0) or 0)
+    newest_sender = str(batch[-1].get("from", "")) or f"{ctx.node}"
+
     variant = state.take_rotation(ctx.node, rig.name, rig.pool_size)
     staging = state.prepare_staging(ctx.node, member.name)
     state.write_turn(
         ctx.node,
         member.name,
         {
-            "task": task_id,
-            "hop": hop,
-            "sender": sender,
-            "body": body[:HISTORY_BODY_MAX],
+            "batch": len(batch),
+            "threads": sorted({str(b.get("task", "")) for b in batch}),
+            "newest_sender": newest_sender,
             "rig": rig.name,
             "started": state.utc_now(),
         },
     )
+    prompt = build_prompt(ctx, roster, member, batch)
+
     env = dict(os.environ)
     env["TELL_OUTBOX_DIR"] = str(staging)
-
-    now = state.utc_now()
-    entry_body = body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"
-    state.append_history(ctx.node, member.name, f"## {now} from {_display_name(ctx.node, sender)}\n\n{entry_body}")
-    state.update_meta(ctx.node, member.name, last_inbound_at=now)
     state.append_log(
         ctx.node,
-        f"## {state.utc_now()} dispatch {sender} -> {member.name} "
-        f"(task {task_id} hop {hop}, rig {rig.name}"
+        f"## {state.utc_now()} dispatch {len(batch)} message(s) -> {member.name} "
+        f"(threads {', '.join(sorted({str(b.get('task', '')) for b in batch}))}, "
+        f"rig {rig.name}"
         + (f" variant {variant}" if rig.pool_size > 1 else "")
         + f")\n\n### Prompt\n\n{prompt}",
     )
@@ -602,64 +754,68 @@ def _run_turn(
         f"### Output ({member.name}, {outcome})\n\n{output.strip() or '(no output)'}",
     )
 
-    if (
-        exit_code == 0
-        and not timed_out
-        and not state.staged_envelopes(ctx.node, member.name)
-    ):
-        # The classic weak-rig shape: the model answers on stdout instead of
-        # running `tell`. `tell` always wins — a turn that staged anything
-        # keeps its stdout as transcript — but a clean turn that released
-        # nothing gets its cleaned stdout staged as ONE reply to the inbound
-        # sender, riding every normal release gate below.
-        reply = clean_transcript(output)
-        if len(reply) > STDOUT_REPLY_MIN_CHARS:
-            msg_id = tasks.new_task_id()
-            state.atomic_write_json(
-                state.staging_dir(ctx.node, member.name) / f"{msg_id}.json",
-                {"id": msg_id, "to": sender, "content": reply, "files": []},
-            )
-            state.append_log(
-                ctx.node,
-                f"r4t: STDOUT-REPLY {member.name.lower()} (rig {rig.name}) "
-                f"released nothing; {len(reply)} bytes of cleaned stdout "
-                f"staged as a reply to {sender}",
-            )
-        elif len(output.strip()) > STDOUT_REPLY_MIN_CHARS:
-            state.append_log(
-                ctx.node,
-                f"r4t: SILENT {member.name.lower()} (rig {rig.name}) exit 0 "
-                f"with {len(output.strip())} bytes of stdout but nothing "
-                "worth relaying survived transcript cleaning",
-            )
-
-    release = release_staging(
-        ctx, config, roster, member, rig, task_id, hop, bulk_source=bulk_source,
-        synthesis_response=synthesis_response,
-    )
-    if release["violations"]:
-        level = state.bucket_drain(
-            ctx.node, member.name, float(release["violations"]), config.bucket_max
-        )
+    failed = timed_out or exit_code != 0
+    if failed:
+        # A failed turn releases nothing and returns its whole batch to the
+        # queue: the messages are never lost, and the breaker accumulates
+        # against repeated failures until it trips and the queue simply holds.
+        shutil.rmtree(staging, ignore_errors=True)
+        for env_msg in batch:
+            state.enqueue(ctx.node, member.name, env_msg)
         state.append_log(
             ctx.node,
-            f"r4t: BUCKET {member.name.lower()} -{release['violations']} "
-            f"-> {level:.1f}/{config.bucket_max:g}",
+            f"r4t: RETRY {member.name.lower()} turn failed ({outcome}); "
+            f"{len(batch)} message(s) returned to the queue",
         )
     else:
-        state.bucket_earn(ctx.node, member.name, config.bucket_earn_ratio, config.bucket_max)
+        for env_msg in batch:
+            entry_body = str(env_msg.get("body", ""))
+            if len(entry_body) > HISTORY_BODY_MAX:
+                entry_body = entry_body[:HISTORY_BODY_MAX] + " [...]"
+            state.append_history(
+                ctx.node,
+                member.name,
+                f"## {state.utc_now()} from "
+                f"{_display_name(ctx.node, str(env_msg.get('from', '?')))}\n\n{entry_body}",
+            )
+        if not state.staged_envelopes(ctx.node, member.name):
+            # The classic weak-rig shape: the model answers on stdout instead
+            # of running `tell`. `tell` always wins — a turn that staged
+            # anything keeps its stdout as transcript — but a clean turn that
+            # released nothing gets its cleaned stdout staged as ONE reply to
+            # the newest message's sender, riding the normal release gates.
+            reply = clean_transcript(output)
+            if len(reply) > STDOUT_REPLY_MIN_CHARS:
+                msg_id = tasks.new_task_id()
+                state.atomic_write_json(
+                    state.staging_dir(ctx.node, member.name) / f"{msg_id}.json",
+                    {"id": msg_id, "to": newest_sender, "content": reply, "files": []},
+                )
+                state.append_log(
+                    ctx.node,
+                    f"r4t: STDOUT-REPLY {member.name.lower()} (rig {rig.name}) "
+                    f"released nothing; {len(reply)} bytes of cleaned stdout "
+                    f"staged as a reply to {newest_sender}",
+                )
+            elif len(output.strip()) > STDOUT_REPLY_MIN_CHARS:
+                state.append_log(
+                    ctx.node,
+                    f"r4t: SILENT {member.name.lower()} (rig {rig.name}) exit 0 "
+                    f"with {len(output.strip())} bytes of stdout but nothing "
+                    "worth relaying survived transcript cleaning",
+                )
+        release_staging(ctx, config, roster, member, rig, batch)
 
     state.record_velocity(
         ctx.node,
         agent=member.name.lower(),
         rig=rig.name,
-        task=task_id,
-        hop=hop,
+        task=newest_thread,
+        hop=newest_hop,
         duration_seconds=duration,
         exit_code=exit_code,
     )
     completed = state.utc_now()
-    failed = timed_out or exit_code != 0
     failures = int(
         state.read_meta(ctx.node, member.name).get("consecutive_failures", 0) or 0
     )
@@ -668,9 +824,8 @@ def _run_turn(
         "last_completed_at": completed,
         "consecutive_failures": failures,
         "last_turn": {
-            "task": task_id,
-            "hop": hop,
-            "sender": sender,
+            "threads": sorted({str(b.get("task", "")) for b in batch}),
+            "messages": len(batch),
             "exit": exit_code,
             "timed_out": timed_out,
             "completed_at": completed,
@@ -689,464 +844,111 @@ def _run_turn(
         )
     if exit_code == 127:
         _tell_error(
-            ctx,
-            sender,
+            ctx, newest_sender,
             f"{member.name}'s harness (rig {rig.name}) failed to start: "
             f"{output.strip()}",
         )
 
 
-# ---------- forced synthesis ----------
+def _runnable(
+    ctx: DispatchContext, config: RigConfig, member: Member, rig: Rig
+) -> tuple[bool, str]:
+    """Can this member start a turn right now? Returns (runnable, reason).
+    The queue and everything else is untouched either way."""
+    blocked, failures = state.breaker_open(
+        ctx.node, member.name, config.breaker_cap, config.breaker_cooldown_seconds
+    )
+    if blocked:
+        return False, (
+            f"breaker open ({failures} consecutive failed turns)"
+        )
+    m = state.budget_level(ctx.node, member.name, rig.budget_max, rig.budget_earn_per_hour)
+    t = state.budget_level(
+        ctx.node, state.CELL_BUDGET_KEY,
+        config.cell_budget_max, config.cell_budget_earn_per_hour,
+    )
+    if m < 1.0:
+        wait = state.budget_seconds_until(
+            ctx.node, member.name, rig.budget_max, rig.budget_earn_per_hour
+        )
+        return False, f"resting (member budget {state.fmt_budget(m)}, ready in ~{wait / 60:.0f} min)"
+    if t < 1.0:
+        wait = state.budget_seconds_until(
+            ctx.node, state.CELL_BUDGET_KEY,
+            config.cell_budget_max, config.cell_budget_earn_per_hour,
+        )
+        return False, f"resting (cell budget {state.fmt_budget(t)}, ready in ~{wait / 60:.0f} min)"
+    return True, ""
 
-def _forced_synthesis(
+
+def _run_member_turn(
     ctx: DispatchContext,
     config: RigConfig,
     roster: Roster,
-    task: dict,
+    member: Member,
+    rig: Rig,
     run_fn,
-    *,
-    why: str,
 ) -> str:
-    """Close the task through one leader turn: "respond to the originator
-    with what you have." Replaces every parking/approval path — tasks always
-    terminate in an answer (docs/governance.md §4)."""
-    task_id = str(task["id"])
-    ledger_lock = state.task_lock(ctx.node, task_id)
-    if not ledger_lock.acquire():
-        state.park_pending(ctx.node, {"synthesis": True, "task": task_id, "why": why})
-        return DEFERRED
-    try:
-        task = tasks.load_task(ctx.node, task_id)
-        if task is None:
-            return SKIPPED
-        if (
-            task.get("status") == tasks.STATUS_OPEN
-            and not task.get("synthesis_state")
-        ):
-            task["status"] = tasks.STATUS_CLOSED
-            task["synthesis_state"] = "pending"
-            tasks.save_task(ctx.node, task)
-        if task.get("synthesis_state") != "pending":
-            return SKIPPED
-    finally:
-        ledger_lock.release()
-
-    leader = roster.leader()
-    if leader is None or leader.errors:
+    if state.queue_depth(ctx.node, member.name) == 0:
+        return SKIPPED
+    runnable, reason = _runnable(ctx, config, member, rig)
+    if not runnable:
         state.append_log(
             ctx.node,
-            f"r4t: SYNTHESIS-SKIPPED task={task_id} ({why}; no usable leader)",
+            f"r4t: {'BREAKER' if reason.startswith('breaker') else 'RESTING'} "
+            f"{member.name.lower()} — {reason} "
+            f"({state.queue_depth(ctx.node, member.name)} queued)",
         )
-        return SKIPPED
-    rig, err, _pinned = config.rig_for(leader)
-    if rig is None:
-        state.append_log(
-            ctx.node, f"r4t: SYNTHESIS-SKIPPED task={task_id} ({why}; {err})"
-        )
-        return SKIPPED
-    lock = state.AgentLock(ctx.node, leader.name)
-    if not lock.acquire(rig.name):
-        state.park_pending(ctx.node, {"synthesis": True, "task": task_id, "why": why})
-        return DEFERRED
-    try:
-        ledger_lock = state.task_lock(ctx.node, task_id)
-        if not ledger_lock.acquire():
-            state.park_pending(ctx.node, {"synthesis": True, "task": task_id, "why": why})
-            return DEFERRED
-        try:
-            task = tasks.load_task(ctx.node, task_id)
-            if task is None or task.get("synthesis_state") != "pending":
-                return SKIPPED
-            task["synthesis_state"] = "running"
-            task["synthesized"] = True
-            tasks.save_task(ctx.node, task)
-        finally:
-            ledger_lock.release()
-        creator = str(task.get("creator", "")) or "unknown"
-        body = (
-            f"Task {task['id']} is closed: {why}. Respond NOW to {creator} "
-            "with the best answer you can assemble from the conversation so "
-            "far — summarize what was accomplished, what remains, and any "
-            "results. Do not delegate further work."
-        )
-        state.append_log(
-            ctx.node, f"r4t: SYNTHESIS task={task['id']} leader={leader.name.lower()} ({why})"
-        )
-        _run_turn(
-            ctx, config, roster, leader, rig, creator, body,
-            task["id"], int(task.get("turns", 0)), run_fn,
-            synthesis_response=True,
-        )
-        ledger_lock = state.task_lock(ctx.node, task_id)
-        if ledger_lock.acquire():
-            try:
-                completed = tasks.load_task(ctx.node, task_id)
-                if completed is not None and completed.get("synthesis_state") == "running":
-                    completed["synthesis_state"] = "done"
-                    tasks.save_task(ctx.node, completed)
-            finally:
-                ledger_lock.release()
-        return SYNTHESIS
-    finally:
-        lock.release()
-
-
-# ---------- dispatch ----------
-
-def _handle(
-    ctx: DispatchContext,
-    sender: str,
-    to: str,
-    message: str,
-    *,
-    run_fn=run_harness,
-    synthesis_response: bool = False,
-    trusted_header: bool = True,
-    suppression_checked: bool = False,
-) -> str:
-    _, sub = split_recipient(to)
-
-    roster = _load_roster(ctx, sender)
-    if roster is None:
-        return SKIPPED
-
-    if sub:
-        member = roster.find(sub)
-        if member is None:
-            names = ", ".join(_dispatchable_names(roster)) or "(none)"
-            _tell_error(
-                ctx,
-                sender,
-                f"no team member named {sub!r}. Dispatchable members: {names}.",
-            )
-            return SKIPPED
-    else:
-        member = roster.leader()
-        if member is None:
-            names = ", ".join(_dispatchable_names(roster)) or "(none)"
-            _tell_error(
-                ctx,
-                sender,
-                "no leader is marked in the roster, so bare messages to "
-                f"{ctx.node} have no recipient. Address a member directly "
-                f"(members: {names}).",
-            )
-            return SKIPPED
-
-    if member.is_human:
-        _park_seat(ctx, member, sender, message)
-        return SKIPPED
-
-    if member.errors:
-        _tell_error(
-            ctx,
-            sender,
-            f"{member.name} is disabled by a roster problem: {member.error}. "
-            f"Fix {ctx.roster_path.name} and resend.",
-        )
-        return SKIPPED
-
-    config = _load_config(ctx, sender)
-    if config is None:
-        return SKIPPED
-    rig, err, _pinned = config.rig_for(member)
-    if rig is None:
-        _tell_error(ctx, sender, f"{member.name} cannot run: {err}")
-        return SKIPPED
-
-    state.refresh_active(ctx.node, member.name, config.active_ttl_rotations)
-
-    if trusted_header:
-        task_id, hop, auto, body = tasks.parse_header(message)
-    else:
-        # Ingress protocol: headers never legitimately arrive from outside
-        # the garden (egress strips them), so an external header is either
-        # noise or a forgery aimed at an existing task's budget/breaker —
-        # treat the whole message as content.
-        task_id, hop, auto, body = None, None, False, message
-    had_header = task_id is not None
-    if task_id is None:
-        task_id = tasks.new_task_id()
-        hop = 0
-
-    envelope = {
-        "from": sender, "to": to, "task": task_id, "hop": hop,
-        "auto": auto or not had_header, "body": body,
-        "synthesis_response": synthesis_response,
-    }
-    ledger_lock = state.task_lock(ctx.node, task_id)
-    if not ledger_lock.acquire():
-        state.park_pending(ctx.node, envelope)
-        return DEFERRED
-    deliberate_reset = False
-    cut_recipient = ""
-    try:
-        task = tasks.ensure_task(ctx.node, task_id, sender)
-        if had_header and not auto:
-            deliberate_reset = tasks.reset_budget(task)
-        accepted_synthesis = (
-            synthesis_response
-            and task.get("status") == tasks.STATUS_CLOSED
-            and bool(task.get("synthesized"))
-            and task.get("synthesis_state") in ("running", "done")
-            and _is_internal(ctx.node, sender)
-            and _is_internal(ctx.node, to)
-            and to.strip().lower()
-            == str(task.get("creator", "")).strip().lower()
-        )
-        early_outcome = ""
-        if task.get("status") == tasks.STATUS_CLOSED and not accepted_synthesis:
-            early_outcome = "closed"
-        elif not accepted_synthesis and hop >= rig.hop_limit:
-            early_outcome = "hop-cut"
-            if not task.get("cut_notified"):
-                task["cut_notified"] = True
-                cut_recipient = str(task.get("creator", sender))
-        tasks.save_task(ctx.node, task)
-    finally:
-        ledger_lock.release()
-
-    if had_header and not auto:
-        state.clear_failures(ctx.node, member.name)
-    if deliberate_reset:
-        state.append_log(
-            ctx.node,
-            f"r4t: DELIBERATE task={task_id} budget and breaker reset "
-            f"(non-auto header from {sender})",
-        )
-    if early_outcome == "closed":
-        state.record_dead_letter(
-            ctx.node, reason="task-closed", sender=sender, to=to,
-            task=task_id, content=body,
-        )
-        state.append_log(
-            ctx.node, f"r4t: CLOSED task={task_id} {sender} -> {member.name.lower()}"
-        )
-        return DEAD
-    if early_outcome == "hop-cut":
-        state.record_dead_letter(
-            ctx.node, reason="hop-cut", sender=sender, to=to,
-            task=task_id, content=body,
-        )
-        state.append_log(
-            ctx.node,
-            f"r4t: CUT task={task_id} hop={hop} {sender} -> {member.name.lower()} "
-            f"(rig {rig.name} hop_limit {rig.hop_limit})",
-        )
-        if cut_recipient:
-            cut_body = (
-                f"[r4t {ctx.node}] task {task_id}: message chain cut at hop "
-                f"{hop} (rig {rig.name} hop_limit {rig.hop_limit}). The last "
-                f"message was {sender} -> {member.name} and was not dispatched."
-            )
-            cut_human = _human_member(ctx.node, roster, cut_recipient)
-            if cut_human is not None:
-                _park_seat(ctx, cut_human, f"r4t:{ctx.node}", cut_body)
-            else:
-                ctx.tell_fn(cut_recipient, cut_body)
-        return DEAD
-
-    bulk_source = sender.lower() if sender.lower() in config.rebroadcast_senders else None
-
-    # Intra-team traffic was already suppression-checked at release (same
-    # store, same key) — re-checking here would suppress every delivery.
-    # External headers are untrusted, so machine/human can't be told apart:
-    # every external repeat within the window dead-letters (recorded, never
-    # silent). The check registers the pair key, so it must run at most
-    # once per message: a deferred message re-presented by drain would
-    # otherwise be suppressed as its own repeat (observed live — a phone
-    # message hit the throttle, deferred, and died on redispatch).
-    if not _is_internal(ctx.node, sender) and not suppression_checked:
-        repeated, count = state.suppression_check(
-            ctx.node,
-            tasks.pair_key(sender, to, body),
-            config.suppression_window_seconds,
-        )
-        if repeated:
-            state.record_dead_letter(
-                ctx.node, reason="pair-repeat", sender=sender, to=to,
-                task=task_id, content=body, count=count,
-            )
-            state.append_log(
-                ctx.node,
-                f"r4t: SUPPRESSED inbound {sender} -> {to} task={task_id} repeat={count}",
-            )
-            return DEAD
-    envelope["checked"] = True
-
-    breaker_blocked, failures = state.breaker_open(
-        ctx.node, member.name, config.breaker_cap, config.breaker_cooldown_seconds
-    )
-    if breaker_blocked:
-        now = state.utc_now()
-        entry_body = body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"
-        state.append_history(ctx.node, member.name, f"## {now} from {_display_name(ctx.node, sender)}\n\n{entry_body}")
-        state.update_meta(ctx.node, member.name, last_inbound_at=now, last_completed_at=now)
-        state.record_dead_letter(
-            ctx.node, reason="breaker-open", sender=sender, to=to,
-            task=task_id, content=body,
-        )
-        state.append_log(
-            ctx.node,
-            f"r4t: BREAKER {member.name.lower()} open ({failures} consecutive "
-            f"failed turns, rig {rig.name}) — message from {sender} recorded "
-            "to history only; closing the task through forced synthesis",
-        )
-        # The chain through this member is dead until a probe succeeds, so
-        # the task terminates in an answer now instead of dangling (same
-        # rule as budget exhaustion). A deliberate human message reopens
-        # both the task budget and the breaker.
-        task = tasks.ensure_task(ctx.node, task_id, sender)
-        return _forced_synthesis(
-            ctx, config, roster, task, run_fn,
-            why=f"{member.name.lower()}'s failure breaker is open "
-            f"({failures} consecutive failed turns)",
-        )
-
-    level = state.bucket_level(ctx.node, member.name, config.bucket_max)
-    if state.bucket_muted(level, config.bucket_max):
-        now = state.utc_now()
-        entry_body = body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"
-        state.append_history(ctx.node, member.name, f"## {now} from {_display_name(ctx.node, sender)}\n\n{entry_body}")
-        state.update_meta(ctx.node, member.name, last_inbound_at=now, last_completed_at=now)
-        state.bucket_earn(ctx.node, member.name, config.bucket_earn_ratio, config.bucket_max)
-        state.record_dead_letter(
-            ctx.node, reason="bucket-muted", sender=sender, to=to,
-            task=task_id, content=body,
-        )
-        state.append_log(
-            ctx.node,
-            f"r4t: MUTED {member.name.lower()} (bucket {level:.1f}/{config.bucket_max:g}) "
-            f"— message from {sender} recorded to history only",
-        )
-        return DEAD
+        return BREAKER if reason.startswith("breaker") else RESTING
 
     lock = state.AgentLock(ctx.node, member.name)
     admission = state.admission_lock(ctx.node)
     if not admission.acquire():
-        state.park_pending(ctx.node, envelope)
         return DEFERRED
-    task = None
-    task_outcome = ""
+    acquired = False
     try:
         throttle_reason = _throttle_block(ctx, config)
-        acquired = throttle_reason is None and lock.acquire(rig.name)
-        rig_blocked = acquired and state.count_rig_locks(
-            ctx.node, rig.name
-        ) > rig.concurrency
-        if rig_blocked:
-            lock.release()
-            acquired = False
-        if acquired:
-            ledger_lock = state.task_lock(ctx.node, task_id)
-            if not ledger_lock.acquire():
+        if throttle_reason is None:
+            acquired = lock.acquire(rig.name)
+            if acquired and state.count_rig_locks(ctx.node, rig.name) > rig.concurrency:
                 lock.release()
                 acquired = False
-                task_outcome = "task-busy"
+        if acquired:
+            # Re-read budgets under the admission lock so simultaneous
+            # admissions cannot both spend the last unit.
+            runnable, reason = _runnable(ctx, config, member, rig)
+            if not runnable:
+                lock.release()
+                acquired = False
             else:
-                try:
-                    task = tasks.ensure_task(ctx.node, task_id, sender)
-                    accepted_synthesis = (
-                        synthesis_response
-                        and task.get("status") == tasks.STATUS_CLOSED
-                        and bool(task.get("synthesized"))
-                        and task.get("synthesis_state") in ("running", "done")
-                        and _is_internal(ctx.node, sender)
-                        and _is_internal(ctx.node, to)
-                        and to.strip().lower()
-                        == str(task.get("creator", "")).strip().lower()
-                    )
-                    if task.get("status") == tasks.STATUS_CLOSED and not accepted_synthesis:
-                        task_outcome = "closed"
-                    elif accepted_synthesis or tasks.charge_turn(
-                        task, rig.max_turns_per_task
-                    ):
-                        task_outcome = "admitted"
-                    else:
-                        task_outcome = "exhausted"
-                        task["status"] = tasks.STATUS_CLOSED
-                        task["synthesis_state"] = "pending"
-                    tasks.save_task(ctx.node, task)
-                finally:
-                    ledger_lock.release()
-                if task_outcome == "admitted":
-                    state.stamp_last_turn_start(ctx.node)
-                else:
-                    lock.release()
-                    acquired = False
+                state.budget_charge(
+                    ctx.node, member.name, rig.budget_max, rig.budget_earn_per_hour
+                )
+                state.budget_charge(
+                    ctx.node, state.CELL_BUDGET_KEY,
+                    config.cell_budget_max, config.cell_budget_earn_per_hour,
+                )
+                state.stamp_last_turn_start(ctx.node)
     finally:
         admission.release()
 
-    if task_outcome == "closed":
-        state.record_dead_letter(
-            ctx.node, reason="task-closed", sender=sender, to=to,
-            task=task_id, content=body,
-        )
-        state.append_log(
-            ctx.node, f"r4t: CLOSED task={task_id} {sender} -> {member.name.lower()}"
-        )
-        return DEAD
-
-    if task_outcome == "exhausted":
-        state.record_dead_letter(
-            ctx.node, reason="budget-exhausted", sender=sender, to=to,
-            task=task_id, content=body,
-        )
-        state.append_log(
-            ctx.node,
-            f"r4t: BUDGET task={task_id} exhausted (used "
-            f"{task.get('used', 0.0):.2f}/{task.get('budget', 1.0):.2f}) — "
-            "closing through forced synthesis",
-        )
-        return _forced_synthesis(
-            ctx, config, roster, task, run_fn, why="turn budget exhausted"
-        )
-
-    if throttle_reason:
-        state.park_pending(ctx.node, envelope)
-        state.append_log(
-            ctx.node,
-            f"r4t: DEFERRED ({throttle_reason}) {sender} -> {member.name.lower()} "
-            f"task={task_id} hop={hop}",
-        )
-        return DEFERRED
-
-    if rig_blocked:
-        state.park_pending(ctx.node, envelope)
-        state.append_log(
-            ctx.node,
-            f"r4t: DEFERRED (rig {rig.name} at concurrency {rig.concurrency}) "
-            f"{sender} -> {member.name.lower()} task={task_id}",
-        )
-        return DEFERRED
-
-    if task_outcome == "task-busy":
-        state.park_pending(ctx.node, envelope)
-        state.append_log(
-            ctx.node,
-            f"r4t: DEFERRED (task ledger busy) {sender} -> {member.name.lower()} "
-            f"task={task_id} hop={hop}",
-        )
-        return DEFERRED
-
     if not acquired:
-        state.park_pending(ctx.node, envelope)
-        state.append_log(
-            ctx.node,
-            f"r4t: DEFERRED (agent busy) {sender} -> {member.name.lower()} "
-            f"task={task_id} hop={hop}",
-        )
-        return DEFERRED
+        if throttle_reason:
+            state.append_log(
+                ctx.node,
+                f"r4t: DEFERRED ({throttle_reason}) {member.name.lower()} "
+                f"({state.queue_depth(ctx.node, member.name)} queued)",
+            )
+        return RESTING if not runnable else DEFERRED
 
     try:
-        _run_turn(
-            ctx, config, roster, member, rig, sender, body, task_id, hop,
-            run_fn, bulk_source=bulk_source,
-        )
+        _run_turn(ctx, config, roster, member, rig, run_fn)
         return RAN
     finally:
         lock.release()
 
+
+# ---------- dispatch entry points ----------
 
 def handle_message(
     ctx: DispatchContext,
@@ -1155,80 +957,70 @@ def handle_message(
     message: str,
     *,
     run_fn=run_harness,
+    drain_after: bool = True,
 ) -> int:
-    _handle(
-        ctx, sender, to, message, run_fn=run_fn,
+    _ingest(
+        ctx, sender, to, message,
         trusted_header=_is_internal(ctx.node, sender),
     )
+    if drain_after:
+        drain_until_quiet(ctx, run_fn=run_fn)
     return 0
 
 
-# ---------- deferred-message drain ----------
+def resting_note(ctx: DispatchContext, to: str) -> str | None:
+    """A one-line note for the seat when a deliberate send lands on a resting
+    member — the human is never blocked from sending, but should know the turn
+    is waiting on the bucket. None when the recipient will run normally."""
+    _, sub = split_recipient(to)
+    try:
+        roster = load_roster(ctx.roster_path)
+        config = load_rig_config(ctx.config_path)
+    except (RosterError, RigError):
+        return None
+    member = roster.find(sub) if sub else roster.leader()
+    if member is None or member.is_human or member.errors:
+        return None
+    rig, _err, _pinned = config.rig_for(member)
+    if rig is None:
+        return None
+    depth = state.queue_depth(ctx.node, member.name)
+    if depth == 0:
+        return None
+    runnable, reason = _runnable(ctx, config, member, rig)
+    if runnable:
+        return None
+    return f"queued — {member.name} is {reason}"
 
-def _redispatch(ctx: DispatchContext, envelope: dict, *, run_fn=run_harness) -> str:
-    if envelope.get("synthesis"):
-        task = tasks.load_task(ctx.node, str(envelope.get("task", "")))
-        if task is None:
-            return SKIPPED
-        roster = _load_roster(ctx, task.get("creator", "unknown"))
-        config = _load_config(ctx, task.get("creator", "unknown"))
-        if roster is None or config is None:
-            return SKIPPED
-        return _forced_synthesis(
-            ctx, config, roster, task, run_fn,
-            why=str(envelope.get("why", "budget exhausted")),
-        )
-    body = envelope.get("body", "")
-    task_id = envelope.get("task")
-    hop = int(envelope.get("hop", 0) or 0)
-    if task_id:
-        header = tasks.format_header(
-            str(task_id), hop, auto=bool(envelope.get("auto", False))
-        )
-        message = f"{header} {body}"
-    else:
-        message = body
-    return _handle(
-        ctx,
-        envelope.get("from", "unknown"),
-        envelope.get("to", ctx.node),
-        message,
-        run_fn=run_fn,
-        synthesis_response=bool(envelope.get("synthesis_response", False)),
-        suppression_checked=bool(envelope.get("checked")),
-    )
 
+# ---------- queue drain ----------
 
 def drain(ctx: DispatchContext, *, run_fn=run_harness) -> int:
-    """One pass over the pending queue. Each file is claimed by atomic
-    rename before redispatch: concurrent drainers (an a8s-woken dispatch
-    and a `seat send`, say) race on the rename and exactly one wins — a
-    read-then-unlink claim would let both redispatch the same envelope.
-    The claim is consumed before redispatch so a re-defer creates a fresh
-    entry instead of looping. Returns the number of turns that RAN."""
+    """One pass over every member with a non-empty queue: run a batch turn for
+    each runnable one. Returns the number of turns that RAN. The agent lock is
+    the only claim — two concurrent drainers race on it and exactly one runs a
+    given member; the loser's message stays safely queued."""
+    try:
+        roster = load_roster(ctx.roster_path)
+        config = load_rig_config(ctx.config_path)
+    except (RosterError, RigError):
+        return 0
     ran = 0
-    state.recover_dead_claims(ctx.node)
-    for path in state.list_pending(ctx.node):
-        claim = path.with_name(f"{path.name}.claim-{os.getpid()}")
-        try:
-            os.rename(str(path), str(claim))
-        except OSError:
+    for name in state.members_with_queue(ctx.node):
+        member = roster.find(name)
+        if member is None or member.is_human or member.errors:
             continue
-        try:
-            envelope = json.loads(claim.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            claim.unlink(missing_ok=True)
+        rig, _err, _pinned = config.rig_for(member)
+        if rig is None:
             continue
-        claim.unlink(missing_ok=True)
-        if isinstance(envelope, dict):
-            if _redispatch(ctx, envelope, run_fn=run_fn) in (RAN, SYNTHESIS):
-                ran += 1
+        if _run_member_turn(ctx, config, roster, member, rig, run_fn) == RAN:
+            ran += 1
     return ran
 
 
 def _cadence_wait(ctx: DispatchContext) -> float:
-    """Seconds until the cadence throttle admits another turn start (0 when
-    the window is already open or the config is unreadable)."""
+    """Seconds until the cadence throttle admits another turn start (0 when the
+    window is already open or the config is unreadable)."""
     try:
         config = load_rig_config(ctx.config_path)
     except RigError:
@@ -1244,19 +1036,18 @@ def _cadence_wait(ctx: DispatchContext) -> float:
 
 def drain_until_quiet(ctx: DispatchContext, *, run_fn=run_harness) -> int:
     """Drain repeatedly until a pass runs nothing — a released intra-team
-    message can enable the next turn in the same invocation, with the
-    cadence throttle spacing the starts. A pass that runs nothing while
-    deferred messages remain and no other turn is live means the cadence
-    window is the only thing in the way — and nobody else is coming back
-    for the queue before the next idle pass. Sleep the window out and go
-    again instead of stalling every intra-team hop for minutes."""
+    message enqueues the next member and can enable another turn in the same
+    invocation. A pass that runs nothing while queued work remains and no turn
+    is live means either the cadence window is the only thing in the way (sleep
+    it out and retry) or every queued member is resting/broken (return; the
+    queue holds until the bucket refills or the breaker closes)."""
     total = 0
     for _ in range(DRAIN_MAX_PASSES):
         ran = drain(ctx, run_fn=run_fn)
         total += ran
         if ran:
             continue
-        if not state.list_pending(ctx.node) or state.live_locks(ctx.node):
+        if not state.members_with_queue(ctx.node) or state.live_locks(ctx.node):
             break
         wait = _cadence_wait(ctx)
         if wait <= 0:
@@ -1272,221 +1063,64 @@ def run_clear(ctx: DispatchContext, older_than: float, *, run_fn=run_harness) ->
     return {"locks_pruned": pruned, "tasks_expired": expired, "drained": drained}
 
 
-# ---------- idle-driven active list (governed crash recovery) ----------
+# ---------- quiet-thread sweep (the termination backstop) ----------
 
-def _collect_evidence(
-    node: str, agent_key: str, active_entry: dict
-) -> tuple[list[str], dict | None]:
-    """Evidence of unfinished business for one active agent. Returns
-    (human-readable lines for the nudge, identity dict carrying task/hop/
-    sender to re-dispatch under)."""
-    lines: list[str] = []
-    identity: dict | None = None
-    last_nudge = str(active_entry.get("last_nudge_at", ""))
-    locked = any(l.get("agent") == agent_key for l in state.live_locks(node))
-
-    turn = state.read_turn(node, agent_key)
-    if turn is not None and not locked:
-        lines.append(
-            f'You received this message from {turn.get("sender", "?")} but your '
-            f'turn did not complete: "{turn.get("body", "")}"'
+def _quiet_task_sweep(
+    ctx: DispatchContext, config: RigConfig, roster: Roster
+) -> list[str]:
+    """A thread can go quiet with its originator never having heard back — a
+    member's turn succeeds while staging no reply, or a chain stalls. When an
+    open thread with an unanswered originator sees no ledger activity for
+    `quiet_task_seconds`, wake the leader with a nudge to report current state
+    (NOT to force-finish the work). Returns the threads nudged."""
+    if config.quiet_task_seconds <= 0:
+        return []
+    if state.live_locks(ctx.node):
+        return []
+    leader = roster.leader()
+    if leader is None or leader.errors:
+        return []
+    cutoff = time.time() - config.quiet_task_seconds
+    nudged: list[str] = []
+    for task in tasks.list_tasks(ctx.node):
+        if task.get("status") != tasks.STATUS_OPEN or task.get("answered"):
+            continue
+        if tasks.last_activity(task) > cutoff:
+            continue
+        thread_id = str(task["id"])
+        creator = str(task.get("creator", "?"))
+        header = tasks.format_header(thread_id, 0, auto=True)
+        body = (
+            f"Thread {thread_id} has gone quiet and {creator} has not heard "
+            "back. Reply to them with where things stand — what is done and "
+            "what remains. You do not have to finish the work, just report "
+            "current state."
         )
-        identity = turn
-
-    meta = state.read_meta(node, agent_key)
-    last_turn = meta.get("last_turn") or {}
-    completed = str(last_turn.get("completed_at", ""))
-    failed = bool(last_turn.get("timed_out")) or int(last_turn.get("exit", 0) or 0) != 0
-    if completed and completed > last_nudge and failed:
-        how = (
-            "timed out"
-            if last_turn.get("timed_out")
-            else f"exited {last_turn.get('exit')}"
+        _ingest(
+            ctx, f"r4t:{ctx.node}", f"{ctx.node}:{leader.name.lower()}",
+            f"{header} {body}", trusted_header=True, roster=roster, config=config,
         )
-        lines.append(
-            f"Your last turn (task {last_turn.get('task', '?')}, message from "
-            f"{last_turn.get('sender', '?')}) {how} before finishing."
+        tasks.save_task(ctx.node, task)  # bump updated_at; won't re-fire until quiet again
+        state.append_log(
+            ctx.node,
+            f"r4t: QUIET thread={thread_id} quiet >{config.quiet_task_seconds:g}s "
+            f"— nudged leader {leader.name.lower()} to update {creator}",
         )
-        if identity is None:
-            identity = last_turn
-
-    if (
-        not locked
-        and turn is None
-        and str(meta.get("last_inbound_at", "")) > str(meta.get("last_completed_at", ""))
-    ):
-        lines.append(
-            "You received messages newer than your last completed turn — "
-            "check your conversation history above."
-        )
-
-    return lines, identity
-
-
-def _nudge_body(lines: list[str]) -> str:
-    bullet = "\n".join(f"- {line}" for line in lines)
-    return (
-        "[r4t idle recovery] Your previous turn appears not to have "
-        f"completed. Outstanding:\n{bullet}\n"
-        "Pick up where you left off and reply to the people waiting on you."
-    )
+        nudged.append(thread_id)
+    return nudged
 
 
 def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
-    """One idle pass: re-wake active agents that show unfinished business
-    (crashed/timed-out turn, stalled inbound); decrement ttl; drop at 0.
-    Recovery is itself governed: at most `nudge_cap` nudges per agent per
-    task, then the leader closes the task with what exists."""
+    """One idle pass: nudge the leader about quiet unanswered threads, then
+    drain every runnable member's queue. Crash recovery needs no special path
+    — a turn that never completed left its messages in the queue (they were
+    claimed only at a turn that ran), so the next runnable turn picks them up."""
     try:
         roster = load_roster(ctx.roster_path)
         config = load_rig_config(ctx.config_path)
     except (RosterError, RigError) as e:
         state.append_log(ctx.node, f"r4t: IDLE-SKIPPED {e}")
-        return {"watched": 0, "nudged": [], "dropped": [], "error": str(e)}
-
-    active = state.load_active(ctx.node)
-    to_nudge: dict[str, tuple[list[str], dict | None]] = {}
-    dropped: list[str] = []
-    for agent_key, entry in list(active.items()):
-        if not isinstance(entry, dict):
-            del active[agent_key]
-            continue
-        member = roster.find(agent_key)
-        if member is None or member.is_human or member.errors:
-            del active[agent_key]
-            dropped.append(agent_key)
-            continue
-        evidence, identity = _collect_evidence(ctx.node, agent_key, entry)
-        if evidence:
-            to_nudge[agent_key] = (evidence, identity)
-        entry["ttl"] = int(entry.get("ttl", 0)) - 1
-        if entry["ttl"] <= 0:
-            del active[agent_key]
-            dropped.append(agent_key)
-    state.save_active(ctx.node, active)
-
-    nudged: list[str] = []
-    for agent_key, (evidence, identity) in to_nudge.items():
-        identity = identity or {}
-        task_id = str(identity.get("task", "")) or tasks.new_task_id()
-        hop = int(identity.get("hop", 0) or 0)
-        sender = str(identity.get("sender", "")) or "r4t"
-        evidence_key = tasks.pair_key(
-            agent_key,
-            task_id,
-            json.dumps({"evidence": evidence, "identity": identity}, sort_keys=True),
-            kind="nudge",
-        )
-        ledger_lock = state.task_lock(ctx.node, task_id)
-        if not ledger_lock.acquire():
-            continue
-        action = ""
-        count = 0
-        try:
-            task = tasks.ensure_task(ctx.node, task_id, sender)
-            nudges = task.get("nudges") or {}
-            inflight = task.get("nudge_inflight") or {}
-            count = int(nudges.get(agent_key, 0))
-            if inflight.get(agent_key) == evidence_key:
-                action = "duplicate"
-            elif task.get("status") == tasks.STATUS_CLOSED:
-                action = "closed"
-            elif count >= config.nudge_cap:
-                task["status"] = tasks.STATUS_CLOSED
-                task["synthesis_state"] = "pending"
-                action = "synthesis"
-            else:
-                nudges[agent_key] = count + 1
-                inflight[agent_key] = evidence_key
-                task["nudges"] = nudges
-                task["nudge_inflight"] = inflight
-                action = "nudge"
-            tasks.save_task(ctx.node, task)
-        finally:
-            ledger_lock.release()
-
-        if action == "synthesis":
-            state.append_log(
-                ctx.node,
-                f"r4t: NUDGE-CAP task={task_id} agent={agent_key} "
-                f"({count} >= {config.nudge_cap}) — closing through forced synthesis",
-            )
-            _forced_synthesis(
-                ctx, config, roster, task, run_fn,
-                why=f"recovery nudge cap reached for {agent_key}",
-            )
-            continue
-        if action != "nudge":
-            continue
-        state.clear_turn(ctx.node, agent_key)
-        state.append_log(
-            ctx.node,
-            f"r4t: NUDGE {agent_key} task={task_id} hop={hop} "
-            f"({count + 1}/{config.nudge_cap}): " + "; ".join(evidence),
-        )
-        message = f"{tasks.format_header(task_id, hop, auto=True)} {_nudge_body(evidence)}"
-        # Stamped BEFORE the nudge turn runs: a nudged turn that fails
-        # completes after this stamp, so its failure stays visible as
-        # evidence next pass and the nudge cap can actually be reached.
-        state.mark_nudged(ctx.node, agent_key)
-        try:
-            _handle(ctx, sender, f"{ctx.node}:{agent_key}", message, run_fn=run_fn)
-        finally:
-            ledger_lock = state.task_lock(ctx.node, task_id)
-            if ledger_lock.acquire():
-                try:
-                    current = tasks.load_task(ctx.node, task_id)
-                    if current is not None:
-                        inflight = current.get("nudge_inflight") or {}
-                        if inflight.get(agent_key) == evidence_key:
-                            del inflight[agent_key]
-                            current["nudge_inflight"] = inflight
-                            tasks.save_task(ctx.node, current)
-                finally:
-                    ledger_lock.release()
-        nudged.append(agent_key)
-
-    quiet_closed = _quiet_task_sweep(ctx, config, roster, run_fn)
-    return {
-        "watched": len(active) + len(dropped),
-        "nudged": nudged,
-        "dropped": dropped,
-        "quiet_closed": quiet_closed,
-    }
-
-
-def _quiet_task_sweep(
-    ctx: DispatchContext, config: RigConfig, roster: Roster, run_fn
-) -> list[str]:
-    """The termination backstop for the silent fan-in hole: a member's turn
-    can succeed while staging no reply, leaving zero recovery evidence — the
-    task would dangle open until expiry and the originator would never hear
-    back. An open task with nothing in flight and no ledger activity for
-    `quiet_task_seconds` closes through forced synthesis instead."""
-    if config.quiet_task_seconds <= 0:
-        return []
-    if state.live_locks(ctx.node) or state.list_pending(ctx.node):
-        return []
-    cutoff = time.time() - config.quiet_task_seconds
-    closed: list[str] = []
-    for task in tasks.list_tasks(ctx.node):
-        if task.get("status") != tasks.STATUS_OPEN or task.get("synthesis_state"):
-            continue
-        if tasks.last_activity(task) > cutoff:
-            continue
-        task_id = str(task["id"])
-        state.append_log(
-            ctx.node,
-            f"r4t: QUIET task={task_id} no activity for "
-            f"{config.quiet_task_seconds:g}s with nothing in flight — "
-            "closing through forced synthesis",
-        )
-        _forced_synthesis(
-            ctx, config, roster, task, run_fn,
-            why=(
-                f"the task went quiet for over {config.quiet_task_seconds:g} "
-                "seconds without the originator being answered"
-            ),
-        )
-        closed.append(task_id)
-    return closed
+        return {"quiet_nudged": [], "drained": 0, "error": str(e)}
+    nudged = _quiet_task_sweep(ctx, config, roster)
+    drained = drain_until_quiet(ctx, run_fn=run_fn)
+    return {"quiet_nudged": nudged, "drained": drained}

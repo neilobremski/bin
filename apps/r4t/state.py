@@ -4,18 +4,17 @@ honors A8S_HOME).
 
     teams/<node>/
     ├── agents/<name>/history.md   rolling conversation memory (messages only), ~8KB cap
+    ├── agents/<name>/queue/       durable inbound queue — one envelope per file,
+    │                              ULID-named; a turn drains the whole queue at once
     ├── agents/<name>/.lock        PID lockfile — one turn per agent at a time
-    ├── agents/<name>/.turn.json   in-flight turn: task/hop/sender;
+    ├── agents/<name>/.turn.json   in-flight turn: thread/hop/sender;
     │                              a leftover file with no live lock = crashed turn
     ├── agents/<name>/meta.json    last inbound / last completed turn bookkeeping
     ├── agents/<name>/staging/     per-turn $TELL_OUTBOX_DIR — envelopes the agent
     │                              sent this turn, released by dispatch afterwards
-    ├── tasks/<id>.json            task ledger (see tasks.py)
-    ├── pending/                   messages deferred on concurrency/throttle limits
-    ├── dead-letter/               suppressed/cut/excess messages, x-death-style records
-    ├── suppression.json           content-keyed pair suppression window
-    ├── buckets.json               per-agent reply-privilege token buckets
-    ├── active.json                idle-recovery watch list (agent → ttl)
+    ├── tasks/<id>.json            thread ledger (see tasks.py)
+    ├── dead-letter/               undeliverable mail (unknown recipient, malformed)
+    ├── buckets.json               per-member + team spend budgets (turns, not tokens)
     ├── rotation.json              per-rig round-robin index for harness pools
     ├── last-turn-start            cadence stamp for the team throttle
     ├── log/<date>.md              full I/O transcript, append-only
@@ -26,6 +25,7 @@ subprocesses themselves.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -35,6 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ulid import new as new_ulid
+
+_queue_seq = itertools.count()
 
 HISTORY_MAX_BYTES = 8192
 HISTORY_ENTRY_RE = re.compile(r"(?m)^(?=## )")
@@ -307,51 +309,107 @@ def prune_stale_locks(node: str) -> int:
     return max(0, before - after)
 
 
-# ---------- pending (concurrency/throttle-deferred messages) ----------
+# ---------- durable member queue (batch invoke; nothing is ever dropped) ----------
 
-def pending_dir(node: str) -> Path:
-    return team_dir(node) / "pending"
+def queue_dir(node: str, name: str) -> Path:
+    return agent_dir(node, name) / "queue"
 
 
-def park_pending(node: str, envelope: dict) -> Path:
-    envelope = dict(envelope)
-    envelope.setdefault("id", new_ulid())
-    envelope.setdefault("queued_at", utc_now())
-    path = pending_dir(node) / f"{envelope['id']}.json"
-    atomic_write_json(path, envelope)
+def _normalize_body(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
+def list_queue(node: str, name: str) -> list[Path]:
+    d = queue_dir(node, name)
+    if not d.is_dir():
+        return []
+    return sorted(f for f in d.iterdir() if f.is_file() and f.name.endswith(".json"))
+
+
+def read_queue(node: str, name: str) -> list[dict]:
+    out: list[dict] = []
+    for path in list_queue(node, name):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict):
+            out.append(data)
+    return out
+
+
+def queue_depth(node: str, name: str) -> int:
+    return len(list_queue(node, name))
+
+
+def enqueue(node: str, name: str, envelope: dict) -> Path:
+    """Append an inbound envelope to a member's durable queue. Duplicate
+    collapse (the only suppression left): if the NEWEST queued entry has the
+    same sender and identical normalized body, bump its `repeats` count and
+    re-stamp instead of adding a file — collapsing loses no information."""
+    d = queue_dir(node, name)
+    d.mkdir(parents=True, exist_ok=True)
+    existing = list_queue(node, name)
+    if existing:
+        newest = existing[-1]
+        try:
+            prev = json.loads(newest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            prev = None
+        if (
+            isinstance(prev, dict)
+            and str(prev.get("from", "")).strip().lower()
+            == str(envelope.get("from", "")).strip().lower()
+            and _normalize_body(str(prev.get("body", "")))
+            == _normalize_body(str(envelope.get("body", "")))
+        ):
+            prev["repeats"] = int(prev.get("repeats", 1) or 1) + 1
+            prev["queued_at"] = utc_now()
+            atomic_write_json(newest, prev)
+            return newest
+    env = dict(envelope)
+    env.setdefault("id", new_ulid())
+    env.setdefault("repeats", 1)
+    env.setdefault("queued_at", utc_now())
+    # The FILENAME orders the queue, so it must be monotonic in arrival order —
+    # ULIDs are not, within a millisecond. A wall-clock nanosecond stamp plus a
+    # process-local counter is: two enqueues in one process never collide, and
+    # separate wake processes are genuinely ordered by wall time.
+    path = d / f"{time.time_ns():020d}-{next(_queue_seq):06d}.json"
+    atomic_write_json(path, env)
     return path
 
 
-def recover_dead_claims(node: str) -> int:
-    """Re-queue pending claims whose drainer died between claim and consume
-    (`<msg>.json.claim-<pid>` with a dead pid) — nothing is silently dropped."""
-    root = pending_dir(node)
-    if not root.is_dir():
-        return 0
-    recovered = 0
-    for f in root.iterdir():
-        if not f.is_file() or ".json.claim-" not in f.name:
-            continue
-        original, _, pid_text = f.name.rpartition(".claim-")
+def claim_queue(node: str, name: str) -> list[dict]:
+    """Read and remove every currently-queued envelope in arrival order.
+    Called under the agent lock at turn start, so no two turns claim the same
+    batch; envelopes arriving mid-turn are written after this snapshot and
+    ride the next turn."""
+    entries: list[dict] = []
+    for path in list_queue(node, name):
         try:
-            pid = int(pid_text)
-        except ValueError:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            path.unlink(missing_ok=True)
             continue
-        if pid == os.getpid() or _pid_alive(pid):
-            continue
-        try:
-            f.rename(root / original)
-            recovered += 1
-        except OSError:
-            continue
-    return recovered
+        if isinstance(data, dict):
+            entries.append(data)
+        path.unlink(missing_ok=True)
+    return entries
 
 
-def list_pending(node: str) -> list[Path]:
-    root = pending_dir(node)
+def members_with_queue(node: str) -> list[str]:
+    root = team_dir(node) / "agents"
     if not root.is_dir():
         return []
-    return sorted(f for f in root.iterdir() if f.is_file() and f.name.endswith(".json"))
+    out: list[str] = []
+    for entry in sorted(root.iterdir()):
+        q = entry / "queue"
+        if q.is_dir() and any(
+            f.is_file() and f.name.endswith(".json") for f in q.iterdir()
+        ):
+            out.append(entry.name)
+    return out
 
 
 # ---------- seat (the roster human's mailbox on the node) ----------
@@ -570,43 +628,26 @@ def list_dead_letters(node: str) -> list[dict]:
     return out
 
 
-# ---------- content-keyed pair suppression ----------
+# ---------- spend budgets (a turn costs 1 unit; empty = resting) ----------
+#
+# A bifurcated token bucket, refilled lazily by elapsed wall-clock time: each
+# member has its own bucket, and the whole cell shares one. A turn costs 1
+# member unit AND 1 cell unit, regardless of how many queued messages it
+# consumes — batching is rewarded by construction. An empty bucket means the
+# member is not runnable ("resting"); the queue simply holds. Nothing is muted,
+# nothing is dropped.
 
-def suppression_path(node: str) -> Path:
-    return team_dir(node) / "suppression.json"
-
-
-def suppression_check(node: str, key: str, window_seconds: float) -> tuple[bool, int]:
-    """Record `key` and report whether it repeated within the window.
-    Returns (suppressed, occurrence_count). Entries outside the window are
-    pruned on every call, so the store stays small."""
-    path = suppression_path(node)
-    data: dict = {}
-    if path.is_file():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except (OSError, json.JSONDecodeError):
-            pass
-    now = time.time()
-    data = {
-        k: v
-        for k, v in data.items()
-        if isinstance(v, dict) and now - float(v.get("last", 0)) <= window_seconds
-    }
-    entry = data.get(key)
-    if entry is not None:
-        entry["count"] = int(entry.get("count", 1)) + 1
-        entry["last"] = now
-        atomic_write_json(path, data)
-        return True, entry["count"]
-    data[key] = {"count": 1, "first": now, "last": now}
-    atomic_write_json(path, data)
-    return False, 1
+CELL_BUDGET_KEY = "__cell__"
 
 
-# ---------- reply-privilege token buckets ----------
+def fmt_budget(value: float) -> str:
+    """Budget level as a clean number: 8.0 -> "8", 7.5 -> "7.5". Rounds to
+    one decimal FIRST so a lazily-extrapolated 7.0004 renders "7", not "7.0"."""
+    rounded = round(value, 1)
+    if rounded == int(rounded):
+        return str(int(rounded))
+    return f"{rounded:.1f}"
+
 
 def buckets_path(node: str) -> Path:
     return team_dir(node) / "buckets.json"
@@ -623,34 +664,60 @@ def read_buckets(node: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def bucket_level(node: str, name: str, bucket_max: float) -> float:
-    raw = read_buckets(node).get(name.lower())
+def budget_level(
+    node: str, key: str, budget_max: float, earn_per_hour: float, *, now: float | None = None
+) -> float:
+    """Current balance: the stored level plus whatever has been earned by
+    elapsed wall-clock time since it was last written, capped at `budget_max`.
+    An unseen key starts full."""
+    now = time.time() if now is None else now
+    entry = read_buckets(node).get(key.lower())
+    if not isinstance(entry, dict):
+        return float(budget_max)
     try:
-        return min(float(raw), bucket_max)
+        level = float(entry.get("level", budget_max))
+        at = float(entry.get("at", now))
     except (TypeError, ValueError):
-        return bucket_max
+        return float(budget_max)
+    earned = max(0.0, now - at) / 3600.0 * earn_per_hour
+    return min(float(budget_max), level + earned)
 
 
-def _bucket_set(node: str, name: str, level: float) -> None:
+def budget_charge(
+    node: str,
+    key: str,
+    budget_max: float,
+    earn_per_hour: float,
+    amount: float = 1.0,
+    *,
+    now: float | None = None,
+) -> float:
+    now = time.time() if now is None else now
+    level = budget_level(node, key, budget_max, earn_per_hour, now=now)
+    new_level = max(0.0, level - amount)
     data = read_buckets(node)
-    data[name.lower()] = round(level, 4)
+    data[key.lower()] = {"level": round(new_level, 4), "at": now}
     atomic_write_json(buckets_path(node), data)
+    return new_level
 
 
-def bucket_drain(node: str, name: str, amount: float, bucket_max: float) -> float:
-    level = max(0.0, bucket_level(node, name, bucket_max) - amount)
-    _bucket_set(node, name, level)
-    return level
-
-
-def bucket_earn(node: str, name: str, ratio: float, bucket_max: float) -> float:
-    level = min(bucket_max, bucket_level(node, name, bucket_max) + ratio)
-    _bucket_set(node, name, level)
-    return level
-
-
-def bucket_muted(level: float, bucket_max: float) -> bool:
-    return level < bucket_max / 2.0
+def budget_seconds_until(
+    node: str,
+    key: str,
+    budget_max: float,
+    earn_per_hour: float,
+    target: float = 1.0,
+    *,
+    now: float | None = None,
+) -> float:
+    """Seconds until the bucket refills to `target` (0.0 when already there,
+    inf when it never will because nothing is earned)."""
+    level = budget_level(node, key, budget_max, earn_per_hour, now=now)
+    if level >= target:
+        return 0.0
+    if earn_per_hour <= 0:
+        return float("inf")
+    return (target - level) / earn_per_hour * 3600.0
 
 
 # ---------- per-agent failure breaker ----------
@@ -749,41 +816,3 @@ def read_last_turn_start(node: str) -> float | None:
         return None
 
 
-# ---------- active list (idle-driven crash recovery) ----------
-
-def active_path(node: str) -> Path:
-    return team_dir(node) / "active.json"
-
-
-def load_active(node: str) -> dict:
-    path = active_path(node)
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def save_active(node: str, data: dict) -> None:
-    atomic_write_json(active_path(node), data)
-
-
-def refresh_active(node: str, name: str, ttl: int) -> None:
-    data = load_active(node)
-    entry = data.get(name.lower())
-    if not isinstance(entry, dict):
-        entry = {}
-    entry["ttl"] = ttl
-    entry["refreshed_at"] = utc_now()
-    data[name.lower()] = entry
-    save_active(node, data)
-
-
-def mark_nudged(node: str, name: str) -> None:
-    data = load_active(node)
-    entry = data.get(name.lower())
-    if isinstance(entry, dict):
-        entry["last_nudge_at"] = utc_now()
-        save_active(node, data)

@@ -10,7 +10,7 @@ Operator documentation for how `tell` works under the hood. Agent-facing usage l
 | System client | `sudo a8s install-client` → `/usr/local/bin/tell` + `/usr/local/lib/a8s/` |
 | Implementation | `apps/a8s/tell.py` (`tell_main`) |
 | Router | `apps/a8s/mailbox.py` (`route_outboxes`) |
-| Sync protocol | `apps/a8s/sync_listen.py` |
+| Receive-side | `apps/a8s/tells.py` (`tells_main`) — see below |
 
 ## Send path (async)
 
@@ -55,26 +55,21 @@ export TELL_OUTBOX_DIR=/var/mailboxes/agent-one/.outbox
 tell GEMINI "hello"
 ```
 
-Created when missing. Sync session files use `<outbox-parent>/.temp/`.
+Created when missing.
 
 When a8s wakes an agent, it sets `TELL_OUTBOX_DIR` in the invoke subprocess environment to the agent definition's resolved `outbox_dir` (default `<agent-root>/.outbox`). Use a separate absolute `outbox_dir` to keep outgoing tell traffic outside the agent workspace.
 
 Does not affect `sender_from_cwd()`; the router still force-stamps `from` from outbox ownership.
 
-## `--sync`
+## `tells` (receive side)
 
-Client side (`tell.py` + `sync_listen.py`):
+`tells [--timeout SEC]` (`apps/a8s/tells.py`) is the receive-side complement of `tell`. It resolves the node from `TELL_OUTBOX_DIR` exactly as `tell` does — the file-proxy inbox is `.inbox` beside the outbox (`<outbox-parent>/.inbox`).
 
-1. Write the user message envelope as usual.
-2. Write a control envelope to `!a8s` with `command: sync_listen` and session paths under `<agent-root>/.temp/`.
-3. Poll for `listen.ack`, then `{session}.reply.json`, then drop `sync_cancel` on exit.
+1. Snapshot the `.json` envelopes already in `.inbox`.
+2. Poll (0.1s) up to `--timeout` seconds (default 5) for new envelopes.
+3. Print each new envelope as `sender: body` to stdout and exit 0; on timeout print one stderr line and exit 1.
 
-Server side (`sync_listen.py` via a8s handler):
-
-- Registers listeners in `~/.a8s/agents/<NAME>/sync-listeners.json`.
-- When a matching reply is routed, writes the reply JSON to the agent-root path `tell` polls.
-
-Designed for containers and file-proxy mounts where only the agent tree is shared.
+Non-destructive: it observes new arrivals without consuming them, so it never competes to remove `.inbox` files and each run waits from its own baseline. Partial writes (mid-delivery on a cross-mount move) are tolerated — an unreadable file is skipped and retried on the next poll. It only reports messages that land after it starts; anything already waiting is ignored.
 
 ## install-client
 
@@ -90,10 +85,10 @@ Use case: agent OS users who must not read the operator's `~/bin` tree — they 
 
 ## User-visible opacity
 
-CLI help and the agent skill intentionally avoid mentioning `.outbox/`, `.temp/`, or JSON. Errors use generic messages (`cannot send from this directory`) so curious agents are not steered toward bypassing the tool.
+CLI help and the agent skills intentionally avoid mentioning `.outbox/`, `.inbox/`, or JSON. Errors use generic messages (`cannot send from this directory`, `cannot receive from this directory`) so curious agents are not steered toward bypassing the tool.
 
 ## Related
 
 - [a8s README](../README.md) — mental model diagram, routing invariants
 - `apps/a8s/tests/test_tell.py` — CLI behavior
-- `apps/a8s/tests/test_sync_listen.py` — sync round-trip
+- `apps/a8s/tests/test_tells.py` — receive-side wait behavior

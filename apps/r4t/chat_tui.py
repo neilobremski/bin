@@ -29,14 +29,12 @@ import state
 import tasks as taskmod
 import verdict
 from chat import (
-    HELP,
     SeatError,
     SeatFeed,
-    format_tasks,
-    format_who,
+    handle_command,
     load_seat,
-    resolve_target,
     send_as_human,
+    sender_label,
 )
 from dispatch import DispatchContext
 from rig import RigError, load_rig_config
@@ -51,8 +49,10 @@ KIND_STYLE = {"in": "cyan", "you": "green", "sys": "yellow", "act": "dim"}
 LEVEL_STYLE = {verdict.OK: "green", verdict.WARN: "yellow", verdict.BAD: "red"}
 
 
-def budget_bar(used: float, budget: float, width: int = 8) -> str:
-    frac = 0.0 if budget <= 0 else min(1.0, used / budget)
+def budget_bar(level: float, budget: float, width: int = 8) -> str:
+    """Fill by how much spend budget is LEFT: a full bar is a fresh member,
+    an empty bar is a resting one."""
+    frac = 0.0 if budget <= 0 else max(0.0, min(1.0, level / budget))
     filled = round(frac * width)
     return "█" * filled + "░" * (width - filled)
 
@@ -123,7 +123,7 @@ class ChatApp(App):
         markdown — agents write markdown, and raw ** and # are noise."""
         log = self.query_one("#conversation", RichLog)
         stamp = datetime.now().strftime("%H:%M:%S")
-        sender = str(envelope.get("from", "?"))
+        sender = sender_label(self.roster, str(envelope.get("from", "?")))
         _, _, _, body = taskmod.parse_header(str(envelope.get("content", "")))
         log.write(Text.assemble((stamp + " ", "dim"), (sender, "bold cyan")))
         log.write(Padding(Markdown(body.strip() or "(empty)"), (0, 0, 1, 9)))
@@ -141,10 +141,27 @@ class ChatApp(App):
         state.touch_seat_presence(self.ctx.node, self.human.name)
         self._pump_feed()
 
+    def _member_budget_rows(self) -> list[tuple[str, float, float]]:
+        """(name, level, max) for the members you're talking to. The target is
+        a canonical address (bare node = leader); show that member's bucket."""
+        if self.rig_config is None:
+            return []
+        _, sub = self.target.partition(":")[0], self.target.partition(":")[2]
+        member = self.roster.find(sub) if sub else self.roster.leader()
+        rows: list[tuple[str, float, float]] = []
+        if member is not None and not member.is_human and not member.errors:
+            rig, _err, _pinned = self.rig_config.rig_for(member)
+            if rig is not None:
+                level = state.budget_level(
+                    self.ctx.node, member.name, rig.budget_max, rig.budget_earn_per_hour
+                )
+                rows.append((member.name, level, rig.budget_max))
+        return rows
+
     def _refresh_header(self) -> None:
         verdicts = verdict.team_verdicts(self.ctx.node, self.roster, self.rig_config)
         worst = verdict.worst_level(verdicts)
-        open_tasks = [
+        open_threads = [
             t for t in taskmod.list_tasks(self.ctx.node)
             if t.get("status") == taskmod.STATUS_OPEN
         ]
@@ -152,7 +169,7 @@ class ChatApp(App):
         header = Text()
         header.append(self.ctx.node, style="bold")
         header.append(f" · seat {self.human.name} → {self.target}", style="")
-        header.append(f" · {len(open_tasks)} open task(s)", style="dim")
+        header.append(f" · {len(open_threads)} open thread(s)", style="dim")
         header.append("   ")
         header.append(
             f"{verdict.MARKS[worst]} "
@@ -168,16 +185,14 @@ class ChatApp(App):
             header.append(
                 f"\n… {len(shown) - MAX_HEADER_VERDICTS} more (r4t status)", style="dim"
             )
-        for t in open_tasks[:MAX_HEADER_TASKS]:
-            used = float(t.get("used", 0.0))
-            budget = float(t.get("budget", 1.0) or 1.0)
+        for name, level, budget_max in self._member_budget_rows()[:MAX_HEADER_TASKS]:
+            depth = state.queue_depth(self.ctx.node, name)
             header.append("\n")
-            header.append(budget_bar(used, budget), style="magenta")
-            header.append(
-                f" {100 * used / budget:3.0f}% {t.get('id', '?')}"
-                f"  turns={t.get('turns', 0)} creator={t.get('creator', '?')}",
-                style="dim",
-            )
+            header.append(budget_bar(level, budget_max), style="magenta")
+            tail = f" {name} budget {state.fmt_budget(level)}/{state.fmt_budget(budget_max)}"
+            if depth:
+                tail += f"  {depth} queued"
+            header.append(tail, style="dim")
         self.query_one("#header", Static).update(header)
 
     # ---------- sending ----------
@@ -186,7 +201,9 @@ class ChatApp(App):
         while True:
             to, text = self.sends.get()
             try:
-                send_as_human(self.ctx, self.human, to, text)
+                note = send_as_human(self.ctx, self.human, to, text)
+                if note:
+                    self.call_from_thread(self._emit, "sys", note)
             except Exception as e:  # noqa: BLE001 — surface, don't kill the seat
                 self.call_from_thread(self._emit, "sys", f"send failed: {e}")
 
@@ -204,34 +221,19 @@ class ChatApp(App):
         self._emit("you", f"you -> {self.target}: {line}")
 
     def _command(self, line: str) -> None:
-        cmd, _, arg = line.partition(" ")
-        cmd = cmd.lower()
-        if cmd == "/quit":
+        result = handle_command(self.roster, self.ctx.node, self.human, line)
+        if result.quit:
             self.exit(0)
-        elif cmd == "/help":
-            self._emit("sys", HELP)
-        elif cmd == "/to":
-            target = resolve_target(self.roster, self.ctx.node, arg)
-            if target is None:
-                self._emit(
-                    "sys", f"no AI member named {arg.strip().lower()!r} in the roster"
-                )
-                return
-            self.target = target
-            suffix = " (leader)" if target == self.ctx.node else ""
+            return
+        if result.target is not None:
+            self.target = result.target
+            suffix = " (leader)" if result.target == self.ctx.node else ""
             self.query_one("#composer", Input).placeholder = (
                 f"message {self.target}{suffix} — /help for commands"
             )
-            self._emit("sys", f"target: {self.target}")
             self._refresh_header()
-        elif cmd == "/who":
-            self._emit(
-                "sys", "\n".join(format_who(self.ctx.node, self.roster, self.human))
-            )
-        elif cmd == "/tasks":
-            self._emit("sys", "\n".join(format_tasks(self.ctx.node)))
-        else:
-            self._emit("sys", f"unknown command {cmd!r} (/help)")
+        if result.lines:
+            self._emit("sys", "\n".join(result.lines))
 
 
 def run_chat_tui(ctx: DispatchContext) -> int:

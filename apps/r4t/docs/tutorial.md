@@ -72,6 +72,7 @@ r4t rig add reviewer claude                # add rig "reviewer" from preset
 r4t rig add worker opencode
 r4t rig add local opencode-ollama --model qwen2.5-coder:7b
 r4t rig add lead cursor --force            # replace an existing rig
+r4t rig swap lead agy                      # switch preset, keep settings
 ```
 
 Each preset documents its **headless** entry point (`-p`, `--print`, `run
@@ -105,9 +106,16 @@ work.
 ### 6. Operate
 
 ```bash
-r4t status --node myrepo    # locks, buckets, tasks, dead letters
+r4t status --node myrepo    # budgets, queues, threads, dead letters
 a8s logs myrepo-node -f     # traffic + r4t governance lines
 ```
+
+### 7. (Optional) point the team with a mission
+
+Drop a short, human-owned `MISSION.md` at the repo root — why the repo exists,
+what "done" looks like, the current milestone; never the how. r4t injects it
+into every **lead's** turn prompt (members with reports); leads restate it
+down to their ICs. Keep it under a page — `roster check` warns past ~40 lines.
 
 ## Mental model
 
@@ -193,7 +201,7 @@ r4t rig add junior-dev opencode
 | `r4t rig add <rig> <preset>` | Define a rig in the rig config |
 | `r4t rig list` | Show rigs and how roster members resolve |
 | `r4t roster check` | Lint roster and rig mappings |
-| `r4t status --node <team>` | Live locks, buckets, tasks, dead letters |
+| `r4t status --node <team>` | Member budgets, queue depths, threads, dead letters |
 | `r4t sandbox --fake` | End-to-end plumbing test without LLM calls |
 | `r4t sandbox --preset opencode-ollama --model M` | Live sandbox via local Ollama + OpenCode (stderr progress, report on stdout) |
 

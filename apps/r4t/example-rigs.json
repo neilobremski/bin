@@ -13,31 +13,30 @@
     "max_concurrent": 1,
     "min_seconds_between_turn_starts": 15
   },
-  "suppression_window_seconds": 600,
-  "bucket_max": 8,
-  "bucket_earn_ratio": 0.1,
-  "nudge_cap": 2,
-  "active_ttl_rotations": 3,
-  "rebroadcast_senders": ["chatroom"],
+  "cell_budget_max": 16,
+  "cell_budget_earn_per_hour": 8,
+  "quiet_task_seconds": 1800,
+  "breaker_cap": 5,
+  "breaker_cooldown_seconds": 600,
 
   "leader": {
-    "_notes": "Orchestrator rig — Cursor agent CLI, generous limits.",
+    "_notes": "Orchestrator rig — Cursor agent CLI. A frontier model on a low budget: high intelligence, few turns per hour, spends smart.",
     "invoke": ["agent", "-p", "--yolo", "{prompt}"],
     "timeout_seconds": 1800,
-    "max_turns_per_task": 25,
-    "hop_limit": 4,
+    "budget_max": 8,
+    "budget_earn_per_hour": 4,
     "max_sends_per_turn": 8
   },
 
   "junior-dev": {
-    "_notes": "Cheap worker rig — OpenCode with whatever model the repo's opencode.json picks. invoke may also be a POOL (list of argvs) rotated round-robin per turn, e.g. across local models — agents never know which variant ran them.",
+    "_notes": "Cheap worker rig — OpenCode with whatever model the repo's opencode.json picks. A local model runs almost freely, so a generous budget. invoke may also be a POOL (list of argvs) rotated round-robin per turn — agents never know which variant ran them.",
     "invoke": [
       ["opencode", "run", "--auto", "{prompt}"],
       ["opencode", "run", "--auto", "--model", "ollama/gpt-oss:20b", "{prompt}"]
     ],
     "timeout_seconds": 900,
-    "max_turns_per_task": 50,
-    "hop_limit": 3,
+    "budget_max": 40,
+    "budget_earn_per_hour": 30,
     "max_sends_per_turn": 4
   },
 

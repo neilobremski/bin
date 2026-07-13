@@ -11,6 +11,7 @@ pytest.importorskip("textual")
 
 import chat_tui
 import state
+import tasks as taskmod
 from chat_tui import ChatApp, budget_bar
 from roster import load_roster
 
@@ -94,6 +95,56 @@ def test_tui_renders_markdown_bodies(seat):
             assert "acme:gerry" in text
             assert "bold claim" in text and "Report" in text
             assert "**" not in text and "# Report" not in text
+
+    asyncio.run(scenario())
+
+
+def test_tui_message_header_shows_rig_slug(seat):
+    ctx, roster, human = seat
+    state.park_seat_message(
+        NODE, "Neil", "acme:gerry",
+        "[r4t task=01KX0000000000000000000000 hop=1 auto] done",
+    )
+    state.park_seat_message(
+        NODE, "Neil", "external:bot",
+        "[r4t task=01KX0000000000000000000000 hop=1 auto] ping",
+    )
+
+    async def scenario():
+        from textual.widgets import RichLog
+
+        app = ChatApp(ctx, roster, human)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            conv = app.query_one("#conversation", RichLog)
+            text = "\n".join(strip.text for strip in conv.lines)
+            assert "acme:gerry (leader)" in text
+            assert "external:bot" in text
+            assert "external:bot (" not in text  # non-member: no rig slug
+
+    asyncio.run(scenario())
+
+
+def test_tui_commands_report_in_conversation(seat):
+    ctx, roster, human = seat
+    taskmod.ensure_task(NODE, "01KX000000000000000000AAAA", "acme:gerry")
+
+    async def scenario():
+        from textual.widgets import Input, RichLog
+
+        app = ChatApp(ctx, roster, human)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            composer = app.query_one("#composer", Input)
+            for value in ("/bogus", "/help", "/threads"):
+                composer.value = value
+                await pilot.press("enter")
+            await pilot.pause()
+            conv = app.query_one("#conversation", RichLog)
+            text = "\n".join(strip.text for strip in conv.lines)
+            assert "unknown command:" in text and "/bogus" in text
+            assert "/threads" in text  # /help listing
+            assert "creator=acme:gerry" in text  # /threads listing
 
     asyncio.run(scenario())
 

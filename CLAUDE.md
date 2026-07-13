@@ -113,7 +113,7 @@ user-home install; `source ~/bin/install.sh --skills` for top-level doc skills.
 ## Common operations
 
 ```bash
-# a8s tests (~426 tests)
+# a8s tests (~640 tests)
 python3 -m pytest apps/a8s/tests/
 
 # k7e tests (~69 tests)

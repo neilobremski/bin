@@ -1,10 +1,10 @@
 """a8s commands — every cmd_* function dispatched by cli.py.
 
 Grouped by section:
-  registry mgmt    — add, define, agents, discover, install
+  registry mgmt    — add, define, ls, discover, install
   aliases          — alias, unalias, aliases
   namespaces       — namespace, unnamespace, namespaces
-  process control  — start, run, step, stop, kill, exit, ls
+  process control  — start, run, step, stop, kill, exit, ps
   messaging        — tell
   logs             — logs
   remotes          — remote, unremote
@@ -349,21 +349,86 @@ def cmd_define(args: list[str]) -> int:
     return 0
 
 
-def cmd_agents() -> int:
-    """`a8s agents` — list every registered agent and its definition path.
-    Every agent always has a definition (default fallback applies if the
-    registry's `definition` field is missing)."""
+def _print_table(headers: list[str], rows: list[tuple[str, ...]]) -> None:
+    """Docker-style aligned table: left-justified columns, three-space gutters,
+    no padding on the trailing column so lines don't carry dead whitespace."""
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def fmt(cells: tuple[str, ...]) -> str:
+        last = len(cells) - 1
+        return "   ".join(
+            cell.ljust(widths[i]) if i < last else cell
+            for i, cell in enumerate(cells)
+        )
+
+    print(fmt(tuple(headers)))
+    for row in rows:
+        print(fmt(row))
+
+
+def _pid_uptime(name: str) -> str:
+    """Coarse uptime from the pid file's mtime — a cheap stat, no bookkeeping.
+    The pid file is written when a process claims the node, so its age tracks
+    how long the node has been running under that handler."""
+    try:
+        mtime = pid_path(name).stat().st_mtime
+    except OSError:
+        return "?"
+    secs = max(0, int(time.time() - mtime))
+    if secs < 60:
+        return f"{secs}s"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins}m"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def cmd_ls(args: list[str] | None = None) -> int:
+    """`a8s ls` — list every registered node, running or not (docker/ollama
+    style). Columns: NAME, STATUS, KIND, ROOT, plus NAMESPACES when any prefix
+    is bound. `-q` prints just names, one per line, for scripting.
+
+    STATUS is `running (pid N)` or `stopped`; KIND is the definition basename
+    (default fallback applies when the registry has no `definition` field)."""
+    args = args or []
+    quiet = "-q" in args
     reg = load_registry()
     if not reg:
-        print("(no agents registered — use `a8s add <name> <dir>`)")
+        if not quiet:
+            print("(no nodes registered — use `a8s add <name> <dir>`)")
         return 0
-    default_fallback = str(default_definition_path("default"))
-    width = max(len(name) for name in reg)
-    for name in sorted(reg, key=str.lower):
+
+    names = sorted(reg, key=str.lower)
+    if quiet:
+        for name in names:
+            print(name)
+        return 0
+
+    bindings: dict[str, list[str]] = {}
+    for prefix, agent in load_namespaces().items():
+        bindings.setdefault(agent.lower(), []).append(f"{prefix}:")
+
+    rows: list[tuple[str, ...]] = []
+    for name in names:
         info = reg[name]
+        pid = _read_handler_pid(name)
+        status = f"running (pid {pid})" if pid is not None else "stopped"
+        defn = info.get("definition") or str(default_definition_path("default"))
+        kind = Path(defn).stem
         root = info.get("root", "?")
-        defn = info.get("definition") or f"{default_fallback} (fallback)"
-        print(f"  {name.ljust(width)}  {root}  [{defn}]")
+        ns = " ".join(sorted(bindings.get(name.lower(), [])))
+        rows.append((name, status, kind, root, ns))
+
+    if any(row[4] for row in rows):
+        _print_table(["NAME", "STATUS", "KIND", "ROOT", "NAMESPACES"], rows)
+    else:
+        _print_table(["NAME", "STATUS", "KIND", "ROOT"], [r[:4] for r in rows])
     return 0
 
 
@@ -1068,20 +1133,31 @@ def cmd_exit() -> int:
     return 0
 
 
-def cmd_ls() -> int:
-    """`a8s ls` — list only running agents and their handler PIDs."""
-    parts = participants_from_registry()
-    running: list[tuple[str, int, Path]] = []
-    for p in parts:
-        pid = _read_handler_pid(p.name)
-        if pid is not None:
-            running.append((p.name, pid, p.root))
+def cmd_ps(args: list[str] | None = None) -> int:
+    """`a8s ps` — list only running node processes (docker/ollama style).
+    Columns: NAME, PID, UPTIME, ROOT. `-q` prints just names, one per line."""
+    args = args or []
+    quiet = "-q" in args
+    reg = load_registry()
+    running: list[tuple[str, int, str]] = []
+    for name in sorted(reg, key=str.lower):
+        pid = _read_handler_pid(name)
+        if pid is None:
+            continue
+        running.append((name, pid, reg[name].get("root", "?")))
+
     if not running:
-        print("(no agents running)")
+        if not quiet:
+            print("no nodes running (try: a8s ls)")
         return 0
-    width = max(len(n) for n, _, _ in running)
-    for name, pid, root in sorted(running, key=lambda x: x[0].lower()):
-        print(f"  {name.ljust(width)}  PID {pid}  {root}")
+
+    if quiet:
+        for name, _, _ in running:
+            print(name)
+        return 0
+
+    rows = [(name, str(pid), _pid_uptime(name), root) for name, pid, root in running]
+    _print_table(["NAME", "PID", "UPTIME", "ROOT"], rows)
     return 0
 
 
@@ -1095,6 +1171,15 @@ def cmd_tell(args: list[str]) -> int:
     from tell import tell_main
 
     return tell_main(args)
+
+
+def cmd_tells(args: list[str]) -> int:
+    """`a8s tells [--timeout SEC]` — block until the next message lands in this
+    node's inbox, print each new envelope, and exit 0; exit 1 on timeout. The
+    receive-side complement of `tell`, resolved from the same `TELL_OUTBOX_DIR`."""
+    from tells import tells_main
+
+    return tells_main(args)
 
 
 # ---------- drain ----------

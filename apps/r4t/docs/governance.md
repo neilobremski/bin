@@ -7,9 +7,9 @@ courtesy, but no mechanism depends on an agent obeying it.
 
 Everything here runs autonomously. There are knobs (config) and lenses
 (`r4t status`, the dead-letter dir, a8s logs) but no gates: the system never
-parks work waiting for a human. Where a human message appears in a chain, it
-*licenses* more work (see the deliberate-decision rule); absence of a human
-never blocks it.
+parks work waiting for a human, and it never drops a deliverable message.
+The economics are *budgets, not cuts* — an agent that is out of budget does
+not run (its mail queues), rather than having its mail thrown away.
 
 ## The failure modes
 
@@ -25,9 +25,10 @@ of them within days:
    but unable to break out. LLM self-awareness does not stop the loop;
    external enforcement does.
 2. **Ping-pong through a re-broadcaster.** A chat room (h4l) re-emits
-   posts as fresh notifications, stripping any per-conversation metadata.
-   Hop counters and task budgets reset on every bounce, so a two-agent
-   loop through a room evades both.
+   posts as fresh notifications, stripping any per-conversation metadata —
+   so anything keyed on conversation state is defeated on every bounce. The
+   defense has to be cost (budgets) and idempotent arrival (duplicate
+   collapse), not chain-length bookkeeping.
 3. **Runaway fan-out.** One turn messages N teammates; each of those
    messages N more. Unbounded width, multiplied by depth.
 4. **Stalled fan-in.** A leader delegates, a subordinate's process dies,
@@ -41,161 +42,171 @@ of them within days:
 All messages — including teammate-to-teammate — round-trip through a8s.
 a8s is deliberately a dumb pipe (recipient opacity is its core invariant),
 messages can originate from unmanaged senders, and rooms re-broadcast. So
-the transport layer can neither attribute nor police traffic. Email faced
-exactly this: two dumb autoresponders looping through a mailing list that
-strips conversation context. The email stack's answer — classification +
-content-keyed suppression + rate floors, with hop counting only as a
-backstop — is the blueprint for r4t's, and notably hop counting was never
-the mechanism that fixed the mailing-list case.
+the transport layer can neither attribute nor police traffic. r4t's answer
+is to make *cost*, not message-dropping, the throttle: a durable per-member
+queue absorbs every arrival, and spend budgets decide when a member is
+allowed to spend a turn draining it.
 
 ## The stack
 
 Ordered from most to least load-bearing. Each layer names its prior art;
 parameters were verified against primary sources (references at bottom).
 
-### 1. Content-keyed pair suppression
+### 1. The durable member queue (nothing is ever dropped)
 
-The same (sender → recipient) pair sending substantially the same content
-within a suppression window gets one delivery; the rest are dead-lettered.
-The key is synthesized from *what is being sent to whom* — origin agent,
-destination, normalized content hash — so it needs nothing a re-broadcaster
-strips. This is the layer that kills room ping-pong.
+Every inbound message to a member enqueues, unconditionally, into
+`agents/<member>/queue/`. No gate drops or dead-letters a deliverable
+message — dead letters are reserved for genuinely *undeliverable* mail
+(unknown recipient, disabled member, a rig that will not resolve). Work
+waits; messages never die. This is the keystone the rest of the stack
+hangs off: budgets, no-cutting, and batch invoke are all one data structure.
 
-Prior art: RFC 3834 §2 ("SHOULD NOT issue the same response to the same
-sender more than once within a period of several days... 7-day period
-RECOMMENDED"); Sieve vacation (RFC 5230 §4.2) tracks a *hash of the
-response + recipient*, not conversation state; syslogd's "last message
-repeated N times"; gemini-cli's `LoopDetectionService` (50-char chunk
-hashes, loop declared at 10 repeats) is the same idea shipped in an LLM
-harness. Agents work on much shorter cycles than vacationing humans, so
-the window is minutes, not days — the mechanism, not the constant, is
-what transfers.
+### 2. Duplicate collapse (the only "suppression")
 
-### 2. Message-class marking
+When a message enqueues, if the NEWEST queued entry has the same sender and
+identical normalized body, the arrival collapses into it — one entry, a
+bumped `repeats` count — instead of adding a file. Collapsing loses no
+information (the prompt notes "sent N times"), so it needs no window and
+no dead letter. It replaces content-keyed pair suppression outright.
 
-r4t stamps every agent-originated envelope as automated at outbox release
-(the `Auto-Submitted: auto-replied` analog) and classifies inbound messages
-from re-broadcaster nodes (h4l rooms) as bulk (the `List-Id` /
-`Precedence: list` analog). Dispatch rule: a bulk-triggered turn may post
-back to that room at most once per suppression window. Two agents cannot
-loop through a hall — the exact composition that ended autoresponder
-storms through mailing lists. This works because both r4t and h4l are our
-infrastructure: the *router* carries the class stamp, not the payload the
-room re-emits.
+Prior art: RFC 3834 §2 (do not issue the same response to the same sender
+repeatedly); syslogd's "last message repeated N times"; gemini-cli's
+`LoopDetectionService`. The mechanism transfers; the difference is that
+collapse *keeps* the count rather than discarding the repeats.
 
-Prior art: RFC 3834 (auto-responders MUST NOT reply to `Auto-Submitted`
-≠ no); procmail's `X-Loop` self-marker; BSD vacation(1) refusing
-`Precedence: bulk/list/junk`.
+### 3. Batch invoke
 
-### 3. Reply-privilege token bucket
+A turn drains the WHOLE queue at pick time: one prompt renders every waiting
+message chronologically ("Messages since your last turn"). An agent that
+sees "teammates discussed X, then the lead overrode with Y" in one reading
+pivots to the current state instead of burning a turn reacting to each
+message in sequence. It is both a quota saver and a storm damper — a burst
+of N arrivals costs one turn, not N.
 
-Each agent has a bucket. Suppression/limit events drain it by 1; clean
-turns earn back a fraction (~0.1). Below half-full, the agent's turns stop
-running — inbound messages are still recorded to its history, so nothing
-is lost — until the bucket recovers. A misbehaving agent mutes itself and
-self-heals; ten clean turns buy back one strike.
+### 4. Spend budgets (member + cell)
 
-Prior art: gRPC retry throttling (gRFC A6) — failures cost 1 token,
-successes earn `tokenRatio` (~0.1), retries disabled below `maxTokens/2`.
-Failure-dominated traffic shuts its own retries off with no operator in
-the loop.
+A bifurcated token bucket, refilled lazily by elapsed wall-clock time. Each
+member has its own bucket (`budget_max` / `budget_earn_per_hour`) and the
+whole cell shares one (`cell_budget_max` / `cell_budget_earn_per_hour`). A
+turn costs 1 member unit AND 1 cell unit, regardless of how many messages it
+consumes. Both must hold ≥1 for a member to run; an empty bucket means the
+member is *resting* — its queue holds and it runs again when the bucket
+refills. Put frontier rigs on a low budget (they run slowly and smartly) and
+local rigs on a high one (near-free) so nothing goes to waste.
 
-### 4. Per-task turn budgets with forced synthesis
+Prior art: real AI subscription plans (a rolling window plus a shared cap);
+gRPC retry throttling (gRFC A6 — a token bucket that disables spend below a
+floor); IRC flood control's burst-credit model (RFC 1459 §8.10). The design
+lesson is graduated degradation: slow first, queue second, never drop.
 
-Every task (conversation chain) has a weighted turn budget. Exhaustion
-does not park or error: the *leader* is woken one final time with
-"budget exhausted — respond to the originator with what you have." Tasks
-always terminate in an answer.
+### 5. Cadence throttle and concurrency cap
 
-Implementation tracks `synthesis_state` on the task ledger:
-`pending` → `running` → `done`. The task closes when synthesis is
-queued; exactly one leader turn may run while `pending`; concurrent
-overflow arrivals defer or dead-letter rather than spawning a second
-synthesis. When the leader's reply to the *task creator* is staged,
-that envelope bypasses closed-task, hop-cut, and budget gates — otherwise
-the final answer could never reach the originator. Only the first such
-reply in a multi-recipient release gets the bypass.
+Team-wide floor on burn rate: a minimum interval between turn starts and a
+cap on concurrent turns. Content- and topology-blind, so nothing evades it;
+a perfectly evasive storm degrades into a slow, visible drip. A member that
+can't start yet keeps its queue and runs on a later pass.
 
-Prior art: the multi-agent framework consensus band is 10–100 automated
-exchanges before forced stop — OpenAI Agents SDK `max_turns=10`, LangGraph
-`recursion_limit=25`, CrewAI `max_iter=20`, AutoGen
-`max_consecutive_auto_reply=100`. CrewAI's semantics are the ones worth
-copying: at the cap it forces a best answer rather than raising.
+Prior art: IRC flood control — RFC 1459 §8.10 (burst credit, per-message
+penalty; excess queues rather than drops), UnrealIRCd fake lag.
 
-### 5. Hop limit
+### 6. Per-member failure breaker
 
-r4t stamps a task/hop header into envelope content at outbox release and
-increments it on redispatch; past the limit the chain is cut and the task
-originator informed once. Cheap, and defeated by re-broadcast (the room
-mints a fresh message) — which is why it is the backstop, not the defense.
-
-Prior art: RFC 5321 §6.3 (count Received headers, reject "normally at
-least 100"; "servers MUST contain provisions for detecting and stopping
-trivial loops"); Postfix `hopcount_limit=50`; RabbitMQ federation
-`max-hops` (default 1).
-
-### 6. Cadence throttle and concurrency cap
-
-Team-wide floor on burn rate: a minimum interval between turn starts and
-a cap on concurrent turns. Content- and topology-blind, so nothing evades
-it; a perfectly evasive storm degrades into a slow, visible drip. This is
-also the operator's "merry-go-round" lever — slow the team down enough to
-watch it and reach in.
-
-Prior art: IRC flood control — RFC 1459 §8.10 (10s of burst credit, 2s
-penalty per message; excess queues rather than drops), UnrealIRCd fake
-lag, solanum's flood tunables. The design lesson is graduated
-degradation: slow first, queue second, drop only on overflow.
-
-### 7. Governed recovery
-
-Crash recovery (the idle-pass active list re-waking agents with
-unfinished business) is itself rate-limited: at most N nudges per agent
-per period, then the task is closed out through the leader with what
-exists. Recovery machinery that retries without a ceiling is just another
-storm generator.
-
-Prior art: Erlang/OTP supervision restart intensity (default 1 restart
-per 5 seconds; exceed it and the supervisor stops fixing and escalates) —
-a rate limit on the recovery actions themselves.
-
-### 8. Per-agent failure breaker
-
-A member whose turns keep failing outright (nonzero exit or timeout —
-a bad flag after a CLI update, a revoked key, a dead local model) would
-otherwise burn a full turn on every inbound message while the asker
-waits forever. After `breaker_cap` consecutive failed turns the member's
-turns pause: inbound still records to history, but the message
-dead-letters and its task closes through forced synthesis so the
-originator gets an answer now. One probe turn is let through per
-`breaker_cooldown_seconds`; the first clean turn closes the breaker. A
-deliberate (non-`auto`) message resets it immediately — same license as
-the budget reset.
+A member whose turns keep failing outright (nonzero exit or timeout — a bad
+flag after a CLI update, a revoked key, a dead local model) would otherwise
+burn a full turn on every arrival. After `breaker_cap` consecutive failed
+turns the member's turns pause; its queue simply holds (nothing is dropped).
+One probe turn is let through per `breaker_cooldown_seconds`; the first
+clean turn closes the breaker.
 
 Prior art: systemd start rate limiting (`StartLimitBurst`/
-`StartLimitIntervalSec`, default 5 starts in 10s — exceed it and the
-unit stops being restarted) and the circuit-breaker pattern's
-closed/open/half-open probe cycle; the failure counter doubling as the
-trip state mirrors SQS's `ReceiveCount` vs `maxReceiveCount` redrive
-test.
+`StartLimitIntervalSec`) and the circuit-breaker pattern's
+closed/open/half-open probe cycle.
 
-### 9. The deliberate-decision rule
+### 7. Quiet-thread sweep (the termination backstop)
 
-Cycles in which every step was automatic are killed; a human message
-anywhere in a chain resets its budgets. Human attention is the license
-for more work.
+A thread (conversation label) can go quiet with its originator never having
+heard back — a turn succeeds while staging no reply, or a chain stalls. When
+an open thread whose originator is unanswered sees no activity for
+`quiet_task_seconds`, the leader is woken with a nudge to report current
+state — NOT to force-finish the work. The human, or the leader, decides what
+"done" means; r4t only makes sure the originator is not left in silence.
 
-Prior art: RabbitMQ dead-letter cycle detection — "will detect a cycle
-and drop the message if there was no rejection in the entire cycle,"
-i.e. purely automatic loops die, loops containing a deliberate consumer
-decision live.
+Prior art: Erlang/OTP supervision — a bounded, rate-limited recovery action
+rather than an unbounded retry loop.
+
+### 8. The tree (information hiding + hard rerouting)
+
+A team is not a flat pool of peers; it is a tree of small **cells**, each
+with one lead, composing up to a single top lead. The roster declares it: an
+AI member's `Cell:` line names its cell and its `Lead:` line names the member
+it reports to (the top lead's `Lead:` is the human). Two mechanisms make the
+tree structural rather than merely advisory, and both switch on only when the
+roster declares `Lead:` lines — a flat roster (no `Lead:` lines anywhere) is
+treated as one cell under the leader and behaves exactly as before.
+
+- **Information hiding.** A member's turn prompt lists only its
+  tree-adjacent names — its lead, its direct reports, its cell-mates — plus
+  the human seat, which is always reachable. It never sees the whole roster.
+  Lateral contact becomes informationally *unthinkable*, not just structurally
+  blocked: an IC in the design cell has no idea the build cell's members exist
+  by name. Cross-cell contact is created by introduction — a lead mentioning
+  a name in a message is the grant — which keeps the channel social, relayed
+  through a lead, rather than a standing back-channel.
+- **Hard rerouting.** If a member does address someone outside its adjacency
+  (a stale name from history, say), the release path reroutes that tell to the
+  member's lead with a mechanical prefix (`[r4t rerouted: Ann -> Cal] …`) and
+  logs a `REROUTED` event. Replies to whoever messaged the member this turn,
+  and any message to the human seat, are never rerouted — answering must
+  always get through.
+
+Why this shape: span-of-control research converges on cells of ~4–6 (soft
+warning past 6, hard cap 10) and trees no deeper than ~2–3 levels; `roster
+check` lints those bounds. And the live evidence is direct — in the first d5n
+run the turn prompt advertised the full roster, and a build-cell lead (Rook)
+messaged a design-cell lead (Cass) laterally *because the name was in front of
+him*. The tree held voluntarily otherwise, but "voluntarily" is not a control.
+Information hiding removes the temptation; rerouting removes the option.
+
+Prior art: Team Topologies (Skelton/Pais) — explicit, bounded interaction
+modes rather than ad-hoc cross-team chatter; the parametric bounds trace to
+Hackman's team-size work and the US Army's fire-team/squad structure.
+
+### 9. The mission file (nested intent)
+
+A `MISSION.md` at the repo root is the team's highest-ranking document — a
+short, human-owned page of *why* the repo exists and what "done" looks like
+(purpose, end state, current milestone), never the *how*. It outranks every
+other document; where anything conflicts with it, it wins.
+
+Injection is **leads-only**: a member with direct reports gets the file
+verbatim at the top of every turn prompt; an IC never does. The IC receives
+its portion as ordinary messages from its lead, restated at the resolution it
+can hold — a dumb-rig member's whole world is its lead's message, by design.
+Intent thus flows edge-by-edge down the tree, restated at every hop, and "who
+gets the mission" has exactly the same answer as "who reports to whom". A flat
+roster treats the marked leader as the only lead. This is commander's-intent
+doctrine (US Army ADP 6-0): intent is the purpose and desired end state, not a
+plan, pushed down the chain so each level can act coherently when the plan
+meets reality — over-specifying the *how* is the failure mode, not the goal.
+
+Two things stay deliberately social, not mechanical. The **briefback**: when
+the file changes (only at milestone boundaries), the top lead's next turn
+restates the intent in its own words to the human and waits for correction
+before work resumes — the loop that catches a wrong reading cheaply. And the
+milestones themselves stay prose the human interprets; r4t builds no status
+fields or staleness verdicts. The only machinery is injection plus a length
+lint: `roster check` warns when `MISSION.md` exceeds ~40 non-blank lines,
+because intent that outgrows a page has usually drifted into planning. See
+[plans/research/ORG-LESSONS.md](../plans/research/ORG-LESSONS.md) for the
+mission-command evidence.
 
 ## Disposal and observability
 
-Suppressed and cut messages are never silently dropped: they move to a
-dead-letter directory under the team's state dir with an x-death-style
-record (reason, count, sender, recipient, task, time) — RabbitMQ's audit
-pattern. That is a lens and a replay source, not a queue anyone waits on.
+Undeliverable mail and per-turn send-quota overflow are never silently
+dropped: they move to a dead-letter directory under the team's state dir
+with an x-death-style record (reason, count, sender, recipient, thread,
+time) — RabbitMQ's audit pattern. That is a lens and a replay source, not a
+queue anyone waits on. Deliverable messages never land here; they queue.
 
 Observability rides on a8s rather than duplicating it:
 
@@ -203,7 +214,7 @@ Observability rides on a8s rather than duplicating it:
   in a8s's transaction log and convo history — r4t adds no transport.
 - Decisions: r4t's dispatch stdout is captured into the a8s node log by
   the wake machinery, so every governance action is one structured line
-  (`r4t: CUT task=.. hop=5 fiona->bob`) in the stream `a8s logs` already
+  (`r4t: RESTING bob — resting (member budget 0.0, ready in ~14 min) (3 queued)`) in the stream `a8s logs` already
   tails.
 - State only r4t can have (locks, buckets, ledgers, dead letters):
   `r4t status` and the state dir.

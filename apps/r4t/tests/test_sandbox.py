@@ -35,7 +35,6 @@ def test_fake_sandbox_end_to_end():
         "Turn count within budget",
         "Zero orphan processes",
         "Dead letters",
-        "Hop cuts",
     ):
         assert check in mechanical
     assert "| FAIL |" not in mechanical
@@ -70,11 +69,11 @@ def test_fake_sandbox_breaker_trips_and_task_still_closes():
     mechanical = report.split("## Mechanical checks", 1)[1].split("## Run", 1)[0]
     for check in (
         "Breaker tripped",
-        "Breaker blocked message(s)",
+        "Breaker held queued message(s)",
         "Leader answered the originator",
         "Zero orphan processes",
     ):
         assert check in mechanical
     assert "| FAIL |" not in mechanical
     assert "BREAKER dev tripped" in report  # governance events section
-    assert "breaker-open" in report
+    assert "breaker open" in report  # queue held while the breaker is open

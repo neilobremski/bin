@@ -1,26 +1,27 @@
-"""Task envelope + ledger — the governance core.
+"""Thread ledger — the conversation label that survives a batch turn.
 
 Every message r4t releases carries a machine-stamped header line:
 
     [r4t task=<ulid> hop=<n> auto]
 
 The header is stamped and stripped by r4t only — agents never see or copy
-it. Incoming: parse + strip, adopt task/hop. Missing header → new task
-ULID, hop 0. The `auto` flag is the message-class mark (RFC 3834's
-Auto-Submitted analog): a header WITHOUT it was written by a deliberate
-hand, which resets the task's turn budget (docs/governance.md §9).
+it. Incoming: parse + strip, adopt the thread id + hop. Missing header →
+new thread ULID, hop 0. The `auto` flag is the message-class mark (RFC
+3834's Auto-Submitted analog): a header WITHOUT it was written by a
+deliberate hand.
 
-Turn budget is weighted by rig: each dispatch by a rig whose
-`max_turns_per_task` is M consumes 1/M of the task's budget (which starts
-at 1.0). A task run entirely by one rig therefore gets exactly
-`max_turns_per_task` turns; mixed-rig chains pro-rate. Exhaustion closes
-the task through one forced-synthesis leader turn — there is no human
-approval gate.
+A thread is a conversation label, not a budget. It exists so a reply can
+be attributed to the exchange it answers, so the originator can be tracked
+(answer-the-originator closure), and so a thread that goes quiet without
+its originator hearing back can wake the leader. It never gates delivery:
+every inbound message enqueues regardless of a thread's status. `task=` on
+the wire is a name kept for compatibility; in prose it is a "thread".
+
+Hop counts are stamped for telemetry (and the Phase 2 tree) but never cut
+a message.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from pathlib import Path
 
@@ -31,8 +32,6 @@ HEADER_RE = re.compile(
     r"^\s*\[r4t\s+task=([0-9A-Za-z]{26})\s+hop=(\d+)(\s+auto)?\]\s*",
     re.IGNORECASE,
 )
-DEFAULT_BUDGET = 1.0
-_EPSILON = 1e-9
 
 STATUS_OPEN = "open"
 STATUS_CLOSED = "closed"
@@ -43,7 +42,7 @@ def new_task_id() -> str:
 
 
 def parse_header(message: str) -> tuple[str | None, int, bool, str]:
-    """Return (task_id, hop, auto, body-with-header-stripped)."""
+    """Return (thread_id, hop, auto, body-with-header-stripped)."""
     match = HEADER_RE.match(message or "")
     if not match:
         return None, 0, False, (message or "").strip()
@@ -58,17 +57,10 @@ def format_header(task_id: str, hop: int, *, auto: bool = False) -> str:
 
 
 def normalize_content(text: str) -> str:
-    """Suppression-key normalization: strip the r4t header, lowercase,
-    collapse whitespace."""
+    """Collapse-key normalization: strip the r4t header, lowercase, collapse
+    whitespace."""
     _, _, _, body = parse_header(text)
     return " ".join(body.lower().split())
-
-
-def pair_key(sender: str, to: str, content: str, *, kind: str = "pair") -> str:
-    digest = hashlib.sha256(
-        f"{sender.strip().lower()}|{to.strip().lower()}|{normalize_content(content)}".encode()
-    ).hexdigest()[:16]
-    return f"{kind}:{digest}"
 
 
 # ---------- ledger ----------
@@ -86,8 +78,10 @@ def load_task(node: str, task_id: str) -> dict | None:
     if not path.is_file():
         return None
     try:
+        import json
+
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
 
@@ -105,12 +99,7 @@ def new_task(task_id: str, creator: str) -> dict:
         "created_at": now,
         "updated_at": now,
         "status": STATUS_OPEN,
-        "used": 0.0,
-        "budget": DEFAULT_BUDGET,
-        "turns": 0,
-        "cut_notified": False,
-        "synthesized": False,
-        "nudges": {},
+        "answered": False,
     }
 
 
@@ -122,32 +111,14 @@ def ensure_task(node: str, task_id: str, creator: str) -> dict:
     return task
 
 
-def charge_turn(task: dict, max_turns_per_task: int) -> bool:
-    """Consume one weighted turn. Returns False (nothing consumed) when the
-    charge would exceed the budget."""
-    cost = 1.0 / max(1, max_turns_per_task)
-    used = float(task.get("used", 0.0))
-    budget = float(task.get("budget", DEFAULT_BUDGET))
-    if used + cost > budget + _EPSILON:
-        return False
-    task["used"] = used + cost
-    task["turns"] = int(task.get("turns", 0)) + 1
-    return True
-
-
-def reset_budget(task: dict) -> bool:
-    """The deliberate-decision rule: a human-origin message in the chain
-    re-licenses the task. Returns True when anything actually changed."""
-    changed = (
-        float(task.get("used", 0.0)) > 0.0
-        or task.get("status") != STATUS_OPEN
-        or bool(task.get("synthesized"))
-    )
-    task["used"] = 0.0
-    task["status"] = STATUS_OPEN
-    task["synthesized"] = False
-    task.pop("synthesis_state", None)
-    return changed
+def close_task(node: str, task_id: str) -> None:
+    """Mark a thread closed: its originator has had a substantive reply."""
+    task = load_task(node, task_id)
+    if task is None or task.get("status") == STATUS_CLOSED:
+        return
+    task["status"] = STATUS_CLOSED
+    task["answered"] = True
+    save_task(node, task)
 
 
 def list_tasks(node: str) -> list[dict]:
@@ -176,7 +147,7 @@ def last_activity(task: dict) -> float:
 
 
 def expire_tasks(node: str, older_than_seconds: float) -> list[str]:
-    """Delete task ledgers idle longer than `older_than_seconds`."""
+    """Delete thread ledgers idle longer than `older_than_seconds`."""
     from datetime import datetime, timezone
 
     cutoff = datetime.now(timezone.utc).timestamp() - older_than_seconds

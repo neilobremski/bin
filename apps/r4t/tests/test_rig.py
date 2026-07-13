@@ -6,16 +6,14 @@ from pathlib import Path
 import pytest
 
 from rig import (
-    DEFAULT_BUCKET_EARN_RATIO,
-    DEFAULT_BUCKET_MAX,
+    DEFAULT_BUDGET_EARN_PER_HOUR,
+    DEFAULT_BUDGET_MAX,
     DEFAULT_CONCURRENCY,
-    DEFAULT_HOP_LIMIT,
     DEFAULT_MAX_CONCURRENT,
     DEFAULT_MAX_SENDS_PER_TURN,
-    DEFAULT_MAX_TURNS_PER_TASK,
     DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS,
-    DEFAULT_NUDGE_CAP,
-    DEFAULT_SUPPRESSION_WINDOW_SECONDS,
+    DEFAULT_CELL_BUDGET_EARN_PER_HOUR,
+    DEFAULT_CELL_BUDGET_MAX,
     DEFAULT_TIMEOUT_SECONDS,
     HARNESS_PRESETS,
     RigError,
@@ -25,6 +23,7 @@ from rig import (
     format_preset_invoke,
     load_rig_config,
     preset_names,
+    swap_preset_rig,
 )
 from roster import Member
 
@@ -48,9 +47,9 @@ class TestLoading:
         assert rig.invoke == ["run", "{prompt}"]
         assert rig.timeout_seconds == DEFAULT_TIMEOUT_SECONDS
         assert rig.concurrency == DEFAULT_CONCURRENCY
-        assert rig.max_turns_per_task == DEFAULT_MAX_TURNS_PER_TASK
-        assert rig.hop_limit == DEFAULT_HOP_LIMIT
         assert rig.max_sends_per_turn == DEFAULT_MAX_SENDS_PER_TURN
+        assert rig.budget_max == DEFAULT_BUDGET_MAX == 8.0
+        assert rig.budget_earn_per_hour == DEFAULT_BUDGET_EARN_PER_HOUR == 4.0
 
     def test_zero_config_gets_full_protection(self, tmp_path):
         config = load_rig_config(
@@ -62,14 +61,13 @@ class TestLoading:
             == DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS
             == 15.0
         )
-        assert config.suppression_window_seconds == DEFAULT_SUPPRESSION_WINDOW_SECONDS == 600.0
-        assert config.bucket_max == DEFAULT_BUCKET_MAX == 8.0
-        assert config.bucket_earn_ratio == DEFAULT_BUCKET_EARN_RATIO == 0.1
-        assert config.nudge_cap == DEFAULT_NUDGE_CAP == 2
+        assert config.cell_budget_max == DEFAULT_CELL_BUDGET_MAX == 16.0
+        assert (
+            config.cell_budget_earn_per_hour == DEFAULT_CELL_BUDGET_EARN_PER_HOUR == 8.0
+        )
         assert config.breaker_cap == 5
         assert config.breaker_cooldown_seconds == 600.0
-        assert config.rebroadcast_senders == ("chatroom",)
-        assert config.active_ttl_rotations == 3
+        assert config.quiet_task_seconds == 1800.0
 
     def test_explicit_limits(self, tmp_path):
         config = load_rig_config(
@@ -80,15 +78,15 @@ class TestLoading:
                         "invoke": ["x", "{prompt}"],
                         "timeout_seconds": 60,
                         "concurrency": 3,
-                        "max_turns_per_task": 10,
-                        "hop_limit": 2,
+                        "budget_max": 10,
+                        "budget_earn_per_hour": 2,
                     }
                 },
             )
         )
         rig = config.rigs["t"]
         assert (rig.timeout_seconds, rig.concurrency) == (60, 3)
-        assert (rig.max_turns_per_task, rig.hop_limit) == (10, 2)
+        assert (rig.budget_max, rig.budget_earn_per_hour) == (10, 2)
 
     def test_explicit_governance_keys(self, tmp_path):
         config = load_rig_config(
@@ -97,36 +95,29 @@ class TestLoading:
                 {
                     "t": {"invoke": ["x", "{prompt}"]},
                     "throttle": {"max_concurrent": 0, "min_seconds_between_turn_starts": 0},
-                    "suppression_window_seconds": 60,
-                    "bucket_max": 4,
-                    "bucket_earn_ratio": 0.5,
-                    "nudge_cap": 1,
+                    "cell_budget_max": 4,
+                    "cell_budget_earn_per_hour": 2,
                     "breaker_cap": 2,
                     "breaker_cooldown_seconds": 30,
-                    "active_ttl_rotations": 5,
-                    "rebroadcast_senders": ["Chatroom", "lobby "],
+                    "quiet_task_seconds": 60,
                 },
             )
         )
         assert config.throttle.max_concurrent == 0
         assert config.throttle.min_seconds_between_turn_starts == 0
-        assert config.suppression_window_seconds == 60
-        assert config.bucket_max == 4
-        assert config.bucket_earn_ratio == 0.5
-        assert config.nudge_cap == 1
+        assert config.cell_budget_max == 4
+        assert config.cell_budget_earn_per_hour == 2
         assert config.breaker_cap == 2
         assert config.breaker_cooldown_seconds == 30
-        assert config.active_ttl_rotations == 5
-        assert config.rebroadcast_senders == ("chatroom", "lobby")
+        assert config.quiet_task_seconds == 60
 
     def test_bad_governance_values_raise(self, tmp_path):
         for key, value in (
-            ("suppression_window_seconds", -1),
-            ("bucket_max", 0),
-            ("nudge_cap", "two"),
+            ("cell_budget_max", 0),
+            ("cell_budget_earn_per_hour", -1),
             ("breaker_cap", 0),
             ("breaker_cooldown_seconds", -5),
-            ("rebroadcast_senders", "chatroom"),
+            ("quiet_task_seconds", 0),
         ):
             with pytest.raises(RigError):
                 load_rig_config(
@@ -279,7 +270,8 @@ class TestDefaultPayload:
 class TestHarnessPresets:
     def test_preset_names_match_a8s_kinds(self):
         assert preset_names() == [
-            "agy", "claude", "codex", "copilot", "cursor", "opencode", "opencode-ollama",
+            "agy", "claude", "codex", "copilot", "cursor", "ollama", "opencode",
+            "opencode-ollama",
         ]
 
     def test_every_preset_invoke_is_valid(self, tmp_path):
@@ -330,6 +322,60 @@ class TestHarnessPresets:
         path = tmp_path / "rigs.json"
         with pytest.raises(RigError, match="unknown preset"):
             add_preset_rig(path, "worker", "gemini")
+
+    def test_swap_preset_rig_preserves_settings(self, tmp_path):
+        path = write_config(tmp_path, {
+            "worker": {
+                "invoke": ["x", "{prompt}"],
+                "concurrency": 3,
+                "timeout_seconds": 120,
+                "budget_max": 10,
+                "budget_earn_per_hour": 2,
+            },
+        })
+        rig_key = swap_preset_rig(path, "worker", "agy")
+        assert rig_key == "worker"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert raw["worker"]["concurrency"] == 3
+        assert raw["worker"]["timeout_seconds"] == 120
+        assert raw["worker"]["budget_max"] == 10
+        assert raw["worker"]["budget_earn_per_hour"] == 2
+        assert "swap" in raw["worker"]["_notes"].lower()
+        config = load_rig_config(path)
+        assert config.rigs["worker"].argv("hi")[0] == "agy"
+        assert config.rigs["worker"].concurrency == 3
+
+    def test_swap_preset_rig_missing_rig(self, tmp_path):
+        path = write_config(tmp_path, {"other": {"invoke": ["x", "{prompt}"]}})
+        with pytest.raises(RigError, match="no rig 'worker' to swap"):
+            swap_preset_rig(path, "worker", "claude")
+
+    def test_swap_preset_rig_missing_config(self, tmp_path):
+        with pytest.raises(RigError, match="no rig"):
+            swap_preset_rig(tmp_path / "rigs.json", "worker", "claude")
+
+    def test_swap_unknown_preset(self, tmp_path):
+        path = write_config(tmp_path, {"worker": {"invoke": ["x", "{prompt}"]}})
+        with pytest.raises(RigError, match="unknown preset"):
+            swap_preset_rig(path, "worker", "gemini")
+
+    def test_swap_preset_rig_requires_model(self, tmp_path):
+        path = write_config(tmp_path, {"worker": {"invoke": ["x", "{prompt}"]}})
+        with pytest.raises(RigError, match="requires --model"):
+            swap_preset_rig(path, "worker", "opencode-ollama")
+
+    def test_swap_preset_rig_materializes_model(self, tmp_path):
+        path = write_config(tmp_path, {
+            "worker": {"invoke": ["x", "{prompt}"], "max_sends_per_turn": 4},
+        })
+        swap_preset_rig(path, "worker", "opencode-ollama", model="qwen2.5-coder:7b")
+        config = load_rig_config(path)
+        argv = config.rigs["worker"].argv("hi")
+        assert argv[4] == "qwen2.5-coder:7b"
+        assert "{model}" not in argv
+        assert config.rigs["worker"].max_sends_per_turn == 4
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert "qwen2.5-coder:7b" in raw["worker"]["_notes"]
 
     def test_opencode_and_agy_presets_avoid_skip_permissions(self):
         opencode = " ".join(HARNESS_PRESETS["opencode"]["invoke"])

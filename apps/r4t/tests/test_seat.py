@@ -6,7 +6,7 @@ import os
 
 import state
 import tasks
-from dispatch import drain
+from dispatch import drain, handle_message
 from r4t import main as r4t_main
 
 NODE = "acme"
@@ -80,30 +80,26 @@ def test_seat_send_rejects_unknown_member(repo, rig_config, r4t_home, capsys):
     assert "no dispatchable member" in capsys.readouterr().err
 
 
-def test_drain_claim_is_exclusive(ctx, r4t_home, fake_harness, monkeypatch):
-    state.park_pending(NODE, {"from": "boss", "to": "acme:phil", "body": "go"})
-    path = state.list_pending(NODE)[0]
-    real_rename = os.rename
-    stolen = {}
-
-    def racing_rename(src, dst):
-        # A second drainer wins the race for this envelope just before us.
-        if not stolen and src == str(path):
-            stolen["by"] = path.with_name(f"{path.name}.claim-99")
-            real_rename(src, str(stolen["by"]))
-        return real_rename(src, dst)
-
-    monkeypatch.setattr("dispatch.os.rename", racing_rename)
-    assert drain(ctx) == 0  # lost the claim: no duplicate redispatch
+def test_live_lock_holds_queue_for_next_drain(ctx, r4t_home, fake_harness):
+    # The agent lock is the only claim: a member with a live turn cannot be
+    # run by a concurrent drainer, and its queued mail simply waits.
+    handle_message(ctx, "boss", "acme:phil", "go", drain_after=False)
+    lock = state.AgentLock(NODE, "phil")
+    assert lock.acquire("junior-dev")
+    assert drain(ctx) == 0
+    assert state.queue_depth(NODE, "phil") == 1
     assert not harness_calls_exist(fake_harness)
+    lock.release()
+    assert drain(ctx) == 1
+    assert harness_calls_exist(fake_harness)
 
 
-def test_drain_recovers_claims_from_dead_drainer(ctx, r4t_home, fake_harness):
-    state.park_pending(NODE, {"from": "boss", "to": "acme:phil", "body": "go"})
-    path = state.list_pending(NODE)[0]
-    os.rename(path, path.with_name(f"{path.name}.claim-999999"))
-    assert state.list_pending(NODE) == []
-    assert drain(ctx) == 1  # dead drainer's claim re-queued and dispatched
+def test_stale_lock_does_not_block_drain(ctx, r4t_home, fake_harness):
+    handle_message(ctx, "boss", "acme:phil", "go", drain_after=False)
+    dead = state.agent_dir(NODE, "phil") / ".lock"
+    dead.parent.mkdir(parents=True, exist_ok=True)
+    dead.write_text(json.dumps({"pid": 999999999, "rig": "junior-dev"}), encoding="utf-8")
+    assert drain(ctx) == 1  # stale lock stolen; the queued message runs
     assert harness_calls_exist(fake_harness)
 
 

@@ -6,24 +6,28 @@ import time
 import state
 from state import (
     AgentLock,
+    CELL_BUDGET_KEY,
     append_history,
-    bucket_drain,
-    bucket_earn,
-    bucket_level,
-    bucket_muted,
+    budget_charge,
+    budget_level,
+    budget_seconds_until,
+    claim_queue,
     count_rig_locks,
+    enqueue,
+    fmt_budget,
     history_path,
     list_dead_letters,
-    list_pending,
+    list_queue,
     live_locks,
-    park_pending,
+    members_with_queue,
     prepare_staging,
     prune_stale_locks,
+    queue_depth,
     read_history,
+    read_queue,
     record_dead_letter,
     record_velocity,
     staged_envelopes,
-    suppression_check,
     team_dir,
 )
 
@@ -113,12 +117,45 @@ class TestLocks:
         assert len(live_locks(NODE)) == 1
 
 
-class TestPending:
-    def test_park_and_list_fifo(self, r4t_home):
-        first = park_pending(NODE, {"from": "a", "to": "acme:phil", "body": "1"})
-        second = park_pending(NODE, {"from": "b", "to": "acme:phil", "body": "2"})
-        listed = list_pending(NODE)
-        assert listed == sorted([first, second])
+class TestQueue:
+    def test_enqueue_and_read_in_arrival_order(self, r4t_home):
+        enqueue(NODE, "phil", {"from": "gerry", "body": "one", "task": "t1"})
+        enqueue(NODE, "phil", {"from": "marcus", "body": "two", "task": "t2"})
+        bodies = [e["body"] for e in read_queue(NODE, "phil")]
+        assert bodies == ["one", "two"]
+        assert queue_depth(NODE, "phil") == 2
+
+    def test_duplicate_collapse_bumps_repeats(self, r4t_home):
+        enqueue(NODE, "phil", {"from": "gerry", "body": "Deploy the  fix"})
+        enqueue(NODE, "phil", {"from": "GERRY", "body": "deploy   the fix\n"})
+        queue = read_queue(NODE, "phil")
+        assert len(queue) == 1
+        assert queue[0]["repeats"] == 2
+
+    def test_collapse_only_against_newest(self, r4t_home):
+        enqueue(NODE, "phil", {"from": "gerry", "body": "same"})
+        enqueue(NODE, "phil", {"from": "marcus", "body": "different"})
+        enqueue(NODE, "phil", {"from": "gerry", "body": "same"})
+        # newest is marcus/"different", so gerry/"same" is a fresh entry
+        assert queue_depth(NODE, "phil") == 3
+
+    def test_different_sender_does_not_collapse(self, r4t_home):
+        enqueue(NODE, "phil", {"from": "gerry", "body": "same"})
+        enqueue(NODE, "phil", {"from": "marcus", "body": "same"})
+        assert queue_depth(NODE, "phil") == 2
+
+    def test_claim_removes_and_returns_all(self, r4t_home):
+        enqueue(NODE, "phil", {"from": "gerry", "body": "one"})
+        enqueue(NODE, "phil", {"from": "gerry-2", "body": "two"})
+        claimed = claim_queue(NODE, "phil")
+        assert [c["body"] for c in claimed] == ["one", "two"]
+        assert queue_depth(NODE, "phil") == 0
+        assert list_queue(NODE, "phil") == []
+
+    def test_members_with_queue(self, r4t_home):
+        enqueue(NODE, "phil", {"from": "gerry", "body": "x"})
+        enqueue(NODE, "gerry", {"from": "neil", "body": "y"})
+        assert members_with_queue(NODE) == ["gerry", "phil"]
 
 
 class TestVelocity:
@@ -185,43 +222,50 @@ class TestDeadLetters:
         assert len(list_dead_letters(NODE)[0]["content"]) == 2000
 
 
-class TestSuppression:
-    def test_first_passes_repeats_counted(self, r4t_home):
-        suppressed, count = suppression_check(NODE, "pair:abc", 600)
-        assert not suppressed and count == 1
-        suppressed, count = suppression_check(NODE, "pair:abc", 600)
-        assert suppressed and count == 2
-        suppressed, count = suppression_check(NODE, "pair:abc", 600)
-        assert suppressed and count == 3
-
-    def test_different_keys_independent(self, r4t_home):
-        assert suppression_check(NODE, "pair:one", 600) == (False, 1)
-        assert suppression_check(NODE, "pair:two", 600) == (False, 1)
-
-    def test_window_expiry(self, r4t_home):
-        assert suppression_check(NODE, "pair:x", 0.05) == (False, 1)
-        time.sleep(0.1)
-        assert suppression_check(NODE, "pair:x", 0.05) == (False, 1)
-
-
-class TestBuckets:
+class TestBudgets:
     def test_starts_full(self, r4t_home):
-        assert bucket_level(NODE, "phil", 8.0) == 8.0
+        assert budget_level(NODE, "phil", 8.0, 4.0) == 8.0
 
-    def test_drain_and_floor_at_zero(self, r4t_home):
-        assert bucket_drain(NODE, "phil", 3.0, 8.0) == 5.0
-        assert bucket_drain(NODE, "phil", 100.0, 8.0) == 0.0
+    def test_charge_deducts_and_floors_at_zero(self, r4t_home):
+        now = 1_000_000.0
+        assert budget_charge(NODE, "phil", 8.0, 0.0, 3.0, now=now) == 5.0
+        assert budget_charge(NODE, "phil", 8.0, 0.0, 100.0, now=now) == 0.0
 
-    def test_earn_caps_at_max(self, r4t_home):
-        bucket_drain(NODE, "phil", 1.0, 8.0)
-        assert bucket_earn(NODE, "phil", 0.1, 8.0) == 7.1
-        for _ in range(20):
-            bucket_earn(NODE, "phil", 0.1, 8.0)
-        assert bucket_level(NODE, "phil", 8.0) == 8.0
+    def test_a_turn_costs_one_unit(self, r4t_home):
+        now = 1_000_000.0
+        assert budget_charge(NODE, "phil", 8.0, 0.0, now=now) == 7.0
+        assert budget_charge(NODE, "phil", 8.0, 0.0, now=now) == 6.0
 
-    def test_muted_below_half(self):
-        assert not bucket_muted(4.0, 8.0)
-        assert bucket_muted(3.9, 8.0)
+    def test_earns_back_over_time_capped_at_max(self, r4t_home):
+        start = 1_000_000.0
+        budget_charge(NODE, "phil", 8.0, 4.0, 8.0, now=start)  # empty
+        # 4 units/hour: after 30 min the bucket holds 2
+        assert budget_level(NODE, "phil", 8.0, 4.0, now=start + 1800) == 2.0
+        # after a long while it caps at the max
+        assert budget_level(NODE, "phil", 8.0, 4.0, now=start + 100000) == 8.0
+
+    def test_seconds_until_ready(self, r4t_home):
+        start = 1_000_000.0
+        budget_charge(NODE, "phil", 8.0, 4.0, 8.0, now=start)  # empty
+        # needs 1 unit at 4/hour -> 900s
+        assert budget_seconds_until(NODE, "phil", 8.0, 4.0, now=start) == 900.0
+        # already ≥1 -> 0
+        budget_charge(NODE, "phil", 8.0, 4.0, 0.0, now=start + 3600)
+        assert budget_seconds_until(NODE, "phil", 8.0, 4.0, now=start + 3600) == 0.0
+
+    def test_cell_bucket_is_independent(self, r4t_home):
+        now = 1_000_000.0
+        budget_charge(NODE, CELL_BUDGET_KEY, 16.0, 0.0, 5.0, now=now)
+        assert budget_level(NODE, CELL_BUDGET_KEY, 16.0, 0.0, now=now) == 11.0
+        assert budget_level(NODE, "phil", 8.0, 0.0, now=now) == 8.0
+
+
+class TestFmtBudget:
+    def test_whole_number_drops_decimal(self):
+        assert fmt_budget(8.0) == "8"
+
+    def test_fraction_keeps_one_decimal(self):
+        assert fmt_budget(7.5) == "7.5"
 
 
 class TestStaging:
