@@ -110,6 +110,13 @@ r4t status --node myrepo    # budgets, queues, threads, dead letters
 a8s logs myrepo-node -f     # traffic + r4t governance lines
 ```
 
+### 7. (Optional) point the team with a mission
+
+Drop a short, human-owned `MISSION.md` at the repo root — why the repo exists,
+what "done" looks like, the current milestone; never the how. r4t injects it
+into every **lead's** turn prompt (members with reports); leads restate it
+down to their ICs. Keep it under a page — `roster check` warns past ~40 lines.
+
 ## Mental model
 
 ```

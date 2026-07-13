@@ -926,6 +926,15 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
         else:
             print(f"warning: {message}")
             warnings += 1
+    mission = root / "MISSION.md"
+    if mission.is_file():
+        n = sum(1 for line in mission.read_text(encoding="utf-8").splitlines() if line.strip())
+        if n > 40:
+            print(
+                f"warning: MISSION.md is {n} lines — intent docs read best "
+                "under one page"
+            )
+            warnings += 1
     if problems:
         print(f"{problems} problem(s)")
         return 1

@@ -195,6 +195,32 @@ def _teammate_lines(ctx: DispatchContext, roster: Roster, member: Member) -> lis
     return lines
 
 
+def _mission_section(ctx: DispatchContext, roster: Roster, member: Member) -> list[str]:
+    """MISSION.md is injected verbatim into a lead's turn prompt and no one
+    else's. A member is a lead when it has direct reports (tree rosters); a
+    flat roster with no tree declared treats the marked Leader as the only
+    lead. ICs never see the file injected — their lead restates the intent at
+    the resolution they can hold. Missing MISSION.md means no section, no error.
+    """
+    try:
+        text = (ctx.root / "MISSION.md").read_text(encoding="utf-8").strip()
+    except OSError:
+        return []
+    if not text:
+        return []
+    if roster.declares_tree:
+        is_lead = bool(roster.reports_to(member))
+    else:
+        is_lead = member.leader and not member.is_human
+    if not is_lead:
+        return []
+    return [
+        "## The mission (MISSION.md — outranks every other document)",
+        text,
+        "",
+    ]
+
+
 def build_prompt(
     ctx: DispatchContext,
     roster: Roster,
@@ -223,6 +249,7 @@ def build_prompt(
         f"the team repo at {ctx.root.resolve()} (your current directory). "
         "Write files here with relative paths only.",
         "",
+        *_mission_section(ctx, roster, member),
         "## Who you are (from the team roster)",
         member.persona or f"### {member.name}",
         "",
@@ -249,6 +276,9 @@ def build_prompt(
         "chat rooms or broadcast channels.",
         "- Do not send acknowledgment-only messages. If you have nothing "
         "substantive to add, send nothing — silence is fine.",
+        "- Your tell's body is the only thing the recipient sees — anything you "
+        "write around it (framing, notes, your reasoning) is lost.",
+        "- Repo work is not done until it is committed.",
     ]
     return "\n".join(parts)
 

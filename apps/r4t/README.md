@@ -165,6 +165,34 @@ held voluntarily, but voluntary is not a control — information hiding removes
 the temptation, rerouting removes the option. See
 [docs/governance.md](docs/governance.md) §8 for the evidence.
 
+## The mission file
+
+Drop a `MISSION.md` at the repo root and it becomes the team's north star: a
+short, **human-owned** page stating *why* the repo exists and what "done"
+looks like — purpose, end state, and the current milestone, never the *how*.
+It outranks every other document in the repo; where anything conflicts with
+it, it wins.
+
+Injection is **leads-only**. Every member with direct reports gets the file
+verbatim at the top of each turn prompt, under a section labelled *"The mission
+(MISSION.md — outranks every other document)"*. ICs never see it injected —
+their lead restates the relevant intent as ordinary messages, at the
+resolution the receiver can hold. Intent flows edge-by-edge down the tree,
+restated at every hop: "who gets the mission" has the same answer as "who
+reports to whom". (A flat roster with no `Lead:` lines treats the marked
+leader as the only lead. Any member with tools can of course open the file
+itself; there is no machinery for that.)
+
+This follows commander's-intent doctrine (US Army ADP 6-0): intent is the
+purpose and desired end state, not a plan, restated down the chain so each
+level can act on its own when the plan meets reality. When the file changes —
+which should happen only at milestone boundaries — the briefback ritual
+applies: the top lead's next turn restates the intent in their own words to
+the human and waits for correction before work resumes. That ritual is social
+convention, not machinery: r4t injects the file and lints its length, nothing
+more. `r4t roster check` warns when `MISSION.md` runs past ~40 lines, because
+intent that no longer fits a page has usually gone stale into planning.
+
 ## Governance knobs
 
 All keys live in the out-of-repo rig config (`~/.config/r4t/rigs.json`).

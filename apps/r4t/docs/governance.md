@@ -171,6 +171,35 @@ Prior art: Team Topologies (Skelton/Pais) — explicit, bounded interaction
 modes rather than ad-hoc cross-team chatter; the parametric bounds trace to
 Hackman's team-size work and the US Army's fire-team/squad structure.
 
+### 9. The mission file (nested intent)
+
+A `MISSION.md` at the repo root is the team's highest-ranking document — a
+short, human-owned page of *why* the repo exists and what "done" looks like
+(purpose, end state, current milestone), never the *how*. It outranks every
+other document; where anything conflicts with it, it wins.
+
+Injection is **leads-only**: a member with direct reports gets the file
+verbatim at the top of every turn prompt; an IC never does. The IC receives
+its portion as ordinary messages from its lead, restated at the resolution it
+can hold — a dumb-rig member's whole world is its lead's message, by design.
+Intent thus flows edge-by-edge down the tree, restated at every hop, and "who
+gets the mission" has exactly the same answer as "who reports to whom". A flat
+roster treats the marked leader as the only lead. This is commander's-intent
+doctrine (US Army ADP 6-0): intent is the purpose and desired end state, not a
+plan, pushed down the chain so each level can act coherently when the plan
+meets reality — over-specifying the *how* is the failure mode, not the goal.
+
+Two things stay deliberately social, not mechanical. The **briefback**: when
+the file changes (only at milestone boundaries), the top lead's next turn
+restates the intent in its own words to the human and waits for correction
+before work resumes — the loop that catches a wrong reading cheaply. And the
+milestones themselves stay prose the human interprets; r4t builds no status
+fields or staleness verdicts. The only machinery is injection plus a length
+lint: `roster check` warns when `MISSION.md` exceeds ~40 non-blank lines,
+because intent that outgrows a page has usually drifted into planning. See
+[plans/research/ORG-LESSONS.md](../plans/research/ORG-LESSONS.md) for the
+mission-command evidence.
+
 ## Disposal and observability
 
 Undeliverable mail and per-turn send-quota overflow are never silently

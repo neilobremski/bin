@@ -950,6 +950,43 @@ class TestTeammateScoping:
         assert "Cal" not in lines  # the build cell is invisible to a design IC
 
 
+MISSION_TEXT = "# Mission\n\nBuild the thing. Done when a stranger loves it.\n"
+MISSION_HEADING = "## The mission (MISSION.md — outranks every other document)"
+
+
+class TestMissionInjection:
+    def _prompt(self, ctx, name):
+        roster = load_roster(ctx.roster_path)
+        return dispatch.build_prompt(ctx, roster, roster.find(name), [])
+
+    def test_lead_with_reports_gets_mission(self, tree_ctx):
+        (tree_ctx.root / "MISSION.md").write_text(MISSION_TEXT, encoding="utf-8")
+        prompt = self._prompt(tree_ctx, "Vic")  # Ann and Cal report to Vic
+        assert MISSION_HEADING in prompt
+        assert "Done when a stranger loves it" in prompt
+
+    def test_ic_never_gets_mission(self, tree_ctx):
+        (tree_ctx.root / "MISSION.md").write_text(MISSION_TEXT, encoding="utf-8")
+        prompt = self._prompt(tree_ctx, "Cal")  # Cal has no reports
+        assert MISSION_HEADING not in prompt
+        assert "Done when a stranger loves it" not in prompt
+
+    def test_flat_roster_injects_only_the_leader(self, ctx):
+        (ctx.root / "MISSION.md").write_text(MISSION_TEXT, encoding="utf-8")
+        assert MISSION_HEADING in self._prompt(ctx, "Gerry")  # Leader: yes
+        assert MISSION_HEADING not in self._prompt(ctx, "Phil")  # plain IC
+
+    def test_missing_mission_no_section_no_error(self, tree_ctx):
+        assert not (tree_ctx.root / "MISSION.md").exists()
+        prompt = self._prompt(tree_ctx, "Vic")
+        assert MISSION_HEADING not in prompt
+
+    def test_prompt_carries_the_two_doctrine_lines(self, ctx):
+        prompt = self._prompt(ctx, "Phil")
+        assert "the only thing the recipient sees" in prompt
+        assert "not done until it is committed" in prompt
+
+
 class TestTreeEnforcement:
     def test_non_adjacent_tell_reroutes_to_lead(self, tree_ctx, monkeypatch):
         monkeypatch.setenv("CHATTY_TO", "Cal")
@@ -1180,6 +1217,37 @@ class TestCli:
         rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
         assert rc == 1
         assert "Ghost" in capsys.readouterr().out
+
+    def _clean_roster(self, root):
+        (root / "ROSTER.md").write_text(
+            "### Gerry\n- **Status:** AI\n- **Rig:** leader\n- **Leader:** yes\n"
+            "### Phil\n- **Status:** AI\n- **Rig:** junior-dev\n",
+            encoding="utf-8",
+        )
+
+    def test_roster_check_warns_on_oversized_mission(self, r4t_home, tmp_path, rig_config, capsys):
+        root = tmp_path / "bigmission"
+        root.mkdir()
+        self._clean_roster(root)
+        (root / "MISSION.md").write_text("\n".join(f"line {i}" for i in range(41)), encoding="utf-8")
+        rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
+        out = capsys.readouterr().out
+        assert rc == 0  # a warning does not fail the check
+        assert "MISSION.md is 41 lines" in out
+        assert "1 warning(s)" in out
+
+    def test_roster_check_quiet_under_mission_limit(self, r4t_home, tmp_path, rig_config, capsys):
+        root = tmp_path / "smallmission"
+        root.mkdir()
+        self._clean_roster(root)
+        # 40 non-blank lines padded with blanks — blank lines are not counted.
+        body = "\n".join(f"line {i}" for i in range(40)) + "\n\n\n\n"
+        (root / "MISSION.md").write_text(body, encoding="utf-8")
+        rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "MISSION.md" not in out
+        assert "OK" in out
 
 
 class TestDefault:
