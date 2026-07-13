@@ -62,7 +62,21 @@ blessings, anything that changed mid-run)*
 
 ## Findings
 
-*(fill in after both M3s land)*
+- **2026-07-13 — shadow MISSION.md in vellum (org B).** In portable-org
+  mode neither workplace repo carries MISSION.md on disk; the mission
+  reaches leads by prompt injection only. Vellum's lead, finding no
+  MISSION.md in the repo, wrote one into the workplace clone
+  (~/repos/vellum) and committed it. Dispatch is unaffected — injection
+  still reads the org dir's copy (~/.config/r4t/orgs/vellum) — but
+  tool-using members reading the repo will now find the lead's shadow
+  copy: two sources of truth. Quill (org A) did not do this. Neil's
+  ruling: leave the shadow in place deliberately and observe the drift —
+  do tool-using members work from the on-disk shadow or the injected
+  text? The drift checkpoint is the M1 blessing: the org-dir copy changes
+  there and the shadow goes stale. Queued design responses (injection
+  declaring itself authoritative; materializing a read-only copy into the
+  workplace) are frozen in `plans/CELL-SPEC.md` under "Queued during the
+  n5a/d5n run" until the run ends.
 
 ## Neil's verdict
 

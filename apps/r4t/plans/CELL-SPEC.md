@@ -211,3 +211,30 @@ per-node. Graduation is trivial — copy the two files into the repo and delete
 `r4t-org.json`; resolution falls back to the in-repo default. `roster check`
 runs against an org dir (tree + 40-line mission lint) and flags a malformed
 config or a missing workplace.
+
+## Queued during the n5a/d5n run (2026-07-13)
+
+Design notes frozen here while the live experiment runs — observe only, no
+agent-facing changes until the run ends.
+
+1. **Mission injection must declare itself authoritative.** The injected
+   prompt text should state explicitly that it IS the mission and that
+   members must never create or edit MISSION.md themselves. Motivated by a
+   live event: one org's lead, seeing no MISSION.md on disk in portable-org
+   mode, wrote one into the workplace repo and committed it. Injection still
+   reads the org dir's copy, so dispatch is unaffected — but tool-using
+   members will read the shadow, giving the team two sources of truth and a
+   standing drift risk. One prompt sentence closes the loophole at the
+   source.
+
+2. **Open question: materialize the mission into the workplace?** In
+   portable-org mode, should dispatch write a read-only MISSION.md copy into
+   the workplace at turn time (so tool-using members find the real one on
+   disk), or stay injection-only (one source of truth, nothing r4t-written
+   in a repo the team also commits to)? Materializing removes the vacuum
+   that invited the shadow copy above, but adds a staleness window between
+   org-dir edits and the next turn. Neil ruled to leave the live shadow in
+   place deliberately (observe-drift experiment: do tool-using members
+   prefer the on-disk shadow over the injected text?); decide after that
+   evidence lands — the drift checkpoint is the M1 blessing, when the org
+   copy changes and the shadow goes stale.
