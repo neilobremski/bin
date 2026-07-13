@@ -158,11 +158,15 @@ tell acme:team:ops "deploy done"     # same node; sub-address opaque to a8s
 ```
 
 Prefixes share the agent/alias name grammar (lowercase canonical form,
-case-insensitive match) and the three name pools are disjoint — a prefix
-can't collide with an agent or alias name and vice versa. An unknown prefix
-behaves like any unknown recipient: published to configured remotes (another
-cluster may own the binding), or trashed when there are none. Removing an
-agent unbinds any prefixes pointing at it.
+case-insensitive match). A prefix may match the name of the agent it binds to
+— a node owning its own namespace, so `s1l` registers as agent `s1l` and binds
+prefix `s1l` to itself, and cross-wall traffic is attributed to `s1l` rather
+than a `s1l-node` stand-in. A prefix still can't collide with an alias or with
+a *different* agent's name (a bare `tell <prefix>` resolves to the namespace,
+which would otherwise silently shadow that agent). An unknown prefix behaves
+like any unknown recipient: published to configured remotes (another cluster
+may own the binding), or trashed when there are none. Removing an agent unbinds
+any prefixes pointing at it.
 
 ### Handlers
 
