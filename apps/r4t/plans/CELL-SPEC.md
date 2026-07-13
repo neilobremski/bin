@@ -157,3 +157,10 @@ Decided 2026-07-12 (nested intent, per commander's-intent doctrine):
   milestone tracking (status fields, staleness verdicts). Milestones
   stay prose; the human interprets them. Revisit only if d5n shows
   specialist drift.
+- Turn-prompt lines earned in the M3 run (all members, not just
+  leads): (a) "Your tell's body is the only thing the recipient
+  sees — anything you write around it is lost" (Vela's briefback-
+  above-the-tell); (b) "Repo work is not done until it is committed"
+  (the twice-taught commit lesson).
+- `roster check` warns when MISSION.md exceeds ~40 lines (intent
+  docs must stay one page — stale-intent guard).
