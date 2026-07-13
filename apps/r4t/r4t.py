@@ -41,6 +41,7 @@ from rig import (
     swap_preset_rig,
 )
 from notify import resolve_tell_fn, simulate_enabled
+from org import check_org, load_org
 from roster import Member, Roster, RosterError, load_roster, resolve_roster_path
 
 DEFAULT_TASK_TTL_SECONDS = 7 * 86400
@@ -121,15 +122,15 @@ def _resolve_node(raw: str | None) -> str | None:
 
 
 def _context(args: argparse.Namespace, node: str) -> DispatchContext:
-    root = _resolve_root(args.root)
-    roster_path = resolve_roster_path(root, getattr(args, "roster", None))
+    org = load_org(_resolve_root(args.root))
+    roster_path = resolve_roster_path(org.dir, getattr(args, "roster", None))
     if not getattr(args, "root", None) and not roster_path.is_file():
         stamped = state.read_root(node)
         if stamped is not None and stamped.is_dir():
-            root = stamped
-            roster_path = resolve_roster_path(root, getattr(args, "roster", None))
+            org = load_org(stamped)
+            roster_path = resolve_roster_path(org.dir, getattr(args, "roster", None))
     return DispatchContext(
-        root=root,
+        root=org.dir,
         node=node,
         roster_path=roster_path,
         config_path=resolve_config_path(getattr(args, "rig_config", None)),
@@ -137,6 +138,7 @@ def _context(args: argparse.Namespace, node: str) -> DispatchContext:
             notify=getattr(args, "notify", True),
             simulate=simulate_enabled(getattr(args, "simulate_tell", False)),
         ),
+        workplace=org.workplace,
     )
 
 
@@ -158,12 +160,17 @@ def _print_rig_summary(config_path: Path, roster_path: Path | None = None) -> No
         argv = " ".join(pool[0])
         if len(pool) > 1:
             argv += f"  [+{len(pool) - 1} pool variant(s)]"
-        print(
-            f"  {name}: {argv}  "
-            f"(timeout={rig.timeout_seconds:g}s "
+        limits = (
+            f"timeout={rig.timeout_seconds:g}s "
             f"budget={rig.budget_max:g}/+{rig.budget_earn_per_hour:g}per-h "
-            f"sends={rig.max_sends_per_turn})"
+            f"sends={rig.max_sends_per_turn}"
         )
+        if rig.rig_budget_max is not None:
+            limits += (
+                f" rig-budget={rig.rig_budget_max:g}/"
+                f"+{rig.rig_budget_earn_per_hour:g}per-h"
+            )
+        print(f"  {name}: {argv}  ({limits})")
     if config.pins:
         print("  pins:")
         for agent in sorted(config.pins):
@@ -413,6 +420,15 @@ def _roster_rows(
             node, m.name, rig.budget_max, rig.budget_earn_per_hour
         )
         detail += f"  budget={state.fmt_budget(level)}/{state.fmt_budget(rig.budget_max)}"
+        rig_level = None
+        if rig.rig_budget_max is not None:
+            rig_level = state.rig_budget_level(
+                rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour
+            )
+            detail += (
+                f"  rig={state.fmt_budget(rig_level)}/"
+                f"{state.fmt_budget(rig.rig_budget_max)}"
+            )
         depth = state.queue_depth(node, m.name)
         if depth:
             detail += f"  {depth} queued"
@@ -423,6 +439,11 @@ def _roster_rows(
                 node, m.name, rig.budget_max, rig.budget_earn_per_hour
             )
             detail += f"  RESTING (ready in ~{wait / 60:.0f} min)"
+        elif rig_level is not None and rig_level < 1.0 and depth:
+            wait = state.rig_budget_seconds_until(
+                rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour
+            )
+            detail += f"  RESTING (rig {rig.name}, ready in ~{wait / 60:.0f} min)"
         blocked, failures = state.breaker_open(
             node, m.name, config.breaker_cap, config.breaker_cooldown_seconds
         )
@@ -455,13 +476,17 @@ def _rig_rows(
         argv = " ".join(pool[0])
         if len(pool) > 1:
             argv += f"  [+{len(pool) - 1} pool variant(s)]"
-        rows.append((
-            True, name,
-            f"{argv}  (timeout={rig.timeout_seconds:g}s "
+        limits = (
+            f"timeout={rig.timeout_seconds:g}s "
             f"budget={rig.budget_max:g}/+{rig.budget_earn_per_hour:g}per-h "
-            f"sends={rig.max_sends_per_turn})",
-            None,
-        ))
+            f"sends={rig.max_sends_per_turn}"
+        )
+        if rig.rig_budget_max is not None:
+            limits += (
+                f" rig-budget={rig.rig_budget_max:g}/"
+                f"+{rig.rig_budget_earn_per_hour:g}per-h"
+            )
+        rows.append((True, name, f"{argv}  ({limits})", None))
     for agent in sorted(config.pins):
         rows.append((None, "pin", f"{agent} -> {config.pins[agent]}", None))
     rows.append((
@@ -875,7 +900,12 @@ def cmd_task(args: argparse.Namespace) -> int:
 
 
 def cmd_roster_check(args: argparse.Namespace) -> int:
-    root = _resolve_root(args.root)
+    org = load_org(_resolve_root(args.root))
+    root = org.dir
+    problems = 0
+    for message in check_org(root):
+        print(f"org: {message}")
+        problems += 1
     roster_path = resolve_roster_path(root, args.roster)
     try:
         roster = load_roster(roster_path)
@@ -889,7 +919,6 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
         print(f"warning: {e}", file=sys.stderr)
         config = None
 
-    problems = 0
     if not roster.members:
         print(f"{roster_path}: no `### <Name>` member blocks found")
         problems += 1

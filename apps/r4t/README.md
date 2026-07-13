@@ -213,6 +213,28 @@ convention, not machinery: r4t injects the file and lints its length, nothing
 more. `r4t roster check` warns when `MISSION.md` runs past ~40 lines, because
 intent that no longer fits a page has usually gone stale into planning.
 
+## Portable orgs
+
+By default `ROSTER.md` and `MISSION.md` live in the repo — the slow furnace a
+proven structure graduates into. When you want to keep the org OUT of the repo
+(to A/B two casts against the same project, or to iterate on a roster without
+touching the codebase), make an **org directory**: put `ROSTER.md` +
+`MISSION.md` there alongside an `r4t-org.json` naming the workplace repo.
+
+```json
+{ "repo": "/path/to/the/repo" }
+```
+
+Register the a8s node at the org dir; turns run and commit in `repo`, while the
+roster, mission, and mission injection read from the org dir. Org-to-repo is
+many-to-one: two org dirs (same `MISSION.md`, different `ROSTER.md`) can point
+at two clones of one project without their team state colliding — state is
+per-a8s-node, not per-repo. `r4t roster check --root <org-dir>` lints the org,
+including a missing/malformed `r4t-org.json` or a workplace repo that does not
+exist. **Graduation is trivial:** copy the two files into the repo and delete
+`r4t-org.json` — resolution falls back to the in-repo default with no other
+change.
+
 ## Governance knobs
 
 All keys live in the out-of-repo rig config (`~/.config/r4t/rigs.json`).
@@ -220,14 +242,30 @@ Per-rig keys go inside a rig block; the rest are top-level. Rationale and
 prior art per layer: [docs/governance.md](docs/governance.md).
 
 The economics are budgets, not cuts: a member runs while its own spend
-bucket and the shared cell bucket both hold ≥1 unit (a turn costs 1 of
-each). An empty bucket means the member is *resting* — its queue holds and
-it runs again when the bucket refills. Messages are never dropped for lack
-of budget.
+bucket, the shared cell bucket, and (if the rig declares one) the rig's own
+bucket all hold ≥1 unit (a turn costs 1 of each). An empty bucket means the
+member is *resting* — its queue holds and it runs again when the bucket
+refills. Messages are never dropped for lack of budget.
+
+The rig bucket is the quota answer. A rig maps to a real subscription (an
+Antigravity plan good for ~20 prompts an hour, a Claude seat), so its ceiling
+is set **on the rig** and is **machine-global**: it binds every r4t team on
+the machine that shares the rig, so one subscription is safely shared across
+projects. Its bucket lives in `~/.config/r4t/rig-buckets.json` (outside any
+team) and every node charges it atomically. Budget refill IS the retry: an
+exhausted rig rests every member on it, on every team, and the held queues
+catch up when it refills — r4t is the retry system so a8s stays dumb delivery.
+A subscription can run dry mid-plan without any error: agy/claude/opencode all
+exit 0 with a **blank** response when out of quota. So a turn that exits 0,
+releases nothing, and prints not one byte is treated as quota-suspect
+(`QUOTA-SUSPECT` in the log) and drains the rig bucket, resting the whole rig
+until it refills. The rule is deliberately conservative — only a *truly empty*
+transcript triggers it, never chrome-only output from a quiet-but-alive member.
 
 | Key | Default | Governs | Failure mode it stops |
 |---|---|---|---|
 | `budget_max` / `budget_earn_per_hour` (rig) | 8 / 4 | Per-member spend bucket. A turn costs 1 unit regardless of how many queued messages it consumes; empty = resting. Put frontier rigs on a low budget (slow, smart), local rigs on a high one (near-free) | Money burn; a fast rig outrunning its quota |
+| `rig_budget_max` / `rig_budget_earn_per_hour` (rig) | unset (no rig gate) | Machine-global rig spend bucket for the subscription behind the rig. A turn also costs 1 rig unit; when empty, every member on that rig rests on every team. Set both together to bind a shared plan (e.g. 20 / 20 for ~20 prompts an hour) | A shared subscription outrunning its real quota across projects |
 | `max_sends_per_turn` (rig) | 6 | Envelopes released per turn; excess dead-letters | Runaway fan-out width |
 | `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed | Hung harnesses |
 | `concurrency` (rig) | 1 | Live turns within one rig | Rig-wide pile-ups |

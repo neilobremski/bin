@@ -23,6 +23,12 @@ optional — every knob has a sane default; see README.md for the table):
 Per-rig keys (defaults for every member on that rig; per-member override
 later): `budget_max` / `budget_earn_per_hour` — the member spend bucket. A
 turn costs 1 member unit; when it is empty the member is resting.
+`rig_budget_max` / `rig_budget_earn_per_hour` — the MACHINE-GLOBAL rig spend
+bucket (absent = no rig gate). A rig maps to a real subscription, so this
+ceiling binds every team on the machine that shares the rig; a turn also costs
+1 rig unit and an empty rig bucket rests every member on it, on every team. If
+`rig_budget_max` is set, `rig_budget_earn_per_hour` must be set too — a real
+plan always declares a refill rate.
 
 Keys starting with `_` anywhere are ignored so shipped examples can carry
 notes.
@@ -203,6 +209,8 @@ class Rig:
     max_sends_per_turn: int = DEFAULT_MAX_SENDS_PER_TURN
     budget_max: float = DEFAULT_BUDGET_MAX
     budget_earn_per_hour: float = DEFAULT_BUDGET_EARN_PER_HOUR
+    rig_budget_max: float | None = None
+    rig_budget_earn_per_hour: float | None = None
     error: str | None = None
 
     def pool(self) -> list[list[str]]:
@@ -464,6 +472,24 @@ def _parse_rig(name: str, raw: object) -> Rig:
     )
     if err:
         problems.append(f"budget_earn_per_hour: {err}")
+
+    # The rig spend bucket is opt-in: absent leaves both None and the rig gate
+    # off. If present, both knobs are required — a real subscription always
+    # declares a refill rate, and a max without one would rest forever.
+    raw_rig_max = raw.get("rig_budget_max")
+    raw_rig_earn = raw.get("rig_budget_earn_per_hour")
+    if raw_rig_max is not None:
+        rig.rig_budget_max, err = _positive_number(raw_rig_max, 0.0)
+        if err:
+            problems.append(f"rig_budget_max: {err}")
+        if raw_rig_earn is None:
+            problems.append("rig_budget_max set but rig_budget_earn_per_hour missing")
+        else:
+            rig.rig_budget_earn_per_hour, err = _positive_number(raw_rig_earn, 0.0)
+            if err:
+                problems.append(f"rig_budget_earn_per_hour: {err}")
+    elif raw_rig_earn is not None:
+        problems.append("rig_budget_earn_per_hour set but rig_budget_max missing")
 
     if problems:
         rig.error = "; ".join(problems)

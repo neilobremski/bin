@@ -262,6 +262,11 @@ class ChatApp(App):
                     self.ctx.node, member.name, rig.budget_max, rig.budget_earn_per_hour
                 )
                 rows.append((member.name, level, rig.budget_max))
+                if rig.rig_budget_max is not None:
+                    rig_level = state.rig_budget_level(
+                        rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour
+                    )
+                    rows.append((f"rig {rig.name}", rig_level, rig.rig_budget_max))
         return rows
 
     def _refresh_header(self) -> None:

@@ -260,6 +260,49 @@ class TestBudgets:
         assert budget_level(NODE, "phil", 8.0, 0.0, now=now) == 8.0
 
 
+class TestRigBucket:
+    def test_lives_at_r4t_home_root_not_under_a_team(self, r4t_home):
+        state.rig_budget_charge("agy", 20.0, 0.0, 1.0)
+        assert state.rig_buckets_path() == r4t_home / "rig-buckets.json"
+        assert state.rig_buckets_path().is_file()
+
+    def test_shared_key_charged_from_anywhere(self, r4t_home):
+        now = 1_000_000.0
+        assert state.rig_budget_charge("agy", 20.0, 0.0, 1.0, now=now) == 19.0
+        assert state.rig_budget_charge("agy", 20.0, 0.0, 1.0, now=now) == 18.0
+        assert state.rig_budget_level("agy", 20.0, 0.0, now=now) == 18.0
+
+    def test_drain_empties_the_bucket(self, r4t_home):
+        now = 1_000_000.0
+        state.rig_budget_drain("agy", now=now)
+        assert state.rig_budget_level("agy", 20.0, 0.0, now=now) == 0.0
+
+    def test_refills_over_time(self, r4t_home):
+        start = 1_000_000.0
+        state.rig_budget_drain("agy", now=start)
+        assert state.rig_budget_seconds_until("agy", 20.0, 20.0, now=start) == 180.0
+        assert state.rig_budget_level("agy", 20.0, 20.0, now=start + 3600) == 20.0
+
+    def test_concurrent_charge_is_atomic(self, r4t_home):
+        # Many threads charge the ONE machine-global bucket at once; the
+        # lock-serialized read-modify-write must lose no decrements.
+        import threading
+
+        state.rig_budget_charge("agy", 1000.0, 0.0, 0.0)  # seed at full
+
+        def hit():
+            for _ in range(20):
+                state.rig_budget_charge("agy", 1000.0, 0.0, 1.0)
+
+        threads = [threading.Thread(target=hit) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        # 10 threads * 20 charges = 200 units spent, exactly.
+        assert state.rig_budget_level("agy", 1000.0, 0.0) == 800.0
+
+
 class TestFmtBudget:
     def test_whole_number_drops_decimal(self):
         assert fmt_budget(8.0) == "8"

@@ -190,6 +190,25 @@ def team_verdicts(
                     ))
                     flagged += 1
                     continue
+                if rig.rig_budget_max is not None:
+                    rig_level = state.rig_budget_level(
+                        rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour,
+                        now=now,
+                    )
+                    if rig_level < 1.0:
+                        wait = state.rig_budget_seconds_until(
+                            rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour,
+                            now=now,
+                        )
+                        out.append(Verdict(
+                            WARN,
+                            f"{m.name} resting — rig {rig.name} exhausted, "
+                            f"{depth} queued, ready in ~{wait / 60:.0f} min",
+                            "raise rig_budget_max/rig_budget_earn_per_hour, or "
+                            "the subscription is out of quota",
+                        ))
+                        flagged += 1
+                        continue
             if depth >= QUEUE_DEPTH_WARN:
                 out.append(Verdict(
                     WARN,

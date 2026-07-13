@@ -512,6 +512,101 @@ class TestBudgets:
         assert state.queue_depth(NODE, "phil") == 1  # message safely queued
 
 
+def _local_base_config(script) -> dict:
+    """A minimal rig config built inline — no `from conftest import`, so it
+    resolves the same whether the r4t suite runs alone or alongside a8s, whose
+    tests/conftest.py shares the bare module name `conftest`."""
+    invoke = [sys.executable, str(script), "{prompt}"]
+    return {
+        "throttle": {"max_concurrent": 0, "min_seconds_between_turn_starts": 0},
+        "cell_budget_max": 200,
+        "cell_budget_earn_per_hour": 100,
+        "leader": {"invoke": invoke, "timeout_seconds": 30, "budget_max": 100},
+        "junior-dev": {"invoke": invoke, "timeout_seconds": 30, "budget_max": 100},
+        "pins": {"gerry": "leader"},
+    }
+
+
+def rig_budget_ctx(repo, tmp_path, tells, *, rig_max=2.0, rig_earn=0.001, name="rig-rigs.json"):
+    """A ctx whose junior-dev rig declares a small machine-global rig bucket."""
+    script = tmp_path / "fake-harness.py"  # created by the fake_harness fixture
+    config = _local_base_config(script)
+    config["junior-dev"]["rig_budget_max"] = rig_max
+    config["junior-dev"]["rig_budget_earn_per_hour"] = rig_earn
+    path = tmp_path / name
+    path.write_text(json.dumps(config), encoding="utf-8")
+    _sent, capture = tells
+    return make_ctx(repo, path, capture)
+
+
+class TestRigBudgets:
+    def test_turn_charges_the_rig_bucket(self, repo, fake_harness, tells, tmp_path, r4t_home):
+        ctx = rig_budget_ctx(repo, tmp_path, tells, rig_max=10)
+        assert run_one(ctx, "acme:gerry", "acme:phil", "job") == 1
+        assert state.rig_budget_level("junior-dev", 10, 0.001) == pytest.approx(9.0, abs=0.3)
+
+    def test_empty_rig_bucket_rests_and_holds_queue(self, repo, fake_harness, tells, tmp_path, r4t_home):
+        ctx = rig_budget_ctx(repo, tmp_path, tells)
+        state.rig_budget_charge("junior-dev", 2, 0.001, 5)  # drain it
+        handle_message(ctx, "acme:gerry", "acme:phil", "job")
+        assert not harness_calls(fake_harness)
+        assert state.queue_depth(NODE, "phil") == 1
+        log = read_log()
+        assert "RESTING phil" in log and "rig junior-dev exhausted" in log
+
+    def test_rig_bucket_is_shared_across_two_teams(self, repo, fake_harness, tells, tmp_path, r4t_home):
+        repo2 = tmp_path / "repo2"
+        repo2.mkdir()
+        (repo2 / "ROSTER.md").write_text(
+            (repo / "ROSTER.md").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        _sent, capture = tells
+        ctx_a = rig_budget_ctx(repo, tmp_path, tells, rig_max=2, name="a.json")
+        cfg_b = tmp_path / "a.json"  # same rig config -> same rig, same bucket
+        ctx_b = dispatch.DispatchContext(
+            root=repo2, node="beta", roster_path=repo2 / "ROSTER.md",
+            config_path=cfg_b, tell_fn=capture,
+        )
+        # Two turns on two DIFFERENT teams spend the ONE shared rig bucket (2 -> 0).
+        assert run_one(ctx_a, "acme:gerry", "acme:phil", "one") == 1
+        assert run_one(ctx_b, "beta:gerry", "beta:phil", "two") == 1
+        assert state.rig_budget_level("junior-dev", 2, 0.001) == pytest.approx(0.0, abs=0.3)
+        # A third turn, on either team, now rests on the exhausted rig.
+        handle_message(ctx_a, "acme:gerry", "acme:phil", "three")
+        assert state.queue_depth("acme", "phil") == 1
+
+    def test_blank_response_drains_the_rig_bucket(self, repo, fake_harness, tells, tmp_path, r4t_home):
+        ctx = rig_budget_ctx(repo, tmp_path, tells, rig_max=10)
+
+        def blank(rig, prompt, cwd, *, env=None, variant=0):
+            return 0, "", 1.0, False  # exit 0, not one byte — the quota signal
+
+        run_one(ctx, "acme:gerry", "acme:phil", "hello?", run_fn=blank)
+        assert state.rig_budget_level("junior-dev", 10, 0.001) == pytest.approx(0.0, abs=0.05)
+        log = read_log()
+        assert "QUOTA-SUSPECT phil" in log and "bucket drained" in log
+
+    def test_chrome_only_does_not_drain_the_rig_bucket(self, repo, fake_harness, tells, tmp_path, r4t_home):
+        ctx = rig_budget_ctx(repo, tmp_path, tells, rig_max=10)
+        chrome = "\x1b[0m\n> build · qwen3:0.6b\n\x1b[0m\n→ Read sample.txt\n"
+
+        def chrome_only(rig, prompt, cwd, *, env=None, variant=0):
+            return 0, chrome, 1.0, False
+
+        run_one(ctx, "acme:gerry", "acme:phil", "hello?", run_fn=chrome_only)
+        # A turn was charged (phil ran) but the rig bucket only lost its 1 unit,
+        # not drained to 0 — chrome is a quiet-but-alive member, not a blank.
+        assert state.rig_budget_level("junior-dev", 10, 0.001) == pytest.approx(9.0, abs=0.3)
+        assert "QUOTA-SUSPECT" not in read_log()
+
+    def test_blank_without_rig_budget_logs_but_does_not_crash(self, ctx, r4t_home):
+        def blank(rig, prompt, cwd, *, env=None, variant=0):
+            return 0, "", 1.0, False
+
+        run_one(ctx, "acme:gerry", "acme:phil", "hello?", run_fn=blank)
+        assert "QUOTA-SUSPECT phil" in read_log()
+
+
 def fail_run(rig, prompt, cwd, *, env=None, variant=0):
     return 1, "boom", 0.05, False
 
@@ -700,10 +795,8 @@ def make_ctx(repo, config_path, tell_fn):
 
 class TestTeamThrottle:
     def _ctx(self, repo, fake_harness, tells, tmp_path, **throttle):
-        from conftest import base_config
-
         script, _out = fake_harness
-        config = base_config(script)
+        config = _local_base_config(script)
         config["throttle"] = throttle
         path = tmp_path / "throttle-rigs.json"
         path.write_text(json.dumps(config), encoding="utf-8")

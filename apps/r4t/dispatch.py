@@ -72,6 +72,15 @@ class DispatchContext:
     roster_path: Path
     config_path: Path
     tell_fn: TellFn
+    workplace: Path | None = None
+
+    def __post_init__(self) -> None:
+        # `root` is where the team's documents live (ROSTER.md, MISSION.md, the
+        # a8s node's outbox); `workplace` is the repo where turns run and commits
+        # land. A portable org splits them (see org.py); the in-repo default has
+        # them equal.
+        if self.workplace is None:
+            self.workplace = self.root
 
 
 def split_recipient(to: str) -> tuple[str, str]:
@@ -265,7 +274,7 @@ def build_prompt(
         message_lines.append("")
     parts = [
         f"You are {member.name}, a member of the {ctx.node} team, working in "
-        f"the team repo at {ctx.root.resolve()} (your current directory). "
+        f"the team repo at {ctx.workplace.resolve()} (your current directory). "
         "Write files here with relative paths only.",
         "",
         *_mission_section(ctx, roster, member),
@@ -806,7 +815,7 @@ def _run_turn(
     )
 
     exit_code, output, duration, timed_out = run_fn(
-        rig, prompt, ctx.root, env=env, variant=variant
+        rig, prompt, ctx.workplace, env=env, variant=variant
     )
 
     outcome = f"exit {exit_code} in {duration:.1f}s"
@@ -859,6 +868,27 @@ def _run_turn(
                     f"r4t: STDOUT-REPLY {member.name.lower()} (rig {rig.name}) "
                     f"released nothing; {len(reply)} bytes of cleaned stdout "
                     f"staged as a reply to {newest_sender}",
+                )
+            elif not output.strip():
+                # The blank-response quota signal (Neil's field observation):
+                # an out-of-quota model on agy/claude/opencode exits 0 with a
+                # BLANK — the only reliable cross-harness signal. Conservatively
+                # we treat ONLY a truly empty transcript as quota-suspect, never
+                # chrome-only output (a quiet-but-alive member still prints tool
+                # traces). Draining the rig bucket rests the whole rig; queued
+                # messages catch up once it refills — r4t is deliberately the
+                # retry system, so a8s can stay dumb delivery.
+                note = ""
+                if rig.rig_budget_max is not None:
+                    state.rig_budget_drain(rig.name)
+                    note = (
+                        f"; rig {rig.name} bucket drained to 0 — the rig rests "
+                        "until it refills, then the queue catches up"
+                    )
+                state.append_log(
+                    ctx.node,
+                    f"r4t: QUOTA-SUSPECT {member.name.lower()} (rig {rig.name}) "
+                    f"exit 0 with empty output{note}",
                 )
             elif len(output.strip()) > STDOUT_REPLY_MIN_CHARS:
                 state.append_log(
@@ -941,6 +971,18 @@ def _runnable(
             config.cell_budget_max, config.cell_budget_earn_per_hour,
         )
         return False, f"resting (cell budget {state.fmt_budget(t)}, ready in ~{wait / 60:.0f} min)"
+    if rig.rig_budget_max is not None:
+        r = state.rig_budget_level(
+            rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour
+        )
+        if r < 1.0:
+            wait = state.rig_budget_seconds_until(
+                rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour
+            )
+            return False, (
+                f"resting — rig {rig.name} exhausted "
+                f"({state.fmt_budget(r)}), ready in ~{wait / 60:.0f} min"
+            )
     return True, ""
 
 
@@ -991,6 +1033,10 @@ def _run_member_turn(
                     ctx.node, state.CELL_BUDGET_KEY,
                     config.cell_budget_max, config.cell_budget_earn_per_hour,
                 )
+                if rig.rig_budget_max is not None:
+                    state.rig_budget_charge(
+                        rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour
+                    )
                 state.stamp_last_turn_start(ctx.node)
     finally:
         admission.release()

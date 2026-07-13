@@ -234,11 +234,23 @@ def member_statuses(node: str, roster: Roster, config=None) -> list[MemberStatus
                 level = state.budget_level(
                     node, m.name, rig.budget_max, rig.budget_earn_per_hour
                 )
+                rig_level = (
+                    state.rig_budget_level(
+                        rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour
+                    )
+                    if rig.rig_budget_max is not None
+                    else None
+                )
                 if depth and level < 1.0:
                     wait = state.budget_seconds_until(
                         node, m.name, rig.budget_max, rig.budget_earn_per_hour
                     )
                     st, detail = RESTING, f"ready ~{wait / 60:.0f}m"
+                elif depth and rig_level is not None and rig_level < 1.0:
+                    wait = state.rig_budget_seconds_until(
+                        rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour
+                    )
+                    st, detail = RESTING, f"rig {rig.name} ~{wait / 60:.0f}m"
                 else:
                     st, detail = IDLE, ""
         else:

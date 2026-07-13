@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import textwrap
 from pathlib import Path
@@ -10,6 +11,20 @@ import pytest
 
 _PKG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG))
+
+
+@pytest.fixture(autouse=True)
+def _restore_tell_outbox_env():
+    """r4t's seat/chat CLIs set TELL_OUTBOX_DIR in os.environ (so child `tell`
+    processes inherit it). Running a CLI in-process would otherwise leak that
+    into later tests — including the a8s `tell` suite when both run together.
+    Snapshot and restore around every test so nothing escapes the suite."""
+    prior = os.environ.get("TELL_OUTBOX_DIR")
+    yield
+    if prior is None:
+        os.environ.pop("TELL_OUTBOX_DIR", None)
+    else:
+        os.environ["TELL_OUTBOX_DIR"] = prior
 
 
 ROSTER_TEXT = textwrap.dedent(
