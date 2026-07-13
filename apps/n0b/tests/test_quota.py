@@ -11,14 +11,20 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import commands.quota_cmd as quota_cmd  # noqa: E402
 from commands.quota_cmd import (  # noqa: E402
     QUOTA_TOOLS,
     cmd_quota,
     detect_antigravity_process,
+    fetch_agy_quota,
+    fetch_agy_quota_cloud,
     get_listening_ports,
     group_model_quotas,
+    load_snapshot,
     parse_quota_response,
     resolve_api_ports,
+    save_snapshot,
+    snapshot_age_text,
 )
 
 
@@ -174,3 +180,163 @@ def test_cmd_quota_unknown_tool(capsys):
     err = capsys.readouterr().err
     assert rc == 2
     assert "unknown tool" in err.lower()
+
+
+def _sample_payload():
+    return {
+        "tool": "agy",
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "origin": "live",
+        "source": "userStatus",
+        "api_port": 1234,
+        **parse_quota_response(SAMPLE_USER_STATUS, "userStatus"),
+    }
+
+
+def test_snapshot_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(quota_cmd, "SNAPSHOT_PATH", tmp_path / "quota-agy.json")
+    payload = _sample_payload()
+    payload["raw"] = {"secret": "stripped"}
+    save_snapshot(payload)
+    snap = load_snapshot()
+    assert snap is not None
+    assert "raw" not in snap["payload"]
+    assert snap["payload"]["account"]["plan"] == "Pro"
+    assert snap["saved_at"]
+
+
+def test_snapshot_age_text():
+    with patch("commands.quota_cmd._utc_now") as now:
+        from datetime import datetime, timezone
+
+        now.return_value = datetime(2026, 1, 2, 3, 43, tzinfo=timezone.utc)
+        assert snapshot_age_text("2026-01-02T03:00:00+00:00") == "43m"
+        assert snapshot_age_text("2026-01-02T01:38:00+00:00") == "2h 5m"
+        assert snapshot_age_text("2025-12-30T01:00:00+00:00") == "3d 2h"
+
+
+def test_fetch_live_success_writes_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(quota_cmd, "SNAPSHOT_PATH", tmp_path / "quota-agy.json")
+    monkeypatch.setattr(quota_cmd, "_fetch_agy_live", lambda **_: _sample_payload())
+    result = fetch_agy_quota()
+    assert result["origin"] == "live"
+    assert load_snapshot() is not None
+
+
+def test_fetch_falls_back_to_cloud(tmp_path, monkeypatch):
+    monkeypatch.setattr(quota_cmd, "SNAPSHOT_PATH", tmp_path / "quota-agy.json")
+
+    def live_down(**_):
+        raise RuntimeError("not running")
+
+    cloud = {**_sample_payload(), "origin": "cloud", "source": "loadCodeAssist"}
+    monkeypatch.setattr(quota_cmd, "_fetch_agy_live", live_down)
+    monkeypatch.setattr(quota_cmd, "fetch_agy_quota_cloud", lambda **_: cloud)
+    result = fetch_agy_quota()
+    assert result["origin"] == "cloud"
+    assert load_snapshot() is not None
+
+
+def test_fetch_falls_back_to_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(quota_cmd, "SNAPSHOT_PATH", tmp_path / "quota-agy.json")
+    save_snapshot(_sample_payload())
+
+    def down(**_):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(quota_cmd, "_fetch_agy_live", down)
+    monkeypatch.setattr(quota_cmd, "fetch_agy_quota_cloud", down)
+    result = fetch_agy_quota()
+    assert result["origin"] == "snapshot"
+    assert result["as_of"]
+    assert result["age"]
+    assert result["account"]["plan"] == "Pro"
+
+
+def test_fetch_error_when_nothing_available(tmp_path, monkeypatch):
+    monkeypatch.setattr(quota_cmd, "SNAPSHOT_PATH", tmp_path / "quota-agy.json")
+
+    def down(**_):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(quota_cmd, "_fetch_agy_live", down)
+    monkeypatch.setattr(quota_cmd, "fetch_agy_quota_cloud", down)
+    with pytest.raises(RuntimeError, match=r"\(try:"):
+        fetch_agy_quota()
+
+
+def test_fetch_cloud_result_without_models_prefers_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(quota_cmd, "SNAPSHOT_PATH", tmp_path / "quota-agy.json")
+    save_snapshot(_sample_payload())
+
+    def live_down(**_):
+        raise RuntimeError("not running")
+
+    cloud = {
+        "tool": "agy",
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "origin": "cloud",
+        "source": "loadCodeAssist",
+        "error": None,
+        "account": {"email": None, "plan": "Pro"},
+        "available_prompt_credits": None,
+        "models": [],
+        "groups": [],
+    }
+    monkeypatch.setattr(quota_cmd, "_fetch_agy_live", live_down)
+    monkeypatch.setattr(quota_cmd, "fetch_agy_quota_cloud", lambda **_: cloud)
+    result = fetch_agy_quota()
+    assert result["origin"] == "snapshot"
+
+
+def test_cloud_auth_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(quota_cmd, "OAUTH_CREDS_PATH", tmp_path / "missing.json")
+    with pytest.raises(RuntimeError, match=r"Not logged in.*\(try: agy"):
+        fetch_agy_quota_cloud()
+
+
+def test_cloud_parses_load_code_assist(monkeypatch, tmp_path):
+    creds = tmp_path / "oauth_creds.json"
+    creds.write_text(json.dumps({"refresh_token": "r", "access_token": "a", "expiry_date": 4102444800000}))
+    monkeypatch.setattr(quota_cmd, "OAUTH_CREDS_PATH", creds)
+
+    class FakeResponse:
+        def __init__(self, body):
+            self._body = json.dumps(body).encode()
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    cloud_body = {
+        "currentTier": {"id": "standard-tier", "name": "Gemini Code Assist"},
+        "paidTier": {"id": "g1-pro-tier", "name": "Google One AI Pro"},
+    }
+    monkeypatch.setattr(
+        quota_cmd.urllib.request, "urlopen", lambda req, timeout=None: FakeResponse(cloud_body)
+    )
+    result = fetch_agy_quota_cloud()
+    assert result["origin"] == "cloud"
+    assert result["account"]["plan"] == "Google One AI Pro"
+    assert result["models"] == []
+
+
+def test_format_snapshot_source_line():
+    payload = {**_sample_payload(), "origin": "snapshot", "age": "43m"}
+    text = quota_cmd.format_agy_quota_text(payload)
+    assert "as of 43m ago" in text
+    assert "✓" in text
+
+
+def test_cloud_client_pair_unconfigured(tmp_path, monkeypatch):
+    creds = tmp_path / "oauth_creds.json"
+    creds.write_text(json.dumps({"refresh_token": "r", "access_token": "expired", "expiry_date": 1}))
+    monkeypatch.setattr(quota_cmd, "OAUTH_CREDS_PATH", creds)
+    monkeypatch.setattr("commands.secrets_cmd.resolve", lambda name: None)
+    with pytest.raises(RuntimeError, match=r"try: n0b secrets set GEMINI_OAUTH_CLIENT_ID"):
+        fetch_agy_quota_cloud()

@@ -7,7 +7,9 @@ import shutil
 import ssl
 import subprocess
 import sys
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +23,22 @@ LIVE_ENDPOINTS = {
 }
 
 REQUEST_TIMEOUT_S = 8
+
+SNAPSHOT_PATH = Path.home() / ".config" / "n0b" / "quota-agy.json"
+
+OAUTH_CREDS_PATH = Path.home() / ".gemini" / "oauth_creds.json"
+OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+# Refreshing the token that gemini-cli/agy login writes to disk requires
+# gemini-cli's installed-app OAuth client pair. The values ship in
+# gemini-cli's public source but trip secret scanners, so they resolve via
+# n0b secrets (env, ~/lib, Keychain) instead of living in this repo.
+OAUTH_CLIENT_ID_SECRET_NAME = "GEMINI_OAUTH_CLIENT_ID"
+OAUTH_CLIENT_SECRET_SECRET_NAME = "GEMINI_OAUTH_CLIENT_SECRET"
+CLOUD_HOSTS = (
+    "https://cloudcode-pa.googleapis.com",
+    "https://daily-cloudcode-pa.googleapis.com",
+)
+CLOUD_LOAD_CODE_ASSIST = "/v1internal:loadCodeAssist"
 
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
@@ -328,12 +346,13 @@ def fetch_raw_agy_quota() -> dict[str, Any]:
         return {"json": json.loads(raw), "shape": "commandModelConfigs", "api_port": api_port}
 
 
-def fetch_agy_quota(*, include_raw: bool = False) -> dict[str, Any]:
+def _fetch_agy_live(*, include_raw: bool = False) -> dict[str, Any]:
     raw = fetch_raw_agy_quota()
     parsed = parse_quota_response(raw["json"], raw["shape"])
     result = {
         "tool": "agy",
         "generated_at": _utc_now().isoformat(),
+        "origin": "live",
         "source": raw["shape"],
         "api_port": raw["api_port"],
         **parsed,
@@ -341,6 +360,204 @@ def fetch_agy_quota(*, include_raw: bool = False) -> dict[str, Any]:
     if include_raw:
         result["raw"] = raw["json"]
     return result
+
+
+def save_snapshot(payload: dict[str, Any]) -> None:
+    data = {
+        "saved_at": _utc_now().isoformat(),
+        "payload": {k: v for k, v in payload.items() if k != "raw"},
+    }
+    SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SNAPSHOT_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.replace(SNAPSHOT_PATH)
+
+
+def load_snapshot() -> dict[str, Any] | None:
+    try:
+        data = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or "saved_at" not in data or "payload" not in data:
+        return None
+    return data
+
+
+def snapshot_age_text(saved_at_iso: str) -> str:
+    saved = datetime.fromisoformat(saved_at_iso.replace("Z", "+00:00"))
+    if saved.tzinfo is None:
+        saved = saved.replace(tzinfo=timezone.utc)
+    mins = max(0, round((_utc_now() - saved).total_seconds() / 60))
+    days, rem = divmod(mins, 1440)
+    hours, mins = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {mins}m"
+    return f"{mins}m"
+
+
+def _load_oauth_creds() -> dict[str, Any]:
+    if not OAUTH_CREDS_PATH.is_file():
+        raise RuntimeError(
+            "Not logged in to Antigravity/Gemini — "
+            f"no OAuth credentials at {OAUTH_CREDS_PATH} (try: agy, then /login)"
+        )
+    try:
+        creds = json.loads(OAUTH_CREDS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Could not read {OAUTH_CREDS_PATH}: {exc} (try: agy, then /login)") from exc
+    if not creds.get("refresh_token"):
+        raise RuntimeError(
+            f"{OAUTH_CREDS_PATH} has no refresh_token (try: agy, then /login)"
+        )
+    return creds
+
+
+def _oauth_client_pair() -> tuple[str, str]:
+    from commands.secrets_cmd import resolve
+
+    client_id = resolve(OAUTH_CLIENT_ID_SECRET_NAME)
+    client_secret = resolve(OAUTH_CLIENT_SECRET_SECRET_NAME)
+    if not client_id or not client_secret:
+        raise RuntimeError(
+            "OAuth client pair not configured — set gemini-cli's public client "
+            f"(try: n0b secrets set {OAUTH_CLIENT_ID_SECRET_NAME}, "
+            f"then n0b secrets set {OAUTH_CLIENT_SECRET_SECRET_NAME})"
+        )
+    return client_id, client_secret
+
+
+def _cloud_access_token() -> str:
+    creds = _load_oauth_creds()
+    expiry_ms = creds.get("expiry_date")
+    if creds.get("access_token") and isinstance(expiry_ms, (int, float)):
+        if expiry_ms / 1000 > time.time() + 60:
+            return creds["access_token"]
+    client_id, client_secret = _oauth_client_pair()
+    body = urllib.parse.urlencode(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": creds["refresh_token"],
+            "grant_type": "refresh_token",
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(OAUTH_TOKEN_URL, data=body, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
+            token = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(
+            f"OAuth token refresh rejected (HTTP {exc.code}) — re-login needed (try: agy, then /login)"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"OAuth token refresh failed: {exc.reason}") from exc
+    access = token.get("access_token")
+    if not access:
+        raise RuntimeError("OAuth token refresh returned no access_token (try: agy, then /login)")
+    return access
+
+
+def parse_cloud_quota(response: dict[str, Any]) -> dict[str, Any]:
+    plan = None
+    for tier_key in ("paidTier", "currentTier"):
+        tier = response.get(tier_key)
+        if isinstance(tier, dict) and tier.get("name"):
+            plan = tier["name"]
+            break
+    configs = _find_model_configs(response)
+    models = sorted(
+        (m for m in (_parse_model_quota(cfg) for cfg in configs) if m),
+        key=lambda item: item["label"].lower(),
+    )
+    return {
+        "error": None,
+        "account": {"email": None, "plan": plan},
+        "available_prompt_credits": None,
+        "models": models,
+        "groups": group_model_quotas(models),
+    }
+
+
+def fetch_agy_quota_cloud(*, include_raw: bool = False) -> dict[str, Any]:
+    token = _cloud_access_token()
+    body = json.dumps(
+        {
+            "metadata": {
+                "ideType": "ANTIGRAVITY",
+                "platform": "PLATFORM_UNSPECIFIED",
+                "pluginType": "GEMINI",
+            }
+        }
+    ).encode("utf-8")
+    last_error: RuntimeError | None = None
+    payload = None
+    for host in CLOUD_HOSTS:
+        request = urllib.request.Request(
+            host + CLOUD_LOAD_CODE_ASSIST,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            last_error = RuntimeError(f"loadCodeAssist returned HTTP {exc.code} at {host}")
+        except (urllib.error.URLError, json.JSONDecodeError) as exc:
+            last_error = RuntimeError(f"loadCodeAssist failed at {host}: {exc}")
+    if payload is None:
+        raise last_error or RuntimeError("loadCodeAssist failed")
+    result = {
+        "tool": "agy",
+        "generated_at": _utc_now().isoformat(),
+        "origin": "cloud",
+        "source": "loadCodeAssist",
+        **parse_cloud_quota(payload),
+    }
+    if include_raw:
+        result["raw"] = payload
+    return result
+
+
+def fetch_agy_quota(*, include_raw: bool = False) -> dict[str, Any]:
+    errors: list[str] = []
+    try:
+        result = _fetch_agy_live(include_raw=include_raw)
+        save_snapshot(result)
+        return result
+    except RuntimeError as exc:
+        errors.append(f"live: {exc}")
+
+    cloud_result: dict[str, Any] | None = None
+    try:
+        cloud_result = fetch_agy_quota_cloud(include_raw=include_raw)
+        if cloud_result["models"]:
+            save_snapshot(cloud_result)
+            return cloud_result
+        errors.append("cloud: loadCodeAssist has no per-model quota for this account")
+    except RuntimeError as exc:
+        errors.append(f"cloud: {exc}")
+
+    snapshot = load_snapshot()
+    if snapshot:
+        payload = dict(snapshot["payload"])
+        payload["origin"] = "snapshot"
+        payload["as_of"] = snapshot["saved_at"]
+        payload["age"] = snapshot_age_text(snapshot["saved_at"])
+        return payload
+
+    if cloud_result is not None:
+        return cloud_result
+
+    raise RuntimeError(
+        "; ".join(errors) + " (try: open Antigravity IDE or run agy --continue)"
+    )
 
 
 def _is_ok_code(code: Any) -> bool:
@@ -690,6 +907,22 @@ def _format_bucket(bucket: dict[str, Any]) -> str:
     return f"{percent_text} remaining"
 
 
+def _format_source_line(payload: dict[str, Any]) -> str | None:
+    origin = payload.get("origin")
+    if origin == "live":
+        port = payload.get("api_port")
+        return f"  source: live language server{f' (port {port})' if port else ''}"
+    if origin == "cloud":
+        return "  source: cloud (loadCodeAssist)"
+    if origin == "snapshot":
+        age = payload.get("age") or "unknown age"
+        return (
+            f"  source: cached snapshot — as of {age} ago "
+            "(try: open Antigravity IDE or agy --continue for live data)"
+        )
+    return None
+
+
 def format_agy_quota_text(payload: dict[str, Any]) -> str:
     lines = ["Antigravity (agy)"]
     plan = (payload.get("account") or {}).get("plan")
@@ -697,18 +930,24 @@ def format_agy_quota_text(payload: dict[str, Any]) -> str:
         lines[0] += f" — {plan}"
 
     if payload.get("error"):
-        lines.append(f"Error: {payload['error']}")
+        lines.append(f"  ✗ {payload['error']}")
         return "\n".join(lines)
+
+    source_line = _format_source_line(payload)
+    if source_line:
+        lines.append(source_line)
 
     groups = payload.get("groups") or []
     if not groups:
-        lines.append("No model quota data returned.")
+        lines.append("  ✗ no model quota data returned")
         return "\n".join(lines)
 
     for group in groups:
         lines.extend(["", group["name"], f"({group['description']})"])
         for bucket in group.get("buckets") or []:
-            lines.append(f"  {bucket.get('label', 'Quota')}: {_format_bucket(bucket)}")
+            known = isinstance(bucket.get("remaining_fraction"), (int, float))
+            mark = "✓" if known else "✗"
+            lines.append(f"  {mark} {bucket.get('label', 'Quota')}: {_format_bucket(bucket)}")
 
     credits = payload.get("available_prompt_credits")
     if credits is not None:
