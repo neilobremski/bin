@@ -10,8 +10,10 @@ Schema:
   attachments may originate at routing time, in addition to `root`.
   `namespaces` — prefix routing (#148): a recipient `<PREFIX>:<sub-address>`
   routes to the single bound agent with the full address preserved in `to`.
-Agent, alias, and namespace name pools are disjoint (`cmd_add`, `cmd_alias`,
-and `cmd_namespace` reject collisions).
+Aliases are disjoint from both agents and namespaces. A namespace prefix may
+match the name of the agent it binds to (a node owning its own namespace, #175);
+it may not match an alias or a *different* agent (`cmd_add` / `cmd_namespace`
+reject those).
 
 Also hosts the read-only marker-file scan used by `cmd_discover` and the
 auto-detect path in `cmd_add`.
@@ -180,6 +182,10 @@ def resolve_name(query: str) -> tuple[str, list[str]]:
             raise KeyError(f"namespace {prefix!r} is bound to unknown agent {bound_agent!r}")
         return "namespace", [agent_lookup[bound_key]]
     q = query.strip().lower()
+    # Namespace beats agent: when a node owns a namespace matching its own name
+    # (#175, e.g. agent `s1l` bound to prefix `s1l`), both routes land on the
+    # same node — the namespace path just delivers `to` as the bare prefix so
+    # the node self-routes, which is exactly what a bare `tell s1l` should do.
     if q in namespace_lookup:
         _prefix_canon, bound_agent = namespace_lookup[q]
         bound_key = str(bound_agent).strip().lower()

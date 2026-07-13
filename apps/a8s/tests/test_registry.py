@@ -254,6 +254,15 @@ class TestResolveNamespace:
         save_namespaces({"acme": "NODE"})
         assert resolve_name("ACME") == ("namespace", ["NODE"])
 
+    def test_self_owned_namespace_both_forms_resolve_to_node(self, fake_home):
+        # #175: a node IS `s1l` — agent `s1l` binds prefix `s1l` to itself.
+        # Bare and colon forms both land on the one node; namespace precedence
+        # over the agent name is intentional and harmless here.
+        save_registry({"s1l": {"root": "/r"}})
+        save_namespaces({"s1l": "s1l"})
+        assert resolve_name("s1l") == ("namespace", ["s1l"])
+        assert resolve_name("s1l:gerry") == ("namespace", ["s1l"])
+
 
 # ---------- find_participant + sender_from_cwd ----------
 

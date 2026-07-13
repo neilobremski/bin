@@ -201,9 +201,12 @@ def cmd_add(args: list[str]) -> int:
             print(f"alias already exists with name: {k} — pick a different agent name", file=sys.stderr)
             return 1
     namespaces = load_namespaces()
-    for k in namespaces:
-        if k.lower() == name:
-            print(f"namespace already exists with prefix: {k} — pick a different agent name", file=sys.stderr)
+    # A prefix already bound to this exact name is the agent's own namespace
+    # (#175) — re-adding the node is fine. A prefix bound to a *different* agent
+    # would be shadowed by `tell <name>` (namespace beats agent), so it stands.
+    for k, bound in namespaces.items():
+        if k.lower() == name and str(bound).strip().lower() != name:
+            print(f"namespace already exists with prefix: {k} (bound to {bound}) — pick a different agent name", file=sys.stderr)
             return 1
 
     if definition_arg:
@@ -813,7 +816,9 @@ def cmd_namespace(args: list[str]) -> int:
     internally. The target must be a registered agent, not an alias —
     namespace delegation is single-delivery by design, the opposite of
     alias fan-out. Prefixes share the agent/alias name grammar (lowercase
-    canonical form) and must not collide with either pool."""
+    canonical form). A prefix may match the name of the agent it binds to (a
+    node owning its own namespace, #175) but must not collide with an alias or
+    with any other agent."""
     if len(args) == 0:
         return cmd_namespaces()
     if len(args) == 1:
@@ -836,8 +841,12 @@ def cmd_namespace(args: list[str]) -> int:
         return 2
     agents = load_registry()
     aliases = load_aliases()
+    # A prefix may match the name of the agent it binds to — that's a node
+    # owning its own namespace (#175), so cross-wall traffic is attributed to
+    # `s1l`, not `s1l-node`. It must not match any *other* agent's name, which
+    # `tell <prefix>` would silently shadow (namespace beats agent in resolve).
     for k in agents:
-        if k.lower() == prefix:
+        if k.lower() == prefix and k.lower() != target:
             print(f"agent already exists with name: {k} — pick a different prefix", file=sys.stderr)
             return 1
     for k in aliases:

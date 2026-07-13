@@ -203,9 +203,22 @@ class TestCmdNamespace:
         assert "not an alias" in capsys.readouterr().err
         assert load_namespaces() == {}
 
-    def test_prefix_collides_with_agent(self, agent_root, capsys):
+    def test_prefix_may_match_own_agent(self, agent_root, capsys):
+        # A node owning its own namespace (#175): agent `s1l` binds prefix
+        # `s1l` to itself so cross-wall traffic is attributed to `s1l`.
+        cmd_add(["s1l", str(agent_root)])
+        rc = cmd_namespace(["s1l", "s1l"])
+        assert rc == 0
+        assert load_namespaces() == {"s1l": "s1l"}
+
+    def test_prefix_collides_with_other_agent(self, agent_root, tmp_path, capsys):
         cmd_add(["node", str(agent_root)])
-        rc = cmd_namespace(["node", "node"])
+        other = tmp_path / "other"
+        other.mkdir()
+        cmd_add(["s1l", str(other)])
+        # Binding prefix `node` to a *different* agent would shadow the `node`
+        # agent on a bare `tell node`, so it's still rejected.
+        rc = cmd_namespace(["node", "s1l"])
         assert rc == 1
         assert "agent already exists" in capsys.readouterr().err
 
@@ -269,11 +282,12 @@ class TestCmdUnnamespace:
 
 
 class TestNamespaceCollisionsElsewhere:
-    """Disjointness is enforced in both directions: `a8s add` / `a8s alias`
-    refuse names already bound as prefixes, and removing an agent unbinds
-    its prefixes (no orphans)."""
+    """Aliases stay disjoint from namespaces in both directions. Agent names
+    may match a prefix only when it's the agent's own namespace (#175); a
+    prefix bound to a different agent still blocks the name. Removing an agent
+    unbinds its prefixes (no orphans)."""
 
-    def test_add_rejects_existing_namespace_prefix(self, fake_home, tmp_path, capsys):
+    def test_add_rejects_namespace_bound_to_other_agent(self, fake_home, tmp_path, capsys):
         node = tmp_path / "node"
         node.mkdir()
         cmd_add(["node", str(node)])
@@ -284,6 +298,16 @@ class TestNamespaceCollisionsElsewhere:
         assert rc == 1
         assert "namespace already exists" in capsys.readouterr().err
         assert "acme" not in load_registry()
+
+    def test_add_allows_own_namespace_prefix(self, fake_home, tmp_path):
+        # A dangling self-namespace (`s1l` -> `s1l` with no agent yet) doesn't
+        # block re-materializing the node; `tell s1l` still lands on `s1l`.
+        save_namespaces({"s1l": "s1l"})
+        root = tmp_path / "s1l"
+        root.mkdir()
+        rc = cmd_add(["s1l", str(root)])
+        assert rc == 0
+        assert "s1l" in load_registry()
 
     def test_alias_rejects_existing_namespace_prefix(self, fake_home, tmp_path, capsys):
         node = tmp_path / "node"
