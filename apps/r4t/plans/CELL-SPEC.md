@@ -172,3 +172,42 @@ Decided 2026-07-12 (nested intent, per commander's-intent doctrine):
   (the twice-taught commit lesson).
 - `roster check` warns when MISSION.md exceeds ~40 lines (intent
   docs must stay one page — stale-intent guard).
+
+## Rig-level budgets (decided 2026-07-13, issue #177)
+
+A third token bucket joins member and cell: the **rig** bucket. A rig maps
+to a real subscription (an Antigravity plan good for ~20 prompts/hour), so
+its ceiling is set ON THE RIG (`rig_budget_max` / `rig_budget_earn_per_hour`,
+absent = no gate) and is **machine-global** — one bucket per rig at the
+R4T_HOME root (`rig-buckets.json`), binding every team on the machine that
+shares the rig, so one subscription is safely shared across projects. A turn
+is runnable only when member ≥1 AND cell ≥1 AND rig ≥1, and charges all three.
+Concurrent charges from many nodes are serialized by a machine-global lock;
+the check-then-charge gate is best-effort (clamp-at-zero + queues-hold absorb
+the rare cross-node double-spend). Budget refill is the implicit retry — an
+exhausted rig rests every member on it and the held queues catch up when it
+refills, so a8s stays dumb delivery and r4t remains the retry system.
+
+Blank-response quota signal (Neil, from the field): agy/claude/opencode all
+exit 0 with a BLANK when out of quota — the only reliable cross-harness
+signal. A turn that exits 0, releases nothing, and prints not one byte is
+logged QUOTA-SUSPECT and drains its rig bucket to 0. Conservative on purpose:
+only a TRULY empty transcript triggers it, never chrome-only output (a
+quiet-but-alive member still prints tool traces).
+
+## Portable org (decided 2026-07-13, issue #180)
+
+MISSION.md + ROSTER.md may be designated OUTSIDE the repo, as a choice; in-repo
+stays the default (the slow furnace a proven structure graduates into). An
+**org directory** holds ROSTER.md + MISSION.md + `r4t-org.json` naming the
+workplace repo. Precedence, decided once and documented in org.py: if
+`<root>/r4t-org.json` exists and names a `repo`, `<root>` is the org dir
+(ROSTER/MISSION read here, mission injection reads here) and turns run/commit
+in `repo`; otherwise `<root>` is both. The a8s node is stamped at the org dir;
+`repo` supplies the turn cwd. Org-to-repo is many-to-one — two org dirs (same
+MISSION, different ROSTERs) at two clones of one project is the A/B case (first
+consumer: a novella-writing experiment). Nothing collides: team state is
+per-node. Graduation is trivial — copy the two files into the repo and delete
+`r4t-org.json`; resolution falls back to the in-repo default. `roster check`
+runs against an org dir (tree + 40-line mission lint) and flags a malformed
+config or a missing workplace.

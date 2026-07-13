@@ -41,9 +41,11 @@
   },
 
   "agy": {
-    "_notes": "Antigravity rig.",
+    "_notes": "Antigravity rig — a real subscription (~20 prompts/hour). rig_budget_max/rig_budget_earn_per_hour bind that plan MACHINE-GLOBALLY: the bucket is shared by every team on this machine that uses `agy`, so one plan is safely shared across projects. Set both together; absent = no rig gate.",
     "invoke": ["agy", "-p", "{prompt}"],
-    "timeout_seconds": 1200
+    "timeout_seconds": 1200,
+    "rig_budget_max": 20,
+    "rig_budget_earn_per_hour": 20
   },
 
   "pins": {

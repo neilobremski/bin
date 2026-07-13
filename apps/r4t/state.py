@@ -22,17 +22,23 @@ honors A8S_HOME).
     ├── log/<date>.md              full I/O transcript, append-only
     └── velocity.csv               one row per harness turn
 
+One file sits ABOVE the teams, at the R4T_HOME root — rig-buckets.json, the
+machine-global rig spend buckets: a rig maps to a real subscription shared by
+every team on the machine, so its bucket cannot be per-team.
+
 Never inside the repo: the working tree is only touched by the harness
 subprocesses themselves.
 """
 from __future__ import annotations
 
+import fcntl
 import itertools
 import json
 import os
 import re
 import shutil
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -684,12 +690,7 @@ def fmt_budget(value: float) -> str:
     return f"{rounded:.1f}"
 
 
-def buckets_path(node: str) -> Path:
-    return team_dir(node) / "buckets.json"
-
-
-def read_buckets(node: str) -> dict:
-    path = buckets_path(node)
+def _read_buckets(path: Path) -> dict:
     if not path.is_file():
         return {}
     try:
@@ -699,14 +700,12 @@ def read_buckets(node: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def budget_level(
-    node: str, key: str, budget_max: float, earn_per_hour: float, *, now: float | None = None
+def _bucket_level(
+    entry: object, budget_max: float, earn_per_hour: float, now: float
 ) -> float:
-    """Current balance: the stored level plus whatever has been earned by
-    elapsed wall-clock time since it was last written, capped at `budget_max`.
-    An unseen key starts full."""
-    now = time.time() if now is None else now
-    entry = read_buckets(node).get(key.lower())
+    """Current balance for one stored bucket entry: the stored level plus
+    whatever has been earned by elapsed wall-clock time since it was last
+    written, capped at `budget_max`. An unseen/malformed entry starts full."""
     if not isinstance(entry, dict):
         return float(budget_max)
     try:
@@ -716,6 +715,21 @@ def budget_level(
         return float(budget_max)
     earned = max(0.0, now - at) / 3600.0 * earn_per_hour
     return min(float(budget_max), level + earned)
+
+
+def buckets_path(node: str) -> Path:
+    return team_dir(node) / "buckets.json"
+
+
+def read_buckets(node: str) -> dict:
+    return _read_buckets(buckets_path(node))
+
+
+def budget_level(
+    node: str, key: str, budget_max: float, earn_per_hour: float, *, now: float | None = None
+) -> float:
+    now = time.time() if now is None else now
+    return _bucket_level(read_buckets(node).get(key.lower()), budget_max, earn_per_hour, now)
 
 
 def budget_charge(
@@ -748,6 +762,94 @@ def budget_seconds_until(
     """Seconds until the bucket refills to `target` (0.0 when already there,
     inf when it never will because nothing is earned)."""
     level = budget_level(node, key, budget_max, earn_per_hour, now=now)
+    if level >= target:
+        return 0.0
+    if earn_per_hour <= 0:
+        return float("inf")
+    return (target - level) / earn_per_hour * 3600.0
+
+
+# ---------- rig spend bucket (MACHINE-GLOBAL: one subscription, many teams) ----------
+#
+# A rig maps to a real subscription (an Antigravity plan good for ~20 prompts an
+# hour, a Claude seat). Its ceiling is set ON THE RIG and binds every r4t team
+# on the machine, so one rig is safely shared across projects. This bucket
+# therefore lives at the r4t_home ROOT, not under any one team, and every team
+# node charges it concurrently — so the read-modify-write is serialized by a
+# machine-global lock. The gate itself (check-then-charge) is best-effort across
+# nodes; the charge clamps at zero and the queue holds, so a rare double-spend
+# just runs one extra turn before the rig rests.
+
+def rig_buckets_path() -> Path:
+    return r4t_home() / "rig-buckets.json"
+
+
+@contextmanager
+def _rig_bucket_locked():
+    """Serialize the machine-global rig-bucket read-modify-write across every
+    charging node AND thread. fcntl.flock is the right primitive here: it blocks
+    until the lock is free, works across processes and threads (each open() gets
+    its own file description), and is released automatically if a holder dies —
+    no stale-lock reclaim to race against. POSIX-only, like the rest of r4t."""
+    path = r4t_home() / ".rig-buckets.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def read_rig_buckets() -> dict:
+    return _read_buckets(rig_buckets_path())
+
+
+def rig_budget_level(
+    rig: str, budget_max: float, earn_per_hour: float, *, now: float | None = None
+) -> float:
+    now = time.time() if now is None else now
+    return _bucket_level(read_rig_buckets().get(rig.lower()), budget_max, earn_per_hour, now)
+
+
+def rig_budget_charge(
+    rig: str,
+    budget_max: float,
+    earn_per_hour: float,
+    amount: float = 1.0,
+    *,
+    now: float | None = None,
+) -> float:
+    now = time.time() if now is None else now
+    with _rig_bucket_locked():
+        data = read_rig_buckets()
+        level = _bucket_level(data.get(rig.lower()), budget_max, earn_per_hour, now)
+        new_level = max(0.0, level - amount)
+        data[rig.lower()] = {"level": round(new_level, 4), "at": now}
+        atomic_write_json(rig_buckets_path(), data)
+        return new_level
+
+
+def rig_budget_drain(rig: str, *, now: float | None = None) -> None:
+    """Empty the rig bucket outright — the whole rig rests until it refills.
+    The blank-response quota signal uses this: an out-of-quota subscription is
+    a rig-wide fact, so one drained bucket rests every member on that rig."""
+    now = time.time() if now is None else now
+    with _rig_bucket_locked():
+        data = read_rig_buckets()
+        data[rig.lower()] = {"level": 0.0, "at": now}
+        atomic_write_json(rig_buckets_path(), data)
+
+
+def rig_budget_seconds_until(
+    rig: str,
+    budget_max: float,
+    earn_per_hour: float,
+    target: float = 1.0,
+    *,
+    now: float | None = None,
+) -> float:
+    level = rig_budget_level(rig, budget_max, earn_per_hour, now=now)
     if level >= target:
         return 0.0
     if earn_per_hour <= 0:
