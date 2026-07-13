@@ -172,3 +172,66 @@ def test_run_chat_requires_human(ctx, repo, r4t_home):
         encoding="utf-8",
     )
     assert run_chat(ctx) == 2
+
+
+def test_handle_command_attach_and_detach(roster, human):
+    attached = handle_command(roster, NODE, human, "/attach phil")
+    assert attached.attach == "phil" and attached.detach is False
+    assert "attached to phil" in attached.lines[0]
+    miss = handle_command(roster, NODE, human, "/attach nobody")
+    assert miss.attach is None and "no AI member" in miss.lines[0]
+    human_miss = handle_command(roster, NODE, human, "/attach neil")
+    assert human_miss.attach is None  # the human is not a dispatchable member
+    detached = handle_command(roster, NODE, human, "/detach")
+    assert detached.detach is True
+
+
+def test_help_lists_attach_and_detach(session, capsys):
+    session.handle_line("/help")
+    out = capsys.readouterr().out
+    assert "/attach" in out and "/detach" in out
+
+
+def test_member_log_event_filters_by_member():
+    from chat import member_log_event
+
+    line = 'r4t: QUEUED gerry -> vela thread=T hop=0 "hi" (depth 1)'
+    assert member_log_event(line, "vela") == line
+    assert member_log_event(line, "cass") is None
+    assert member_log_event("### Prompt", "vela") is None
+
+
+def test_member_watch_streams_recv_and_output(r4t_home):
+    from chat import MemberWatch
+
+    watch = MemberWatch(NODE, "phil")
+    watch.poll()  # first poll syncs the log offset to the end (skips history)
+    state.append_log(NODE, 'r4t: QUEUED gerry -> phil thread=T hop=0 "do it" (depth 1)')
+    state.reset_live_log(NODE, "phil")
+    with state.live_log_path(NODE, "phil").open("a", encoding="utf-8") as f:
+        f.write("thinking out loud\n")
+    events = watch.poll()
+    kinds = [k for k, _ in events]
+    assert "recv" in kinds and "out" in kinds
+    recv = next(text for kind, text in events if kind == "recv")
+    assert "phil" in recv and "do it" in recv
+    out = next(text for kind, text in events if kind == "out")
+    assert "thinking out loud" in out
+
+
+def test_member_statuses_reports_active_resting_and_queue(ctx, roster, r4t_home):
+    from chat import member_statuses
+    from rig import load_rig_config
+
+    config = load_rig_config(ctx.config_path)
+    state.enqueue(NODE, "phil", {"from": "acme:gerry", "body": "x"})
+    rows = {r.name: r for r in member_statuses(NODE, roster, config)}
+    assert rows["Phil"].queue == 1
+    assert "Neil" not in rows and "Broken" not in rows  # human + errored excluded
+    lock = state.AgentLock(NODE, "gerry")
+    assert lock.acquire("leader")
+    try:
+        active = {r.name: r for r in member_statuses(NODE, roster, config)}
+        assert active["Gerry"].state == "active"
+    finally:
+        lock.release()

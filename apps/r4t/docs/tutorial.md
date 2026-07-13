@@ -55,7 +55,6 @@ a8s namespace myrepo myrepo-node
 a8s start myrepo-node
 tell myrepo-node "hello"       # bare agent name -> roster leader
 tell myrepo "hello"            # bare namespace prefix -> roster leader
-tell myrepo:dev "hello"        # namespace prefix:member -> specific member
 ```
 
 Run those commands (adjust paths and names) before expecting live traffic.
@@ -179,9 +178,11 @@ r4t rig add junior-dev opencode
 
 ## How a message flows
 
-1. `tell myrepo:dev "..."` routes through a8s to the team node; the node's
-   definition invokes `r4t dispatch`.
-2. r4t loads the roster, resolves Dev's rig, checks governance
+1. `tell myrepo "..."` routes through a8s to the team node; the node's
+   definition invokes `r4t dispatch`. External messages always enter at the
+   roster leader — the topmost leader IS the garden from outside; only the
+   team itself (and the human seat) addresses individual members.
+2. r4t loads the roster, resolves the leader's rig, checks governance
    gates, and runs the rig's CLI with a prompt (persona, history, incoming
    message).
 3. The harness's `$TELL_OUTBOX_DIR` points at a per-turn staging dir. The
@@ -214,7 +215,7 @@ r4t roster check
 a8s add acme-node ~/repos/acme ~/bin/apps/r4t/example-definition.json
 a8s namespace acme acme-node
 a8s start acme-node
-tell acme:gerry "Ship the refactor; report when reviewed."
+tell acme "Ship the refactor; report when reviewed."
 ```
 
 Watch: `a8s logs acme-node -f`, `r4t status --node acme`, and dead letters

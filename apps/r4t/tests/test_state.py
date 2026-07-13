@@ -284,3 +284,16 @@ class TestStaging:
         (d / "001").mkdir()
         names = [p.name for p in staged_envelopes(NODE, "phil")]
         assert names == ["001.json", "002.json"]
+
+
+def test_live_log_reset_and_tail(r4t_home):
+    path = state.reset_live_log(NODE, "phil")
+    assert path.read_text(encoding="utf-8") == ""
+    with path.open("a", encoding="utf-8") as f:
+        f.write("hello\n")
+    chunk, offset = state.read_live_log_tail(NODE, "phil", 0)
+    assert chunk == "hello\n" and offset == 6
+    assert state.read_live_log_tail(NODE, "phil", offset) == ("", 6)
+    # a new turn truncates the file; a stale offset restarts from the top
+    state.reset_live_log(NODE, "phil")
+    assert state.read_live_log_tail(NODE, "phil", offset) == ("", 0)

@@ -166,3 +166,56 @@ def test_tui_header_surfaces_trouble(seat):
             assert "pair-repeat" in header
 
     asyncio.run(scenario())
+
+
+def test_tui_attach_and_detach_toggles_panes(seat):
+    ctx, roster, human = seat
+
+    async def scenario():
+        from textual.widgets import Input, RichLog
+
+        app = ChatApp(ctx, roster, human)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            composer = app.query_one("#composer", Input)
+            composer.value = "/attach phil"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.attached == "phil"
+            assert app.query_one("#attach", RichLog).display is True
+            assert app.query_one("#activity", RichLog).display is False
+
+            composer.value = "/detach"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.attached is None
+            assert app.query_one("#attach", RichLog).display is False
+            assert app.query_one("#activity", RichLog).display is True
+
+    asyncio.run(scenario())
+
+
+def test_tui_click_member_attaches(seat):
+    ctx, roster, human = seat
+
+    async def scenario():
+        app = ChatApp(ctx, roster, human)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.click("#member-phil")
+            await pilot.pause()
+            assert app.attached == "phil"
+
+    asyncio.run(scenario())
+
+
+def test_tui_attach_flag_opens_attached(seat):
+    ctx, roster, human = seat
+
+    async def scenario():
+        app = ChatApp(ctx, roster, human, attach="phil")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.attached == "phil"
+
+    asyncio.run(scenario())

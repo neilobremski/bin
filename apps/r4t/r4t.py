@@ -649,6 +649,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
         return 2
     ctx = _context(args, node)
     _ensure_tell_outbox(ctx)
+    attach = getattr(args, "attach", None)
     if not args.plain and sys.stdout.isatty():
         try:
             from chat_tui import run_chat_tui
@@ -659,10 +660,10 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         else:
-            return run_chat_tui(ctx)
+            return run_chat_tui(ctx, attach=attach)
     from chat import run_chat
 
-    return run_chat(ctx)
+    return run_chat(ctx, attach=attach)
 
 
 def _seat_human(roster: Roster) -> Member | None:
@@ -1108,6 +1109,10 @@ def build_parser() -> argparse.ArgumentParser:
     chat_p.add_argument(
         "--plain", action="store_true",
         help="Line UI instead of the full-screen TUI.",
+    )
+    chat_p.add_argument(
+        "--attach", metavar="MEMBER",
+        help="Open watching a member read-only (messages in and turn output live).",
     )
     chat_p.set_defaults(func=cmd_chat)
 

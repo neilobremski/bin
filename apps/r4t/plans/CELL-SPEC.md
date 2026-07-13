@@ -133,8 +133,16 @@ JSON edit.
 - TUI composer gains command parity with the line UI; unknown commands
   say so instead of vanishing. `/tasks` renamed `/threads`.
 - Chat message headers carry the rig slug: `d5n:vela (specialist)`.
-- Later ("gemba mode"): scope a chat session to one cell — see that
-  cell's traffic, message its members directly, then step back out.
+- Gemba mode (decided 2026-07-13, issue #176): `r4t chat` is the control
+  plane. A member status panel (active/resting/broken, queue depths) plus
+  ATTACH — click a member or `/attach <name>` for a read-only live view:
+  every message it receives as it is enqueued, and its turn output
+  streaming as it comes out (dispatch tees harness output to
+  `agents/<member>/live.log`, truncated at turn start). Observation only;
+  `/detach` steps back out. This replaced the old scope-to-a-cell idea,
+  and direct outside-world connection to a member was rejected outright —
+  observing creates no channel that later needs locking down. Messaging
+  an attached member is future gemba work.
 
 ## Phase 3 — mission/milestone doc
 

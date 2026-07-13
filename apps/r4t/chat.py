@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import sys
 import threading
 import time
@@ -191,11 +192,63 @@ def format_threads(node: str) -> list[str]:
     return rows or ["(no open threads)"]
 
 
+ACTIVE = "active"
+RESTING = "resting"
+BROKEN = "broken"
+IDLE = "idle"
+
+
+@dataclass
+class MemberStatus:
+    """One AI member's live state for the control-plane panel: whether it is
+    running a turn, resting on an empty budget, broken, or idle, and how deep
+    its queue is. Built entirely from state.py/verdict-grade signals."""
+
+    name: str
+    rig: str
+    state: str
+    queue: int
+    detail: str = ""
+
+
+def member_statuses(node: str, roster: Roster, config=None) -> list[MemberStatus]:
+    locks = {lock["agent"]: lock for lock in state.live_locks(node, prune=False)}
+    rows: list[MemberStatus] = []
+    for m in roster.members:
+        if m.is_human or m.errors:
+            continue
+        depth = state.queue_depth(node, m.name)
+        lock = locks.get(m.name.lower())
+        rig = None
+        if config is not None:
+            rig, _err, _pinned = config.rig_for(m)
+        if lock is not None:
+            st, detail = ACTIVE, f"pid {lock.get('pid')}"
+        elif config is not None and rig is not None:
+            blocked, failures = state.breaker_open(
+                node, m.name, config.breaker_cap, config.breaker_cooldown_seconds
+            )
+            if blocked:
+                st, detail = BROKEN, f"{failures} straight failures"
+            else:
+                level = state.budget_level(
+                    node, m.name, rig.budget_max, rig.budget_earn_per_hour
+                )
+                if depth and level < 1.0:
+                    wait = state.budget_seconds_until(
+                        node, m.name, rig.budget_max, rig.budget_earn_per_hour
+                    )
+                    st, detail = RESTING, f"ready ~{wait / 60:.0f}m"
+                else:
+                    st, detail = IDLE, ""
+        else:
+            st, detail = IDLE, ""
+        rows.append(MemberStatus(m.name, rig.name if rig else (m.rig or "?"), st, depth, detail))
+    return rows
+
+
 def format_who(node: str, roster: Roster, human: Member) -> list[str]:
-    locks = {
-        lock.get("name", "").lower(): lock
-        for lock in state.live_locks(node, prune=False)
-    }
+    locks = {lock["agent"]: lock for lock in state.live_locks(node, prune=False)}
     rows: list[str] = []
     for m in roster.members:
         if m.is_human:
@@ -204,14 +257,80 @@ def format_who(node: str, roster: Roster, human: Member) -> list[str]:
             rows.append(f"{m.name:12} human   ({seat}{bell})")
             continue
         lock = locks.get(m.name.lower())
+        depth = state.queue_depth(node, m.name)
         status = f"ACTIVE (pid {lock.get('pid')})" if lock else "idle"
+        if depth:
+            status += f", {depth} queued"
         leader = " leader" if m.leader else ""
         rows.append(f"{m.name:12} {m.rig or '?':7} {status}{leader}")
     return rows
 
 
+def member_log_event(line: str, name: str) -> str | None:
+    """Compact a team-log line into a gemba event for one member, or None when
+    the line does not name it — messages enqueued for it, its turn boundaries,
+    and the governance lines that mention it, nothing else."""
+    event = filter_log_line(line)
+    if event is None:
+        return None
+    key = name.strip().lower()
+    if re.search(rf"\b{re.escape(key)}\b", event.lower()):
+        return event
+    return None
+
+
+class MemberWatch:
+    """Read-only live view of one AI member for a gemba attach: the team-log
+    events that name it (every message enqueued for it, its turn boundaries)
+    plus its turn output tailed live from agents/<name>/live.log as it streams.
+    Observation only — attaching never sends to the member."""
+
+    def __init__(self, node: str, name: str):
+        self.node = node
+        self.name = name.strip().lower()
+        self._log_path = None
+        self._log_offset = 0
+        self._live_offset = 0
+
+    def _poll_log(self) -> list[tuple[str, str]]:
+        path = state.team_dir(self.node) / "log" / (
+            datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".md"
+        )
+        if path != self._log_path:
+            self._log_path = path
+            self._log_offset = path.stat().st_size if path.is_file() else 0
+            return []
+        if not path.is_file():
+            return []
+        size = path.stat().st_size
+        if size <= self._log_offset:
+            self._log_offset = min(self._log_offset, size)
+            return []
+        with path.open("r", encoding="utf-8") as f:
+            f.seek(self._log_offset)
+            chunk = f.read()
+            self._log_offset = f.tell()
+        out: list[tuple[str, str]] = []
+        for line in chunk.splitlines():
+            event = member_log_event(line, self.name)
+            if event:
+                out.append(("recv", event))
+        return out
+
+    def _poll_live(self) -> list[tuple[str, str]]:
+        chunk, self._live_offset = state.read_live_log_tail(
+            self.node, self.name, self._live_offset
+        )
+        return [("out", line) for line in chunk.splitlines() if line.strip()]
+
+    def poll(self) -> list[tuple[str, str]]:
+        return [*self._poll_log(), *self._poll_live()]
+
+
 HELP = """\
 /to <name|team>   set message target (bare team = leader)
+/attach <name>    watch a member read-only (messages in + turn output live)
+/detach           stop watching
 /who              roster and live turn locks
 /threads          open threads for this team
 /help             this help
@@ -221,11 +340,14 @@ HELP = """\
 @dataclass
 class CommandResult:
     """Outcome of a shared /command: system lines both surfaces display, plus
-    any state change the surface applies itself (quit, adopt a new target)."""
+    any state change the surface applies itself (quit, adopt a new target,
+    attach to / detach from a member)."""
 
     lines: list[str] = field(default_factory=list)
     quit: bool = False
     target: str | None = None
+    attach: str | None = None
+    detach: bool = False
 
 
 def handle_command(roster: Roster, node: str, human: Member, line: str) -> CommandResult:
@@ -248,11 +370,25 @@ def handle_command(roster: Roster, node: str, human: Member, line: str) -> Comma
                 lines=[f"no AI member named {arg.strip().lower()!r} in the roster"]
             )
         return CommandResult(lines=[f"target: {target}"], target=target)
+    if cmd == "/attach":
+        member = roster.find(arg)
+        if member is None or member.is_human or member.errors:
+            return CommandResult(
+                lines=[f"no AI member named {arg.strip().lower()!r} to attach to"]
+            )
+        name = member.name.lower()
+        return CommandResult(
+            lines=[f"attached to {name} — read-only; /detach to stop"], attach=name
+        )
+    if cmd == "/detach":
+        return CommandResult(lines=["detached"], detach=True)
     return CommandResult(lines=[f"unknown command: {cmd} (try /help)"])
 
 
 class ChatSession:
-    def __init__(self, ctx: DispatchContext, roster: Roster, human: Member):
+    def __init__(
+        self, ctx: DispatchContext, roster: Roster, human: Member, attach: str | None = None
+    ):
         self.ctx = ctx
         self.roster = roster
         self.human = human
@@ -261,10 +397,14 @@ class ChatSession:
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.sends: queue.Queue[tuple[str, str]] = queue.Queue()
         self.tty = sys.stdout.isatty()
+        self.watch = MemberWatch(ctx.node, attach) if attach else None
 
     # ---------- output ----------
 
-    _STYLE = {"in": "\x1b[36m", "you": "\x1b[32m", "sys": "\x1b[33m", "act": "\x1b[2m"}
+    _STYLE = {
+        "in": "\x1b[36m", "you": "\x1b[32m", "sys": "\x1b[33m", "act": "\x1b[2m",
+        "recv": "\x1b[35m", "out": "\x1b[37m",
+    }
 
     def emit(self, kind: str, text: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
@@ -305,6 +445,10 @@ class ChatSession:
                 return False
             if result.target is not None:
                 self.target = result.target
+            if result.attach is not None:
+                self.watch = MemberWatch(self.ctx.node, result.attach)
+            if result.detach:
+                self.watch = None
             if result.lines:
                 self.emit("sys", "\n".join(result.lines))
             return True
@@ -319,14 +463,23 @@ class ChatSession:
             text = render_envelope(payload, self.roster) if kind == "in" else payload
             self.events.put((kind, text))
 
+    def _pump_watch(self) -> None:
+        if self.watch is None:
+            return
+        for kind, text in self.watch.poll():
+            self.events.put((kind, f"[{self.watch.name}] {text}"))
+
     def run(self) -> int:
         self.emit(
             "sys",
             f"seat: {self.human.name} on {self.ctx.node} — messages go to"
             f" {self.target} (leader). /help for commands.",
         )
+        if self.watch is not None:
+            self.emit("sys", f"attached to {self.watch.name} — read-only; /detach to stop")
         state.touch_seat_presence(self.ctx.node, self.human.name)
         self._pump_feed()
+        self._pump_watch()
 
         threading.Thread(target=self._send_worker, daemon=True).start()
         lines: queue.Queue[str] = queue.Queue()
@@ -341,6 +494,7 @@ class ChatSession:
                     pass
                 state.touch_seat_presence(self.ctx.node, self.human.name)
                 self._pump_feed()
+                self._pump_watch()
                 try:
                     while True:
                         kind, text = self.events.get_nowait()
@@ -355,10 +509,16 @@ class ChatSession:
             self.emit("sys", "seat detached — mail parks and the doorbell rings again")
 
 
-def run_chat(ctx: DispatchContext) -> int:
+def run_chat(ctx: DispatchContext, attach: str | None = None) -> int:
     try:
         roster, human = load_seat(ctx)
     except SeatError as e:
         print(f"r4t chat: {e}", file=sys.stderr)
         return 2
-    return ChatSession(ctx, roster, human).run()
+    if attach:
+        member = roster.find(attach)
+        if member is None or member.is_human or member.errors:
+            print(f"r4t chat: no AI member named {attach!r} to attach to", file=sys.stderr)
+            return 2
+        attach = member.name.lower()
+    return ChatSession(ctx, roster, human, attach=attach).run()

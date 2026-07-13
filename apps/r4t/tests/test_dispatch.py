@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import sys
 import textwrap
 import time
@@ -155,7 +156,7 @@ class TestIngressAndTurn:
         assert len(harness_calls(fake_harness)) == 1
 
     def test_prompt_batches_messages_without_headers(self, ctx, fake_harness):
-        handle_message(ctx, "gerry", "acme:phil", "hi")
+        handle_message(ctx, "acme:gerry", "acme:phil", "hi")
         prompt = read_prompt(harness_calls(fake_harness)[0])
         assert "You are Phil" in prompt
         assert "## Messages since your last turn" in prompt
@@ -199,30 +200,30 @@ class TestIngressAndTurn:
         assert "You are Gerry" in prompt
 
     def test_history_holds_inbound(self, ctx, fake_harness):
-        handle_message(ctx, "gerry", "acme:phil", "first job")
+        handle_message(ctx, "acme:gerry", "acme:phil", "first job")
         assert "first job" in state.read_history(NODE, "phil")
 
     def test_conversation_history_fed_back(self, ctx, fake_harness):
-        handle_message(ctx, "gerry", "acme:phil", "first job")
-        handle_message(ctx, "marcus", "acme:phil", "second job")
+        handle_message(ctx, "acme:gerry", "acme:phil", "first job")
+        handle_message(ctx, "acme:marcus", "acme:phil", "second job")
         prompt = read_prompt(harness_calls(fake_harness)[-1])
         assert "first job" in prompt  # earlier turn is now in the history block
 
     def test_velocity_recorded(self, ctx, fake_harness):
-        handle_message(ctx, "gerry", "acme:phil", "job")
+        handle_message(ctx, "acme:gerry", "acme:phil", "job")
         rows = (state.team_dir(NODE) / "velocity.csv").read_text().splitlines()
         assert len(rows) == 2  # header + one turn
 
     def test_transcript_logged(self, ctx, fake_harness):
-        handle_message(ctx, "gerry", "acme:phil", "job")
+        handle_message(ctx, "acme:gerry", "acme:phil", "job")
         log = read_log()
         assert "### Prompt" in log
         assert "### Output (Phil" in log
 
     def test_two_messages_drain_in_one_batch_turn(self, ctx, fake_harness):
         # Both arrive before any turn runs: ONE turn drains the whole queue.
-        handle_message(ctx, "gerry", "acme:phil", "job one", drain_after=False)
-        handle_message(ctx, "marcus", "acme:phil", "job two", drain_after=False)
+        handle_message(ctx, "acme:gerry", "acme:phil", "job one", drain_after=False)
+        handle_message(ctx, "acme:marcus", "acme:phil", "job two", drain_after=False)
         assert state.queue_depth(NODE, "phil") == 2
         assert drain(ctx) == 1
         calls = harness_calls(fake_harness)
@@ -231,8 +232,8 @@ class TestIngressAndTurn:
         assert "job one" in prompt and "job two" in prompt
 
     def test_duplicate_collapse_notes_repeats(self, ctx, fake_harness):
-        handle_message(ctx, "gerry", "acme:phil", "same ping", drain_after=False)
-        handle_message(ctx, "gerry", "acme:phil", "same ping", drain_after=False)
+        handle_message(ctx, "acme:gerry", "acme:phil", "same ping", drain_after=False)
+        handle_message(ctx, "acme:gerry", "acme:phil", "same ping", drain_after=False)
         assert state.queue_depth(NODE, "phil") == 1
         assert drain(ctx) == 1
         prompt = read_prompt(harness_calls(fake_harness)[0])
@@ -244,7 +245,7 @@ class TestIngressAndTurn:
             state.enqueue(NODE, "phil", {"from": "late", "body": "arrived mid-turn", "task": new_ulid(), "hop": 0})
             return run_harness(rig, prompt, cwd, env=env, variant=variant)
 
-        handle_message(ctx, "gerry", "acme:phil", "first", drain_after=False)
+        handle_message(ctx, "acme:gerry", "acme:phil", "first", drain_after=False)
         assert drain(ctx, run_fn=enqueue_midturn) == 1
         assert "arrived mid-turn" not in read_prompt(harness_calls(fake_harness)[0])
         assert state.queue_depth(NODE, "phil") == 1  # it waits for the next turn
@@ -253,15 +254,15 @@ class TestIngressAndTurn:
 class TestRejections:
     def test_unknown_member_dead_letters_and_tells(self, ctx, tells, fake_harness):
         sent, _ = tells
-        handle_message(ctx, "gerry", "acme:nobody", "hi")
+        handle_message(ctx, "acme:gerry", "acme:nobody", "hi")
         assert not harness_calls(fake_harness)
         assert any("no team member named" in b for _, b in sent)
         assert "unknown-recipient" in dead_reasons()
 
     def test_human_message_parks_in_seat(self, ctx, tells, fake_harness):
-        handle_message(ctx, "gerry", "acme:neil", "hi")
+        handle_message(ctx, "acme:gerry", "acme:neil", "hi")
         assert not harness_calls(fake_harness)
-        assert [m["from"] for m in seat_messages()] == ["gerry"]
+        assert [m["from"] for m in seat_messages()] == ["acme:gerry"]
 
     def test_doorbell_copy_is_headerless_egress(self, ctx, tells, fake_harness):
         sent, _ = tells
@@ -272,12 +273,12 @@ class TestRejections:
     def test_human_doorbell_skipped_when_attached(self, ctx, tells, fake_harness):
         sent, _ = tells
         state.touch_seat_presence(NODE, "Neil")
-        handle_message(ctx, "gerry", "acme:neil", "hi")
+        handle_message(ctx, "acme:gerry", "acme:neil", "hi")
         assert not sent
 
     def test_disabled_member_dead_letters(self, ctx, tells, fake_harness):
         sent, _ = tells
-        handle_message(ctx, "gerry", "acme:broken", "hi")
+        handle_message(ctx, "acme:gerry", "acme:broken", "hi")
         assert any("disabled" in b for _, b in sent)
         assert "member-disabled" in dead_reasons()
 
@@ -294,7 +295,7 @@ class TestRejections:
     def test_missing_roster(self, ctx, repo, tells, fake_harness):
         (repo / "ROSTER.md").unlink()
         sent, _ = tells
-        handle_message(ctx, "gerry", "acme:phil", "hi")
+        handle_message(ctx, "acme:gerry", "acme:phil", "hi")
         assert any("cannot dispatch" in b for _, b in sent)
 
     def test_no_leader_for_bare_node(self, ctx, repo, tells, fake_harness):
@@ -320,7 +321,7 @@ class TestStagingRelease:
     ):
         monkeypatch.setenv("CHATTY_TO", "outsider")
         monkeypatch.setenv("CHATTY_BODY", "the fix is deployed")
-        assert run_one(chatty_ctx, "gerry", "acme:phil", "deploy the fix") == 1
+        assert run_one(chatty_ctx, "acme:gerry", "acme:phil", "deploy the fix") == 1
         envelopes = outbox_envelopes(repo)
         assert len(envelopes) == 1
         envelope = envelopes[0]
@@ -333,7 +334,7 @@ class TestStagingRelease:
     def test_outbound_attributed_to_history(self, chatty_ctx, chatty_harness, monkeypatch):
         monkeypatch.setenv("CHATTY_TO", "neil")
         monkeypatch.setenv("CHATTY_BODY", "status: done")
-        run_one(chatty_ctx, "gerry", "acme:phil", "report status")
+        run_one(chatty_ctx, "acme:gerry", "acme:phil", "report status")
         history = state.read_history(NODE, "phil")
         assert "to neil" in history
         assert "status: done" in history
@@ -341,7 +342,7 @@ class TestStagingRelease:
     def test_quota_overflow_dead_letters(self, chatty_ctx, repo, chatty_harness, monkeypatch):
         monkeypatch.setenv("CHATTY_TO", "outsider")
         monkeypatch.setenv("CHATTY_SENDS", "4")  # max_sends_per_turn is 2
-        run_one(chatty_ctx, "gerry", "acme:phil", "fan out")
+        run_one(chatty_ctx, "acme:gerry", "acme:phil", "fan out")
         assert len(outbox_envelopes(repo)) == 2
         assert dead_reasons() == ["quota", "quota"]
 
@@ -350,7 +351,7 @@ class TestStagingRelease:
     ):
         monkeypatch.setenv("CHATTY_TO", "acme:gerry")
         monkeypatch.setenv("CHATTY_BODY", "please review my patch")
-        assert run_one(chatty_ctx, "neil", "acme:phil", "do the work") == 1
+        assert run_one(chatty_ctx, "acme:gerry", "acme:phil", "do the work") == 1
         assert state.queue_depth(NODE, "gerry") == 1  # delegation queued for gerry
         monkeypatch.setenv("CHATTY_SENDS", "0")
         assert drain_until_quiet(chatty_ctx) == 1
@@ -367,7 +368,7 @@ class TestStagingRelease:
     ):
         monkeypatch.setenv("CHATTY_TO", "Gerry")
         monkeypatch.setenv("CHATTY_BODY", "please review my patch")
-        assert run_one(chatty_ctx, "neil", "acme:phil", "do the work") == 1
+        assert run_one(chatty_ctx, "acme:gerry", "acme:phil", "do the work") == 1
         assert outbox_envelopes(repo) == []
         assert state.queue_depth(NODE, "gerry") == 1
 
@@ -376,7 +377,7 @@ class TestStagingRelease:
     ):
         monkeypatch.setenv("CHATTY_TO", "acme:neil")
         monkeypatch.setenv("CHATTY_BODY", "shipped")
-        assert run_one(chatty_ctx, "gerry", "acme:phil", "ship it") == 1
+        assert run_one(chatty_ctx, "acme:gerry", "acme:phil", "ship it") == 1
         assert outbox_envelopes(repo) == []
         parked = seat_messages()
         assert [m["from"] for m in parked] == ["acme:phil"]
@@ -387,7 +388,7 @@ class TestStagingRelease:
     ):
         monkeypatch.setenv("CHATTY_TO", "chatroom")
         monkeypatch.setenv("CHATTY_BODY", "#dev hello")
-        assert run_one(chatty_ctx, "neil", "acme:phil", "post an update") == 1
+        assert run_one(chatty_ctx, "acme:gerry", "acme:phil", "post an update") == 1
         assert [e["to"] for e in outbox_envelopes(repo)] == ["chatroom"]
 
     def test_reply_to_human_creator_closes_thread(
@@ -418,7 +419,7 @@ class TestStagingRelease:
         monkeypatch.setenv("CHATTY_TO", "neil,gerry")
         monkeypatch.setenv("CHATTY_SENDS", "2")
         monkeypatch.setenv("CHATTY_BODY", "P0 logged, dispatching ({i})")
-        assert run_one(chatty_ctx, "neil", "acme:phil", "movement is broken") == 1
+        assert run_one(chatty_ctx, "acme:gerry", "acme:phil", "movement is broken") == 1
         assert state.queue_depth(NODE, "gerry") == 1
         monkeypatch.setenv("CHATTY_SENDS", "0")
         assert drain_until_quiet(chatty_ctx) == 1
@@ -429,7 +430,7 @@ class TestStagingRelease:
     ):
         monkeypatch.setenv("CHATTY_TO", "chatroom")
         monkeypatch.setenv("CHATTY_BODY", "#dev progress update")
-        assert run_one(chatty_ctx, "neil", "acme:phil", "post an update") == 1
+        assert run_one(chatty_ctx, "acme:gerry", "acme:phil", "post an update") == 1
         assert tasks.list_tasks(NODE)[0]["status"] == tasks.STATUS_OPEN
 
     def test_released_envelope_claims_namespaced_sender(
@@ -437,7 +438,7 @@ class TestStagingRelease:
     ):
         monkeypatch.setenv("CHATTY_TO", "outsider")
         monkeypatch.setenv("CHATTY_BODY", "status: done")
-        run_one(chatty_ctx, "gerry", "acme:phil", "report status")
+        run_one(chatty_ctx, "acme:gerry", "acme:phil", "report status")
         assert [e["from"] for e in outbox_envelopes(repo)] == ["acme:phil"]
 
     def test_reply_closes_only_the_answered_thread(self, ctx, repo, r4t_home):
@@ -463,7 +464,7 @@ class TestStagingRelease:
 class TestBudgets:
     def test_turn_charges_member_and_team_one_unit(self, ctx, fake_harness):
         config = load_rig_config(ctx.config_path)
-        handle_message(ctx, "gerry", "acme:phil", "job")
+        handle_message(ctx, "acme:gerry", "acme:phil", "job")
         assert member_budget(ctx, "phil") == pytest.approx(99.0, abs=0.3)
         team = state.budget_level(
             NODE, state.CELL_BUDGET_KEY,
@@ -473,7 +474,7 @@ class TestBudgets:
 
     def test_empty_member_budget_rests_and_holds_queue(self, ctx, fake_harness):
         empty_member_budget(ctx, "phil")
-        handle_message(ctx, "gerry", "acme:phil", "job")
+        handle_message(ctx, "acme:gerry", "acme:phil", "job")
         assert not harness_calls(fake_harness)
         assert state.queue_depth(NODE, "phil") == 1
         assert "RESTING phil" in read_log()
@@ -485,7 +486,7 @@ class TestBudgets:
             config.cell_budget_max, config.cell_budget_earn_per_hour,
             config.cell_budget_max + 5,
         )
-        handle_message(ctx, "gerry", "acme:phil", "job")
+        handle_message(ctx, "acme:gerry", "acme:phil", "job")
         assert not harness_calls(fake_harness)
         assert state.queue_depth(NODE, "phil") == 1
 
@@ -497,7 +498,7 @@ class TestBudgets:
             NODE, "phil", rig.budget_max, rig.budget_earn_per_hour,
             rig.budget_max, now=time.time() - 3600,
         )
-        handle_message(ctx, "gerry", "acme:phil", "job")
+        handle_message(ctx, "acme:gerry", "acme:phil", "job")
         assert len(harness_calls(fake_harness)) == 1
 
     def test_seat_send_reports_resting(self, ctx):
@@ -525,20 +526,20 @@ def timeout_run(rig, prompt, cwd, *, env=None, variant=0):
 
 def trip_breaker(ctx, agent="phil", cap=5):
     for i in range(cap):
-        assert run_one(ctx, "neil", f"acme:{agent}", f"attempt {i}", run_fn=fail_run) == 1
+        assert run_one(ctx, "acme:gerry", f"acme:{agent}", f"attempt {i}", run_fn=fail_run) == 1
 
 
 class TestFailureBreaker:
     def test_failures_counted_and_cleared_by_clean_turn(self, ctx):
-        assert run_one(ctx, "neil", "acme:phil", "one", run_fn=fail_run) == 1
-        assert run_one(ctx, "neil", "acme:phil", "two", run_fn=timeout_run) == 1
+        assert run_one(ctx, "acme:gerry", "acme:phil", "one", run_fn=fail_run) == 1
+        assert run_one(ctx, "acme:gerry", "acme:phil", "two", run_fn=timeout_run) == 1
         assert state.read_meta(NODE, "phil")["consecutive_failures"] == 2
-        assert run_one(ctx, "neil", "acme:phil", "three", run_fn=ok_run) == 1
+        assert run_one(ctx, "acme:gerry", "acme:phil", "three", run_fn=ok_run) == 1
         assert state.read_meta(NODE, "phil")["consecutive_failures"] == 0
 
     def test_trips_at_cap_then_holds_queue(self, ctx):
         trip_breaker(ctx)
-        handle_message(ctx, "neil", "acme:phil", "blocked", drain_after=False)
+        handle_message(ctx, "acme:gerry", "acme:phil", "blocked", drain_after=False)
         assert drain(ctx, run_fn=ok_run) == 0  # breaker open: no turn
         assert state.queue_depth(NODE, "phil") >= 1  # messages held, not dropped
         assert "BREAKER phil" in read_log()
@@ -547,14 +548,14 @@ class TestFailureBreaker:
     def test_half_open_probe_success_closes(self, ctx):
         trip_breaker(ctx)
         state.update_meta(NODE, "phil", last_failure_at="2020-01-01T00:00:00Z")
-        assert run_one(ctx, "neil", "acme:phil", "probe", run_fn=ok_run) == 1
+        assert run_one(ctx, "acme:gerry", "acme:phil", "probe", run_fn=ok_run) == 1
         assert state.read_meta(NODE, "phil")["consecutive_failures"] == 0
 
     def test_failed_probe_reopens(self, ctx):
         trip_breaker(ctx)
         state.update_meta(NODE, "phil", last_failure_at="2020-01-01T00:00:00Z")
-        assert run_one(ctx, "neil", "acme:phil", "probe", run_fn=fail_run) == 1
-        handle_message(ctx, "neil", "acme:phil", "again", drain_after=False)
+        assert run_one(ctx, "acme:gerry", "acme:phil", "probe", run_fn=fail_run) == 1
+        handle_message(ctx, "acme:gerry", "acme:phil", "again", drain_after=False)
         assert drain(ctx, run_fn=ok_run) == 0  # reopened for another cooldown
 
 
@@ -714,7 +715,7 @@ class TestTeamThrottle:
                         max_concurrent=1, min_seconds_between_turn_starts=0)
         live = state.AgentLock(NODE, "gerry")
         assert live.acquire("leader")  # one turn already live
-        handle_message(ctx, "neil", "acme:phil", "job", drain_after=False)
+        handle_message(ctx, "acme:gerry", "acme:phil", "job", drain_after=False)
         assert drain(ctx) == 0  # throttle blocks the second start
         assert state.queue_depth(NODE, "phil") == 1
         live.release()
@@ -723,7 +724,7 @@ class TestTeamThrottle:
     def test_cadence_spaces_turn_starts(self, repo, fake_harness, tells, tmp_path, r4t_home):
         ctx = self._ctx(repo, fake_harness, tells, tmp_path,
                         max_concurrent=0, min_seconds_between_turn_starts=30)
-        assert run_one(ctx, "neil", "acme:phil", "one") == 1
+        assert run_one(ctx, "acme:gerry", "acme:phil", "one") == 1
         handle_message(ctx, "neil", "acme:gerry", "two", drain_after=False)
         assert drain(ctx) == 0  # cadence window still shut
         assert state.queue_depth(NODE, "gerry") == 1
@@ -932,7 +933,7 @@ class TestRunHarness:
         config["junior-dev"]["invoke"] = ["/no/such/binary-r4t", "{prompt}"]
         rig_config.write_text(json.dumps(config), encoding="utf-8")
         sent, _ = tells
-        handle_message(ctx, "gerry", f"{NODE}:phil", "hi")
+        handle_message(ctx, "acme:gerry", f"{NODE}:phil", "hi")
         assert any("failed to start" in b for _, b in sent)
 
 
@@ -1039,13 +1040,13 @@ class TestCli:
 
     def test_dispatch_batches_queued_with_live(self, r4t_home, repo, rig_config, fake_harness):
         state.enqueue(
-            NODE, "phil",
-            {"from": "gerry", "to": "acme:phil", "task": new_ulid(), "hop": 0,
+            NODE, "gerry",
+            {"from": "boss", "to": "acme", "task": new_ulid(), "hop": 0,
              "auto": True, "body": "parked earlier"},
         )
         self.run(
-            "dispatch", "--root", str(repo), "--from", "gerry",
-            "--to", "acme:phil", "--message", "live one",
+            "dispatch", "--root", str(repo), "--from", "boss",
+            "--to", "acme", "--message", "live one",
             "--rig-config", str(rig_config), "--no-notify",
         )
         calls = harness_calls(fake_harness)
@@ -1321,3 +1322,78 @@ class TestInit:
         assert "left unchanged" in out
         assert (root / "ROSTER.md").read_text(encoding="utf-8") == roster_before
         assert (r4t_home / "rigs.json").read_text(encoding="utf-8") == config_before
+
+
+class TestExternalIngressEntersAtTheTop:
+    def test_external_member_address_routes_to_leader(self, ctx, fake_harness):
+        # An outside agent cannot reach a member by namespace: the topmost
+        # leader IS the garden from outside, so a sub-address is ignored.
+        handle_message(ctx, "boss", "acme:phil", "do this")
+        assert state.queue_depth(NODE, "phil") == 0
+        prompt = read_prompt(harness_calls(fake_harness)[0])
+        assert "You are Gerry" in prompt
+        assert tasks.list_tasks(NODE)[0]["creator"] == "boss"  # sender unchanged
+
+    def test_external_bare_node_reaches_leader(self, ctx, fake_harness):
+        handle_message(ctx, "boss", "acme", "status?")
+        assert "You are Gerry" in read_prompt(harness_calls(fake_harness)[0])
+
+    def test_internal_sender_still_reaches_named_member(self, ctx, fake_harness):
+        handle_message(ctx, "acme:gerry", "acme:phil", "do this")
+        assert "You are Phil" in read_prompt(harness_calls(fake_harness)[0])
+
+    def test_doorbell_reply_lands_in_seat_path_and_routes_to_leader(self, ctx, fake_harness):
+        # "neil" is the roster human's Address: a reply from it is the human
+        # speaking, re-stamped to the seat and routed to the leader.
+        handle_message(ctx, "neil", "acme:phil", "please do X")
+        assert state.queue_depth(NODE, "phil") == 0
+        assert "You are Gerry" in read_prompt(harness_calls(fake_harness)[0])
+        assert tasks.list_tasks(NODE)[0]["creator"] == "acme:neil"
+
+    def test_doorbell_reply_thread_closes_on_answer(
+        self, chatty_ctx, chatty_harness, monkeypatch
+    ):
+        monkeypatch.setenv("CHATTY_TO", "neil")
+        monkeypatch.setenv("CHATTY_BODY", "done: shipped and verified")
+        assert run_one(chatty_ctx, "neil", "acme:gerry", "please ship") == 1
+        task = tasks.list_tasks(NODE)[0]
+        assert task["creator"] == "acme:neil"
+        assert task["status"] == tasks.STATUS_CLOSED
+
+    def test_reply_to_human_address_parks_in_seat_and_closes(
+        self, chatty_ctx, repo, chatty_harness, tells, monkeypatch
+    ):
+        # Gerry answers the doorbell reply by its a8s Address ("neil"), the
+        # human's other name: it parks in the seat, rings the doorbell, and
+        # closes the human's thread — no envelope leaves the garden.
+        sent, _ = tells
+        monkeypatch.setenv("CHATTY_TO", "neil")
+        monkeypatch.setenv("CHATTY_BODY", "done: shipped and verified")
+        assert run_one(chatty_ctx, "neil", "acme", "please ship") == 1
+        assert outbox_envelopes(repo) == []
+        assert [m["from"] for m in seat_messages()] == ["acme:gerry"]
+        assert ("neil", "done: shipped and verified") in sent
+        task = tasks.list_tasks(NODE)[0]
+        assert task["creator"] == "acme:neil"
+        assert task["status"] == tasks.STATUS_CLOSED
+
+
+class TestLiveLogTee:
+    def test_run_harness_tees_output_to_live_log(self, tmp_path):
+        script = tmp_path / "chatter.py"
+        script.write_text("print('line one')\nprint('line two')\n", encoding="utf-8")
+        rig = Rig(
+            name="t", invoke=[sys.executable, str(script), "{prompt}"], timeout_seconds=10
+        )
+        live = tmp_path / "live.log"
+        env = {**os.environ, "R4T_LIVE_LOG": str(live)}
+        code, out, _dur, timed = run_harness(rig, "x", tmp_path, env=env)
+        assert code == 0 and not timed
+        streamed = live.read_text(encoding="utf-8")
+        assert "line one" in streamed and "line two" in streamed
+        assert "line one" in out  # still returned in full for staging
+
+    def test_turn_streams_to_member_live_log(self, ctx, fake_harness):
+        handle_message(ctx, "acme:gerry", "acme:phil", "hi")
+        text = state.live_log_path(NODE, "phil").read_text(encoding="utf-8")
+        assert "fake harness ran" in text
