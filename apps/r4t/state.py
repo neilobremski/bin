@@ -107,16 +107,34 @@ def read_root(node: str) -> Path | None:
 
 
 def node_for_root(cwd: Path) -> str | None:
-    """The team whose stamped repo root is cwd or an ancestor of it."""
-    by_root = {}
+    """The team whose stamped org-dir root — or, in a portable org, whose
+    workplace repo — is cwd or an ancestor of it. The org-dir root matches
+    first; the workplace is a fallback so that standing in the repo a portable
+    team works in also infers the node. A workplace shared by two org dirs (the
+    A/B case) is ambiguous and matches neither, so the caller still asks for
+    --node."""
+    from org import load_org
+
+    by_root: dict[Path, str] = {}
+    by_workplace: dict[Path, str | None] = {}
     for node in known_teams():
         root = read_root(node)
-        if root is not None:
-            by_root[root] = node
+        if root is None:
+            continue
+        by_root[root] = node
+        org = load_org(root)
+        if org.is_portable:
+            by_workplace[org.workplace] = (
+                None if org.workplace in by_workplace else node
+            )
     cwd = cwd.resolve()
     for candidate in (cwd, *cwd.parents):
         if candidate in by_root:
             return by_root[candidate]
+    for candidate in (cwd, *cwd.parents):
+        node = by_workplace.get(candidate)
+        if node is not None:
+            return node
     return None
 
 
@@ -495,6 +513,21 @@ def append_log(node: str, text: str) -> None:
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with (log_dir / f"{day}.md").open("a", encoding="utf-8") as f:
         f.write(text.rstrip() + "\n\n")
+
+
+def recent_log_lines(node: str, *, days: int = 2) -> list[str]:
+    """Raw lines from the last `days` UTC day log files, oldest first — a
+    read-only view for chat/attach backfill. Never writes."""
+    log_dir = team_dir(node) / "log"
+    if not log_dir.is_dir():
+        return []
+    lines: list[str] = []
+    for path in sorted(log_dir.glob("*.md"))[-days:]:
+        try:
+            lines.extend(path.read_text(encoding="utf-8").splitlines())
+        except OSError:
+            continue
+    return lines
 
 
 def _csv_field(value: object) -> str:

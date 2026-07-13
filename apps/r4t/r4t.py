@@ -122,13 +122,20 @@ def _resolve_node(raw: str | None) -> str | None:
 
 
 def _context(args: argparse.Namespace, node: str) -> DispatchContext:
-    org = load_org(_resolve_root(args.root))
-    roster_path = resolve_roster_path(org.dir, getattr(args, "roster", None))
-    if not getattr(args, "root", None) and not roster_path.is_file():
+    # The stamped node root IS the org dir — it is what dispatch resolved and
+    # ran against. Observer surfaces (chat/status/seat) must read the roster,
+    # mission and docs from there too, not from wherever the human happens to
+    # stand: in a portable org the workplace repo is not the org dir, and a
+    # member that wrote a shadow ROSTER.md/MISSION.md into the workplace must
+    # not shadow the authoritative copy. So prefer the stamp over cwd whenever
+    # no explicit --root overrides it.
+    root = _resolve_root(args.root)
+    if not getattr(args, "root", None):
         stamped = state.read_root(node)
         if stamped is not None and stamped.is_dir():
-            org = load_org(stamped)
-            roster_path = resolve_roster_path(org.dir, getattr(args, "roster", None))
+            root = stamped
+    org = load_org(root)
+    roster_path = resolve_roster_path(org.dir, getattr(args, "roster", None))
     return DispatchContext(
         root=org.dir,
         node=node,

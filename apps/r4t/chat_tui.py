@@ -43,6 +43,7 @@ from chat import (
     SeatFeed,
     handle_command,
     load_seat,
+    member_backfill,
     member_statuses,
     send_as_human,
     sender_label,
@@ -226,8 +227,25 @@ class ChatApp(App):
         attach_log.display = True
         attach_log.clear()
         self._emit("sys", f"── attached to {self.attached} (read-only) ──")
+        self._backfill_attach(attach_log)
         self._pump_watch()
         self._refresh_roster()
+
+    def _backfill_attach(self, attach_log: RichLog) -> None:
+        """Seed the attach pane with the member's recent history so a message
+        sent before attach-time is visible; the live tail continues below."""
+        attach_log.write(Text("── history ──", style="dim"))
+        events = member_backfill(self.ctx.node, self.attached)
+        if not events:
+            attach_log.write(Text("(no recent activity)", style="dim"))
+        for kind, text in events:
+            stamp = datetime.now().strftime("%H:%M:%S")
+            attach_log.write(
+                Text.assemble(
+                    (stamp + " ", "dim"), (text, KIND_STYLE.get(kind, "white"))
+                )
+            )
+        attach_log.write(Text("── live ──", style="dim"))
 
     def _detach(self) -> None:
         if self.attached is None:
