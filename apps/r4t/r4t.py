@@ -675,11 +675,24 @@ def _ensure_tell_outbox(ctx: DispatchContext) -> None:
     os.environ.setdefault("TELL_OUTBOX_DIR", str(ctx.root / ".outbox"))
 
 
+def _adopt_root(ctx: DispatchContext) -> None:
+    """A seat session is team ingress just like dispatch — chat/seat sends
+    call handle_message directly and never pass cmd_dispatch, the only place
+    the root stamp was written. A team driven entirely through the seat
+    therefore had no stamp, and every observer command fell back to guessing
+    the root from cwd (the live quill repro). First successful seat
+    resolution writes the stamp; an existing stamp is never overridden here
+    — dispatch owns that."""
+    if state.read_root(ctx.node) is None and ctx.roster_path.is_file():
+        state.stamp_root(ctx.node, ctx.root)
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     node = _resolve_node(args.node)
     if node is None:
         return 2
     ctx = _context(args, node)
+    _adopt_root(ctx)
     _ensure_tell_outbox(ctx)
     attach = getattr(args, "attach", None)
     if not args.plain and sys.stdout.isatty():
@@ -707,6 +720,7 @@ def cmd_seat(args: argparse.Namespace) -> int:
     if node is None:
         return 2
     ctx = _context(args, node)
+    _adopt_root(ctx)
     _ensure_tell_outbox(ctx)
     try:
         roster = load_roster(ctx.roster_path)

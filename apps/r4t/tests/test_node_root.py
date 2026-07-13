@@ -74,3 +74,65 @@ def test_bare_node_still_errors_outside_any_root(
     rc = r4t_main(["status"])
     assert rc == 2
     assert "pass --node" in capsys.readouterr().err
+
+
+# ---------- portable orgs: the workplace repo also infers the node ----------
+
+def _portable(tmp_path, node, org_name, workplace):
+    import json
+
+    from org import ORG_CONFIG_NAME
+
+    org_dir = tmp_path / org_name
+    org_dir.mkdir()
+    (org_dir / ORG_CONFIG_NAME).write_text(
+        json.dumps({"repo": str(workplace)}), encoding="utf-8"
+    )
+    state.stamp_root(node, org_dir)
+    return org_dir
+
+
+def test_workplace_cwd_infers_the_node(r4t_home, tmp_path):
+    workplace = tmp_path / "novel-repo"
+    workplace.mkdir()
+    _portable(tmp_path, NODE, "org", workplace)
+    state.stamp_root("other", tmp_path / "elsewhere")
+    sub = workplace / "chapters"
+    sub.mkdir()
+    assert state.node_for_root(workplace) == NODE
+    assert state.node_for_root(sub) == NODE
+
+
+def test_org_dir_cwd_beats_workplace_lookup(r4t_home, tmp_path):
+    workplace = tmp_path / "novel-repo"
+    workplace.mkdir()
+    org_dir = _portable(tmp_path, NODE, "org", workplace)
+    assert state.node_for_root(org_dir) == NODE
+
+
+def test_shared_workplace_stays_ambiguous(r4t_home, tmp_path):
+    # The A/B case: two org dirs, one repo. Standing in the repo cannot pick
+    # a side, so inference declines and the CLI still asks for --node.
+    workplace = tmp_path / "shared-repo"
+    workplace.mkdir()
+    _portable(tmp_path, "org-a-node", "org-a", workplace)
+    _portable(tmp_path, "org-b-node", "org-b", workplace)
+    assert state.node_for_root(workplace) is None
+
+
+def test_bare_status_resolves_from_workplace_cwd(
+    r4t_home, tmp_path, monkeypatch, capsys
+):
+    workplace = tmp_path / "novel-repo"
+    workplace.mkdir()
+    org_dir = _portable(tmp_path, NODE, "org", workplace)
+    (org_dir / "ROSTER.md").write_text(
+        "# Roster\n\n### Gerry\n- **Status:** AI\n- **Rig:** leader\n"
+        "- **Leader:** yes\n",
+        encoding="utf-8",
+    )
+    state.team_dir("other").mkdir(parents=True)  # two teams: ambiguity is real
+    monkeypatch.chdir(workplace)
+    rc = r4t_main(["status"])
+    assert rc == 0
+    assert f"team: {NODE}" in capsys.readouterr().out

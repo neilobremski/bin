@@ -219,3 +219,32 @@ def test_tui_attach_flag_opens_attached(seat):
             assert app.attached == "phil"
 
     asyncio.run(scenario())
+
+
+def test_tui_attach_backfills_history(seat):
+    ctx, roster, human = seat
+    state.append_log(
+        NODE, 'r4t: QUEUED gerry -> phil thread=T hop=0 "before attach" (depth 1)'
+    )
+    state.enqueue(NODE, "phil", {"from": "acme:neil", "body": "still queued"})
+
+    async def scenario():
+        from textual.widgets import Input, RichLog
+
+        app = ChatApp(ctx, roster, human)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            composer = app.query_one("#composer", Input)
+            composer.value = "/attach phil"
+            await pilot.press("enter")
+            await pilot.pause()
+            text = "\n".join(
+                strip.text for strip in app.query_one("#attach", RichLog).lines
+            )
+            history = text.index("── history ──")
+            event = text.index("before attach")
+            queued = text.index("queued from acme:neil: still queued")
+            live = text.index("── live ──")
+            assert history < event < queued < live
+
+    asyncio.run(scenario())
