@@ -12,6 +12,8 @@ honors A8S_HOME).
     ├── agents/<name>/meta.json    last inbound / last completed turn bookkeeping
     ├── agents/<name>/staging/     per-turn $TELL_OUTBOX_DIR — envelopes the agent
     │                              sent this turn, released by dispatch afterwards
+    ├── agents/<name>/live.log     the running turn's harness output, teed live
+    │                              (truncated at turn start; a gemba attach tails it)
     ├── tasks/<id>.json            thread ledger (see tasks.py)
     ├── dead-letter/               undeliverable mail (unknown recipient, malformed)
     ├── buckets.json               per-member + team spend budgets (turns, not tokens)
@@ -577,6 +579,39 @@ def staged_envelopes(node: str, name: str) -> list[Path]:
     if not d.is_dir():
         return []
     return sorted(f for f in d.iterdir() if f.is_file() and f.name.endswith(".json"))
+
+
+# ---------- live turn output (a gemba attach tails this) ----------
+
+def live_log_path(node: str, name: str) -> Path:
+    return agent_dir(node, name) / "live.log"
+
+
+def reset_live_log(node: str, name: str) -> Path:
+    """Truncate the member's live turn log and return its path. Dispatch tees
+    the turn's harness output here as it streams, so an attached read-only view
+    can tail the turn AS IT COMES OUT instead of waiting for the turn to end."""
+    path = live_log_path(node, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(path, "")
+    return path
+
+
+def read_live_log_tail(node: str, name: str, offset: int) -> tuple[str, int]:
+    """Return (new text since `offset`, new offset). A shrunk file means the
+    next turn truncated it, so reading restarts from the top."""
+    path = live_log_path(node, name)
+    if not path.is_file():
+        return "", 0
+    try:
+        if path.stat().st_size < offset:
+            offset = 0
+        with path.open("r", encoding="utf-8") as f:
+            f.seek(offset)
+            chunk = f.read()
+            return chunk, f.tell()
+    except OSError:
+        return "", offset
 
 
 # ---------- dead letters ----------

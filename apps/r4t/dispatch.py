@@ -3,7 +3,10 @@
 Every inbound message to a member ENQUEUES, unconditionally, into that
 member's durable queue (state.enqueue). No gate ever drops or dead-letters a
 deliverable message; dead letters are for undeliverable mail only (unknown
-recipient, disabled member, no rig). A separate drain loop picks a runnable
+recipient, disabled member, no rig). External mail always enters at the top:
+the topmost leader IS the garden from outside, so outside senders cannot pick
+a member — except the roster human's own Address, whose doorbell reply lands
+in the seat path as the human speaking. A separate drain loop picks a runnable
 member with a non-empty queue and runs ONE turn that drains the WHOLE queue:
 the prompt renders every queued message at once, so an agent that sees
 "teammates discussed X, then the lead overrode with Y" pivots in one reading
@@ -37,6 +40,7 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,7 +101,9 @@ def _canonical_recipient(node: str, roster: Roster, to: str) -> str:
     internal form; anything else (external addresses, unknown names) passes
     through untouched. Human members are internal on purpose: their mail parks
     in the node's seat mailbox, and `Address:` is only a doorbell copy when no
-    seat session is attached."""
+    seat session is attached. A human's `Address:` is another name for the
+    human: a tell to it parks in the seat too, and — since doorbell replies
+    enter as the human speaking — closes the human's threads."""
     t = to.strip()
     if ":" in t:
         prefix, _, sub = t.partition(":")
@@ -106,7 +112,7 @@ def _canonical_recipient(node: str, roster: Roster, to: str) -> str:
         name = sub
     else:
         name = t
-    member = roster.find(name)
+    member = roster.find(name) or _human_by_address(roster, name)
     if member is None:
         return t
     return f"{node}:{member.name.lower()}"
@@ -129,6 +135,19 @@ def _human_member(node: str, roster: Roster, addr: str) -> Member | None:
         t = sub
     member = roster.find(t)
     return member if member is not None and member.is_human else None
+
+
+def _human_by_address(roster: Roster, sender: str) -> Member | None:
+    """The roster human whose a8s `Address:` equals `sender` — the doorbell
+    reply path. Their reply is the human speaking, not an outside agent, so
+    ingress re-stamps it to the seat instead of routing it as external mail."""
+    s = (sender or "").strip().lower()
+    if not s:
+        return None
+    for m in roster.members:
+        if m.is_human and m.address and m.address.strip().lower() == s:
+            return m
+    return None
 
 
 def _tell_error(ctx: DispatchContext, recipient: str, text: str) -> None:
@@ -293,8 +312,11 @@ def run_harness(
 ) -> tuple[int, str, float, bool]:
     """Run the rig's argv (pool variant `variant`) with {prompt} substituted
     as a single argv element — never a shell. Returns (exit_code, output,
-    duration_seconds, timed_out)."""
+    duration_seconds, timed_out). When the env carries `R4T_LIVE_LOG`, the
+    harness output is teed there line by line as it arrives, so a gemba attach
+    can tail the turn live; the full output is still returned for staging."""
     argv = rig.argv(prompt, variant)
+    live_log = (env or {}).get("R4T_LIVE_LOG")
     start = time.monotonic()
     try:
         proc = subprocess.Popen(
@@ -309,18 +331,41 @@ def run_harness(
         )
     except OSError as e:
         return 127, f"failed to spawn harness {argv[0]!r}: {e}", 0.0, False
+
+    chunks: list[str] = []
+
+    def _pump() -> None:
+        sink = None
+        if live_log:
+            try:
+                sink = open(live_log, "a", encoding="utf-8")
+            except OSError:
+                sink = None
+        try:
+            for line in proc.stdout:
+                chunks.append(line)
+                if sink is not None:
+                    sink.write(line)
+                    sink.flush()
+        finally:
+            if sink is not None:
+                sink.close()
+
+    reader = threading.Thread(target=_pump, daemon=True)
+    reader.start()
     timed_out = False
     try:
-        output, _ = proc.communicate(timeout=rig.timeout_seconds)
+        proc.wait(timeout=rig.timeout_seconds)
     except subprocess.TimeoutExpired:
         timed_out = True
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except OSError:
             proc.kill()
-        output, _ = proc.communicate()
+        proc.wait()
+    reader.join()
     duration = time.monotonic() - start
-    return proc.returncode, output or "", duration, timed_out
+    return proc.returncode, "".join(chunks), duration, timed_out
 
 
 def _throttle_block(ctx: DispatchContext, config: RigConfig) -> str | None:
@@ -359,13 +404,29 @@ def _ingest(
 ) -> str:
     """Resolve the recipient and enqueue. Humans park in the seat; undeliverable
     mail dead-letters with an audit record; a deliverable message to an AI
-    member enqueues unconditionally (duplicate-collapsed) and returns QUEUED."""
-    _, sub = split_recipient(to)
+    member enqueues unconditionally (duplicate-collapsed) and returns QUEUED.
 
+    Ingress routing turns on trust. Intra-team and seat traffic
+    (`trusted_header`) honors `node:member` addressing — that is how the tree
+    delivers between members and how the human seat reaches anyone. External
+    mail does NOT: the topmost leader IS the garden from outside, so every
+    outside message enters at the top regardless of any sub-address. The lone
+    exception is the roster human's own `Address:` — their doorbell reply is the
+    human speaking, re-stamped to the seat so it routes and closes threads
+    exactly like a chat/seat send."""
     if roster is None:
         roster = _load_roster(ctx, sender)
     if roster is None:
         return SKIPPED
+
+    if trusted_header:
+        _, sub = split_recipient(to)
+    else:
+        human = _human_by_address(roster, sender)
+        if human is not None:
+            sender = f"{ctx.node}:{human.name.lower()}"
+        to = ctx.node
+        sub = ""
 
     if sub:
         member = roster.find(sub)
@@ -451,10 +512,11 @@ def _ingest(
         },
     )
     state.update_meta(ctx.node, member.name, last_inbound_at=state.utc_now())
+    preview = " ".join(body.split())[:80]
     state.append_log(
         ctx.node,
         f"r4t: QUEUED {sender} -> {member.name.lower()} thread={thread_id} "
-        f"hop={hop} (depth {state.queue_depth(ctx.node, member.name)})",
+        f'hop={hop} "{preview}" (depth {state.queue_depth(ctx.node, member.name)})',
     )
     return QUEUED
 
@@ -733,6 +795,7 @@ def _run_turn(
 
     env = dict(os.environ)
     env["TELL_OUTBOX_DIR"] = str(staging)
+    env["R4T_LIVE_LOG"] = str(state.reset_live_log(ctx.node, member.name))
     state.append_log(
         ctx.node,
         f"## {state.utc_now()} dispatch {len(batch)} message(s) -> {member.name} "

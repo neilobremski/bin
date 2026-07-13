@@ -83,7 +83,7 @@ def test_seat_send_rejects_unknown_member(repo, rig_config, r4t_home, capsys):
 def test_live_lock_holds_queue_for_next_drain(ctx, r4t_home, fake_harness):
     # The agent lock is the only claim: a member with a live turn cannot be
     # run by a concurrent drainer, and its queued mail simply waits.
-    handle_message(ctx, "boss", "acme:phil", "go", drain_after=False)
+    handle_message(ctx, "acme:gerry", "acme:phil", "go", drain_after=False)
     lock = state.AgentLock(NODE, "phil")
     assert lock.acquire("junior-dev")
     assert drain(ctx) == 0
@@ -95,7 +95,7 @@ def test_live_lock_holds_queue_for_next_drain(ctx, r4t_home, fake_harness):
 
 
 def test_stale_lock_does_not_block_drain(ctx, r4t_home, fake_harness):
-    handle_message(ctx, "boss", "acme:phil", "go", drain_after=False)
+    handle_message(ctx, "acme:gerry", "acme:phil", "go", drain_after=False)
     dead = state.agent_dir(NODE, "phil") / ".lock"
     dead.parent.mkdir(parents=True, exist_ok=True)
     dead.write_text(json.dumps({"pid": 999999999, "rig": "junior-dev"}), encoding="utf-8")

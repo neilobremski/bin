@@ -30,14 +30,23 @@ fail closed — see the [tutorial](docs/tutorial.md#missing-rig-no-default--fail
 
 ### How a message flows
 
-1. `tell acme:phil "..."` routes through a8s to the team node; the node's
-   definition invokes `r4t dispatch`.
-2. r4t parses the `[r4t task=<ulid> hop=<n> auto]` header (a thread label,
-   creating a new thread if absent) and ENQUEUES the message into Phil's
-   durable queue — unconditionally. When Phil is runnable (both his spend
-   bucket and the cell bucket hold ≥1, his breaker is closed, the throttle
-   admits a start), ONE turn drains his whole queue: the prompt carries his
-   persona, rolling history, and every waiting message at once.
+1. `tell acme "..."` routes through a8s to the team node; the node's
+   definition invokes `r4t dispatch`. **The topmost leader IS the garden
+   from outside** — every external message enters at the top, no matter how
+   it is addressed. A `node:member` sub-address from an outside sender is
+   ignored (the namespace is the garden's outside address, not a way in to a
+   specific member); the leader is the one who decides what to relay inward.
+   The lone exception is the roster human's own `Address:` — a reply from it
+   is the human speaking, so it lands in the seat path and routes exactly
+   like a chat/seat send (see the seat section).
+2. r4t opens or continues a thread (the `[r4t task=<ulid> hop=<n> auto]`
+   header is a thread label; a fresh thread opens when absent) and ENQUEUES
+   the message into the leader's durable queue — unconditionally. When the
+   leader is runnable (both its spend bucket and the cell bucket hold ≥1, its
+   breaker is closed, the throttle admits a start), ONE turn drains its whole
+   queue: the prompt carries its persona, rolling history, and every waiting
+   message at once. Intra-team routing (below) is what delivers to a named
+   member — from *inside* the garden, addressing is honored.
 3. The harness's `$TELL_OUTBOX_DIR` points at a per-turn staging dir, so
    Phil replies with the ordinary `tell` — unmodified. After the turn r4t
    releases the staged envelopes: sender attribution is free (only that
@@ -79,7 +88,7 @@ r4t init --root ~/repos/acme
 a8s add acme-node ~/repos/acme ~/bin/apps/r4t/example-definition.json
 a8s namespace acme acme-node
 a8s start acme-node
-tell acme:gerry "Ship the payload refactor; report when reviewed."
+tell acme "Ship the payload refactor; report when reviewed."
 ```
 
 Watch it — one surface per way of looking:
@@ -101,10 +110,14 @@ is optional. (`a8s logs acme-node -f` still shows the cross-wall view.)
 ## The seat: being the human in the roster
 
 A human roster member is a first-class team address: teammates just
-`tell neil`, outsiders (your phone, another cluster) `tell acme:neil`, and
-both park in the node's seat mailbox under `~/.config/r4t/teams/acme/seat/` —
-no handler, no router, nothing to disconnect. Two surfaces read and speak
-for it:
+`tell neil`, and messages park in the node's seat mailbox under
+`~/.config/r4t/teams/acme/seat/` — no handler, no router, nothing to
+disconnect. When the seat is unattended dispatch rings the `Address:`
+doorbell (a copy forwarded over a8s to the human's phone); a reply from that
+Address is the human speaking, so it re-enters through the seat path and
+routes like a chat send. Outsiders other than the human do not reach the
+seat directly — like all external traffic they enter through the top lead.
+Two surfaces read and speak for it:
 
 ```bash
 r4t seat                    # summary: unread count, attached, doorbell
@@ -115,18 +128,25 @@ r4t seat send --to phil "…" # or to a member (runs their turn synchronously)
 
 `r4t seat` is the scriptable surface — an orchestrating agent impersonates
 the human with it directly. `r4t chat` is the human view over the same
-mailbox: a full-screen TUI with a health header fed by the same verdict
-engine as `r4t status` (worst-level summary, live warnings, member budget
-bars for whoever you're talking to), a conversation pane beside a
-fly-on-the-wall activity pane (turn starts/completions and every governance
-decision line), and an input line (`/to`, `/who`, `/tasks`, `/quit`). The TUI needs
-[textual](https://textual.textualize.io/) (`python3 -m pip install
+mailbox, and the team's **control plane**: a full-screen TUI with a health
+header fed by the same verdict engine as `r4t status`, a clickable member
+status panel (who is active, resting, or broken and how deep each queue is),
+a conversation pane beside a fly-on-the-wall activity pane, and an input line
+(`/to`, `/attach`, `/detach`, `/who`, `/threads`, `/help`, `/quit`). The TUI
+needs [textual](https://textual.textualize.io/) (`python3 -m pip install
 textual`); without it — or with `--plain`, or piped — chat falls back to
 a line UI over the same feed. While chat (or anything touching the
 presence file) is attached, dispatch skips the `Address:` doorbell;
-detach and the doorbell rings again. Training wheels, not a replacement
-for autonomy — everything still flows through normal dispatch and
-governance.
+detach and the doorbell rings again.
+
+**Gemba attach — walk the floor, read-only.** Click a member or type
+`/attach vela` (`r4t chat --attach vela` to open straight into it) for a live
+view of one member: every message it receives as it is enqueued, and its
+turn output streaming as it comes out (teed to `agents/<member>/live.log`,
+truncated at each turn start). Attaching is observation only — it never sends
+to that member; the composer keeps talking to the seat's usual
+counterparties. `/detach` steps back out. Training wheels, not a replacement
+for autonomy — everything still flows through normal dispatch and governance.
 
 ## The tree: cells, leads, and information hiding
 
@@ -235,8 +255,11 @@ released envelope carries `auto` in its `[r4t task=<ulid> hop=<n>]` header
 header never crosses egress — external releases carry the bare body (class
 survives as `x_r4t_class` envelope metadata), because other a8s nodes must
 not need to know whether a name is one agent, a human, a device, or a whole
-roster. Symmetrically, headers on inbound external messages are untrusted
-content: a forged header can't attach to an existing thread.
+roster. Symmetrically, external ingress is untrusted end to end: headers on
+inbound external messages are content (a forged header can't attach to an
+existing thread), and a sub-address can't pick a member — everything from
+outside enters at the top lead. One ingress point means one thing to reason
+about.
 
 ## Security model
 
