@@ -1,0 +1,198 @@
+"""Portable orgs — ROSTER.md/MISSION.md outside the repo, resolution + graduation."""
+from __future__ import annotations
+
+import json
+import sys
+
+import state
+from org import ORG_CONFIG_NAME, check_org, load_org
+from r4t import main as r4t_main
+
+NODE = "acme"
+
+# Self-contained roster/config (no `from conftest import` — running the a8s and
+# r4t suites together makes the bare `conftest` module ambiguous at collection).
+CLEAN_ROSTER = """\
+# Team Roster
+
+### Neil
+- **Status:** Human
+- **Address:** neil
+- **Role:** Director
+
+### Gerry
+- **Status:** AI
+- **Rig:** leader
+- **Role:** Lead
+- **Leader:** yes
+
+### Phil
+- **Status:** AI
+- **Rig:** junior-dev
+- **Role:** Developer
+"""
+
+ROSTER_TEXT = CLEAN_ROSTER
+
+
+def _prompt_of(fake_harness) -> str:
+    _script, out = fake_harness
+    calls = sorted(out.iterdir())
+    assert calls, "the harness never ran"
+    return calls[-1].read_text(encoding="utf-8")
+
+
+def _rig_config(tmp_path, fake_harness):
+    script, _out = fake_harness
+    invoke = [sys.executable, str(script), "{prompt}"]
+    config = {
+        "throttle": {"max_concurrent": 0, "min_seconds_between_turn_starts": 0},
+        "cell_budget_max": 200,
+        "cell_budget_earn_per_hour": 100,
+        "leader": {"invoke": invoke, "timeout_seconds": 30, "budget_max": 100},
+        "junior-dev": {"invoke": invoke, "timeout_seconds": 30, "budget_max": 100},
+        "pins": {"gerry": "leader"},
+    }
+    path = tmp_path / "rigs.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
+# ---------- unit: resolution + precedence ----------
+
+def test_in_repo_is_the_default(tmp_path):
+    org = load_org(tmp_path)
+    assert org.dir == tmp_path and org.workplace == tmp_path
+    assert not org.is_portable
+
+
+def test_org_config_points_at_a_workplace(tmp_path):
+    org_dir = tmp_path / "org"
+    org_dir.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (org_dir / ORG_CONFIG_NAME).write_text(json.dumps({"repo": str(repo)}), encoding="utf-8")
+    org = load_org(org_dir)
+    assert org.dir == org_dir and org.workplace == repo
+    assert org.is_portable
+
+
+def test_relative_repo_resolves_against_the_org_dir(tmp_path):
+    org_dir = tmp_path / "org"
+    (org_dir).mkdir()
+    (tmp_path / "repo").mkdir()
+    (org_dir / ORG_CONFIG_NAME).write_text(json.dumps({"repo": "../repo"}), encoding="utf-8")
+    assert load_org(org_dir).workplace == (tmp_path / "repo").resolve()
+
+
+def test_malformed_config_degrades_but_check_reports(tmp_path):
+    (tmp_path / ORG_CONFIG_NAME).write_text("{ not json", encoding="utf-8")
+    org = load_org(tmp_path)  # never raises — degrades to in-repo
+    assert org.workplace == tmp_path
+    assert any("cannot read org config" in m for m in check_org(tmp_path))
+
+
+def test_check_reports_missing_repo_key_and_absent_workplace(tmp_path):
+    (tmp_path / ORG_CONFIG_NAME).write_text(json.dumps({"note": "oops"}), encoding="utf-8")
+    assert any('must set "repo"' in m for m in check_org(tmp_path))
+    (tmp_path / ORG_CONFIG_NAME).write_text(
+        json.dumps({"repo": str(tmp_path / "nope")}), encoding="utf-8"
+    )
+    assert any("does not exist" in m for m in check_org(tmp_path))
+
+
+# ---------- integration: turns resolve org dir vs workplace ----------
+
+def _portable_org(tmp_path, mission="Ship the thing and stop."):
+    org_dir = tmp_path / "org"
+    org_dir.mkdir()
+    workplace = tmp_path / "workplace"
+    workplace.mkdir()
+    (org_dir / "ROSTER.md").write_text(ROSTER_TEXT, encoding="utf-8")
+    (org_dir / ORG_CONFIG_NAME).write_text(json.dumps({"repo": str(workplace)}), encoding="utf-8")
+    if mission is not None:
+        (org_dir / "MISSION.md").write_text(mission, encoding="utf-8")
+    return org_dir, workplace
+
+
+def test_dispatch_reads_org_docs_but_works_in_the_repo(r4t_home, tmp_path, fake_harness):
+    org_dir, workplace = _portable_org(tmp_path)
+    cfg = _rig_config(tmp_path, fake_harness)
+    rc = r4t_main([
+        "dispatch", "--root", str(org_dir),
+        "--from", "boss", "--to", f"{NODE}:gerry", "--message", "go",
+        "--rig-config", str(cfg), "--no-notify",
+    ])
+    assert rc == 0
+    prompt = _prompt_of(fake_harness)
+    assert f"team repo at {workplace.resolve()}" in prompt   # turns run in the repo
+    assert "Ship the thing and stop." in prompt              # MISSION read from org dir
+    assert state.read_root(NODE) == org_dir                  # node stamped to org dir
+
+
+def test_graduation_falls_back_to_in_repo(r4t_home, tmp_path, fake_harness):
+    # Graduation: copy the docs into the repo and drop the pointer.
+    _org_dir, workplace = _portable_org(tmp_path)
+    (workplace / "ROSTER.md").write_text(ROSTER_TEXT, encoding="utf-8")
+    (workplace / "MISSION.md").write_text("Ship the thing and stop.", encoding="utf-8")
+    cfg = _rig_config(tmp_path, fake_harness)
+    rc = r4t_main([
+        "dispatch", "--root", str(workplace),
+        "--from", "boss", "--to", f"{NODE}:gerry", "--message", "go",
+        "--rig-config", str(cfg), "--no-notify",
+    ])
+    assert rc == 0
+    prompt = _prompt_of(fake_harness)
+    assert f"team repo at {workplace.resolve()}" in prompt
+    assert "Ship the thing and stop." in prompt
+    assert load_org(workplace).workplace == workplace  # no pointer -> in-repo default
+
+
+def test_roster_check_runs_against_an_org_dir(r4t_home, tmp_path, fake_harness, capsys):
+    org_dir, _workplace = _portable_org(tmp_path)
+    (org_dir / "ROSTER.md").write_text(CLEAN_ROSTER, encoding="utf-8")
+    cfg = _rig_config(tmp_path, fake_harness)
+    rc = r4t_main(["roster", "check", "--root", str(org_dir), "--rig-config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "OK" in out and "leader Gerry" in out
+
+
+def test_roster_check_flags_a_bad_org_config(r4t_home, tmp_path, fake_harness, capsys):
+    org_dir, _workplace = _portable_org(tmp_path)
+    (org_dir / "ROSTER.md").write_text(CLEAN_ROSTER, encoding="utf-8")
+    (org_dir / ORG_CONFIG_NAME).write_text(
+        json.dumps({"repo": str(tmp_path / "gone")}), encoding="utf-8"
+    )
+    cfg = _rig_config(tmp_path, fake_harness)
+    rc = r4t_main(["roster", "check", "--root", str(org_dir), "--rig-config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "org:" in out and "does not exist" in out
+
+
+def test_two_orgs_one_repo_do_not_collide(r4t_home, tmp_path, fake_harness):
+    # The A/B case: two org dirs (same repo) run as two a8s nodes; team state is
+    # per-node, so nothing collides.
+    workplace = tmp_path / "shared-repo"
+    workplace.mkdir()
+    cfg = _rig_config(tmp_path, fake_harness)
+    for org_name, node in (("org-a", "acme"), ("org-b", "beta")):
+        org_dir = tmp_path / org_name
+        org_dir.mkdir()
+        (org_dir / "ROSTER.md").write_text(ROSTER_TEXT, encoding="utf-8")
+        (org_dir / ORG_CONFIG_NAME).write_text(
+            json.dumps({"repo": str(workplace)}), encoding="utf-8"
+        )
+        rc = r4t_main([
+            "dispatch", "--root", str(org_dir),
+            "--from", "boss", "--to", f"{node}:gerry", "--message", "go",
+            "--rig-config", str(cfg), "--no-notify",
+        ])
+        assert rc == 0
+
+    assert state.read_root("acme") == tmp_path / "org-a"
+    assert state.read_root("beta") == tmp_path / "org-b"
+    assert state.team_dir("acme") != state.team_dir("beta")
+    assert (state.agent_dir("acme", "gerry")).is_dir()
+    assert (state.agent_dir("beta", "gerry")).is_dir()

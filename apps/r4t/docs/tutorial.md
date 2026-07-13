@@ -116,6 +116,16 @@ what "done" looks like, the current milestone; never the how. r4t injects it
 into every **lead's** turn prompt (members with reports); leads restate it
 down to their ICs. Keep it under a page — `roster check` warns past ~40 lines.
 
+### 8. (Optional) keep the org outside the repo
+
+`ROSTER.md` and `MISSION.md` default to the repo, but you can put them in an
+**org directory** instead — add an `r4t-org.json` there naming the workplace
+repo (`{ "repo": "/path/to/repo" }`) and register the a8s node at the org dir.
+Turns run in the repo; the roster and mission read from the org dir. Two org
+dirs can point at two clones of one project (same mission, different rosters)
+without their state colliding. See the README's *Portable orgs* section;
+graduate by copying the two files into the repo and deleting `r4t-org.json`.
+
 ## Mental model
 
 ```
