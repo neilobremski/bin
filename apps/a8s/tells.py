@@ -109,6 +109,7 @@ def tells_main(argv: list[str]) -> int:
 
     seen = _json_names(inbox)
     deadline = time.monotonic() + timeout
+    printed_any = False
     while True:
         printed = 0
         for name in sorted(_json_names(inbox) - seen):
@@ -119,8 +120,13 @@ def tells_main(argv: list[str]) -> int:
             seen.add(name)
             printed += 1
         if printed:
+            printed_any = True
+        elif printed_any:
+            # A poll after arrivals found nothing new: the burst has drained.
+            # Returning on the first message instead would truncate a burst
+            # whose files are still landing when the poll fires.
             return 0
-        if time.monotonic() >= deadline:
+        if not printed_any and time.monotonic() >= deadline:
             print(f"tells: no message within {timeout:g}s", file=sys.stderr)
             return 1
         time.sleep(POLL_INTERVAL_SEC)
