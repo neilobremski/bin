@@ -1,6 +1,8 @@
 """node→root stamping — `--node` works from anywhere, CWD finds the node."""
 from __future__ import annotations
 
+import pytest
+
 import state
 from r4t import main as r4t_main
 
@@ -136,3 +138,41 @@ def test_bare_status_resolves_from_workplace_cwd(
     rc = r4t_main(["status"])
     assert rc == 0
     assert f"team: {NODE}" in capsys.readouterr().out
+
+
+# ---------- ambiguity is an error, not a result: every command exits non-zero ----------
+
+AMBIGUOUS_ARGVS = [
+    ["status"],
+    ["seat"],
+    ["seat", "send", "hello"],
+    ["seat", "inbox"],
+    ["chat", "--plain"],
+    ["logs"],
+    ["task", "list"],
+    ["clear"],
+    ["idle"],
+]
+
+
+@pytest.mark.parametrize("argv", AMBIGUOUS_ARGVS, ids=lambda a: " ".join(a))
+def test_ambiguous_team_exits_nonzero(r4t_home, tmp_path, monkeypatch, capsys, argv):
+    # The live hour-long stall: a scripted `r4t seat send` printed the
+    # pass-node hint but the pipeline read exit 0 (the pipe's last command
+    # masked it). r4t's side of the contract is a hard non-zero exit from
+    # EVERY command that resolves a node, so a plain (unpiped) invocation
+    # can never mask a no-op as success.
+    state.team_dir("aaa").mkdir(parents=True)
+    state.team_dir("bbb").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)  # no stamped root matches cwd
+    rc = r4t_main([*argv, "--simulate-tell"] if argv[0] in ("seat", "chat") else argv)
+    assert rc == 2
+    assert "pass --node" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", AMBIGUOUS_ARGVS, ids=lambda a: " ".join(a))
+def test_no_teams_exits_nonzero(r4t_home, tmp_path, monkeypatch, capsys, argv):
+    monkeypatch.chdir(tmp_path)
+    rc = r4t_main([*argv, "--simulate-tell"] if argv[0] in ("seat", "chat") else argv)
+    assert rc == 2
+    assert "pass --node" in capsys.readouterr().err
