@@ -19,7 +19,9 @@ Why each governance layer exists, with prior art:
 cd /path/to/your/repo
 r4t init                              # ROSTER.md + ~/.config/r4t/rigs.json
 r4t rig add worker opencode       # when roster members need extra rigs
+r4t rig add brain agy --model sonnet   # pick a model for the preset
 r4t rig swap worker agy           # switch a rig's preset, keep its settings
+r4t rig remove worker             # drop a rig (alias: rm)
 r4t roster check                      # lint roster ↔ harness mappings
 # register with a8s (exact commands printed by r4t init)
 ```
@@ -27,6 +29,31 @@ r4t roster check                      # lint roster ↔ harness mappings
 The roster (`ROSTER.md`) names members and symbolic rigs; the harness
 config (`~/.config/r4t/rigs.json`) maps those rigs to CLIs. Unknown rigs
 fail closed — see the [tutorial](docs/tutorial.md#missing-rig-no-default--fail-closed).
+
+### Picking a model (`--model`)
+
+`r4t rig add` and `r4t rig swap` take an optional `--model`. For most presets
+(`claude`, `codex`, `cursor`, `opencode`) it is spliced into the invoke at add
+time — `--model <alias>` for claude, `-m <id>` after `exec` for codex, after
+`run` for opencode — and omitting it lets the CLI's own default apply. The
+`ollama` and `opencode-ollama` presets have no default, so their `--model` is
+required and names a local model tag.
+
+`agy` is different: its `--model` takes an exact display name from `agy models`
+(short aliases are silently ignored), and those names carry version numbers
+that change as agy ships releases. So r4t stores the friendly string you give
+(`--model sonnet`) and resolves it against the live `agy models` list before
+**every** turn — never a pinned table that could go stale. Matching is
+case-insensitive with dashes and spaces interchangeable (`gemini-3.5-flash`
+matches "Gemini 3.5 Flash (Medium)"); when several names match, the tie-break
+prefers the fewest extra tokens, then the highest effort suffix
+(thinking > high > medium > low), then alphabetical order. A string that
+matches nothing fails the turn loudly with the available names — an unresolved
+value is never passed through, because agy would silently run its default.
+
+`r4t rig remove <rig>...` (alias `rm`) deletes one or more rigs. It refuses if
+a roster member or pin still references the rig, naming what does; pass
+`--force` to remove anyway.
 
 ### How a message flows
 

@@ -22,7 +22,7 @@ from dispatch import (
     run_idle,
     split_recipient,
 )
-from rig import Rig, load_rig_config
+from rig import Rig, RigError, load_rig_config
 from roster import load_roster
 from r4t import main as r4t_main
 from ulid import new as new_ulid
@@ -1020,6 +1020,45 @@ class TestRunHarness:
         assert code == 127
         assert "failed to spawn" in out
         assert not timed_out
+
+    def test_agy_model_resolved_live_before_turn(self, tmp_path, monkeypatch):
+        # The stored argv carries a {model} placeholder; run_harness resolves it
+        # against the live list right before spawning.
+        seen = {}
+
+        def fake_resolve(query, **_):
+            seen["query"] = query
+            return "Claude Sonnet 4.6 (Thinking)"
+
+        monkeypatch.setattr(dispatch, "resolve_agy_model", fake_resolve)
+        rig = Rig(
+            name="brain",
+            invoke=["printf", "%s\\n", "--model", "{model}", "{prompt}"],
+            model="sonnet",
+            model_resolver="agy-live",
+        )
+        code, out, _dur, timed_out = run_harness(rig, "hello", tmp_path)
+        assert code == 0
+        assert not timed_out
+        assert seen["query"] == "sonnet"
+        assert "Claude Sonnet 4.6 (Thinking)" in out
+        assert "{model}" not in out
+
+    def test_agy_resolution_failure_fails_turn_loudly(self, tmp_path, monkeypatch):
+        def boom(query, **_):
+            raise RigError("--model 'banana' matched no agy model")
+
+        monkeypatch.setattr(dispatch, "resolve_agy_model", boom)
+        rig = Rig(
+            name="brain",
+            invoke=["echo", "--model", "{model}", "{prompt}"],
+            model="banana",
+            model_resolver="agy-live",
+        )
+        code, out, _dur, _timed = run_harness(rig, "x", tmp_path)
+        assert code == 127
+        assert "did not resolve" in out
+        assert "banana" in out
 
     def test_spawn_failure_tells_sender(self, ctx, repo, tells, fake_harness, rig_config):
         config = json.loads(rig_config.read_text(encoding="utf-8"))
