@@ -165,14 +165,14 @@ HARNESS_PRESETS: dict[str, dict] = {
     "agy": {
         "text_tier": "big",
         "description": (
-            "Antigravity 1.1+ — --print for headless turns; --sandbox + "
-            "--mode accept-edits for repo writes"
+            "Antigravity 1.1+ — --print for headless turns; --mode accept-edits "
+            "so edits skip the review prompt. No --sandbox: it confines child "
+            "writes to CWD, blocking tell's staging outbox (see docs/harness-agy.md)"
         ),
         "a8s_definition": "agy.json",
         "headless": "--print",
         "invoke": [
             "agy",
-            "--sandbox",
             "--mode",
             "accept-edits",
             "--print",

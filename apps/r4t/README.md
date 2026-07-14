@@ -51,6 +51,12 @@ prefers the fewest extra tokens, then the highest effort suffix
 matches nothing fails the turn loudly with the available names — an unresolved
 value is never passed through, because agy would silently run its default.
 
+The `agy` preset runs **without** `--sandbox`. agy's sandbox confines the
+agent's child-process writes to the CWD, which blocks `tell` (its staging
+outbox lives outside the workplace repo) — the whole capability map and the
+2026-07-14 incident are in [docs/harness-agy.md](docs/harness-agy.md). Like
+every other r4t preset, agy is trusted with normal filesystem permissions.
+
 `r4t rig remove <rig>...` (alias `rm`) deletes one or more rigs. It refuses if
 a roster member or pin still references the rig, naming what does; pass
 `--force` to remove anyway.
