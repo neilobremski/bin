@@ -64,7 +64,7 @@ def render_envelope(envelope: dict, roster: Roster | None = None) -> str:
     sender = str(envelope.get("from", "?"))
     if roster is not None:
         sender = sender_label(roster, sender)
-    _, _, _, body = taskmod.parse_header(str(envelope.get("content", "")))
+    body = str(envelope.get("content", ""))
     lines = body.strip().splitlines() or ["(empty)"]
     out = [f"{sender}: {lines[0]}"]
     out.extend(f"    {line}" for line in lines[1:])

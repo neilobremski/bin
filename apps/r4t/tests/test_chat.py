@@ -60,11 +60,11 @@ def test_seat_presence(r4t_home):
     assert not state.seat_attached(NODE, "neil")
 
 
-def test_render_envelope_strips_header_and_indents():
+def test_render_envelope_indents_multiline_body():
     text = render_envelope(
         {
             "from": "acme:gerry",
-            "content": "[r4t task=01KX0000000000000000000000 hop=2 auto] line one\nline two",
+            "content": "line one\nline two",
         }
     )
     assert text == "acme:gerry: line one\n    line two"
@@ -156,7 +156,7 @@ def test_plain_line_queues_send(session, capsys):
 
 
 def test_poll_inbox_consumes_and_renders(session, r4t_home):
-    state.park_seat_message(NODE, "Neil", "acme:gerry", "[r4t task=01KX0000000000000000000000 hop=1 auto] hi")
+    state.park_seat_message(NODE, "Neil", "acme:gerry", "hi")
     events = session.feed.poll_inbox()
     assert [(kind, render_envelope(e)) for kind, e in events] == [
         ("in", "acme:gerry: hi")

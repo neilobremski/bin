@@ -20,11 +20,13 @@ member is *resting*: its queue holds and it runs again when the bucket
 refills. Nothing is lost.
 
 The agent replies with the unmodified `tell`. Dispatch points the harness
-subprocess's $TELL_OUTBOX_DIR at a per-turn staging dir and releases the
-staged envelopes afterwards: attribution (only this turn wrote there), the
-thread/hop header stamped mechanically, per-turn send quota, then either the
-node's real outbox (external) or straight onto the recipient member's queue
-(intra-team). A reply is attributed to the thread of the message it answers.
+subprocess's $TELL_OUTBOX_DIR at a per-turn staging dir and reads the staged
+files as r4t-message DRAFTS (`to` + `body` + optional `files`), then releases
+them: attribution (only this turn wrote there), the thread/hop/class stamped as
+structured fields, per-turn send quota, then either the node's real outbox
+(external — converted to an a8s envelope at the wall) or straight onto the
+recipient member's queue (intra-team, no header, no round-trip). A reply is
+attributed to the thread of the message it answers.
 
 Requeueing note: a8s trashes the inbox message BEFORE spawning the wake
 subprocess and only logs its exit code (daemon.wake_once), so exiting nonzero
@@ -159,21 +161,61 @@ def _human_by_address(roster: Roster, sender: str) -> Member | None:
     return None
 
 
-def _tell_error(ctx: DispatchContext, recipient: str, text: str) -> None:
-    body = f"[r4t {ctx.node}] {text}"
+def _internal_ai_member(
+    ctx: DispatchContext, roster: Roster | None, recipient: str
+) -> Member | None:
+    """The runnable AI member `recipient` (canonical or bare) names, if any —
+    the guard for routing operational feedback back in-band."""
+    if roster is None:
+        return None
+    if ":" in recipient and not _is_internal(ctx.node, recipient):
+        return None
+    member = roster.find(_display_name(ctx.node, recipient))
+    if member is None or member.is_human or member.errors:
+        return None
+    return member
+
+
+def _tell_error(
+    ctx: DispatchContext,
+    recipient: str,
+    text: str,
+    *,
+    thread: str | None = None,
+    roster: Roster | None = None,
+) -> None:
+    """Operational feedback to a sender. For an INTRA-team sender it is an
+    internal `class=error` r4t-message carrying the ORIGINATING thread id (#160):
+    because it already has a thread it can never mint a fresh one, so it cannot
+    spawn a headerless new-task turn — it dies at the normal budget/answer gates
+    like any other message. External senders keep the direct a8s tell."""
     state.append_log(ctx.node, f"r4t: ERROR -> {recipient}: {text}")
-    ctx.tell_fn(recipient, body)
+    member = _internal_ai_member(ctx, roster, recipient)
+    if member is not None and thread:
+        state.enqueue(
+            ctx.node,
+            member.name,
+            {
+                "from": f"r4t:{ctx.node}",
+                "to": f"{ctx.node}:{member.name.lower()}",
+                "thread": thread,
+                "hop": 0,
+                "class": "error",
+                "body": text,
+            },
+        )
+        return
+    ctx.tell_fn(recipient, f"[r4t {ctx.node}] {text}")
 
 
-def _park_seat(ctx: DispatchContext, member: Member, sender: str, message: str) -> None:
+def _park_seat(ctx: DispatchContext, member: Member, sender: str, body: str) -> None:
     """Deliver a message to a roster human: park it in the node's seat
     mailbox, and ring the `Address:` doorbell (a forwarded copy over a8s)
     only when no seat session is attached to read it live."""
-    state.park_seat_message(ctx.node, member.name, sender, message)
+    state.park_seat_message(ctx.node, member.name, sender, body)
     bell = ""
     if member.address and not state.seat_attached(ctx.node, member.name):
-        _, _, _, bell_body = tasks.parse_header(message)
-        ctx.tell_fn(member.address, bell_body)
+        ctx.tell_fn(member.address, body)
         bell = f", doorbell -> {member.address}"
     state.append_log(
         ctx.node,
@@ -260,12 +302,15 @@ def build_prompt(
     message_lines: list[str] = []
     for env in batch:
         sender = _display_name(ctx.node, str(env.get("from", "?")))
-        thread = str(env.get("task", "")) or "?"
+        thread = str(env.get("thread", "")) or "?"
         repeats = int(env.get("repeats", 1) or 1)
         body = str(env.get("body", "")).strip() or "(empty message)"
         if len(body) > PROMPT_BODY_MAX:
             body = body[:PROMPT_BODY_MAX] + "\n[... message truncated by r4t ...]"
-        header = f"From: {sender} (thread {thread})"
+        if str(env.get("class", "")) == "error":
+            header = f"From: {sender} (operational error, thread {thread})"
+        else:
+            header = f"From: {sender} (thread {thread})"
         if repeats > 1:
             header += f" (sent {repeats} times)"
         message_lines.append(header)
@@ -415,30 +460,35 @@ def _ingest(
     ctx: DispatchContext,
     sender: str,
     to: str,
-    message: str,
+    body: str,
     *,
-    trusted_header: bool,
+    klass: str,
+    internal: bool,
+    thread: str | None = None,
+    hop: int = 0,
     roster: Roster | None = None,
     config: RigConfig | None = None,
 ) -> str:
-    """Resolve the recipient and enqueue. Humans park in the seat; undeliverable
-    mail dead-letters with an audit record; a deliverable message to an AI
-    member enqueues unconditionally (duplicate-collapsed) and returns QUEUED.
+    """Resolve the recipient and enqueue a structured r4t-message. Humans park
+    in the seat; undeliverable mail dead-letters with an audit record; a
+    deliverable message to an AI member enqueues unconditionally
+    (duplicate-collapsed) and returns QUEUED. No text header is parsed or
+    stamped — `thread`/`hop`/`class` travel as fields end to end.
 
-    Ingress routing turns on trust. Intra-team and seat traffic
-    (`trusted_header`) honors `node:member` addressing — that is how the tree
-    delivers between members and how the human seat reaches anyone. External
-    mail does NOT: the topmost leader IS the garden from outside, so every
-    outside message enters at the top regardless of any sub-address. The lone
-    exception is the roster human's own `Address:` — their doorbell reply is the
-    human speaking, re-stamped to the seat so it routes and closes threads
-    exactly like a chat/seat send."""
+    Routing turns on `internal`. Intra-team and seat traffic honors
+    `node:member` addressing — that is how the tree delivers between members and
+    how the human seat reaches anyone — and carries the resolved `thread`/`hop`.
+    External mail does NOT: the topmost leader IS the garden from outside, so
+    every outside message enters at the top regardless of any sub-address and
+    opens a fresh thread. The lone exception is the roster human's own
+    `Address:` — their doorbell reply is the human speaking, re-stamped to the
+    seat so it routes and closes threads exactly like a chat/seat send."""
     if roster is None:
         roster = _load_roster(ctx, sender)
     if roster is None:
         return SKIPPED
 
-    if trusted_header:
+    if internal:
         _, sub = split_recipient(to)
     else:
         human = _human_by_address(roster, sender)
@@ -446,6 +496,7 @@ def _ingest(
             sender = f"{ctx.node}:{human.name.lower()}"
         to = ctx.node
         sub = ""
+        thread = None  # external mail always opens a fresh thread
 
     if sub:
         member = roster.find(sub)
@@ -454,10 +505,11 @@ def _ingest(
             _tell_error(
                 ctx, sender,
                 f"no team member named {sub!r}. Dispatchable members: {names}.",
+                thread=thread, roster=roster,
             )
             state.record_dead_letter(
                 ctx.node, reason="unknown-recipient", sender=sender, to=to,
-                task="", content=message,
+                thread=thread or "", content=body,
             )
             return DEAD
     else:
@@ -469,15 +521,16 @@ def _ingest(
                 "no leader is marked in the roster, so bare messages to "
                 f"{ctx.node} have no recipient. Address a member directly "
                 f"(members: {names}).",
+                thread=thread, roster=roster,
             )
             state.record_dead_letter(
                 ctx.node, reason="no-leader", sender=sender, to=to,
-                task="", content=message,
+                thread=thread or "", content=body,
             )
             return DEAD
 
     if member.is_human:
-        _park_seat(ctx, member, sender, message)
+        _park_seat(ctx, member, sender, body)
         return SKIPPED
 
     if member.errors:
@@ -485,10 +538,11 @@ def _ingest(
             ctx, sender,
             f"{member.name} is disabled by a roster problem: {member.error}. "
             f"Fix {ctx.roster_path.name} and resend.",
+            thread=thread, roster=roster,
         )
         state.record_dead_letter(
             ctx.node, reason="member-disabled", sender=sender, to=to,
-            task="", content=message,
+            thread=thread or "", content=body,
         )
         return DEAD
 
@@ -498,25 +552,20 @@ def _ingest(
         return SKIPPED
     rig, err, _pinned = config.rig_for(member)
     if rig is None:
-        _tell_error(ctx, sender, f"{member.name} cannot run: {err}")
+        _tell_error(
+            ctx, sender, f"{member.name} cannot run: {err}",
+            thread=thread, roster=roster,
+        )
         state.record_dead_letter(
             ctx.node, reason="no-rig", sender=sender, to=to,
-            task="", content=message,
+            thread=thread or "", content=body,
         )
         return DEAD
 
-    if trusted_header:
-        thread_id, hop, auto, body = tasks.parse_header(message)
-    else:
-        # Ingress protocol: headers never legitimately arrive from outside the
-        # garden (egress strips them), so an external header is either noise or
-        # a forgery aimed at an existing thread — treat the whole message as
-        # content and open a fresh thread.
-        thread_id, hop, auto, body = None, 0, False, (message or "").strip()
-    if thread_id is None:
-        thread_id = tasks.new_task_id()
+    if thread is None:
+        thread = tasks.new_thread_id()
         hop = 0
-    tasks.ensure_task(ctx.node, thread_id, sender)
+    tasks.ensure_task(ctx.node, thread, sender)
 
     state.enqueue(
         ctx.node,
@@ -524,9 +573,9 @@ def _ingest(
         {
             "from": sender,
             "to": _canonical_recipient(ctx.node, roster, to),
-            "task": thread_id,
+            "thread": thread,
             "hop": hop,
-            "auto": auto,
+            "class": klass,
             "body": body,
         },
     )
@@ -534,7 +583,7 @@ def _ingest(
     preview = " ".join(body.split())[:80]
     state.append_log(
         ctx.node,
-        f"r4t: QUEUED {sender} -> {member.name.lower()} thread={thread_id} "
+        f"r4t: QUEUED {sender} -> {member.name.lower()} thread={thread} "
         f'hop={hop} "{preview}" (depth {state.queue_depth(ctx.node, member.name)})',
     )
     return QUEUED
@@ -563,10 +612,10 @@ def _release_one(
 ) -> None:
     to = str(envelope.get("to", "")).strip()
     if _is_internal(ctx.node, to):
-        header = tasks.format_header(thread_id, next_hop, auto=True)
         _ingest(
-            ctx, sender_addr, to, f"{header} {body}",
-            trusted_header=True, roster=roster, config=config,
+            ctx, sender_addr, to, body,
+            klass="auto", internal=True, thread=thread_id, hop=next_hop,
+            roster=roster, config=config,
         )
         bundle = staging / str(envelope.get("id", ""))
         if bundle.is_dir():
@@ -589,7 +638,7 @@ def _release_one(
     envelope["x_r4t_class"] = "auto"
     envelope["from"] = sender_addr
     outbox.mkdir(parents=True, exist_ok=True)
-    msg_id = str(envelope.get("id", "")) or tasks.new_task_id()
+    msg_id = str(envelope.get("id", "")) or tasks.new_thread_id()
     envelope["id"] = msg_id
     bundle = staging / msg_id
     if bundle.is_dir():
@@ -602,7 +651,7 @@ def _release_one(
             except OSError as e:
                 if e.errno != errno.EXDEV:
                     raise
-                temporary = outbox / f".{msg_id}.{tasks.new_task_id()}.tmp"
+                temporary = outbox / f".{msg_id}.{tasks.new_thread_id()}.tmp"
                 try:
                     shutil.copytree(bundle, temporary)
                     if not destination.exists():
@@ -655,11 +704,11 @@ def release_staging(
     newest: tuple[str, int] | None = None
     for env in batch:
         key = _display_name(ctx.node, str(env.get("from", ""))).strip().lower()
-        pair = (str(env.get("task", "")), int(env.get("hop", 0) or 0))
+        pair = (str(env.get("thread", "")), int(env.get("hop", 0) or 0))
         consumed[key] = pair
         newest = pair
     if newest is None:
-        newest = (tasks.new_task_id(), 0)
+        newest = (tasks.new_thread_id(), 0)
 
     reachable = (
         _reachable_names(ctx, roster, member, batch) if roster.declares_tree else None
@@ -677,7 +726,7 @@ def release_staging(
             path.unlink(missing_ok=True)
             continue
         to = str(envelope.get("to", "")).strip()
-        _, _, _, body = tasks.parse_header(str(envelope.get("content", "")))
+        body = str(envelope.get("content", "")).strip()
         if not to or not body.strip():
             path.unlink(missing_ok=True)
             continue
@@ -688,7 +737,7 @@ def release_staging(
             violations += 1
             state.record_dead_letter(
                 ctx.node, reason="quota", sender=sender_addr, to=to,
-                task=newest[0], content=body,
+                thread=newest[0], content=body,
             )
             state.append_log(
                 ctx.node,
@@ -793,7 +842,7 @@ def _run_turn(
     batch = state.claim_queue(ctx.node, member.name)
     if not batch:
         return
-    newest_thread = str(batch[-1].get("task", "")) or "?"
+    newest_thread = str(batch[-1].get("thread", "")) or "?"
     newest_hop = int(batch[-1].get("hop", 0) or 0)
     newest_sender = str(batch[-1].get("from", "")) or f"{ctx.node}"
 
@@ -804,7 +853,7 @@ def _run_turn(
         member.name,
         {
             "batch": len(batch),
-            "threads": sorted({str(b.get("task", "")) for b in batch}),
+            "threads": sorted({str(b.get("thread", "")) for b in batch}),
             "newest_sender": newest_sender,
             "rig": rig.name,
             "started": state.utc_now(),
@@ -818,7 +867,7 @@ def _run_turn(
     state.append_log(
         ctx.node,
         f"## {state.utc_now()} dispatch {len(batch)} message(s) -> {member.name} "
-        f"(threads {', '.join(sorted({str(b.get('task', '')) for b in batch}))}, "
+        f"(threads {', '.join(sorted({str(b.get('thread', '')) for b in batch}))}, "
         f"rig {rig.name}"
         + (f" variant {variant}" if rig.pool_size > 1 else "")
         + f")\n\n### Prompt\n\n{prompt}",
@@ -868,7 +917,7 @@ def _run_turn(
             # the newest message's sender, riding the normal release gates.
             reply = clean_transcript(output)
             if len(reply) > STDOUT_REPLY_MIN_CHARS:
-                msg_id = tasks.new_task_id()
+                msg_id = tasks.new_thread_id()
                 state.atomic_write_json(
                     state.staging_dir(ctx.node, member.name) / f"{msg_id}.json",
                     {"id": msg_id, "to": newest_sender, "content": reply, "files": []},
@@ -913,7 +962,7 @@ def _run_turn(
         ctx.node,
         agent=member.name.lower(),
         rig=rig.name,
-        task=newest_thread,
+        thread=newest_thread,
         hop=newest_hop,
         duration_seconds=duration,
         exit_code=exit_code,
@@ -927,7 +976,7 @@ def _run_turn(
         "last_completed_at": completed,
         "consecutive_failures": failures,
         "last_turn": {
-            "threads": sorted({str(b.get("task", "")) for b in batch}),
+            "threads": sorted({str(b.get("thread", "")) for b in batch}),
             "messages": len(batch),
             "exit": exit_code,
             "timed_out": timed_out,
@@ -950,6 +999,7 @@ def _run_turn(
             ctx, newest_sender,
             f"{member.name}'s harness (rig {rig.name}) failed to start: "
             f"{output.strip()}",
+            thread=newest_thread, roster=roster,
         )
 
 
@@ -1079,8 +1129,8 @@ def handle_message(
     drain_after: bool = True,
 ) -> int:
     _ingest(
-        ctx, sender, to, message,
-        trusted_header=_is_internal(ctx.node, sender),
+        ctx, sender, to, (message or "").strip(),
+        klass="human", internal=_is_internal(ctx.node, sender),
     )
     if drain_after:
         drain_until_quiet(ctx, run_fn=run_fn)
@@ -1208,7 +1258,6 @@ def _quiet_task_sweep(
             continue
         thread_id = str(task["id"])
         creator = str(task.get("creator", "?"))
-        header = tasks.format_header(thread_id, 0, auto=True)
         body = (
             f"Thread {thread_id} has gone quiet and {creator} has not heard "
             "back. Reply to them with where things stand — what is done and "
@@ -1216,8 +1265,9 @@ def _quiet_task_sweep(
             "current state."
         )
         _ingest(
-            ctx, f"r4t:{ctx.node}", f"{ctx.node}:{leader.name.lower()}",
-            f"{header} {body}", trusted_header=True, roster=roster, config=config,
+            ctx, f"r4t:{ctx.node}", f"{ctx.node}:{leader.name.lower()}", body,
+            klass="auto", internal=True, thread=thread_id, hop=0,
+            roster=roster, config=config,
         )
         tasks.save_task(ctx.node, task)  # bump updated_at; won't re-fire until quiet again
         state.append_log(

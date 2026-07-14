@@ -178,7 +178,7 @@ class ChatApp(App):
         log = self.query_one("#conversation", RichLog)
         stamp = datetime.now().strftime("%H:%M:%S")
         sender = sender_label(self.roster, str(envelope.get("from", "?")))
-        _, _, _, body = taskmod.parse_header(str(envelope.get("content", "")))
+        body = str(envelope.get("content", ""))
         log.write(Text.assemble((stamp + " ", "dim"), (sender, "bold cyan")))
         log.write(Padding(Markdown(body.strip() or "(empty)"), (0, 0, 1, 9)))
 

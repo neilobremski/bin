@@ -48,7 +48,7 @@ _queue_seq = itertools.count()
 
 HISTORY_MAX_BYTES = 8192
 HISTORY_ENTRY_RE = re.compile(r"(?m)^(?=## )")
-VELOCITY_HEADER = "timestamp,agent,rig,task,hop,duration_seconds,exit_code\n"
+VELOCITY_HEADER = "timestamp,agent,rig,thread,hop,duration_seconds,exit_code\n"
 
 
 def utc_now() -> str:
@@ -542,7 +542,7 @@ def record_velocity(
     *,
     agent: str,
     rig: str,
-    task: str,
+    thread: str,
     hop: int,
     duration_seconds: float,
     exit_code: int,
@@ -556,7 +556,7 @@ def record_velocity(
             utc_now(),
             agent,
             rig,
-            task,
+            thread,
             hop,
             f"{duration_seconds:.2f}",
             exit_code,
@@ -665,7 +665,7 @@ def record_dead_letter(
     reason: str,
     sender: str,
     to: str,
-    task: str,
+    thread: str,
     content: str,
     count: int = 1,
 ) -> Path:
@@ -680,7 +680,7 @@ def record_dead_letter(
             "count": count,
             "from": sender,
             "to": to,
-            "task": task,
+            "thread": thread,
             "content": content[:2000],
         },
     )

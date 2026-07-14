@@ -1,66 +1,29 @@
 """Thread ledger — the conversation label that survives a batch turn.
 
-Every message r4t releases carries a machine-stamped header line:
-
-    [r4t task=<ulid> hop=<n> auto]
-
-The header is stamped and stripped by r4t only — agents never see or copy
-it. Incoming: parse + strip, adopt the thread id + hop. Missing header →
-new thread ULID, hop 0. The `auto` flag is the message-class mark (RFC
-3834's Auto-Submitted analog): a header WITHOUT it was written by a
-deliberate hand.
-
 A thread is a conversation label, not a budget. It exists so a reply can
 be attributed to the exchange it answers, so the originator can be tracked
 (answer-the-originator closure), and so a thread that goes quiet without
 its originator hearing back can wake the leader. It never gates delivery:
-every inbound message enqueues regardless of a thread's status. `task=` on
-the wire is a name kept for compatibility; in prose it is a "thread".
+every inbound message enqueues regardless of a thread's status.
 
-Hop counts are stamped for telemetry (and the Phase 2 tree) but never cut
-a message.
+The thread id + hop travel as structured fields on the r4t-message
+(`dispatch.py`), never as a text header — there is no serialize/parse step
+inside the walls. Hop counts are stamped for telemetry (and the tree) but
+never cut a message.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from state import atomic_write_json, team_dir, utc_now
 from ulid import new as new_ulid
 
-HEADER_RE = re.compile(
-    r"^\s*\[r4t\s+task=([0-9A-Za-z]{26})\s+hop=(\d+)(\s+auto)?\]\s*",
-    re.IGNORECASE,
-)
-
 STATUS_OPEN = "open"
 STATUS_CLOSED = "closed"
 
 
-def new_task_id() -> str:
+def new_thread_id() -> str:
     return new_ulid()
-
-
-def parse_header(message: str) -> tuple[str | None, int, bool, str]:
-    """Return (thread_id, hop, auto, body-with-header-stripped)."""
-    match = HEADER_RE.match(message or "")
-    if not match:
-        return None, 0, False, (message or "").strip()
-    task_id = match.group(1).upper()
-    hop = int(match.group(2))
-    auto = match.group(3) is not None
-    return task_id, hop, auto, message[match.end():].strip()
-
-
-def format_header(task_id: str, hop: int, *, auto: bool = False) -> str:
-    return f"[r4t task={task_id} hop={hop}{' auto' if auto else ''}]"
-
-
-def normalize_content(text: str) -> str:
-    """Collapse-key normalization: strip the r4t header, lowercase, collapse
-    whitespace."""
-    _, _, _, body = parse_header(text)
-    return " ".join(body.lower().split())
 
 
 # ---------- ledger ----------
