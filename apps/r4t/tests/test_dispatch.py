@@ -6,6 +6,7 @@ import os
 import sys
 import textwrap
 import time
+from dataclasses import replace
 
 import pytest
 

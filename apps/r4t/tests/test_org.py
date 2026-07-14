@@ -128,6 +128,26 @@ def test_check_flags_bad_setting_values(tmp_path):
     assert org.comms == "open" and org.leader_sees_lateral is False
 
 
+def test_doorbell_check_string_accepted(tmp_path):
+    (tmp_path / ORG_CONFIG_NAME).write_text(
+        json.dumps({"doorbell_check": "r4t check acme"}), encoding="utf-8"
+    )
+    assert load_org(tmp_path).doorbell_check == "r4t check acme"
+    assert check_org(tmp_path) == []
+
+
+def test_doorbell_check_absent_by_default(tmp_path):
+    assert load_org(tmp_path).doorbell_check is None
+
+
+def test_doorbell_check_non_string_degrades_with_error(tmp_path):
+    (tmp_path / ORG_CONFIG_NAME).write_text(
+        json.dumps({"doorbell_check": ["r4t", "check"]}), encoding="utf-8"
+    )
+    assert any('"doorbell_check" must be a string' in m for m in check_org(tmp_path))
+    assert load_org(tmp_path).doorbell_check is None
+
+
 # ---------- integration: turns resolve org dir vs workplace ----------
 
 def _portable_org(tmp_path, mission="Ship the thing and stop."):

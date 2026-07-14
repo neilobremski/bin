@@ -32,6 +32,10 @@ home — this file is the org-level home):
 - `egress` (bool, default `true`): when on, the topmost leader alone may
   originate external mail; when off, no member may, and external `to`s redirect
   to the top leader (the garden's single voice).
+- `doorbell_check` (string, default absent): a shell command run before the org
+  may ring an absent human's doorbell. Exit 0 lets the ring through; nonzero
+  parks the message without ringing (the gate protects attention, not the
+  mailbox). Absent or empty is today's behavior — no gate.
 
 Graduation is trivial: copy ROSTER.md + MISSION.md into the repo and drop the
 `repo` key (or the whole file, if it carries no settings). Resolution falls
@@ -61,6 +65,7 @@ class Org:
     comms: str = COMMS_OPEN
     leader_sees_lateral: bool = False
     egress: bool = True
+    doorbell_check: str | None = None
 
     @property
     def is_portable(self) -> bool:
@@ -102,6 +107,14 @@ def _parse_bool(raw: object, default: bool, key: str) -> tuple[bool, str | None]
     return raw, None
 
 
+def _parse_str(raw: object, key: str) -> tuple[str | None, str | None]:
+    if raw is None:
+        return None, None
+    if not isinstance(raw, str):
+        return None, f'org config "{key}" must be a string (got {raw!r})'
+    return raw, None
+
+
 def _parse_settings(data: dict) -> tuple[dict, list[str]]:
     errors: list[str] = []
     comms = data.get("comms", COMMS_OPEN)
@@ -114,7 +127,15 @@ def _parse_settings(data: dict) -> tuple[dict, list[str]]:
     egress, err = _parse_bool(data.get("egress"), True, "egress")
     if err:
         errors.append(err)
-    return {"comms": comms, "leader_sees_lateral": lsl, "egress": egress}, errors
+    doorbell_check, err = _parse_str(data.get("doorbell_check"), "doorbell_check")
+    if err:
+        errors.append(err)
+    return {
+        "comms": comms,
+        "leader_sees_lateral": lsl,
+        "egress": egress,
+        "doorbell_check": doorbell_check,
+    }, errors
 
 
 def load_org(root: Path) -> Org:
