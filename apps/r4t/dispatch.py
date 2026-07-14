@@ -985,6 +985,49 @@ def clean_transcript(output: str) -> str:
     return "\n".join(kept).strip()
 
 
+def _capture_turn(
+    ctx: DispatchContext,
+    member: Member,
+    *,
+    threads: list[str],
+    exit_code: int,
+    duration: float,
+    timed_out: bool,
+    rig_name: str,
+    prompt: str,
+    output: str,
+) -> None:
+    """Persist one turn's full assembled prompt and full raw harness output to
+    agents/<member>/turns/. Wrapped so a write failure only warns — observability
+    must never take down a turn. Captures every dispatched turn, timeouts
+    included: an empty/partial output is exactly the evidence a hang needs."""
+    stamp = state.turn_capture_stamp()
+    meta = "\n".join(
+        [
+            f"- stamp: {stamp}",
+            f"- threads: {', '.join(threads) or '(none)'}",
+            f"- exit: {exit_code}",
+            f"- duration_seconds: {duration:.2f}",
+            f"- timed_out: {str(timed_out).lower()}",
+            f"- rig: {rig_name}",
+        ]
+    )
+    content = (
+        f"# turn {stamp} ({member.name})\n\n{meta}\n\n"
+        f"## Prompt\n\n{prompt}\n\n"
+        f"## Output\n\n{output.strip() or '(no output)'}\n"
+    )
+    try:
+        state.write_turn_capture(
+            ctx.node, member.name, stamp, threads[0] if threads else "batch", content
+        )
+    except OSError as e:
+        state.append_log(
+            ctx.node,
+            f"r4t: WARN turn capture for {member.name.lower()} failed: {e}",
+        )
+
+
 def _run_turn(
     ctx: DispatchContext,
     config: RigConfig,
@@ -1037,6 +1080,18 @@ def _run_turn(
     state.append_log(
         ctx.node,
         f"### Output ({member.name}, {outcome})\n\n{output.strip() or '(no output)'}",
+    )
+
+    _capture_turn(
+        ctx,
+        member,
+        threads=sorted({str(b.get("thread", "")) for b in batch}),
+        exit_code=exit_code,
+        duration=duration,
+        timed_out=timed_out,
+        rig_name=rig.name,
+        prompt=prompt,
+        output=output,
     )
 
     failed = timed_out or exit_code != 0

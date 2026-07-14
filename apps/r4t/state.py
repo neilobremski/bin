@@ -14,6 +14,8 @@ honors A8S_HOME).
     │                              sent this turn, released by dispatch afterwards
     ├── agents/<name>/live.log     the running turn's harness output, teed live
     │                              (truncated at turn start; a gemba attach tails it)
+    ├── agents/<name>/turns/       per-turn capture — one markdown file per turn
+    │                              (full prompt + raw output; most recent 50 kept)
     ├── tasks/<id>.json            thread ledger (see tasks.py)
     ├── dead-letter/               undeliverable mail (unknown recipient, malformed)
     ├── buckets.json               per-member + team spend budgets (turns, not tokens)
@@ -671,6 +673,50 @@ def read_live_log_tail(node: str, name: str, offset: int) -> tuple[str, int]:
             return chunk, f.tell()
     except OSError:
         return "", offset
+
+
+# ---------- per-turn capture (prompt + raw output, one file per turn) ----------
+#
+# live.log holds only the LAST turn's raw output and no prompt at all, so a
+# prompting problem cannot be diagnosed after the fact. Turn capture keeps the
+# most recent TURN_RETENTION turns per member as standalone markdown files —
+# the full assembled prompt and the full raw harness output, every turn,
+# successes and timeouts alike. Day logs and #159 own long-term retention.
+
+TURN_RETENTION = 50
+
+
+def turns_dir(node: str, name: str) -> Path:
+    return agent_dir(node, name) / "turns"
+
+
+def turn_capture_stamp() -> str:
+    """Filesystem-safe, time-sortable stamp for a turn-capture filename."""
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def list_turn_captures(node: str, name: str) -> list[Path]:
+    d = turns_dir(node, name)
+    if not d.is_dir():
+        return []
+    return sorted(f for f in d.iterdir() if f.is_file() and f.name.endswith(".md"))
+
+
+def write_turn_capture(node: str, name: str, stamp: str, thread: str, content: str) -> Path:
+    """Write one turn-capture file and prune the member's turns/ dir to the
+    most recent TURN_RETENTION. The filename sorts by time; the thread (or
+    'batch' when a turn drained several threads) makes it identifiable."""
+    d = turns_dir(node, name)
+    d.mkdir(parents=True, exist_ok=True)
+    tag = re.sub(r"[^A-Za-z0-9_-]", "", thread) or "batch"
+    path = d / f"{stamp}-{tag}.md"
+    _atomic_write_text(path, content)
+    for stale in list_turn_captures(node, name)[:-TURN_RETENTION]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    return path
 
 
 # ---------- dead letters ----------
