@@ -46,9 +46,8 @@ from ulid import new as new_ulid
 
 _queue_seq = itertools.count()
 
-HISTORY_MAX_BYTES = 8192
 HISTORY_ENTRY_RE = re.compile(r"(?m)^(?=## )")
-VELOCITY_HEADER = "timestamp,agent,rig,task,hop,duration_seconds,exit_code\n"
+VELOCITY_HEADER = "timestamp,agent,rig,thread,hop,duration_seconds,exit_code\n"
 
 
 def utc_now() -> str:
@@ -181,7 +180,7 @@ def _truncate_history(text: str, max_bytes: int) -> str:
 
 
 def append_history(
-    node: str, name: str, entry: str, *, max_bytes: int = HISTORY_MAX_BYTES
+    node: str, name: str, entry: str, *, max_bytes: int = 8192
 ) -> None:
     current = read_history(node, name).rstrip()
     combined = (current + "\n\n" if current else "") + entry.strip() + "\n"
@@ -542,7 +541,7 @@ def record_velocity(
     *,
     agent: str,
     rig: str,
-    task: str,
+    thread: str,
     hop: int,
     duration_seconds: float,
     exit_code: int,
@@ -556,7 +555,7 @@ def record_velocity(
             utc_now(),
             agent,
             rig,
-            task,
+            thread,
             hop,
             f"{duration_seconds:.2f}",
             exit_code,
@@ -596,6 +595,27 @@ def clear_turn(node: str, name: str) -> None:
         turn_path(node, name).unlink()
     except OSError:
         pass
+
+
+# ---------- mission-review backoff (idle liveness) ----------
+
+def mission_review_path(node: str) -> Path:
+    return team_dir(node) / "mission-review.json"
+
+
+def read_mission_review(node: str) -> dict:
+    path = mission_review_path(node)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_mission_review(node: str, data: dict) -> None:
+    atomic_write_json(mission_review_path(node), data)
 
 
 def staging_dir(node: str, name: str) -> Path:
@@ -665,7 +685,7 @@ def record_dead_letter(
     reason: str,
     sender: str,
     to: str,
-    task: str,
+    thread: str,
     content: str,
     count: int = 1,
 ) -> Path:
@@ -680,7 +700,7 @@ def record_dead_letter(
             "count": count,
             "from": sender,
             "to": to,
-            "task": task,
+            "thread": thread,
             "content": content[:2000],
         },
     )

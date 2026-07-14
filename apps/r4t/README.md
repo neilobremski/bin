@@ -66,23 +66,25 @@ a roster member or pin still references the rig, naming what does; pass
    The lone exception is the roster human's own `Address:` — a reply from it
    is the human speaking, so it lands in the seat path and routes exactly
    like a chat/seat send (see the seat section).
-2. r4t opens or continues a thread (the `[r4t task=<ulid> hop=<n> auto]`
-   header is a thread label; a fresh thread opens when absent) and ENQUEUES
-   the message into the leader's durable queue — unconditionally. When the
-   leader is runnable (both its spend bucket and the cell bucket hold ≥1, its
-   breaker is closed, the throttle admits a start), ONE turn drains its whole
-   queue: the prompt carries its persona, rolling history, and every waiting
-   message at once. Intra-team routing (below) is what delivers to a named
-   member — from *inside* the garden, addressing is honored.
+2. r4t opens or continues a thread (a conversation label; a fresh thread
+   opens for external mail) and ENQUEUES the message into the leader's
+   durable queue — unconditionally. When the leader is runnable (both its
+   spend bucket and the cell bucket hold ≥1, its breaker is closed, the
+   throttle admits a start), ONE turn drains its whole queue: the prompt
+   carries its persona, rolling history, and every waiting message at once.
+   Intra-team routing (below) is what delivers to a named member — from
+   *inside* the garden, addressing is honored.
 3. The harness's `$TELL_OUTBOX_DIR` points at a per-turn staging dir, so
-   Phil replies with the ordinary `tell` — unmodified. After the turn r4t
-   releases the staged envelopes: sender attribution is free (only that
-   turn wrote there), each reply is attributed to the thread of the message
-   it answers and the thread/hop header + `auto` class mark are stamped
-   mechanically (the LLM never sees or copies headers), the send quota
-   applies, outbound messages land in Phil's history, and the envelopes go
-   to the node's real outbox (external) or straight onto the recipient
-   member's queue (intra-team).
+   Phil replies with the ordinary `tell` — unmodified. Inside the walls a
+   message is a structured r4t-message, not a text header: dispatch reads the
+   staged files as drafts (`to` + `body` + optional files) and stamps the rest
+   as fields — `from` (from the staging dir, unforgeable), the thread/hop, and
+   a `class` (`human` deliberate · `auto` relay/nudge · `error` feedback). Each
+   reply is attributed to the thread of the message it answers, the send quota
+   applies, outbound messages land in Phil's history, and the message goes
+   straight onto the recipient member's queue (intra-team, no header, no
+   round-trip) or is converted to an a8s envelope at the wall (external — the
+   only place a wire header exists, carrying `class` as `x_r4t_class`).
    Inside the team, agents address each other by bare first name
    (`tell gerry`) — the namespace prefix is the *outside* address of the
    walled garden, and roster agents never see it. Release canonicalizes
@@ -193,12 +195,15 @@ Once any `Lead:` line is present the tree becomes structural, not advisory:
 
 - **Information hiding.** A member's turn prompt lists only its tree-adjacent
   names — its lead, its direct reports, its cell-mates — plus the human seat.
-  It never sees the whole roster, so lateral contact is unthinkable rather
-  than merely discouraged.
-- **Hard rerouting.** A tell to anyone outside that adjacency is rerouted to
-  the member's lead (`[r4t rerouted: Ann -> Cal] …`, logged `REROUTED`).
-  Replies to whoever messaged you this turn, and anything to the human seat,
-  always get through — answering never reroutes.
+  It never sees the whole roster, so lateral contact is not advertised.
+- **Delivery follows the `comms` setting** (org-level, default `open`). In
+  `open` a tell to any valid roster member delivers — a learned address works
+  even though the prompt did not list it (info hiding stays at the prompt
+  level, softening the tree tax). In `closed` a tell outside a member's
+  adjacency is rerouted to its lead (`[r4t rerouted: Ann -> Cal] …`, logged
+  `REROUTED`) — the military model. In both, replies to whoever messaged you
+  this turn and anything to the human seat always get through. Set it in
+  `r4t-org.json` (below).
 
 `r4t roster check` lints the shape: every `Lead:` must name a real member,
 exactly one member is the leader, a cell warns past 6 AI members and errors
@@ -257,10 +262,22 @@ roster, mission, and mission injection read from the org dir. Org-to-repo is
 many-to-one: two org dirs (same `MISSION.md`, different `ROSTER.md`) can point
 at two clones of one project without their team state colliding — state is
 per-a8s-node, not per-repo. `r4t roster check --root <org-dir>` lints the org,
-including a missing/malformed `r4t-org.json` or a workplace repo that does not
-exist. **Graduation is trivial:** copy the two files into the repo and delete
-`r4t-org.json` — resolution falls back to the in-repo default with no other
-change.
+including a malformed `r4t-org.json`, a bad setting value, or a workplace repo
+that does not exist. **Graduation is trivial:** copy the two files into the repo
+and delete `r4t-org.json` — resolution falls back to the in-repo default with no
+other change.
+
+### Org settings
+
+`r4t-org.json` also carries org-level settings that travel with the org, not the
+machine. They are optional and may be the *only* thing the file holds — a
+config without a `repo` key is an in-repo org that just wants settings.
+
+| Key | Default | Governs |
+|---|---|---|
+| `comms` | `open` | `open` delivers a tell to any valid member (learned addresses); `closed` reroutes non-adjacent tells through the sender's lead |
+| `leader_sees_lateral` | `false` | when `true`, a lateral (peer) delivery lands a read-only copy in the lead's history — no turn burned |
+| `egress` | `true` | only the topmost leader may message outside the garden; a non-top member's external tell redirects up to it. `false` keeps the org silent outward |
 
 ## Governance knobs
 
@@ -294,6 +311,7 @@ transcript triggers it, never chrome-only output from a quiet-but-alive member.
 | `budget_max` / `budget_earn_per_hour` (rig) | 8 / 4 | Per-member spend bucket. A turn costs 1 unit regardless of how many queued messages it consumes; empty = resting. Put frontier rigs on a low budget (slow, smart), local rigs on a high one (near-free) | Money burn; a fast rig outrunning its quota |
 | `rig_budget_max` / `rig_budget_earn_per_hour` (rig) | unset (no rig gate) | Machine-global rig spend bucket for the subscription behind the rig. A turn also costs 1 rig unit; when empty, every member on that rig rests on every team. Set both together to bind a shared plan (e.g. 20 / 20 for ~20 prompts an hour) | A shared subscription outrunning its real quota across projects |
 | `max_sends_per_turn` (rig) | 6 | Envelopes released per turn; excess dead-letters | Runaway fan-out width |
+| `history_max_bytes` / `history_body_max` / `prompt_body_max` (rig) | by preset tier — big (agy/codex/claude) 50k/12k/24k · moderate (cursor/opencode/copilot) 25k/6k/12k · small (ollama variants, or no preset) 8192/2000/4000 | Context sizing on the rig: rolling-history budget, per-entry history clip, and per-message prompt clip. `rig add`/`swap` record the preset; explicit values override the tier | A weak rig drowning in context, or a strong one starved of it |
 | `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed | Hung harnesses |
 | `concurrency` (rig) | 1 | Live turns within one rig | Rig-wide pile-ups |
 | `cell_budget_max` / `cell_budget_earn_per_hour` | 16 / 8 | Shared cell spend bucket; a turn also costs 1 cell unit. When empty, everyone rests | Whole-cell money burn |
@@ -301,6 +319,16 @@ transcript triggers it, never chrome-only output from a quiet-but-alive member.
 | `throttle.min_seconds_between_turn_starts` | 15 | Cadence floor between turn starts; a member that can't start yet keeps its queue and runs later | Invisible burn — a storm degrades into a watchable drip |
 | `quiet_task_seconds` | 1800 | Backstop: an open thread whose originator has not been answered and that has seen no activity for this long wakes the leader with a nudge to report current state | A thread that dangles — a turn "succeeds" without replying and the originator never hears back |
 | `breaker_cap` / `breaker_cooldown_seconds` | 5 / 600 | Failure breaker: after N consecutive failed turns (nonzero exit or timeout) the member's turns pause; one probe runs per cooldown until a turn succeeds. Queued messages hold — nothing is dropped | A broken harness (bad flag, revoked key, dead local model) burning turn after turn while messages pile up |
+
+When an org goes fully quiet — every queue empty, no open thread — but the
+mission may not be met, the idle pass hands the topmost leader a budget-gated
+**mission-review** turn to reweigh the mission and delegate the next step
+(cadence is the a8s `idle.timeout` with a widening backoff; three silent
+reviews go dormant until a real message or a `MISSION.md` change re-arms it).
+The nudge never asks the leader to report to the human. Prompt text — the turn
+framing, doctrine bullets, and both nudges — is overridable per key under a
+`prompts` object in the a8s node definition (defaults live in `dispatch.py`);
+the definition reaches r4t via `--definition $DEFINITION_PATH`.
 
 The durable queue ties it together. Every inbound message to a member
 enqueues unconditionally — no gate ever drops or dead-letters a deliverable
@@ -314,17 +342,16 @@ and identical normalized body, the arrival collapses into it with a
 once (batch invoke): one prompt shows every waiting message, so an agent
 pivots on the current state instead of burning a turn per message.
 
-Class marking rides the garden's internal serialization: every internally
-released envelope carries `auto` in its `[r4t task=<ulid> hop=<n>]` header
-(a thread label plus a telemetry hop count that never cuts a message). The
-header never crosses egress — external releases carry the bare body (class
-survives as `x_r4t_class` envelope metadata), because other a8s nodes must
-not need to know whether a name is one agent, a human, a device, or a whole
-roster. Symmetrically, external ingress is untrusted end to end: headers on
-inbound external messages are content (a forged header can't attach to an
-existing thread), and a sub-address can't pick a member — everything from
-outside enters at the top lead. One ingress point means one thing to reason
-about.
+Inside the walls there is no text header: a message is a structured
+r4t-message whose fields (`thread` label, telemetry `hop` that never cuts a
+message, and a `class` of `human`/`auto`/`error`) travel end to end, stamped by
+dispatch and never written or parsed as prose. The only wire header is at
+egress, where an external release is converted to an a8s envelope carrying the
+bare body and `class` as `x_r4t_class` metadata — other a8s nodes must not need
+to know whether a name is one agent, a human, a device, or a whole roster.
+Symmetrically, external ingress is untrusted: a sub-address can't pick a member
+and nothing is parsed out of the body — everything from outside enters at the
+top lead on a fresh thread. One ingress point means one thing to reason about.
 
 ## Security model
 
@@ -370,7 +397,7 @@ python3 -m pytest apps/r4t/tests/     # from anywhere in ~/bin — the repo
 ```
 
 Layout: `r4t.py` (CLI) · `dispatch.py` (enqueue, batch turns, staging
-release, quiet-thread sweep) · `tasks.py` (header + thread ledger) · `state.py`
+release, quiet-thread sweep, mission-review) · `tasks.py` (thread ledger) · `state.py`
 (all on-disk state under `$R4T_HOME`) · `harness.py` (rig config) ·
 `roster.py` · `verdict.py` (health verdicts + dead-letter rollup, shared
 by status and chat) · `chat.py` (seat feed + line UI) · `chat_tui.py`

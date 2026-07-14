@@ -119,8 +119,8 @@ class TestLocks:
 
 class TestQueue:
     def test_enqueue_and_read_in_arrival_order(self, r4t_home):
-        enqueue(NODE, "phil", {"from": "gerry", "body": "one", "task": "t1"})
-        enqueue(NODE, "phil", {"from": "marcus", "body": "two", "task": "t2"})
+        enqueue(NODE, "phil", {"from": "gerry", "body": "one", "thread": "t1"})
+        enqueue(NODE, "phil", {"from": "marcus", "body": "two", "thread": "t2"})
         bodies = [e["body"] for e in read_queue(NODE, "phil")]
         assert bodies == ["one", "two"]
         assert queue_depth(NODE, "phil") == 2
@@ -164,7 +164,7 @@ class TestVelocity:
             NODE,
             agent="phil",
             rig="junior-dev",
-            task="01ABC",
+            thread="01ABC",
             hop=1,
             duration_seconds=1.234,
             exit_code=0,
@@ -173,7 +173,7 @@ class TestVelocity:
             NODE,
             agent="gerry",
             rig="leader",
-            task="01DEF",
+            thread="01DEF",
             hop=0,
             duration_seconds=2.0,
             exit_code=1,
@@ -188,7 +188,7 @@ class TestVelocity:
             NODE,
             agent='we,"ird',
             rig="t",
-            task="x",
+            thread="x",
             hop=0,
             duration_seconds=0,
             exit_code=0,
@@ -201,11 +201,11 @@ class TestDeadLetters:
     def test_record_and_list(self, r4t_home):
         record_dead_letter(
             NODE, reason="quota", sender="acme:phil", to="gerry",
-            task="01ABC", content="too chatty",
+            thread="01ABC", content="too chatty",
         )
         record_dead_letter(
             NODE, reason="pair-repeat", sender="acme:phil", to="gerry",
-            task="01ABC", content="again", count=3,
+            thread="01ABC", content="again", count=3,
         )
         records = list_dead_letters(NODE)
         assert len(records) == 2
@@ -217,7 +217,7 @@ class TestDeadLetters:
 
     def test_content_capped(self, r4t_home):
         record_dead_letter(
-            NODE, reason="quota", sender="a", to="b", task="t", content="x" * 5000,
+            NODE, reason="quota", sender="a", to="b", thread="t", content="x" * 5000,
         )
         assert len(list_dead_letters(NODE)[0]["content"]) == 2000
 

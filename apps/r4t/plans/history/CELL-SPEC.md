@@ -4,7 +4,7 @@
 task demotes to thread label with answer-the-originator, hard tree
 enforcement, and the nested-garden unit is named the **cell**.
 This spec covers the phased build on the working branch. Direction
-rationale: [SYNTHESIS.md](SYNTHESIS.md).*
+rationale: [SYNTHESIS.md](../SYNTHESIS.md).*
 
 ## Phase 1 — member queue, budgets, batch invoke
 

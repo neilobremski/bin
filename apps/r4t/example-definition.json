@@ -6,6 +6,8 @@
     "dispatch",
     "--root",
     ".",
+    "--definition",
+    "$DEFINITION_PATH",
     "--from",
     "$SENDER",
     "--to",
@@ -21,7 +23,12 @@
       "$A8S_DIR/../r4t/r4t.py",
       "idle",
       "--root",
-      "."
+      ".",
+      "--definition",
+      "$DEFINITION_PATH"
     ]
+  },
+  "prompts": {
+    "_comment": "Optional sparse overrides of r4t's built-in prompt text, by key (see apps/r4t/README.md and plans/COMMS-SPEC.md §6). Substitution fields: {name}, {node}, {workplace}, {creator}, {thread}. Omit this whole object to use every default."
   }
 }

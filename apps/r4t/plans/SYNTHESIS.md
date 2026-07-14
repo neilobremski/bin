@@ -1,7 +1,7 @@
 # R4T re-founding — synthesis and attack plan
 
 *2026-07-12. Synthesizes the CTO discussion (2026-07-11), the four
-department scenarios (plans/departments/), and Neil's voice memo taken
+department scenarios (plans/history/departments/), and Neil's voice memo taken
 on his run after listening to the audio version. This is the working
 plan; individual pieces still go through issues + PRs as usual.*
 

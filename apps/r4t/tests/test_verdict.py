@@ -42,7 +42,7 @@ def texts(verdicts):
 
 def enqueue_n(name: str, n: int) -> None:
     for i in range(n):
-        state.enqueue(NODE, name, {"from": f"sender-{i}", "body": f"job {i}", "task": "t"})
+        state.enqueue(NODE, name, {"from": f"sender-{i}", "body": f"job {i}", "thread": "t"})
 
 
 def empty_budget(node, key, budget_max, earn):
@@ -93,7 +93,7 @@ class TestRunawayVerdict:
     def test_high_turn_rate_warns(self, r4t_home, roster, config):
         for _ in range(verdict.RUNAWAY_TURNS_PER_WINDOW):
             state.record_velocity(
-                NODE, agent="phil", rig="junior-dev", task="01X",
+                NODE, agent="phil", rig="junior-dev", thread="01X",
                 hop=1, duration_seconds=1.0, exit_code=0,
             )
         verdicts = verdict.team_verdicts(NODE, roster, config)
@@ -104,7 +104,7 @@ class TestRunawayVerdict:
     def test_old_turns_do_not_count(self, r4t_home, roster, config):
         for _ in range(verdict.RUNAWAY_TURNS_PER_WINDOW):
             state.record_velocity(
-                NODE, agent="phil", rig="junior-dev", task="01X",
+                NODE, agent="phil", rig="junior-dev", thread="01X",
                 hop=1, duration_seconds=1.0, exit_code=0,
             )
         later = time.time() + verdict.RECENT_WINDOW_SECONDS + 60
@@ -162,7 +162,7 @@ class TestSignalDeadLetters:
     def test_recent_signal_warns_with_gloss(self, r4t_home, roster, config):
         state.record_dead_letter(
             NODE, reason="unknown-recipient", sender="acme:gerry", to="ghost",
-            task="", content="x",
+            thread="", content="x",
         )
         verdicts = verdict.team_verdicts(NODE, roster, config)
         warn = by_level(verdicts, verdict.WARN)
@@ -174,7 +174,7 @@ class TestSignalDeadLetters:
     def test_stale_signal_is_quiet(self, r4t_home, roster, config):
         state.record_dead_letter(
             NODE, reason="unknown-recipient", sender="acme:gerry", to="ghost",
-            task="", content="x",
+            thread="", content="x",
         )
         later = time.time() + verdict.SIGNAL_RECENT_SECONDS + 60
         verdicts = verdict.team_verdicts(NODE, roster, config, now=later)

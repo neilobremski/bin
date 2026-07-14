@@ -20,11 +20,13 @@ member is *resting*: its queue holds and it runs again when the bucket
 refills. Nothing is lost.
 
 The agent replies with the unmodified `tell`. Dispatch points the harness
-subprocess's $TELL_OUTBOX_DIR at a per-turn staging dir and releases the
-staged envelopes afterwards: attribution (only this turn wrote there), the
-thread/hop header stamped mechanically, per-turn send quota, then either the
-node's real outbox (external) or straight onto the recipient member's queue
-(intra-team). A reply is attributed to the thread of the message it answers.
+subprocess's $TELL_OUTBOX_DIR at a per-turn staging dir and reads the staged
+files as r4t-message DRAFTS (`to` + `body` + optional `files`), then releases
+them: attribution (only this turn wrote there), the thread/hop/class stamped as
+structured fields, per-turn send quota, then either the node's real outbox
+(external — converted to an a8s envelope at the wall) or straight onto the
+recipient member's queue (intra-team, no header, no round-trip). A reply is
+attributed to the thread of the message it answers.
 
 Requeueing note: a8s trashes the inbox message BEFORE spawning the wake
 subprocess and only logs its exit code (daemon.wake_once), so exiting nonzero
@@ -51,9 +53,81 @@ from rig import RigConfig, RigError, Rig, load_rig_config, resolve_agy_model
 from notify import TellFn
 from roster import Member, Roster, RosterError, load_roster
 
-PROMPT_BODY_MAX = 4000
-HISTORY_BODY_MAX = 2000
 DRAIN_MAX_PASSES = 20
+
+# Default prompt text, overridable sparsely by key via the a8s node definition's
+# `prompts` object (#190). Substitution fields: {name}, {node}, {workplace},
+# {creator}, {thread}. Structural section headers stay in code (not doctrine).
+PROMPT_DEFAULTS: dict[str, str] = {
+    "intro": (
+        "You are {name}, a member of the {node} team, working in the team repo "
+        "at {workplace} (your current directory). Write files here with "
+        "relative paths only."
+    ),
+    "mission_header": "## The mission (MISSION.md — outranks every other document)",
+    "work_batch": (
+        "- This is one turn: you were woken with every message above at once. "
+        "Read them together and act on the current state, not each message in "
+        "sequence. Your process ends when you finish; you are woken again when "
+        "more messages arrive."
+    ),
+    "work_never_wait": (
+        "- Never wait for a reply inside a turn. If you need work from "
+        "teammates, message them and END your turn without answering the "
+        "original request; when their replies wake you later, answer the "
+        "person who asked once you have enough."
+    ),
+    "work_tell": (
+        "- Send messages with the `tell` shell command (run it via your shell "
+        "tool — printing it as text sends nothing):\n"
+        "    - reply to whoever asked: tell <name> \"<message>\"\n"
+        "    - a teammate: tell <name> \"<message>\". Teammates:"
+    ),
+    "work_direct": (
+        "- Speak to teammates directly and one at a time — do not post to "
+        "chat rooms or broadcast channels."
+    ),
+    "work_no_ack": (
+        "- Do not send acknowledgment-only messages. If you have nothing "
+        "substantive to add, send nothing — silence is fine."
+    ),
+    "work_body_only": (
+        "- Your tell's body is the only thing the recipient sees — anything you "
+        "write around it (framing, notes, your reasoning) is lost."
+    ),
+    "work_commit": "- Repo work is not done until it is committed.",
+    "quiet_nudge": (
+        "Thread {thread} has gone quiet and {creator} has not heard back. "
+        "Reply to them with where things stand — what is done and what remains. "
+        "You do not have to finish the work, just report current state."
+    ),
+    "mission_review": (
+        "The team's queues are empty and no thread is open, but the mission "
+        "may not be met. Review MISSION.md against where things stand and "
+        "decide the next move — delegate the next step down the tree if there "
+        "is one. No communication to the human NEEDS to happen: this is a "
+        "working review, not a status report, so do not message the human "
+        "unless you genuinely have something they must act on."
+    ),
+}
+
+
+def _load_prompt_overrides(definition_path: Path | None) -> dict[str, str]:
+    """Read the `prompts` object from the a8s node definition (sparse, by key).
+    Tolerates absence at every step → returns {} and all defaults apply."""
+    if not definition_path:
+        return {}
+    try:
+        data = json.loads(Path(definition_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    prompts = data.get("prompts") if isinstance(data, dict) else None
+    if not isinstance(prompts, dict):
+        return {}
+    return {
+        k: v for k, v in prompts.items()
+        if isinstance(v, str) and not k.startswith("_")
+    }
 
 RAN = "ran"
 REROUTED = "rerouted"
@@ -73,6 +147,10 @@ class DispatchContext:
     config_path: Path
     tell_fn: TellFn
     workplace: Path | None = None
+    comms: str = "open"
+    leader_sees_lateral: bool = False
+    egress: bool = True
+    definition_path: Path | None = None
 
     def __post_init__(self) -> None:
         # `root` is where the team's documents live (ROSTER.md, MISSION.md, the
@@ -81,6 +159,13 @@ class DispatchContext:
         # them equal.
         if self.workplace is None:
             self.workplace = self.root
+        self._prompts = _load_prompt_overrides(self.definition_path)
+
+    def prompt(self, key: str, **fields: object) -> str:
+        """Resolve a prompt bullet: the definition's override for `key`, else the
+        built-in default, with any substitution fields filled in."""
+        template = self._prompts.get(key) or PROMPT_DEFAULTS[key]
+        return template.format(**fields) if fields else template
 
 
 def split_recipient(to: str) -> tuple[str, str]:
@@ -159,21 +244,61 @@ def _human_by_address(roster: Roster, sender: str) -> Member | None:
     return None
 
 
-def _tell_error(ctx: DispatchContext, recipient: str, text: str) -> None:
-    body = f"[r4t {ctx.node}] {text}"
+def _internal_ai_member(
+    ctx: DispatchContext, roster: Roster | None, recipient: str
+) -> Member | None:
+    """The runnable AI member `recipient` (canonical or bare) names, if any —
+    the guard for routing operational feedback back in-band."""
+    if roster is None:
+        return None
+    if ":" in recipient and not _is_internal(ctx.node, recipient):
+        return None
+    member = roster.find(_display_name(ctx.node, recipient))
+    if member is None or member.is_human or member.errors:
+        return None
+    return member
+
+
+def _tell_error(
+    ctx: DispatchContext,
+    recipient: str,
+    text: str,
+    *,
+    thread: str | None = None,
+    roster: Roster | None = None,
+) -> None:
+    """Operational feedback to a sender. For an INTRA-team sender it is an
+    internal `class=error` r4t-message carrying the ORIGINATING thread id (#160):
+    because it already has a thread it can never mint a fresh one, so it cannot
+    spawn a headerless new-task turn — it dies at the normal budget/answer gates
+    like any other message. External senders keep the direct a8s tell."""
     state.append_log(ctx.node, f"r4t: ERROR -> {recipient}: {text}")
-    ctx.tell_fn(recipient, body)
+    member = _internal_ai_member(ctx, roster, recipient)
+    if member is not None and thread:
+        state.enqueue(
+            ctx.node,
+            member.name,
+            {
+                "from": f"r4t:{ctx.node}",
+                "to": f"{ctx.node}:{member.name.lower()}",
+                "thread": thread,
+                "hop": 0,
+                "class": "error",
+                "body": text,
+            },
+        )
+        return
+    ctx.tell_fn(recipient, f"[r4t {ctx.node}] {text}")
 
 
-def _park_seat(ctx: DispatchContext, member: Member, sender: str, message: str) -> None:
+def _park_seat(ctx: DispatchContext, member: Member, sender: str, body: str) -> None:
     """Deliver a message to a roster human: park it in the node's seat
     mailbox, and ring the `Address:` doorbell (a forwarded copy over a8s)
     only when no seat session is attached to read it live."""
-    state.park_seat_message(ctx.node, member.name, sender, message)
+    state.park_seat_message(ctx.node, member.name, sender, body)
     bell = ""
     if member.address and not state.seat_attached(ctx.node, member.name):
-        _, _, _, bell_body = tasks.parse_header(message)
-        ctx.tell_fn(member.address, bell_body)
+        ctx.tell_fn(member.address, body)
         bell = f", doorbell -> {member.address}"
     state.append_log(
         ctx.node,
@@ -243,7 +368,7 @@ def _mission_section(ctx: DispatchContext, roster: Roster, member: Member) -> li
     if not is_lead:
         return []
     return [
-        "## The mission (MISSION.md — outranks every other document)",
+        ctx.prompt("mission_header"),
         text,
         "",
     ]
@@ -254,18 +379,22 @@ def build_prompt(
     roster: Roster,
     member: Member,
     batch: list[dict],
+    rig: Rig,
 ) -> str:
     history = state.read_history(ctx.node, member.name)
     teammates = _teammate_lines(ctx, roster, member)
     message_lines: list[str] = []
     for env in batch:
         sender = _display_name(ctx.node, str(env.get("from", "?")))
-        thread = str(env.get("task", "")) or "?"
+        thread = str(env.get("thread", "")) or "?"
         repeats = int(env.get("repeats", 1) or 1)
         body = str(env.get("body", "")).strip() or "(empty message)"
-        if len(body) > PROMPT_BODY_MAX:
-            body = body[:PROMPT_BODY_MAX] + "\n[... message truncated by r4t ...]"
-        header = f"From: {sender} (thread {thread})"
+        if len(body) > rig.prompt_body_max:
+            body = body[:rig.prompt_body_max] + "\n[... message truncated by r4t ...]"
+        if str(env.get("class", "")) == "error":
+            header = f"From: {sender} (operational error, thread {thread})"
+        else:
+            header = f"From: {sender} (thread {thread})"
         if repeats > 1:
             header += f" (sent {repeats} times)"
         message_lines.append(header)
@@ -273,9 +402,12 @@ def build_prompt(
         message_lines.append(body)
         message_lines.append("")
     parts = [
-        f"You are {member.name}, a member of the {ctx.node} team, working in "
-        f"the team repo at {ctx.workplace.resolve()} (your current directory). "
-        "Write files here with relative paths only.",
+        ctx.prompt(
+            "intro",
+            name=member.name,
+            node=ctx.node,
+            workplace=ctx.workplace.resolve(),
+        ),
         "",
         *_mission_section(ctx, roster, member),
         "## Who you are (from the team roster)",
@@ -287,26 +419,14 @@ def build_prompt(
         "## Messages since your last turn",
         *(message_lines or ["(none)"]),
         "## How to work",
-        "- This is one turn: you were woken with every message above at once. "
-        "Read them together and act on the current state, not each message in "
-        "sequence. Your process ends when you finish; you are woken again when "
-        "more messages arrive.",
-        "- Never wait for a reply inside a turn. If you need work from "
-        "teammates, message them and END your turn without answering the "
-        "original request; when their replies wake you later, answer the "
-        "person who asked once you have enough.",
-        "- Send messages with the `tell` shell command (run it via your shell "
-        "tool — printing it as text sends nothing):",
-        "    - reply to whoever asked: tell <name> \"<message>\"",
-        "    - a teammate: tell <name> \"<message>\". Teammates:",
+        ctx.prompt("work_batch"),
+        ctx.prompt("work_never_wait"),
+        ctx.prompt("work_tell"),
         *(teammates or ["    - (none)"]),
-        "- Speak to teammates directly and one at a time — do not post to "
-        "chat rooms or broadcast channels.",
-        "- Do not send acknowledgment-only messages. If you have nothing "
-        "substantive to add, send nothing — silence is fine.",
-        "- Your tell's body is the only thing the recipient sees — anything you "
-        "write around it (framing, notes, your reasoning) is lost.",
-        "- Repo work is not done until it is committed.",
+        ctx.prompt("work_direct"),
+        ctx.prompt("work_no_ack"),
+        ctx.prompt("work_body_only"),
+        ctx.prompt("work_commit"),
     ]
     return "\n".join(parts)
 
@@ -415,30 +535,35 @@ def _ingest(
     ctx: DispatchContext,
     sender: str,
     to: str,
-    message: str,
+    body: str,
     *,
-    trusted_header: bool,
+    klass: str,
+    internal: bool,
+    thread: str | None = None,
+    hop: int = 0,
     roster: Roster | None = None,
     config: RigConfig | None = None,
 ) -> str:
-    """Resolve the recipient and enqueue. Humans park in the seat; undeliverable
-    mail dead-letters with an audit record; a deliverable message to an AI
-    member enqueues unconditionally (duplicate-collapsed) and returns QUEUED.
+    """Resolve the recipient and enqueue a structured r4t-message. Humans park
+    in the seat; undeliverable mail dead-letters with an audit record; a
+    deliverable message to an AI member enqueues unconditionally
+    (duplicate-collapsed) and returns QUEUED. No text header is parsed or
+    stamped — `thread`/`hop`/`class` travel as fields end to end.
 
-    Ingress routing turns on trust. Intra-team and seat traffic
-    (`trusted_header`) honors `node:member` addressing — that is how the tree
-    delivers between members and how the human seat reaches anyone. External
-    mail does NOT: the topmost leader IS the garden from outside, so every
-    outside message enters at the top regardless of any sub-address. The lone
-    exception is the roster human's own `Address:` — their doorbell reply is the
-    human speaking, re-stamped to the seat so it routes and closes threads
-    exactly like a chat/seat send."""
+    Routing turns on `internal`. Intra-team and seat traffic honors
+    `node:member` addressing — that is how the tree delivers between members and
+    how the human seat reaches anyone — and carries the resolved `thread`/`hop`.
+    External mail does NOT: the topmost leader IS the garden from outside, so
+    every outside message enters at the top regardless of any sub-address and
+    opens a fresh thread. The lone exception is the roster human's own
+    `Address:` — their doorbell reply is the human speaking, re-stamped to the
+    seat so it routes and closes threads exactly like a chat/seat send."""
     if roster is None:
         roster = _load_roster(ctx, sender)
     if roster is None:
         return SKIPPED
 
-    if trusted_header:
+    if internal:
         _, sub = split_recipient(to)
     else:
         human = _human_by_address(roster, sender)
@@ -446,6 +571,7 @@ def _ingest(
             sender = f"{ctx.node}:{human.name.lower()}"
         to = ctx.node
         sub = ""
+        thread = None  # external mail always opens a fresh thread
 
     if sub:
         member = roster.find(sub)
@@ -454,10 +580,11 @@ def _ingest(
             _tell_error(
                 ctx, sender,
                 f"no team member named {sub!r}. Dispatchable members: {names}.",
+                thread=thread, roster=roster,
             )
             state.record_dead_letter(
                 ctx.node, reason="unknown-recipient", sender=sender, to=to,
-                task="", content=message,
+                thread=thread or "", content=body,
             )
             return DEAD
     else:
@@ -469,15 +596,16 @@ def _ingest(
                 "no leader is marked in the roster, so bare messages to "
                 f"{ctx.node} have no recipient. Address a member directly "
                 f"(members: {names}).",
+                thread=thread, roster=roster,
             )
             state.record_dead_letter(
                 ctx.node, reason="no-leader", sender=sender, to=to,
-                task="", content=message,
+                thread=thread or "", content=body,
             )
             return DEAD
 
     if member.is_human:
-        _park_seat(ctx, member, sender, message)
+        _park_seat(ctx, member, sender, body)
         return SKIPPED
 
     if member.errors:
@@ -485,10 +613,11 @@ def _ingest(
             ctx, sender,
             f"{member.name} is disabled by a roster problem: {member.error}. "
             f"Fix {ctx.roster_path.name} and resend.",
+            thread=thread, roster=roster,
         )
         state.record_dead_letter(
             ctx.node, reason="member-disabled", sender=sender, to=to,
-            task="", content=message,
+            thread=thread or "", content=body,
         )
         return DEAD
 
@@ -498,25 +627,20 @@ def _ingest(
         return SKIPPED
     rig, err, _pinned = config.rig_for(member)
     if rig is None:
-        _tell_error(ctx, sender, f"{member.name} cannot run: {err}")
+        _tell_error(
+            ctx, sender, f"{member.name} cannot run: {err}",
+            thread=thread, roster=roster,
+        )
         state.record_dead_letter(
             ctx.node, reason="no-rig", sender=sender, to=to,
-            task="", content=message,
+            thread=thread or "", content=body,
         )
         return DEAD
 
-    if trusted_header:
-        thread_id, hop, auto, body = tasks.parse_header(message)
-    else:
-        # Ingress protocol: headers never legitimately arrive from outside the
-        # garden (egress strips them), so an external header is either noise or
-        # a forgery aimed at an existing thread — treat the whole message as
-        # content and open a fresh thread.
-        thread_id, hop, auto, body = None, 0, False, (message or "").strip()
-    if thread_id is None:
-        thread_id = tasks.new_task_id()
+    if thread is None:
+        thread = tasks.new_thread_id()
         hop = 0
-    tasks.ensure_task(ctx.node, thread_id, sender)
+    tasks.ensure_task(ctx.node, thread, sender)
 
     state.enqueue(
         ctx.node,
@@ -524,9 +648,9 @@ def _ingest(
         {
             "from": sender,
             "to": _canonical_recipient(ctx.node, roster, to),
-            "task": thread_id,
+            "thread": thread,
             "hop": hop,
-            "auto": auto,
+            "class": klass,
             "body": body,
         },
     )
@@ -534,7 +658,7 @@ def _ingest(
     preview = " ".join(body.split())[:80]
     state.append_log(
         ctx.node,
-        f"r4t: QUEUED {sender} -> {member.name.lower()} thread={thread_id} "
+        f"r4t: QUEUED {sender} -> {member.name.lower()} thread={thread} "
         f'hop={hop} "{preview}" (depth {state.queue_depth(ctx.node, member.name)})',
     )
     return QUEUED
@@ -563,10 +687,10 @@ def _release_one(
 ) -> None:
     to = str(envelope.get("to", "")).strip()
     if _is_internal(ctx.node, to):
-        header = tasks.format_header(thread_id, next_hop, auto=True)
         _ingest(
-            ctx, sender_addr, to, f"{header} {body}",
-            trusted_header=True, roster=roster, config=config,
+            ctx, sender_addr, to, body,
+            klass="auto", internal=True, thread=thread_id, hop=next_hop,
+            roster=roster, config=config,
         )
         bundle = staging / str(envelope.get("id", ""))
         if bundle.is_dir():
@@ -589,7 +713,7 @@ def _release_one(
     envelope["x_r4t_class"] = "auto"
     envelope["from"] = sender_addr
     outbox.mkdir(parents=True, exist_ok=True)
-    msg_id = str(envelope.get("id", "")) or tasks.new_task_id()
+    msg_id = str(envelope.get("id", "")) or tasks.new_thread_id()
     envelope["id"] = msg_id
     bundle = staging / msg_id
     if bundle.is_dir():
@@ -602,7 +726,7 @@ def _release_one(
             except OSError as e:
                 if e.errno != errno.EXDEV:
                     raise
-                temporary = outbox / f".{msg_id}.{tasks.new_task_id()}.tmp"
+                temporary = outbox / f".{msg_id}.{tasks.new_thread_id()}.tmp"
                 try:
                     shutil.copytree(bundle, temporary)
                     if not destination.exists():
@@ -632,6 +756,45 @@ def _reachable_names(
     return names
 
 
+def _copy_lateral_to_lead(
+    ctx: DispatchContext,
+    roster: Roster,
+    member: Member,
+    rig: Rig,
+    to: str,
+    body: str,
+    thread_id: str,
+) -> None:
+    """`leader_sees_lateral` (#185): land a read-only history copy of a lateral
+    (peer) delivery on the sender's lead so the lead sees it on its next real
+    turn — no turn is burned, and traffic UP to the lead is skipped (already
+    visible)."""
+    if not member.lead:
+        return
+    lead = roster.find(member.lead)
+    if lead is None or lead.is_human or lead.errors:
+        return
+    recipient_name = _display_name(ctx.node, to).strip().lower()
+    if recipient_name == lead.name.lower():
+        return
+    recipient = roster.find(recipient_name)
+    if recipient is None or recipient.is_human:
+        return
+    clip = body if len(body) <= rig.history_body_max else body[:rig.history_body_max] + " [...]"
+    state.append_history(
+        ctx.node,
+        lead.name,
+        f"## {state.utc_now()} lateral {member.name} -> "
+        f"{_display_name(ctx.node, to)} (thread {thread_id})\n\n{clip}",
+        max_bytes=rig.history_max_bytes,
+    )
+    state.append_log(
+        ctx.node,
+        f"r4t: LATERAL-COPY {member.name.lower()} -> {recipient_name} "
+        f"visible to lead {lead.name.lower()}",
+    )
+
+
 def release_staging(
     ctx: DispatchContext,
     config: RigConfig,
@@ -655,15 +818,20 @@ def release_staging(
     newest: tuple[str, int] | None = None
     for env in batch:
         key = _display_name(ctx.node, str(env.get("from", ""))).strip().lower()
-        pair = (str(env.get("task", "")), int(env.get("hop", 0) or 0))
+        pair = (str(env.get("thread", "")), int(env.get("hop", 0) or 0))
         consumed[key] = pair
         newest = pair
     if newest is None:
-        newest = (tasks.new_task_id(), 0)
+        newest = (tasks.new_thread_id(), 0)
 
+    # `closed` comms keeps the hard reroute-through-lead; `open` (the default)
+    # delivers to any valid member and computes no reachability set.
     reachable = (
-        _reachable_names(ctx, roster, member, batch) if roster.declares_tree else None
+        _reachable_names(ctx, roster, member, batch)
+        if roster.declares_tree and ctx.comms == "closed"
+        else None
     )
+    top_leader = roster.leader()
 
     released = 0
     violations = 0
@@ -677,7 +845,7 @@ def release_staging(
             path.unlink(missing_ok=True)
             continue
         to = str(envelope.get("to", "")).strip()
-        _, _, _, body = tasks.parse_header(str(envelope.get("content", "")))
+        body = str(envelope.get("content", "")).strip()
         if not to or not body.strip():
             path.unlink(missing_ok=True)
             continue
@@ -688,7 +856,7 @@ def release_staging(
             violations += 1
             state.record_dead_letter(
                 ctx.node, reason="quota", sender=sender_addr, to=to,
-                task=newest[0], content=body,
+                thread=newest[0], content=body,
             )
             state.append_log(
                 ctx.node,
@@ -697,12 +865,44 @@ def release_staging(
             )
             continue
 
-        # Hard tree enforcement: an intra-team tell to a member who is not
-        # tree-adjacent (and did not message the sender this turn) reroutes to
-        # the sender's lead. The human seat and batch senders are always
-        # reachable — answering must never reroute. Unknown names fall through
-        # to the normal unknown-recipient dead letter, not to the lead.
-        if reachable is not None and _is_internal(ctx.node, to):
+        # Egress gate (#183): the org presents as a single a8s node, and only
+        # the topmost leader may originate external mail. A non-top member's
+        # external tell redirects to the top leader (the garden's voice),
+        # regardless of comms mode. When egress is disabled, not even the top
+        # leader may message out — its external tell dead-letters with an audit
+        # note; a non-top member's still redirects up.
+        redirected_to_top = False
+        if not _is_internal(ctx.node, to) and top_leader is not None:
+            is_top = member.name.lower() == top_leader.name.lower()
+            if is_top and not ctx.egress:
+                path.unlink(missing_ok=True)
+                violations += 1
+                state.record_dead_letter(
+                    ctx.node, reason="egress-disabled", sender=sender_addr, to=to,
+                    thread=newest[0], content=body,
+                )
+                state.append_log(
+                    ctx.node,
+                    f"r4t: EGRESS-BLOCKED {sender_addr} -> {to} "
+                    "(egress disabled; the org does not message outside)",
+                )
+                continue
+            if not is_top:
+                to = _canonical_recipient(ctx.node, roster, top_leader.name)
+                envelope["to"] = to
+                redirected_to_top = True
+                state.append_log(
+                    ctx.node,
+                    f"r4t: EGRESS-REDIRECT {sender_addr} -> external redirected "
+                    f"to top leader {top_leader.name.lower()}",
+                )
+
+        # Hard tree enforcement (comms=closed): an intra-team tell to a member
+        # who is not tree-adjacent (and did not message the sender this turn)
+        # reroutes to the sender's lead. The human seat and batch senders are
+        # always reachable — answering must never reroute. Unknown names fall
+        # through to the normal unknown-recipient dead letter, not to the lead.
+        if not redirected_to_top and reachable is not None and _is_internal(ctx.node, to):
             target = _display_name(ctx.node, to).strip().lower()
             recipient = roster.find(target)
             if (
@@ -731,12 +931,15 @@ def release_staging(
             ctx.node,
             member.name,
             f"## {state.utc_now()} to {_display_name(ctx.node, to)}\n\n"
-            + (body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"),
+            + (body if len(body) <= rig.history_body_max else body[:rig.history_body_max] + " [...]"),
+            max_bytes=rig.history_max_bytes,
         )
         _release_one(
             ctx, outbox, staging, envelope, sender_addr, thread_id, next_hop,
             body, roster, config,
         )
+        if ctx.leader_sees_lateral and _is_internal(ctx.node, to):
+            _copy_lateral_to_lead(ctx, roster, member, rig, to, body, thread_id)
         path.unlink(missing_ok=True)
         released += 1
 
@@ -793,7 +996,7 @@ def _run_turn(
     batch = state.claim_queue(ctx.node, member.name)
     if not batch:
         return
-    newest_thread = str(batch[-1].get("task", "")) or "?"
+    newest_thread = str(batch[-1].get("thread", "")) or "?"
     newest_hop = int(batch[-1].get("hop", 0) or 0)
     newest_sender = str(batch[-1].get("from", "")) or f"{ctx.node}"
 
@@ -804,13 +1007,13 @@ def _run_turn(
         member.name,
         {
             "batch": len(batch),
-            "threads": sorted({str(b.get("task", "")) for b in batch}),
+            "threads": sorted({str(b.get("thread", "")) for b in batch}),
             "newest_sender": newest_sender,
             "rig": rig.name,
             "started": state.utc_now(),
         },
     )
-    prompt = build_prompt(ctx, roster, member, batch)
+    prompt = build_prompt(ctx, roster, member, batch, rig)
 
     env = dict(os.environ)
     env["TELL_OUTBOX_DIR"] = str(staging)
@@ -818,7 +1021,7 @@ def _run_turn(
     state.append_log(
         ctx.node,
         f"## {state.utc_now()} dispatch {len(batch)} message(s) -> {member.name} "
-        f"(threads {', '.join(sorted({str(b.get('task', '')) for b in batch}))}, "
+        f"(threads {', '.join(sorted({str(b.get('thread', '')) for b in batch}))}, "
         f"rig {rig.name}"
         + (f" variant {variant}" if rig.pool_size > 1 else "")
         + f")\n\n### Prompt\n\n{prompt}",
@@ -852,13 +1055,14 @@ def _run_turn(
     else:
         for env_msg in batch:
             entry_body = str(env_msg.get("body", ""))
-            if len(entry_body) > HISTORY_BODY_MAX:
-                entry_body = entry_body[:HISTORY_BODY_MAX] + " [...]"
+            if len(entry_body) > rig.history_body_max:
+                entry_body = entry_body[:rig.history_body_max] + " [...]"
             state.append_history(
                 ctx.node,
                 member.name,
                 f"## {state.utc_now()} from "
                 f"{_display_name(ctx.node, str(env_msg.get('from', '?')))}\n\n{entry_body}",
+                max_bytes=rig.history_max_bytes,
             )
         if not state.staged_envelopes(ctx.node, member.name):
             # The classic weak-rig shape: the model answers on stdout instead
@@ -868,7 +1072,7 @@ def _run_turn(
             # the newest message's sender, riding the normal release gates.
             reply = clean_transcript(output)
             if len(reply) > STDOUT_REPLY_MIN_CHARS:
-                msg_id = tasks.new_task_id()
+                msg_id = tasks.new_thread_id()
                 state.atomic_write_json(
                     state.staging_dir(ctx.node, member.name) / f"{msg_id}.json",
                     {"id": msg_id, "to": newest_sender, "content": reply, "files": []},
@@ -913,7 +1117,7 @@ def _run_turn(
         ctx.node,
         agent=member.name.lower(),
         rig=rig.name,
-        task=newest_thread,
+        thread=newest_thread,
         hop=newest_hop,
         duration_seconds=duration,
         exit_code=exit_code,
@@ -927,7 +1131,7 @@ def _run_turn(
         "last_completed_at": completed,
         "consecutive_failures": failures,
         "last_turn": {
-            "threads": sorted({str(b.get("task", "")) for b in batch}),
+            "threads": sorted({str(b.get("thread", "")) for b in batch}),
             "messages": len(batch),
             "exit": exit_code,
             "timed_out": timed_out,
@@ -950,6 +1154,7 @@ def _run_turn(
             ctx, newest_sender,
             f"{member.name}'s harness (rig {rig.name}) failed to start: "
             f"{output.strip()}",
+            thread=newest_thread, roster=roster,
         )
 
 
@@ -1079,8 +1284,8 @@ def handle_message(
     drain_after: bool = True,
 ) -> int:
     _ingest(
-        ctx, sender, to, message,
-        trusted_header=_is_internal(ctx.node, sender),
+        ctx, sender, to, (message or "").strip(),
+        klass="human", internal=_is_internal(ctx.node, sender),
     )
     if drain_after:
         drain_until_quiet(ctx, run_fn=run_fn)
@@ -1208,16 +1413,11 @@ def _quiet_task_sweep(
             continue
         thread_id = str(task["id"])
         creator = str(task.get("creator", "?"))
-        header = tasks.format_header(thread_id, 0, auto=True)
-        body = (
-            f"Thread {thread_id} has gone quiet and {creator} has not heard "
-            "back. Reply to them with where things stand — what is done and "
-            "what remains. You do not have to finish the work, just report "
-            "current state."
-        )
+        body = ctx.prompt("quiet_nudge", thread=thread_id, creator=creator)
         _ingest(
-            ctx, f"r4t:{ctx.node}", f"{ctx.node}:{leader.name.lower()}",
-            f"{header} {body}", trusted_header=True, roster=roster, config=config,
+            ctx, f"r4t:{ctx.node}", f"{ctx.node}:{leader.name.lower()}", body,
+            klass="auto", internal=True, thread=thread_id, hop=0,
+            roster=roster, config=config,
         )
         tasks.save_task(ctx.node, task)  # bump updated_at; won't re-fire until quiet again
         state.append_log(
@@ -1229,17 +1429,148 @@ def _quiet_task_sweep(
     return nudged
 
 
+# ---------- mission-review idle turn (the furnace burns on its own) ----------
+
+MISSION_REVIEW_BACKOFF_BASE = 2
+MISSION_REVIEW_BACKOFF_CAP = 32
+MISSION_REVIEW_SILENT_CAP = 3
+
+
+def _has_open_threads(node: str) -> bool:
+    return any(t.get("status") == tasks.STATUS_OPEN for t in tasks.list_tasks(node))
+
+
+def _mission_mtime(ctx: DispatchContext) -> float:
+    try:
+        return (ctx.root / "MISSION.md").stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _mission_review(
+    ctx: DispatchContext,
+    config: RigConfig,
+    roster: Roster,
+    drained: int,
+    run_fn,
+) -> dict:
+    """When the org is structurally stalled — every queue empty, no open thread,
+    the drain ran nothing, no live turn — hand the top leader a budget-gated
+    mission-review turn so a done-looking-but-unmet mission does not sleep
+    forever (#189). r4t detects the STALL; the leader judges whether the mission
+    is met (§5.3). A backoff widens the cadence (2->4->8... stalled ticks); K
+    silent reviews (the leader stages nothing) go dormant until a real message
+    or a MISSION.md change re-arms it. The nudge must not train leaders to
+    doorbell the human every cycle (§5.6)."""
+    stalled = (
+        drained == 0
+        and not state.members_with_queue(ctx.node)
+        and not _has_open_threads(ctx.node)
+        and not state.live_locks(ctx.node)
+    )
+    st = state.read_mission_review(ctx.node)
+    mtime = _mission_mtime(ctx)
+    if not stalled:
+        # Real work is flowing — the furnace does not need a nudge; reset.
+        if st.get("stalls") or st.get("silent_reviews") or st.get("dormant"):
+            state.write_mission_review(
+                ctx.node, {"stalls": 0, "silent_reviews": 0, "dormant": False, "mission_mtime": mtime}
+            )
+        return {"fired": False}
+
+    if st.get("dormant"):
+        if mtime == st.get("mission_mtime"):
+            return {"fired": False, "dormant": True}
+        st = {"stalls": 0, "silent_reviews": 0, "dormant": False}  # MISSION changed -> re-arm
+
+    stalls = int(st.get("stalls", 0)) + 1
+    silent = int(st.get("silent_reviews", 0))
+    threshold = min(MISSION_REVIEW_BACKOFF_BASE << silent, MISSION_REVIEW_BACKOFF_CAP)
+    if stalls < threshold:
+        state.write_mission_review(
+            ctx.node,
+            {"stalls": stalls, "silent_reviews": silent, "dormant": False, "mission_mtime": mtime},
+        )
+        return {"fired": False, "stalls": stalls}
+
+    leader = roster.leader()
+    if leader is None or leader.errors:
+        return {"fired": False}
+    rig, _err, _pinned = config.rig_for(leader)
+    if rig is None:
+        return {"fired": False}
+    runnable, reason = _runnable(ctx, config, leader, rig)
+    if not runnable:
+        # A broke leader is a non-issue by construction — hold the counter at the
+        # threshold so the review fires the moment the bucket refills (#189).
+        state.write_mission_review(
+            ctx.node,
+            {"stalls": stalls, "silent_reviews": silent, "dormant": False, "mission_mtime": mtime},
+        )
+        state.append_log(
+            ctx.node,
+            f"r4t: MISSION-REVIEW deferred — leader {leader.name.lower()} {reason}",
+        )
+        return {"fired": False, "resting": True}
+
+    state.enqueue(
+        ctx.node,
+        leader.name,
+        {
+            "from": f"r4t:{ctx.node}",
+            "to": f"{ctx.node}:{leader.name.lower()}",
+            "thread": tasks.new_thread_id(),
+            "hop": 0,
+            "class": "auto",
+            "body": ctx.prompt("mission_review"),
+        },
+    )
+    state.append_log(
+        ctx.node,
+        f"r4t: MISSION-REVIEW fired -> {leader.name.lower()} "
+        f"(stall {stalls}, review {silent + 1})",
+    )
+    # Run just the leader's review turn to observe whether it delegates: a
+    # productive review opens threads / queues work; a silent one leaves the org
+    # still stalled and widens the backoff toward dormancy.
+    _run_member_turn(ctx, config, roster, leader, rig, run_fn)
+    produced = bool(state.members_with_queue(ctx.node)) or _has_open_threads(ctx.node)
+    if produced:
+        silent = 0
+        dormant = False
+    else:
+        silent += 1
+        dormant = silent >= MISSION_REVIEW_SILENT_CAP
+        if dormant:
+            state.append_log(
+                ctx.node,
+                f"r4t: MISSION-REVIEW dormant after {silent} silent review(s) — "
+                "leader judged the mission met; a real message or MISSION.md "
+                "change re-arms it",
+            )
+    state.write_mission_review(
+        ctx.node,
+        {"stalls": 0, "silent_reviews": silent, "dormant": dormant, "mission_mtime": mtime},
+    )
+    return {"fired": True, "leader": leader.name, "silent_reviews": silent, "dormant": dormant}
+
+
 def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
-    """One idle pass: nudge the leader about quiet unanswered threads, then
-    drain every runnable member's queue. Crash recovery needs no special path
-    — a turn that never completed left its messages in the queue (they were
-    claimed only at a turn that ran), so the next runnable turn picks them up."""
+    """One idle pass: nudge the leader about quiet unanswered threads, drain
+    every runnable member's queue, then — if the org is structurally stalled —
+    hand the top leader a budget-gated mission-review turn. Crash recovery needs
+    no special path — a turn that never completed left its messages in the queue
+    (they were claimed only at a turn that ran), so the next runnable turn picks
+    them up."""
     try:
         roster = load_roster(ctx.roster_path)
         config = load_rig_config(ctx.config_path)
     except (RosterError, RigError) as e:
         state.append_log(ctx.node, f"r4t: IDLE-SKIPPED {e}")
-        return {"quiet_nudged": [], "drained": 0, "error": str(e)}
+        return {"quiet_nudged": [], "drained": 0, "mission_review": {"fired": False}, "error": str(e)}
     nudged = _quiet_task_sweep(ctx, config, roster)
     drained = drain_until_quiet(ctx, run_fn=run_fn)
-    return {"quiet_nudged": nudged, "drained": drained}
+    review = _mission_review(ctx, config, roster, drained, run_fn)
+    if review.get("fired"):
+        drained += drain_until_quiet(ctx, run_fn=run_fn)
+    return {"quiet_nudged": nudged, "drained": drained, "mission_review": review}

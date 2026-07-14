@@ -30,6 +30,11 @@ ceiling binds every team on the machine that shares the rig; a turn also costs
 `rig_budget_max` is set, `rig_budget_earn_per_hour` must be set too — a real
 plan always declares a refill rate.
 
+`preset` — the harness preset the rig was created from (`r4t rig add`/`swap`
+record it). It defaults the text knobs (`history_max_bytes` /
+`history_body_max` / `prompt_body_max`) by the preset's text tier (TEXT_TIERS);
+explicit values always win, and a rig with no preset gets the small tier.
+
 Keys starting with `_` anywhere are ignored so shipped examples can carry
 notes.
 """
@@ -58,6 +63,7 @@ RESERVED_CONFIG_KEYS = frozenset({
 
 HARNESS_PRESETS: dict[str, dict] = {
     "claude": {
+        "text_tier": "big",
         "description": "Claude Code — matches apps/a8s/definitions/claude.json",
         "a8s_definition": "claude.json",
         "headless": "-p",
@@ -73,6 +79,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         "model_argv": ["--model", "{model}"],
     },
     "codex": {
+        "text_tier": "big",
         "description": "OpenAI Codex CLI — matches apps/a8s/definitions/codex.json",
         "a8s_definition": "codex.json",
         "headless": "exec (positional prompt)",
@@ -87,6 +94,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         "model_anchor": "exec",
     },
     "cursor": {
+        "text_tier": "moderate",
         "description": "Cursor Agent CLI (`agent`) — matches apps/a8s/definitions/cursor.json",
         "a8s_definition": "cursor.json",
         "headless": "-p",
@@ -101,6 +109,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         "model_argv": ["--model", "{model}"],
     },
     "opencode": {
+        "text_tier": "moderate",
         "description": (
             "OpenCode 1.17+ — `run` (not `-i`) with --auto for headless repo tools"
         ),
@@ -118,6 +127,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         "model_anchor": "run",
     },
     "opencode-ollama": {
+        "text_tier": "small",
         "description": (
             "OpenCode via `ollama launch` — local models, no cloud quota; "
             "requires --model"
@@ -139,6 +149,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         ],
     },
     "ollama": {
+        "text_tier": "small",
         "description": (
             "Bare `ollama run` — tiny models with no tool use or big context; "
             "replies ride the stdout fallback; requires --model"
@@ -152,6 +163,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         ],
     },
     "agy": {
+        "text_tier": "big",
         "description": (
             "Antigravity 1.1+ — --print for headless turns; --sandbox + "
             "--mode accept-edits for repo writes"
@@ -170,6 +182,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         "model_resolver": "agy-live",
     },
     "copilot": {
+        "text_tier": "moderate",
         "description": "GitHub Copilot CLI — matches apps/a8s/definitions/copilot.json",
         "a8s_definition": "copilot.json",
         "headless": "-p",
@@ -185,6 +198,36 @@ HARNESS_PRESETS: dict[str, dict] = {
 DEFAULT_TIMEOUT_SECONDS = 900
 DEFAULT_CONCURRENCY = 1
 DEFAULT_MAX_SENDS_PER_TURN = 6
+DEFAULT_HISTORY_MAX_BYTES = 8192
+DEFAULT_HISTORY_BODY_MAX = 2000
+DEFAULT_PROMPT_BODY_MAX = 4000
+
+# Text-budget tiers: how much history/prompt a preset's harness can usefully
+# carry. `small` is the conservative floor and the fallback for rigs with no
+# preset (custom/scripted CLIs — an unknown harness gets the safe values).
+TEXT_TIERS: dict[str, dict[str, int]] = {
+    "big": {
+        "history_max_bytes": 50_000,
+        "history_body_max": 12_000,
+        "prompt_body_max": 24_000,
+    },
+    "moderate": {
+        "history_max_bytes": 25_000,
+        "history_body_max": 6_000,
+        "prompt_body_max": 12_000,
+    },
+    "small": {
+        "history_max_bytes": DEFAULT_HISTORY_MAX_BYTES,
+        "history_body_max": DEFAULT_HISTORY_BODY_MAX,
+        "prompt_body_max": DEFAULT_PROMPT_BODY_MAX,
+    },
+}
+
+
+def text_defaults(preset: str | None) -> dict[str, int]:
+    """The text-knob defaults for `preset` (small when absent/unknown)."""
+    tier = HARNESS_PRESETS.get((preset or "").strip().lower(), {}).get("text_tier")
+    return TEXT_TIERS.get(tier or "small", TEXT_TIERS["small"])
 DEFAULT_BUDGET_MAX = 8.0
 DEFAULT_BUDGET_EARN_PER_HOUR = 4.0
 DEFAULT_MAX_CONCURRENT = 1
@@ -221,6 +264,9 @@ class Rig:
     budget_earn_per_hour: float = DEFAULT_BUDGET_EARN_PER_HOUR
     rig_budget_max: float | None = None
     rig_budget_earn_per_hour: float | None = None
+    history_max_bytes: int = DEFAULT_HISTORY_MAX_BYTES
+    history_body_max: int = DEFAULT_HISTORY_BODY_MAX
+    prompt_body_max: int = DEFAULT_PROMPT_BODY_MAX
     model: str | None = None
     model_resolver: str | None = None
     error: str | None = None
@@ -484,6 +530,7 @@ def add_preset_rig(
         note += f" model={model.strip()}."
     rig_entry: dict = {
         "_notes": note,
+        "preset": preset_key,
         "invoke": invoke,
     }
     if model and entry.get("model_resolver"):
@@ -521,9 +568,11 @@ def swap_preset_rig(
     if model:
         note += f" model={model.strip()}."
     existing["_notes"] = note
+    existing["preset"] = preset_key
     existing["invoke"] = invoke
     # A swap replaces the harness wholesale, so stale model resolution from the
-    # previous preset must not linger.
+    # previous preset must not linger. The updated `preset` re-resolves the
+    # text-tier defaults; explicit knob values in the entry still win.
     existing.pop("model", None)
     existing.pop("model_resolver", None)
     if model and entry.get("model_resolver"):
@@ -627,6 +676,17 @@ def _parse_rig(name: str, raw: object) -> Rig:
     )
     if err:
         problems.append(f"budget_earn_per_hour: {err}")
+
+    # History/prompt sizing rides the rig, defaulted by the preset's text tier
+    # — a 0.6B local member and an agy seat should not share a history budget.
+    # Explicit values in rigs.json win; a rig with no `preset` (custom CLI)
+    # gets the conservative small tier.
+    defaults = text_defaults(raw.get("preset") if isinstance(raw.get("preset"), str) else None)
+    for knob in ("history_max_bytes", "history_body_max", "prompt_body_max"):
+        value, err = _positive_number(raw.get(knob), defaults[knob])
+        if err:
+            problems.append(f"{knob}: {err}")
+        setattr(rig, knob, int(value))
 
     # The rig spend bucket is opt-in: absent leaves both None and the rig gate
     # off. If present, both knobs are required — a real subscription always

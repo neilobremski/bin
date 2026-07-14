@@ -2,7 +2,10 @@
 
 Each agent has a definition JSON (built-in or custom) that encodes one argv
 under the `invoke` key. `build_command` substitutes `$SENDER` / `$RECIPIENT`
-/ `$MESSAGE` / `$TIMESTAMP` / `$AGE` / `$A8S_DIR` into it.
+/ `$MESSAGE` / `$TIMESTAMP` / `$AGE` / `$A8S_DIR` / `$DEFINITION_PATH` into it.
+`$DEFINITION_PATH` is the resolved path of the agent's own definition file, so
+a self-contained node (e.g. r4t) can read its own definition for settings the
+wire does not carry.
 
 Strict opacity (issues #69, #70): the recipient sees only sender + message
 content — no `alias` or `others_count` leak. A direct tell and an
@@ -101,6 +104,15 @@ def resolve_inbox_dir_for_agent(name: str, agent_root: Path) -> Path:
     return resolve_inbox_dir(agent_root, definition)
 
 
+def resolve_definition_path(name: str) -> str:
+    """The resolved path of `name`'s definition file (custom if the registry
+    names one, else the bundled default) — the value `$DEFINITION_PATH` expands
+    to. Mirrors `load_definition`'s resolution without reading the file."""
+    reg = load_registry()
+    info = reg.get(name) or {}
+    return str(Path(info.get("definition") or default_definition_path("default")).expanduser())
+
+
 def load_definition(name: str) -> dict:
     """Load the JSON definition for `name`. Every agent always has one — if
     the registry lacks an explicit `definition` field, falls back to the
@@ -194,6 +206,7 @@ def _expand_argv(
     message: str,
     timestamp: str = "",
     age: str = "",
+    definition_path: str = "",
 ) -> list[str]:
     """Expand placeholders in argv:
       - `$SENDER`     sender's canonical name (empty for senderless prompts)
@@ -206,6 +219,8 @@ def _expand_argv(
                       `5 minutes ago`); same emptiness rules as $TIMESTAMP
       - `$A8S_DIR`    the apps/a8s/ directory (so default.json can reference
                       bundled scripts like dummy-cli without hardcoding paths)
+      - `$DEFINITION_PATH`  the resolved path of this agent's definition file
+                      (empty when the caller did not resolve it)
     """
     a8s_dir = str(SCRIPT_DIR)
     out: list[str] = []
@@ -216,11 +231,14 @@ def _expand_argv(
         a = a.replace("$TIMESTAMP", timestamp)
         a = a.replace("$AGE", age)
         a = a.replace("$A8S_DIR", a8s_dir)
+        a = a.replace("$DEFINITION_PATH", definition_path)
         out.append(a)
     return out
 
 
-def build_command(definition: dict, msg: dict, agent_root: Path) -> list[str]:
+def build_command(
+    definition: dict, msg: dict, agent_root: Path, definition_path: str = ""
+) -> list[str]:
     """Pick the `invoke` argv from `definition` and expand interpolation
     variables. There is one verb — every routed message is a `tell` — so
     no dispatch table is needed.
@@ -237,10 +255,14 @@ def build_command(definition: dict, msg: dict, agent_root: Path) -> list[str]:
     body = _message_body(msg, files_root)
     date_str = (msg.get("date") or "").strip()
     age = _format_age(date_str)
-    return _expand_argv(list(argv), sender, recipient, body, date_str, age)
+    return _expand_argv(
+        list(argv), sender, recipient, body, date_str, age, definition_path
+    )
 
 
-def build_idle_command(definition: dict, agent_name: str) -> list[str] | None:
+def build_idle_command(
+    definition: dict, agent_name: str, definition_path: str = ""
+) -> list[str] | None:
     """Pick the `idle.invoke` argv from `definition` and expand the same
     interpolation variables `build_command` does. Returns None if the agent
     has no idle config, or if its `invoke` argv is missing/empty.
@@ -255,7 +277,7 @@ def build_idle_command(definition: dict, agent_name: str) -> list[str] | None:
     argv = idle.get("invoke")
     if not argv:
         return None
-    return _expand_argv(list(argv), "", agent_name, "", "", "")
+    return _expand_argv(list(argv), "", agent_name, "", "", "", definition_path)
 
 
 def pause_seconds(definition: dict) -> float:
@@ -302,7 +324,7 @@ def batch_limit(definition: dict) -> int:
 
 
 def build_batch_command(
-    definition: dict, agent_name: str, msg_paths: list[Path]
+    definition: dict, agent_name: str, msg_paths: list[Path], definition_path: str = ""
 ) -> list[str]:
     """Expand `batch.invoke` like idle (no incoming message) and append each
     message file path as a trailing argv element."""
@@ -312,7 +334,7 @@ def build_batch_command(
     argv = batch.get("invoke")
     if not argv:
         raise ValueError("definition missing 'batch.invoke'")
-    cmd = _expand_argv(list(argv), "", agent_name, "", "", "")
+    cmd = _expand_argv(list(argv), "", agent_name, "", "", "", definition_path)
     cmd.extend(str(p.resolve()) for p in msg_paths)
     return cmd
 

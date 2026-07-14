@@ -1,7 +1,7 @@
 # EXPERIMENT — d5n as an r4t cell-org test
 
 d5n is a controlled test of r4t's re-founded org design (see
-`apps/r4t/plans/CELL-SPEC.md` and `SYNTHESIS.md`). The game is the pretext;
+`apps/r4t/plans/history/CELL-SPEC.md` and `SYNTHESIS.md`). The game is the pretext;
 the **org** is what we are measuring. This file is the lab notebook.
 
 ## What we are testing

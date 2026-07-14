@@ -62,6 +62,7 @@ from definitions import (
     idle_timeout_seconds,
     is_file_proxy,
     load_definition,
+    resolve_definition_path,
     max_wake_seconds,
     pause_seconds,
 )
@@ -351,7 +352,7 @@ def wake_once(p: Participant, msg_path: Path, *, async_wake: bool = False) -> bo
     msg_path.rename(trashed)
     out_agent(p.name, f"[{p.name}] waking from {trashed.name}: {_preview(msg.get('content', ''))}")
     p.files_path().mkdir(parents=True, exist_ok=True)
-    cmd = build_command(definition, msg, p.root)
+    cmd = build_command(definition, msg, p.root, resolve_definition_path(p.name))
     out_agent(p.name, f"[{p.name}] exec: {shlex.join(cmd)}")
     max_sec = max_wake_seconds(definition)
     if async_wake:
@@ -404,7 +405,7 @@ def wake_batch(
         f"[{p.name}] batch waking ({len(trashed)}): {summary}",
     )
     p.files_path().mkdir(parents=True, exist_ok=True)
-    cmd = build_batch_command(definition, p.name, trashed)
+    cmd = build_batch_command(definition, p.name, trashed, resolve_definition_path(p.name))
     out_agent(p.name, f"[{p.name}] batch exec: {shlex.join(cmd)}")
     max_sec = max_wake_seconds(definition)
     if async_wake:
@@ -477,7 +478,7 @@ def maybe_run_idle(p: Participant, *, async_wake: bool = False) -> bool:
         touch_last_active(p.name)
         return True
 
-    cmd = build_idle_command(definition, p.name)
+    cmd = build_idle_command(definition, p.name, resolve_definition_path(p.name))
     if cmd is None:
         return False
     last = read_last_active(p.name)

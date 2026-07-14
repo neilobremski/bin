@@ -37,7 +37,7 @@ def test_tui_consumes_inbox_and_routes_commands(seat, monkeypatch):
     ctx, roster, human = seat
     state.park_seat_message(
         NODE, "Neil", "acme:gerry",
-        "[r4t task=01KX0000000000000000000000 hop=1 auto] ready for review",
+        "[r4t thread=01KX0000000000000000000000 hop=1 auto] ready for review",
     )
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
@@ -80,7 +80,6 @@ def test_tui_renders_markdown_bodies(seat):
     ctx, roster, human = seat
     state.park_seat_message(
         NODE, "Neil", "acme:gerry",
-        "[r4t task=01KX0000000000000000000000 hop=1 auto] "
         "# Report\n\n**bold claim** and `code()`",
     )
 
@@ -103,11 +102,11 @@ def test_tui_message_header_shows_rig_slug(seat):
     ctx, roster, human = seat
     state.park_seat_message(
         NODE, "Neil", "acme:gerry",
-        "[r4t task=01KX0000000000000000000000 hop=1 auto] done",
+        "[r4t thread=01KX0000000000000000000000 hop=1 auto] done",
     )
     state.park_seat_message(
         NODE, "Neil", "external:bot",
-        "[r4t task=01KX0000000000000000000000 hop=1 auto] ping",
+        "[r4t thread=01KX0000000000000000000000 hop=1 auto] ping",
     )
 
     async def scenario():
@@ -153,7 +152,7 @@ def test_tui_header_surfaces_trouble(seat):
     ctx, roster, human = seat
     state.record_dead_letter(
         NODE, reason="pair-repeat", sender="acme:gerry", to="phil",
-        task="01X", content="x",
+        thread="01X", content="x",
     )
 
     async def scenario():

@@ -89,7 +89,7 @@ def recent_turns(
             for row in csv.DictReader(f):
                 if now - _ts(row.get("timestamp", "")) <= window:
                     count += 1
-                    seen.add(row.get("task", "?"))
+                    seen.add(row.get("thread", "?"))
     except OSError:
         return 0, set()
     return count, seen
