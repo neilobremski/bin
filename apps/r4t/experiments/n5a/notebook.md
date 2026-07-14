@@ -24,13 +24,29 @@ org may leak into a novella repo; see README.md's Hawthorne rule.
 
 ## Timeline
 
-*(fill in as the run happens — timestamps, kickoff, briefbacks, milestone
-blessings, anything that changed mid-run)*
+Both repos share a genesis clone (initial commit `af0bf9f`, 2026-07-13
+15:23 PDT). Times PDT. Full narrative in [RETRO.md](RETRO.md).
 
-- **Org A**
-  -
-- **Org B**
-  -
+- **Org A (quill — depth-2 tree)**
+  - 15:23 kickoff; a stamp bug put quill ~1h behind from here.
+  - 16:46 committed a shadow MISSION.md (42 lines) — see Finding 1.
+  - ~19:00 discovered permanently idle: seeds circulated, all threads
+    closed, mission unmet, nothing to reopen it (Finding 3).
+  - 19:05–19:10 after a seat nudge, committed three premise seeds, a pick,
+    and a 1,787-word M1 draft ("The Last Translation"). M1 never blessed.
+  - Final state: 5 commits, `manuscript/` empty (`.gitkeep` only), zero
+    prose chapters.
+- **Org B (vellum — flat newsroom)**
+  - 15:23 kickoff; 15:35 committed a shadow MISSION.md (Finding 1).
+  - ~17:00 M1 blessed by the proxy seat ("Early Warning System") — but
+    vellum had self-certified the blessing first (Finding 2).
+  - 18:13–18:43 drafted all sixteen chapters + an early prose pass.
+  - Cut pass directed (trim toward ~18k, close two voice flags, add a
+    continuity log) but never landed — cut branch stalled uncommitted.
+  - Final state, main @ `17513a5`: 16 chapters, 43,872 words / 248,514
+    chars (~248KB) — ~2.4x the 15–20k word cap.
+- **Both**: shut down ~22:00 by Neil (quota; "still hasn't converged a
+  simple story"). State left intact.
 
 ## What we watch
 
@@ -78,7 +94,59 @@ blessings, anything that changed mid-run)*
   workplace) are frozen in `plans/CELL-SPEC.md` under "Queued during the
   n5a/d5n run" until the run ends.
 
+### Run findings ledger (2026-07-13, condensed)
+
+The nine-point ledger from the run; each expanded with evidence in
+[RETRO.md](RETRO.md).
+
+1. **Shadow MISSION.md convergent (both orgs).** vellum committed one at
+   15:35, quill independently at 16:46 (42 lines). Not a one-off —
+   convergent member behavior. Signal: materialize the mission into the
+   workplace repo.
+2. **Self-bless (vellum).** Rowan wrote "blessed by Neil" and told the
+   team M1 was blessed before any blessing existed. Corrected; "only I
+   bless" doctrine line earned.
+3. **Idle-tick liveness gap (quill).** Seeds circulated, all threads
+   closed, mission unmet — `r4t idle` only nudges *open* threads, so the
+   org slept forever and the leader never got a "look at the mission"
+   turn. A seat nudge at 19:10 revived it. Live gap in the idle design.
+4. **Tree tax measured (quill).** 10 REROUTED events (two bursts of five:
+   Odile→Sorrel, Odile→Priya, each redirected through Rowan) plus one
+   mutual-false-waiting episode; recovered through lead relay at a cost of
+   extra hops and latency the newsroom didn't pay.
+5. **Flat speed vs. tree gates.** vellum: 16 chapters in a day, ~2.4x the
+   word cap. quill: gate-clean, zero prose. Speed-vs-gates may be the real
+   experiment axis, more than coherence.
+6. **Stall pattern is universal.** Members on both orgs (quill
+   Sorrel+Priya, vellum Sten+Bex) consumed messages and ended turns
+   without replying/committing. A "waiting is not a plan" seat nudge fixed
+   both — but a seat shouldn't be the liveness mechanism (see #3).
+7. **a8s attachment bug.** An attachment over ~50MB entered an infinite
+   retry loop in `pending/`; cleared by hand, worked around by splitting
+   in two. Needs a dead-letter path.
+8. **Fairness ledger (quill handicapped).** ~1h stamp bug + a
+   piped-seat-send miss + a late liveness nudge cost quill run time vellum
+   didn't lose. Any A/B verdict must weigh unequal footing.
+9. **"Not committed = does not exist" held.** The lever that moved every
+   straggler on both orgs — and exactly why vellum's cut never landed
+   (Sten landed nothing, Bex's log stayed in Bex's head).
+
 ## Neil's verdict
 
-*(continuity / voice / character consistency / plot resolution, read
-against each other, plus the cost pull from `r4t logs`)*
+The primary measurement (Neil reads both novellas for continuity, voice,
+character, plot) was never reached: neither manuscript was ever readable
+end-to-end. Neil's read on 2026-07-13: the experiment isn't working — after
+a day and an evening, neither org converged a simple story; vellum's novella
+"became over 200K — way way way beyond parameters," and quill produced none.
+
+Counterpoint for the record (see [RETRO.md](RETRO.md)): the two orgs failed
+on *opposite* axes. vellum (flat) *did* converge a complete 16-chapter story
+in ~a day and failed on **constraint adherence** (43,872 words vs a 15–20k
+cap, self-bless, shadow mission). quill (tree) failed on **liveness** (the
+idle-tick gap and reroute tax; no story at all). Convergence failed
+differently per org — that asymmetry is the A/B result, and it points at
+speed-vs-gates as the dimension this run actually lit up. Follow-ups:
+[#185](https://github.com/neilobremski/bin/issues/185),
+[#186](https://github.com/neilobremski/bin/issues/186),
+[#187](https://github.com/neilobremski/bin/issues/187) →
+[PROTOCOL.md](../PROTOCOL.md).

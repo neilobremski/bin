@@ -14,3 +14,12 @@ story unfolds; the text is the source, the m4a is the listenable cut.
    silence; a full autonomous build-test-fix loop; the keyboard bug
    only real keys could find; M3 awaiting Neil's ruling and blessing.
    Recorded 2026-07-12.
+3. [03-the-night-shift](03-the-night-shift.txt) —
+   the n5a novella experiment runs live under a proxy seat: the flat
+   newsroom (vellum) draws a complete sixteen-chapter story but sails
+   past the word ceiling and the blessing gate; the tree (quill) stays
+   gate-clean but goes silent and writes no story; both orgs
+   independently materialize a shadow mission file; the idle-tick
+   liveness gap surfaces in a team quietly dying of politeness; speed
+   against gates emerges as the real axis. Recorded 2026-07-13. See the
+   [n5a retrospective](../experiments/n5a/RETRO.md) for the full result.
