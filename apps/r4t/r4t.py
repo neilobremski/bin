@@ -623,19 +623,74 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_log_member(args: argparse.Namespace, node: str) -> str | None | bool:
+    """Validate --agent against the roster. Returns the canonical member name,
+    None when no --agent was given, or False on an unknown member (already
+    reported)."""
+    if not args.agent:
+        return None
+    ctx = _context(args, node)
+    try:
+        roster = load_roster(ctx.roster_path)
+    except RosterError as e:
+        print(f"logs --agent: cannot read roster: {e}", file=sys.stderr)
+        return False
+    member = roster.find(args.agent)
+    if member is None:
+        names = ", ".join(roster.names()) or "(none)"
+        print(
+            f"logs --agent: no team member named {args.agent!r} — "
+            f"(try: r4t logs --node {node} --agent <name>; members: {names})",
+            file=sys.stderr,
+        )
+        return False
+    return member.name
+
+
+def _print_member_turns(node: str, member: str) -> int:
+    files = state.list_turn_captures(node, member)
+    if not files:
+        print(
+            f"(no captured turns yet for {member.lower()} under "
+            f"{state.turns_dir(node, member)})",
+            file=sys.stderr,
+        )
+        return 0
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        print(f"===== {path.name} =====")
+        print(text.rstrip())
+        print()
+    return 0
+
+
 def cmd_logs(args: argparse.Namespace) -> int:
     node = _resolve_node(args.node)
     if node is None:
         return 2
     from chat import filter_log_line
 
+    member = _resolve_log_member(args, node)
+    if member is False:
+        return 2
+    if member and args.full:
+        return _print_member_turns(node, member)
+
+    mention = re.compile(rf"\b{re.escape(member)}\b", re.IGNORECASE) if member else None
     log_dir = state.team_dir(node) / "log"
 
     def rendered(raw: str) -> list[str]:
         if args.full:
             return [raw]
         event = filter_log_line(raw)
-        return [event] if event else []
+        if not event:
+            return []
+        if mention and not mention.search(event):
+            return []
+        return [event]
 
     files = sorted(log_dir.glob("*.md")) if log_dir.is_dir() else []
     collected: list[str] = []
@@ -1323,6 +1378,10 @@ def build_parser() -> argparse.ArgumentParser:
     logs_p.add_argument(
         "--full", action="store_true",
         help="Raw daily log, prompts and transcripts included.",
+    )
+    logs_p.add_argument(
+        "--agent", metavar="MEMBER",
+        help="Only one member's activity; with --full, their captured turns.",
     )
     logs_p.set_defaults(func=cmd_logs)
 

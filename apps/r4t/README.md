@@ -162,7 +162,9 @@ Watch it — one surface per way of looking:
   open threads, and dead letters rolled up by meaning.
 - `r4t logs -f` — the stream. The team's own event log: every governance
   decision and turn boundary, including walled-garden traffic that never
-  reaches a8s. `--full` includes prompts and transcripts.
+  reaches a8s. `--full` includes prompts and transcripts. `--agent <member>`
+  narrows the stream to one member; with `--full` it prints that member's
+  captured turns (each turn's full prompt and raw output, newest last).
 - `r4t chat` — the human, interactively (see the seat section below).
 - `r4t seat` — an orchestrating agent, programmatically.
 
@@ -206,7 +208,10 @@ detach and the doorbell rings again.
 `/attach vela` (`r4t chat --attach vela` to open straight into it) for a live
 view of one member: every message it receives as it is enqueued, and its
 turn output streaming as it comes out (teed to `agents/<member>/live.log`,
-truncated at each turn start). Attaching is observation only — it never sends
+truncated at each turn start). For the record after the fact, every turn is
+also captured whole under `agents/<member>/turns/` — one markdown file per
+turn (prompt + raw output, successes and timeouts alike, most recent 50 kept),
+surfaced by `r4t logs --agent <member> --full`. Attaching is observation only — it never sends
 to that member; the composer keeps talking to the seat's usual
 counterparties. `/detach` steps back out. Training wheels, not a replacement
 for autonomy — everything still flows through normal dispatch and governance.
