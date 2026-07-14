@@ -96,9 +96,9 @@ in skill frontmatter.
 ## Top-level scripts: `tell`
 
 `~/bin/tell` is a **thin shim** to `a8s tell` (plus `tell.cmd` on Windows).
-Implementation lives in `apps/a8s/tell.py`. It walks up from CWD to find
-the first `.outbox/` directory and atomic-writes a JSON envelope there — no
-`~/.a8s` access required. When the registry is reachable and CWD is inside a
+Implementation lives in `apps/a8s/tell.py`. It requires `TELL_OUTBOX_DIR`
+(set by a8s on agent wake) and atomic-writes a JSON envelope there — no
+filesystem discovery. When the registry is reachable and CWD is inside a
 registered agent, recipient validation, `from` stamping, and agent logging
 apply on top.
 
