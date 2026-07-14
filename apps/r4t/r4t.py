@@ -122,13 +122,20 @@ def _resolve_node(raw: str | None) -> str | None:
 
 
 def _context(args: argparse.Namespace, node: str) -> DispatchContext:
-    org = load_org(_resolve_root(args.root))
-    roster_path = resolve_roster_path(org.dir, getattr(args, "roster", None))
-    if not getattr(args, "root", None) and not roster_path.is_file():
+    # The stamped node root IS the org dir — it is what dispatch resolved and
+    # ran against. Observer surfaces (chat/status/seat) must read the roster,
+    # mission and docs from there too, not from wherever the human happens to
+    # stand: in a portable org the workplace repo is not the org dir, and a
+    # member that wrote a shadow ROSTER.md/MISSION.md into the workplace must
+    # not shadow the authoritative copy. So prefer the stamp over cwd whenever
+    # no explicit --root overrides it.
+    root = _resolve_root(args.root)
+    if not getattr(args, "root", None):
         stamped = state.read_root(node)
         if stamped is not None and stamped.is_dir():
-            org = load_org(stamped)
-            roster_path = resolve_roster_path(org.dir, getattr(args, "roster", None))
+            root = stamped
+    org = load_org(root)
+    roster_path = resolve_roster_path(org.dir, getattr(args, "roster", None))
     return DispatchContext(
         root=org.dir,
         node=node,
@@ -668,11 +675,24 @@ def _ensure_tell_outbox(ctx: DispatchContext) -> None:
     os.environ.setdefault("TELL_OUTBOX_DIR", str(ctx.root / ".outbox"))
 
 
+def _adopt_root(ctx: DispatchContext) -> None:
+    """A seat session is team ingress just like dispatch — chat/seat sends
+    call handle_message directly and never pass cmd_dispatch, the only place
+    the root stamp was written. A team driven entirely through the seat
+    therefore had no stamp, and every observer command fell back to guessing
+    the root from cwd (the live quill repro). First successful seat
+    resolution writes the stamp; an existing stamp is never overridden here
+    — dispatch owns that."""
+    if state.read_root(ctx.node) is None and ctx.roster_path.is_file():
+        state.stamp_root(ctx.node, ctx.root)
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     node = _resolve_node(args.node)
     if node is None:
         return 2
     ctx = _context(args, node)
+    _adopt_root(ctx)
     _ensure_tell_outbox(ctx)
     attach = getattr(args, "attach", None)
     if not args.plain and sys.stdout.isatty():
@@ -700,6 +720,7 @@ def cmd_seat(args: argparse.Namespace) -> int:
     if node is None:
         return 2
     ctx = _context(args, node)
+    _adopt_root(ctx)
     _ensure_tell_outbox(ctx)
     try:
         roster = load_roster(ctx.roster_path)

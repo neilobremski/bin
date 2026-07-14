@@ -339,6 +339,31 @@ class MemberWatch:
         return [*self._poll_log(), *self._poll_live()]
 
 
+BACKFILL_MAX = 20
+
+
+def member_backfill(
+    node: str, name: str, limit: int = BACKFILL_MAX
+) -> list[tuple[str, str]]:
+    """Recent history for a gemba attach, so a message sent to the member
+    before attach-time is not invisible: its received-message and turn events
+    from the team log (current + previous UTC day), bounded to the last
+    `limit`, then whatever is still waiting in its queue. Read-only; the live
+    stream picks up from here forward."""
+    key = name.strip().lower()
+    events: list[tuple[str, str]] = []
+    for line in state.recent_log_lines(node):
+        event = member_log_event(line, key)
+        if event:
+            events.append(("recv", event))
+    events = events[-limit:]
+    for env in state.read_queue(node, key):
+        sender = str(env.get("from", "?"))
+        first = (str(env.get("body", "")).strip().splitlines() or ["(empty)"])[0]
+        events.append(("recv", f"queued from {sender}: {first}"))
+    return events
+
+
 HELP = """\
 /to <name|team>   set message target (bare team = leader)
 /attach <name>    watch a member read-only (messages in + turn output live)
@@ -457,12 +482,13 @@ class ChatSession:
                 return False
             if result.target is not None:
                 self.target = result.target
-            if result.attach is not None:
-                self.watch = MemberWatch(self.ctx.node, result.attach)
             if result.detach:
                 self.watch = None
             if result.lines:
                 self.emit("sys", "\n".join(result.lines))
+            if result.attach is not None:
+                self.watch = MemberWatch(self.ctx.node, result.attach)
+                self._emit_backfill(result.attach)
             return True
         self.sends.put((self.target, line))
         self.emit("you", f"you -> {self.target}: {line}")
@@ -481,6 +507,15 @@ class ChatSession:
         for kind, text in self.watch.poll():
             self.events.put((kind, f"[{self.watch.name}] {text}"))
 
+    def _emit_backfill(self, name: str) -> None:
+        self.emit("act", "── history ──")
+        events = member_backfill(self.ctx.node, name)
+        if not events:
+            self.emit("act", "(no recent activity)")
+        for kind, text in events:
+            self.emit(kind, f"[{name}] {text}")
+        self.emit("act", "── live ──")
+
     def run(self) -> int:
         self.emit(
             "sys",
@@ -489,6 +524,7 @@ class ChatSession:
         )
         if self.watch is not None:
             self.emit("sys", f"attached to {self.watch.name} — read-only; /detach to stop")
+            self._emit_backfill(self.watch.name)
         state.touch_seat_presence(self.ctx.node, self.human.name)
         self._pump_feed()
         self._pump_watch()

@@ -196,3 +196,147 @@ def test_two_orgs_one_repo_do_not_collide(r4t_home, tmp_path, fake_harness):
     assert state.team_dir("acme") != state.team_dir("beta")
     assert (state.agent_dir("acme", "gerry")).is_dir()
     assert (state.agent_dir("beta", "gerry")).is_dir()
+
+
+# ---------- observer surfaces resolve the stamped org dir like dispatch ----------
+
+SHADOW_ROSTER = """\
+# Shadow
+
+### Impostor
+- **Status:** AI
+- **Rig:** leader
+- **Leader:** yes
+"""
+
+
+def _stamped_org(r4t_home, tmp_path):
+    org_dir, workplace = _portable_org(tmp_path)
+    state.stamp_root(NODE, org_dir)
+    return org_dir, workplace
+
+
+def test_status_reads_the_org_dir_not_the_cwd(
+    r4t_home, tmp_path, fake_harness, monkeypatch, capsys
+):
+    _org_dir, workplace = _stamped_org(r4t_home, tmp_path)
+    cfg = _rig_config(tmp_path, fake_harness)
+    monkeypatch.chdir(workplace)
+    rc = r4t_main(["status", "--node", NODE, "--rig-config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "roster not found" not in out
+    assert "Gerry" in out
+
+
+def test_status_ignores_a_shadow_roster_in_the_workplace(
+    r4t_home, tmp_path, fake_harness, monkeypatch, capsys
+):
+    # A member wrote its own ROSTER.md into the workplace (it happened live
+    # with MISSION.md). The stamped org dir stays authoritative.
+    _org_dir, workplace = _stamped_org(r4t_home, tmp_path)
+    (workplace / "ROSTER.md").write_text(SHADOW_ROSTER, encoding="utf-8")
+    cfg = _rig_config(tmp_path, fake_harness)
+    monkeypatch.chdir(workplace)
+    rc = r4t_main(["status", "--node", NODE, "--rig-config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Gerry" in out
+    assert "Impostor" not in out
+
+
+def test_explicit_root_still_overrides_the_stamp(
+    r4t_home, tmp_path, fake_harness, monkeypatch, capsys
+):
+    _org_dir, workplace = _stamped_org(r4t_home, tmp_path)
+    (workplace / "ROSTER.md").write_text(SHADOW_ROSTER, encoding="utf-8")
+    cfg = _rig_config(tmp_path, fake_harness)
+    rc = r4t_main([
+        "status", "--node", NODE, "--root", str(workplace), "--rig-config", str(cfg),
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Impostor" in out
+
+
+def test_seat_resolves_the_stamped_org_dir(
+    r4t_home, tmp_path, fake_harness, monkeypatch, capsys
+):
+    _org_dir, workplace = _stamped_org(r4t_home, tmp_path)
+    cfg = _rig_config(tmp_path, fake_harness)
+    monkeypatch.chdir(workplace)
+    rc = r4t_main(["seat", "--node", NODE, "--rig-config", str(cfg), "--simulate-tell"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"seat: Neil on {NODE}" in out
+
+
+def test_chat_resolves_the_stamped_org_dir(
+    r4t_home, tmp_path, fake_harness, monkeypatch, capsys
+):
+    import io
+
+    _org_dir, workplace = _stamped_org(r4t_home, tmp_path)
+    cfg = _rig_config(tmp_path, fake_harness)
+    monkeypatch.chdir(workplace)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("/quit\n"))
+    rc = r4t_main([
+        "chat", "--plain", "--node", NODE, "--rig-config", str(cfg), "--simulate-tell",
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"seat: Neil on {NODE}" in out
+
+
+def test_logs_runs_against_an_org_dir_node(
+    r4t_home, tmp_path, fake_harness, monkeypatch, capsys
+):
+    _org_dir, workplace = _stamped_org(r4t_home, tmp_path)
+    state.append_log(NODE, "r4t: QUEUED boss -> gerry thread=T hop=0 \"go\" (depth 1)")
+    monkeypatch.chdir(workplace)
+    rc = r4t_main(["logs", "--node", NODE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "QUEUED boss -> gerry" in out
+
+
+def test_seat_adopts_the_root_when_no_stamp_exists(
+    r4t_home, tmp_path, fake_harness, monkeypatch, capsys
+):
+    # The live quill sequence: a team driven entirely through the seat never
+    # passes cmd_dispatch, so no stamp exists and observer commands guess
+    # from cwd. One seat run with --root writes the stamp; from then on the
+    # workplace cwd resolves the node and the org dir.
+    org_dir, workplace = _portable_org(tmp_path)
+    cfg = _rig_config(tmp_path, fake_harness)
+    assert state.read_root(NODE) is None
+
+    rc = r4t_main([
+        "seat", "--node", NODE, "--root", str(org_dir),
+        "--rig-config", str(cfg), "--simulate-tell",
+    ])
+    assert rc == 0
+    assert state.read_root(NODE) == org_dir
+
+    state.team_dir("other").mkdir(parents=True)  # ambiguity is real
+    monkeypatch.chdir(workplace)
+    capsys.readouterr()
+    rc = r4t_main(["status", "--rig-config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"team: {NODE}" in out and "Gerry" in out
+
+
+def test_seat_never_overrides_an_existing_stamp(
+    r4t_home, tmp_path, fake_harness, capsys
+):
+    org_dir, workplace = _portable_org(tmp_path)
+    state.stamp_root(NODE, org_dir)
+    (workplace / "ROSTER.md").write_text(SHADOW_ROSTER, encoding="utf-8")
+    cfg = _rig_config(tmp_path, fake_harness)
+    rc = r4t_main([
+        "seat", "--node", NODE, "--root", str(workplace),
+        "--rig-config", str(cfg), "--simulate-tell",
+    ])
+    assert rc == 2  # shadow roster has no human — the seat refuses
+    assert state.read_root(NODE) == org_dir  # and the stamp is untouched

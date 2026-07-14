@@ -235,3 +235,67 @@ def test_member_statuses_reports_active_resting_and_queue(ctx, roster, r4t_home)
         assert active["Gerry"].state == "active"
     finally:
         lock.release()
+
+
+# ---------- attach backfill: history before the live stream ----------
+
+def test_member_backfill_reads_log_history_and_queue(r4t_home):
+    from chat import member_backfill
+
+    state.append_log(NODE, 'r4t: QUEUED gerry -> phil thread=T hop=0 "old ask" (depth 1)')
+    state.append_log(NODE, 'r4t: QUEUED gerry -> vela thread=T hop=0 "not his" (depth 1)')
+    state.enqueue(NODE, "phil", {"from": "acme:neil", "body": "waiting for you\nsecond line"})
+    events = member_backfill(NODE, "phil")
+    kinds = {k for k, _ in events}
+    assert kinds == {"recv"}
+    texts = [t for _, t in events]
+    assert any("old ask" in t for t in texts)
+    assert not any("not his" in t for t in texts)
+    assert texts[-1] == "queued from acme:neil: waiting for you"
+
+
+def test_member_backfill_is_bounded(r4t_home):
+    from chat import BACKFILL_MAX, member_backfill
+
+    for i in range(BACKFILL_MAX + 5):
+        state.append_log(
+            NODE, f'r4t: QUEUED gerry -> phil thread=T hop=0 "ask {i}" (depth 1)'
+        )
+    texts = [t for _, t in member_backfill(NODE, "phil")]
+    assert len(texts) == BACKFILL_MAX
+    assert "ask 0" not in "\n".join(texts)          # oldest trimmed
+    assert any(f"ask {BACKFILL_MAX + 4}" in t for t in texts)  # newest kept
+
+
+def test_member_backfill_spans_the_previous_utc_day(r4t_home):
+    from chat import member_backfill
+
+    log_dir = state.team_dir(NODE) / "log"
+    log_dir.mkdir(parents=True)
+    (log_dir / "2020-01-01.md").write_text(
+        'r4t: QUEUED gerry -> phil thread=T hop=0 "from yesterday" (depth 1)\n',
+        encoding="utf-8",
+    )
+    state.append_log(NODE, 'r4t: QUEUED gerry -> phil thread=T hop=0 "from today" (depth 1)')
+    texts = "\n".join(t for _, t in member_backfill(NODE, "phil"))
+    assert "from yesterday" in texts and "from today" in texts
+
+
+def test_attach_command_emits_history_then_live(session, capsys, r4t_home):
+    state.append_log(NODE, 'r4t: QUEUED gerry -> phil thread=T hop=0 "before attach" (depth 1)')
+    session.handle_line("/attach phil")
+    out = capsys.readouterr().out
+    assert "attached to phil" in out
+    history = out.index("── history ──")
+    event = out.index("before attach")
+    live = out.index("── live ──")
+    assert history < event < live
+    # the watch starts AFTER the backfill snapshot: no duplicate live replay
+    assert session.watch is not None
+    assert session.watch.poll() == []
+
+
+def test_attach_backfill_empty_history(session, capsys, r4t_home):
+    session.handle_line("/attach phil")
+    out = capsys.readouterr().out
+    assert "(no recent activity)" in out
