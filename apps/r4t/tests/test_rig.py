@@ -278,6 +278,62 @@ class TestHarnessPresets:
             "opencode-ollama",
         ]
 
+    def test_every_preset_declares_a_known_text_tier(self):
+        from rig import TEXT_TIERS
+
+        tiers = {name: HARNESS_PRESETS[name]["text_tier"] for name in preset_names()}
+        assert set(tiers.values()) <= set(TEXT_TIERS)
+        assert tiers == {
+            "agy": "big", "claude": "big", "codex": "big",
+            "copilot": "moderate", "cursor": "moderate", "opencode": "moderate",
+            "ollama": "small", "opencode-ollama": "small",
+        }
+
+    def test_text_tier_anchors(self):
+        from rig import TEXT_TIERS
+
+        assert TEXT_TIERS["big"]["history_max_bytes"] == 50_000
+        assert TEXT_TIERS["moderate"]["history_max_bytes"] == 25_000
+        assert TEXT_TIERS["small"] == {
+            "history_max_bytes": 8192, "history_body_max": 2000,
+            "prompt_body_max": 4000,
+        }
+
+    def test_no_preset_key_gets_small_defaults(self, tmp_path):
+        config = load_rig_config(
+            write_config(tmp_path, {"custom": {"invoke": ["my-cli", "{prompt}"]}})
+        )
+        rig = config.rigs["custom"]
+        assert (rig.history_max_bytes, rig.history_body_max, rig.prompt_body_max) == (
+            8192, 2000, 4000,
+        )
+
+    def test_unknown_preset_value_gets_small_defaults(self, tmp_path):
+        config = load_rig_config(write_config(
+            tmp_path,
+            {"custom": {"invoke": ["x", "{prompt}"], "preset": "gemini"}},
+        ))
+        assert config.rigs["custom"].history_max_bytes == 8192
+
+    def test_preset_tier_defaults_and_explicit_override(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "big": {"invoke": ["codex", "{prompt}"], "preset": "codex"},
+            "mid": {"invoke": ["copilot", "{prompt}"], "preset": "copilot"},
+            "pinned": {
+                "invoke": ["claude", "{prompt}"], "preset": "claude",
+                "history_max_bytes": 999,
+            },
+        }))
+        big, mid, pinned = (config.rigs[k] for k in ("big", "mid", "pinned"))
+        assert (big.history_max_bytes, big.history_body_max, big.prompt_body_max) == (
+            50_000, 12_000, 24_000,
+        )
+        assert (mid.history_max_bytes, mid.history_body_max, mid.prompt_body_max) == (
+            25_000, 6_000, 12_000,
+        )
+        assert pinned.history_max_bytes == 999  # explicit wins over the tier
+        assert pinned.history_body_max == 12_000  # untouched knobs stay tiered
+
     def test_every_preset_invoke_is_valid(self, tmp_path):
         for name in preset_names():
             config = load_rig_config(
@@ -348,6 +404,32 @@ class TestHarnessPresets:
         config = load_rig_config(path)
         assert config.rigs["worker"].argv("hi")[0] == "agy"
         assert config.rigs["worker"].concurrency == 3
+
+    def test_add_records_preset_and_tier_defaults_apply(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "brain", "agy", model="sonnet")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert raw["brain"]["preset"] == "agy"
+        rig = load_rig_config(path).rigs["brain"]
+        assert rig.history_max_bytes == 50_000
+        assert rig.history_body_max == 12_000
+        assert rig.prompt_body_max == 24_000
+
+    def test_swap_reresolves_tier_but_explicit_knob_wins(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "ollama", model="qwen3:0.6b")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["worker"]["history_body_max"] = 1234  # operator's explicit value
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        assert load_rig_config(path).rigs["worker"].history_max_bytes == 8192
+
+        swap_preset_rig(path, "worker", "claude")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert raw["worker"]["preset"] == "claude"
+        rig = load_rig_config(path).rigs["worker"]
+        assert rig.history_max_bytes == 50_000  # re-resolved to the big tier
+        assert rig.prompt_body_max == 24_000
+        assert rig.history_body_max == 1234  # explicit value survives the swap
 
     def test_swap_preset_rig_missing_rig(self, tmp_path):
         path = write_config(tmp_path, {"other": {"invoke": ["x", "{prompt}"]}})

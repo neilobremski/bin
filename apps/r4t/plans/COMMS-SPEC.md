@@ -317,19 +317,25 @@ state that egress/ingress was built to avoid.)
 ### 6.3 History size as a rig-level knob
 
 `HISTORY_MAX_BYTES` (state.py), `HISTORY_BODY_MAX` and `PROMPT_BODY_MAX`
-(dispatch.py) become per-rig knobs with today's values as defaults, following
-the model/budget rig pattern (`rig.py`) — agy carries far more history/context
-than an opencode-class local model:
+(dispatch.py) become per-rig knobs, following the model/budget rig pattern
+(`rig.py`) — a 0.6B local member and an agy seat should not share a history
+budget. Defaults are **per preset**, by text tier (Neil's PR-review ruling):
 
-| Rig knob | Default | Replaces |
-|---|---|---|
-| `history_max_bytes` | 8192 | `state.HISTORY_MAX_BYTES` |
-| `history_body_max` | 2000 | `dispatch.HISTORY_BODY_MAX` |
-| `prompt_body_max` | 4000 | `dispatch.PROMPT_BODY_MAX` |
+| Tier | Presets | `history_max_bytes` | `history_body_max` | `prompt_body_max` |
+|---|---|---|---|---|
+| big | agy, codex, claude | 50,000 | 12,000 | 24,000 |
+| moderate | cursor, opencode, copilot | 25,000 | 6,000 | 12,000 |
+| small | opencode-ollama, ollama | 8,192 | 2,000 | 4,000 |
 
-`Rig` gains three fields parsed by `_parse_rig` (reuse `_positive_number`);
-dispatch passes the rig values at write time. The global constants are deleted
-(scorch-the-earth).
+Resolution order: explicit value in rigs.json → the rig's preset's tier → the
+small tier. `r4t rig add`/`swap` record a `preset` key on the rig entry; a swap
+to a different preset re-resolves the tier while explicit values still win. A
+rig with no `preset` (custom/scripted CLI) gets the small tier — conservative
+is correct for an unknown harness. Copilot's moderate placement is a judgment
+call (Neil's tiers did not name it), flagged on the PR for veto. The knobs
+replace `state.HISTORY_MAX_BYTES` / `dispatch.HISTORY_BODY_MAX` /
+`dispatch.PROMPT_BODY_MAX`; the global constants are deleted
+(scorch-the-earth) and dispatch passes the rig values at write time.
 
 ---
 
@@ -340,9 +346,9 @@ dispatch passes the rig values at write time. The global constants are deleted
 | `comms` | `open` \| `closed` | `open` | `r4t-org.json` (org) | #185 |
 | `leader_sees_lateral` | bool | `false` | `r4t-org.json` (org) | #185 |
 | `egress` | bool (top-leader external) | `true` | `r4t-org.json` (org) | #183 |
-| `history_max_bytes` | int | 8192 | rig (rigs.json, per-rig) | #190 |
-| `history_body_max` | int | 2000 | rig (rigs.json, per-rig) | #190 |
-| `prompt_body_max` | int | 4000 | rig (rigs.json, per-rig) | #190 |
+| `history_max_bytes` | int | preset tier: 50k big / 25k moderate / 8192 small | rig (rigs.json, per-rig) | #190 |
+| `history_body_max` | int | preset tier: 12k / 6k / 2000 | rig (rigs.json, per-rig) | #190 |
+| `prompt_body_max` | int | preset tier: 24k / 12k / 4000 | rig (rigs.json, per-rig) | #190 |
 | `prompts.<key>` (11 keys) | text, sparse | code default | a8s node definition | #190 |
 | message `class` | `human` \| `auto` \| `error` | per-path | protocol (not user-set) | #192 / #167 |
 | `definition.idle.timeout` | seconds | (existing) | a8s node definition | #189 (cadence base) |
