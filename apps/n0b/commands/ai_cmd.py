@@ -56,6 +56,10 @@ def cmd_research(args: list[str]) -> int:
 WHISPER_VENV = Path.home() / ".cache" / "n0b" / "whisper-venv"
 HINTS_FILE = Path.home() / ".config" / "n0b" / "transcribe-hints.txt"
 REPLACEMENTS_FILE = Path.home() / ".config" / "n0b" / "transcribe-replacements.txt"
+SPEAK_REPLACEMENTS_FILE = Path.home() / ".config" / "n0b" / "speak-replacements.txt"
+SPEAK_PRONUNCIATIONS_FILE = Path.home() / ".config" / "n0b" / "speak-pronunciations.txt"
+SPEAK_VOICE_FILE = Path.home() / ".config" / "n0b" / "speak-voice.txt"
+DEFAULT_SPEAK_VOICE = "af_heart"
 
 _WHISPER_SNIPPET = """\
 import sys
@@ -97,13 +101,14 @@ if not chunks:
 sf.write(out_path, np.concatenate(chunks), 24000)
 """
 
-_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_MD_URL_LINK_RE = re.compile(r"\[([^\]]+)\]\((?!/)[^)]*\)")
 _MD_NOISE_RE = re.compile(r"[*_`#>|]+")
 
 
 def speakable(markdown: str) -> str:
     """Reduce markdown to prose worth hearing: drop code fences and table
-    rows, unwrap links, strip emphasis markers."""
+    rows, unwrap URL links, strip emphasis markers. Keeps misaki phoneme
+    overrides like [word](/ipa/)."""
     out: list[str] = []
     fenced = False
     for line in markdown.splitlines():
@@ -113,7 +118,7 @@ def speakable(markdown: str) -> str:
             continue
         if fenced or s.startswith("|"):
             continue
-        line = _MD_LINK_RE.sub(r"\1", line)
+        line = _MD_URL_LINK_RE.sub(r"\1", line)
         line = _MD_NOISE_RE.sub("", line)
         out.append(line)
     return "\n".join(out)
@@ -162,13 +167,172 @@ def _kokoro_python() -> Path:
     return python
 
 
+def read_sticky_voice(voice_file: Path | None = None) -> str | None:
+    path = SPEAK_VOICE_FILE if voice_file is None else voice_file
+    if not path.is_file():
+        return None
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            return line
+    return None
+
+
+def save_sticky_voice(voice: str, voice_file: Path | None = None) -> int:
+    path = SPEAK_VOICE_FILE if voice_file is None else voice_file
+    voice = voice.strip()
+    if not voice:
+        return 2
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{voice}\n")
+    print(f"saved default voice to {path}", file=sys.stderr)
+    return 0
+
+
+def resolve_speak_voice(cli_voice: str | None) -> tuple[str, str]:
+    if cli_voice is not None:
+        return cli_voice, "cli"
+    sticky = read_sticky_voice()
+    if sticky:
+        return sticky, str(SPEAK_VOICE_FILE)
+    return DEFAULT_SPEAK_VOICE, "built-in default"
+
+
+def read_pair_file(
+    pair_file: Path, label: str = "n0b"
+) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    if not pair_file.is_file():
+        return pairs
+    for line in pair_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        pair = parse_replacement(line)
+        if pair is None:
+            print(
+                f"{label}: skipping bad line (want 'left => right'): {line!r}",
+                file=sys.stderr,
+            )
+            continue
+        pairs.append(pair)
+    return pairs
+
+
+def parse_cli_pairs(cli_values: list[str], label: str) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for raw in cli_values:
+        pair = parse_replacement(raw)
+        if pair is None:
+            print(
+                f"{label}: bad value (want 'left => right'): {raw!r}",
+                file=sys.stderr,
+            )
+            continue
+        pairs.append(pair)
+    return pairs
+
+
+def apply_speak_replacements(
+    text: str, pairs: list[tuple[str, str]]
+) -> tuple[str, list[str]]:
+    applied: list[str] = []
+    for pattern, spoken in pairs:
+        try:
+            text, count = re.subn(pattern, spoken, text)
+        except re.error as exc:
+            print(
+                f"n0b ai speak: bad replacement regex {pattern!r}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        if count:
+            applied.append(f"{pattern} => {spoken} (x{count})")
+    return text, applied
+
+
+def apply_pronunciations(
+    text: str, pairs: list[tuple[str, str]]
+) -> tuple[str, list[str]]:
+    applied: list[str] = []
+    for pattern, ipa in pairs:
+        def wrap(m: re.Match[str]) -> str:
+            word = m.group(0)
+            return f"[{word}](/{ipa}/)"
+
+        try:
+            text, count = re.subn(pattern, wrap, text)
+        except re.error as exc:
+            print(
+                f"n0b ai speak: bad pronunciation regex {pattern!r}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        if count:
+            applied.append(f"{pattern} => /{ipa}/ (x{count})")
+    return text, applied
+
+
+def save_pair_file(
+    cli_values: list[str],
+    pair_file: Path,
+    label: str,
+) -> int:
+    new = parse_cli_pairs(cli_values, label)
+    if not new:
+        return 2
+    known = {pattern for pattern, _ in read_pair_file(pair_file, label)}
+    added = [(p, r) for p, r in new if p not in known]
+    if added:
+        pair_file.parent.mkdir(parents=True, exist_ok=True)
+        lead = ""
+        if pair_file.is_file():
+            text = pair_file.read_text()
+            if text and not text.endswith("\n"):
+                lead = "\n"
+        with pair_file.open("a") as f:
+            f.write(lead + "".join(f"{p} => {r}\n" for p, r in added))
+    print(
+        f"saved {len(added)} entry(ies) to {pair_file}"
+        + (f" ({len(new) - len(added)} already there)" if len(added) < len(new) else ""),
+        file=sys.stderr,
+    )
+    return 0
+
+
 def cmd_speak(
     source: str | None,
     out: str | None,
-    voice: str,
+    voice: str | None,
     speed: float,
     raw: bool = False,
+    replaces: list[str] | None = None,
+    pronounces: list[str] | None = None,
+    save: bool = False,
 ) -> int:
+    replaces = replaces or []
+    pronounces = pronounces or []
+    if save:
+        saved = False
+        if parse_cli_pairs(replaces, "n0b ai speak"):
+            save_pair_file(replaces, SPEAK_REPLACEMENTS_FILE, "n0b ai speak")
+            saved = True
+        if parse_cli_pairs(pronounces, "n0b ai speak"):
+            save_pair_file(pronounces, SPEAK_PRONUNCIATIONS_FILE, "n0b ai speak")
+            saved = True
+        if voice is not None:
+            save_sticky_voice(voice)
+            saved = True
+        if not saved:
+            print(
+                "n0b ai speak: --save needs --voice, --replace, and/or --pronounce",
+                file=sys.stderr,
+            )
+            return 2
+        if source is None:
+            return 0
+    voice, voice_src = resolve_speak_voice(voice)
+    print(f"voice: {voice} ({voice_src})", file=sys.stderr)
     if source is None or source == "-":
         text = sys.stdin.read()
         stem = "speech"
@@ -181,6 +345,32 @@ def cmd_speak(
         stem = path.stem
     if not raw:
         text = speakable(text)
+    file_replaces = read_pair_file(SPEAK_REPLACEMENTS_FILE, "n0b ai speak")
+    cli_replaces = parse_cli_pairs(replaces, "n0b ai speak")
+    replace_pairs = file_replaces + cli_replaces
+    file_pronounces = read_pair_file(SPEAK_PRONUNCIATIONS_FILE, "n0b ai speak")
+    cli_pronounces = parse_cli_pairs(pronounces, "n0b ai speak")
+    pronounce_pairs = file_pronounces + cli_pronounces
+    if pronounce_pairs:
+        print(
+            f"pronunciations: {len(pronounce_pairs)} pattern(s) loaded "
+            f"({len(file_pronounces)} from {SPEAK_PRONUNCIATIONS_FILE}, "
+            f"{len(cli_pronounces)} from --pronounce)",
+            file=sys.stderr,
+        )
+        text, applied = apply_pronunciations(text, pronounce_pairs)
+        note = "; ".join(applied) if applied else "none matched"
+        print(f"pronunciations applied: {note}", file=sys.stderr)
+    if replace_pairs:
+        print(
+            f"replacements: {len(replace_pairs)} pattern(s) loaded "
+            f"({len(file_replaces)} from {SPEAK_REPLACEMENTS_FILE}, "
+            f"{len(cli_replaces)} from --replace)",
+            file=sys.stderr,
+        )
+        text, applied = apply_speak_replacements(text, replace_pairs)
+        note = "; ".join(applied) if applied else "none matched"
+        print(f"replacements applied: {note}", file=sys.stderr)
     if not text.strip():
         print("n0b ai speak: nothing to say after cleanup", file=sys.stderr)
         return 2
@@ -259,38 +449,11 @@ def parse_replacement(line: str) -> tuple[str, str] | None:
 
 
 def read_replacements(replacements_file: Path) -> list[tuple[str, str]]:
-    pairs: list[tuple[str, str]] = []
-    if not replacements_file.is_file():
-        return pairs
-    for line in replacements_file.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        pair = parse_replacement(line)
-        if pair is None:
-            print(
-                f"n0b ai transcribe: skipping bad replacement line "
-                f"(want 'wrong => right'): {line!r}",
-                file=sys.stderr,
-            )
-            continue
-        pairs.append(pair)
-    return pairs
+    return read_pair_file(replacements_file, "n0b ai transcribe")
 
 
 def parse_cli_replacements(cli_replaces: list[str]) -> list[tuple[str, str]]:
-    pairs: list[tuple[str, str]] = []
-    for raw in cli_replaces:
-        pair = parse_replacement(raw)
-        if pair is None:
-            print(
-                f"n0b ai transcribe: bad --replace value "
-                f"(want 'wrong => right'): {raw!r}",
-                file=sys.stderr,
-            )
-            continue
-        pairs.append(pair)
-    return pairs
+    return parse_cli_pairs(cli_replaces, "n0b ai transcribe")
 
 
 def apply_replacements(
@@ -315,26 +478,7 @@ def apply_replacements(
 
 
 def save_replacements(cli_replaces: list[str], replacements_file: Path) -> int:
-    new = parse_cli_replacements(cli_replaces)
-    if not new:
-        return 2
-    known = {pattern for pattern, _ in read_replacements(replacements_file)}
-    added = [(p, c) for p, c in new if p not in known]
-    if added:
-        replacements_file.parent.mkdir(parents=True, exist_ok=True)
-        lead = ""
-        if replacements_file.is_file():
-            text = replacements_file.read_text()
-            if text and not text.endswith("\n"):
-                lead = "\n"
-        with replacements_file.open("a") as f:
-            f.write(lead + "".join(f"{p} => {c}\n" for p, c in added))
-    print(
-        f"saved {len(added)} replacement(s) to {replacements_file}"
-        + (f" ({len(new) - len(added)} already there)" if len(added) < len(new) else ""),
-        file=sys.stderr,
-    )
-    return 0
+    return save_pair_file(cli_replaces, replacements_file, "n0b ai transcribe")
 
 
 def save_hints(cli_hints: list[str], hints_file: Path) -> int:

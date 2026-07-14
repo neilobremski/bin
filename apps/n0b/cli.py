@@ -92,13 +92,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output audio file: .wav, or .m4a via afconvert (default: <input>.wav)",
     )
     ai_speak.add_argument(
-        "--voice", default="af_heart", help="Kokoro voice (default: af_heart)"
+        "--voice",
+        help=(
+            "Kokoro voice id or path to a .pt pack; default reads "
+            "~/.config/n0b/speak-voice.txt, else af_heart"
+        ),
     )
     ai_speak.add_argument(
         "--speed", type=float, default=1.0, help="Speech speed multiplier"
     )
     ai_speak.add_argument(
         "--raw", action="store_true", help="Skip markdown-to-prose cleanup"
+    )
+    ai_speak.add_argument(
+        "--replace",
+        action="append",
+        default=[],
+        dest="replaces",
+        metavar="'TEXT => SPOKEN'",
+        help=(
+            "Regex + spoken form applied before synthesis. Merged with "
+            "~/.config/n0b/speak-replacements.txt"
+        ),
+    )
+    ai_speak.add_argument(
+        "--pronounce",
+        action="append",
+        default=[],
+        dest="pronounces",
+        metavar="'WORD => IPA'",
+        help=(
+            "Regex + misaki IPA phonemes; matches become [word](/ipa/). "
+            "Merged with ~/.config/n0b/speak-pronunciations.txt"
+        ),
+    )
+    ai_speak.add_argument(
+        "--save",
+        action="store_true",
+        help=(
+            "Append --replace/--pronounce to their global files and/or "
+            "persist --voice as the system default"
+        ),
     )
     ai_transcribe = ai_sub.add_parser(
         "transcribe", help="Transcribe an audio file locally with Whisper"
@@ -225,7 +259,14 @@ def dispatch(args: argparse.Namespace) -> int:
             return cmd_research(args.prompt)
         if args.ai_kind == "speak":
             return cmd_speak(
-                args.text, args.out, args.voice, args.speed, raw=args.raw
+                args.text,
+                args.out,
+                args.voice,
+                args.speed,
+                raw=args.raw,
+                replaces=args.replaces,
+                pronounces=args.pronounces,
+                save=args.save,
             )
         if args.ai_kind == "transcribe":
             return cmd_transcribe(
