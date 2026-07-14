@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from rig import (
+    CONFIGURABLE_RIG_KEYS,
     DEFAULT_BUDGET_EARN_PER_HOUR,
     DEFAULT_BUDGET_MAX,
     DEFAULT_CONCURRENCY,
@@ -26,7 +27,11 @@ from rig import (
     preset_names,
     remove_rig,
     resolve_agy_model,
+    rig_setting,
+    rig_settings,
+    set_rig_value,
     swap_preset_rig,
+    unset_rig_value,
 )
 from roster import Member
 from r4t import main as r4t_main
@@ -680,3 +685,257 @@ class TestRemoveCLI:
             ["rig", "remove", "a", "--force", "--rig-config", str(path)]
         ) == 0
         assert "a" not in json.loads(path.read_text(encoding="utf-8"))
+
+
+class TestRigSettingsCore:
+    def test_get_all_keys_covered(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        keys = [s.key for s in rig_settings(path, "worker")]
+        assert keys == list(CONFIGURABLE_RIG_KEYS)
+
+    def test_concurrency_default_and_explicit_source(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        s = rig_setting(path, "worker", "concurrency")
+        assert (s.value, s.explicit, s.source) == (DEFAULT_CONCURRENCY, False, "built-in default")
+        set_rig_value(path, "worker", "concurrency", "4")
+        s = rig_setting(path, "worker", "concurrency")
+        assert (s.value, s.explicit, s.source) == (4, True, "explicit")
+
+    def test_text_knob_inherits_from_preset_tier(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        s = rig_setting(path, "worker", "history_max_bytes")
+        assert s.value == 25_000
+        assert s.explicit is False
+        assert s.source == "from preset opencode"
+
+    def test_text_knob_no_preset_is_built_in(self, tmp_path):
+        path = write_config(tmp_path, {"custom": {"invoke": ["x", "{prompt}"]}})
+        s = rig_setting(path, "custom", "history_max_bytes")
+        assert (s.value, s.source, s.explicit) == (8192, "built-in default", False)
+
+    def test_rig_budget_unset_by_default(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        s = rig_setting(path, "worker", "rig_budget_max")
+        assert s.value is None
+        assert s.explicit is False
+        assert s.display() == "unset"
+
+    def test_set_get_unset_round_trip(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        set_rig_value(path, "worker", "history_max_bytes", "9999")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert raw["worker"]["history_max_bytes"] == 9999
+        assert rig_setting(path, "worker", "history_max_bytes").value == 9999
+        assert unset_rig_value(path, "worker", "history_max_bytes") is True
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert "history_max_bytes" not in raw["worker"]
+        # falls back to the preset tier, not materialized
+        s = rig_setting(path, "worker", "history_max_bytes")
+        assert s.value == 25_000 and s.explicit is False
+
+    def test_enter_keeps_inherited_does_not_materialize(self, tmp_path):
+        # The configure loop skips keys the operator leaves blank, so nothing
+        # inherited is written — swap re-resolution depends on this.
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        before = json.loads(path.read_text(encoding="utf-8"))["worker"]
+        set_rig_value(path, "worker", "concurrency", "2")
+        raw = json.loads(path.read_text(encoding="utf-8"))["worker"]
+        assert raw["concurrency"] == 2
+        assert "history_max_bytes" not in raw
+        assert "rig_budget_max" not in raw
+        assert before.get("preset") == raw.get("preset")
+
+    def test_unset_unset_key_is_noop(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        assert unset_rig_value(path, "worker", "concurrency") is False
+
+    def test_unknown_key_errors_loudly(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        for fn in (
+            lambda: rig_setting(path, "worker", "bogus"),
+            lambda: set_rig_value(path, "worker", "bogus", "1"),
+            lambda: unset_rig_value(path, "worker", "bogus"),
+        ):
+            with pytest.raises(RigError, match="unknown rig setting"):
+                fn()
+
+    def test_numeric_validation(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        with pytest.raises(RigError, match="must be a number"):
+            set_rig_value(path, "worker", "concurrency", "abc")
+        with pytest.raises(RigError, match="whole number"):
+            set_rig_value(path, "worker", "concurrency", "2.5")
+        with pytest.raises(RigError, match="positive"):
+            set_rig_value(path, "worker", "concurrency", "0")
+
+    def test_float_key_accepts_decimals(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        set_rig_value(path, "worker", "rig_budget_max", "20")
+        set_rig_value(path, "worker", "rig_budget_earn_per_hour", "2.5")
+        raw = json.loads(path.read_text(encoding="utf-8"))["worker"]
+        assert raw["rig_budget_max"] == 20
+        assert raw["rig_budget_earn_per_hour"] == 2.5
+
+    def test_set_missing_rig_errors(self, tmp_path):
+        path = write_config(tmp_path, {"other": {"invoke": ["x", "{prompt}"]}})
+        with pytest.raises(RigError, match="no rig 'worker'"):
+            set_rig_value(path, "worker", "concurrency", "2")
+
+
+class TestRigModelSetting:
+    def test_set_model_agy_keeps_live_resolver(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "brain", "agy", model="sonnet")
+        set_rig_value(path, "brain", "model", "opus")
+        raw = json.loads(path.read_text(encoding="utf-8"))["brain"]
+        assert raw["model"] == "opus"
+        assert raw["model_resolver"] == "agy-live"
+        assert raw["invoke"][:3] == ["agy", "--model", "{model}"]
+        assert rig_setting(path, "brain", "model").value == "opus"
+
+    def test_set_model_static_bakes_into_invoke(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "coder", "claude")
+        set_rig_value(path, "coder", "model", "opus")
+        raw = json.loads(path.read_text(encoding="utf-8"))["coder"]
+        assert raw["invoke"][:3] == ["claude", "--model", "opus"]
+        assert "model" not in raw
+
+    def test_set_model_without_preset_errors(self, tmp_path):
+        path = write_config(tmp_path, {"raw": {"invoke": ["x", "{prompt}"]}})
+        with pytest.raises(RigError, match="no recorded preset"):
+            set_rig_value(path, "raw", "model", "opus")
+
+    def test_set_model_unsupported_preset_errors(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "cop", "copilot")
+        with pytest.raises(RigError, match="does not support --model"):
+            set_rig_value(path, "cop", "model", "opus")
+
+    def test_unset_model_static_reverts_to_base(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "coder", "claude", model="opus")
+        assert unset_rig_value(path, "coder", "model") is True
+        raw = json.loads(path.read_text(encoding="utf-8"))["coder"]
+        assert raw["invoke"] == HARNESS_PRESETS["claude"]["invoke"]
+
+    def test_unset_model_agy_drops_resolver(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "brain", "agy", model="sonnet")
+        assert unset_rig_value(path, "brain", "model") is True
+        raw = json.loads(path.read_text(encoding="utf-8"))["brain"]
+        assert "model" not in raw and "model_resolver" not in raw
+        assert raw["invoke"] == HARNESS_PRESETS["agy"]["invoke"]
+
+
+class TestRigConfigureCLI:
+    def test_set_get_unset_via_cli(self, tmp_path, capsys):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        assert r4t_main(
+            ["rig", "set", "worker", "concurrency", "3", "--rig-config", str(path)]
+        ) == 0
+        capsys.readouterr()
+        assert r4t_main(
+            ["rig", "get", "worker", "concurrency", "--rig-config", str(path)]
+        ) == 0
+        out = capsys.readouterr()
+        assert out.out.strip() == "3"
+        assert "(explicit)" in out.err
+        assert r4t_main(
+            ["rig", "unset", "worker", "concurrency", "--rig-config", str(path)]
+        ) == 0
+        assert "concurrency" not in json.loads(path.read_text(encoding="utf-8"))["worker"]
+
+    def test_get_bare_lists_all(self, tmp_path, capsys):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        assert r4t_main(["rig", "get", "worker", "--rig-config", str(path)]) == 0
+        out = capsys.readouterr().out
+        for key in CONFIGURABLE_RIG_KEYS:
+            assert key in out
+        assert "from preset opencode" in out
+
+    def test_set_unknown_key_returns_1(self, tmp_path, capsys):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        assert r4t_main(
+            ["rig", "set", "worker", "bogus", "1", "--rig-config", str(path)]
+        ) == 1
+        assert "unknown rig setting" in capsys.readouterr().err
+
+    def test_set_bad_number_returns_1(self, tmp_path, capsys):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        assert r4t_main(
+            ["rig", "set", "worker", "concurrency", "abc", "--rig-config", str(path)]
+        ) == 1
+        assert "must be a number" in capsys.readouterr().err
+
+    def test_unset_multiple_keys(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        set_rig_value(path, "worker", "concurrency", "2")
+        set_rig_value(path, "worker", "history_max_bytes", "1000")
+        assert r4t_main(
+            ["rig", "unset", "worker", "concurrency", "history_max_bytes",
+             "--rig-config", str(path)]
+        ) == 0
+        raw = json.loads(path.read_text(encoding="utf-8"))["worker"]
+        assert "concurrency" not in raw and "history_max_bytes" not in raw
+
+    def test_configure_piped_sets_one_keeps_rest(self, tmp_path, capsys, monkeypatch):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        answers = iter(["5", "", ""])
+
+        def piped(prompt=""):
+            try:
+                return next(answers)
+            except StopIteration:
+                raise EOFError
+
+        monkeypatch.setattr("builtins.input", piped)
+        assert r4t_main(["rig", "configure", "worker", "--rig-config", str(path)]) == 0
+        raw = json.loads(path.read_text(encoding="utf-8"))["worker"]
+        assert raw["concurrency"] == 5
+        assert "rig_budget_max" not in raw
+        assert "history_max_bytes" not in raw
+
+    def test_configure_piped_eof_keeps_rest(self, tmp_path, monkeypatch):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        def eof(prompt=""):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", eof)
+        assert r4t_main(["rig", "configure", "worker", "--rig-config", str(path)]) == 0
+        raw = json.loads(path.read_text(encoding="utf-8"))["worker"]
+        assert "concurrency" not in raw
+
+    def test_configure_piped_invalid_errors_loudly(self, tmp_path, capsys, monkeypatch):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        answers = iter(["notanumber"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+        assert r4t_main(["rig", "configure", "worker", "--rig-config", str(path)]) == 1
+        assert "must be a number" in capsys.readouterr().err
+
+    def test_configure_missing_rig_returns_1(self, tmp_path, capsys):
+        path = write_config(tmp_path, {"other": {"invoke": ["x", "{prompt}"]}})
+        assert r4t_main(["rig", "configure", "ghost", "--rig-config", str(path)]) == 1
+        assert "no rig 'ghost'" in capsys.readouterr().err

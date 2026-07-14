@@ -55,6 +55,40 @@ value is never passed through, because agy would silently run its default.
 a roster member or pin still references the rig, naming what does; pass
 `--force` to remove anyway.
 
+### Editing a rig's settings (`configure` / `set` / `get` / `unset`)
+
+Rig settings no longer need hand-edited JSON. The configurable keys are
+`concurrency`, `rig_budget_max`, `rig_budget_earn_per_hour`, the context knobs
+`history_max_bytes` / `history_body_max` / `prompt_body_max`, and `model`
+(each detailed in [Governance knobs](#governance-knobs)).
+
+```bash
+r4t rig configure specialist          # walk every setting, Enter keeps each
+r4t rig set specialist concurrency 2  # write one explicit value
+r4t rig get specialist                # list effective settings, source-annotated
+r4t rig get specialist concurrency    # one value on stdout (script-friendly)
+r4t rig unset specialist concurrency  # drop it back to the default
+```
+
+`configure` prompts one key at a time, showing the effective value and its
+source in brackets (`history_max_bytes [25000, from preset opencode]:`).
+**Plain Enter keeps the current state exactly** — an explicit value stays
+explicit and an inherited tier default stays inherited; it is never written
+into `rigs.json`, so `rig swap` can still re-resolve the tier. Only typed input
+becomes an explicit value. Piped stdin works (one answer per line, EOF keeps
+the rest), so an agent can drive it non-interactively.
+
+`get` annotates each value's source: `explicit`, `from preset <name>` (a
+context knob inheriting the preset's text tier), or `built-in default`. With a
+key it prints the bare value on stdout and the source on stderr, so
+`conc=$(r4t rig get specialist concurrency)` captures cleanly.
+
+`model` is special: `set`/`configure` re-resolve the invoke through the rig's
+recorded preset, exactly like `rig add --model` (agy keeps its live fuzzy match
+per turn). A rig with no recorded preset errors, pointing at
+`r4t rig swap <rig> <preset> --model ...`. Raw `invoke` arrays are never
+exposed through this surface; use `rig add`/`swap` to change the harness.
+
 ### How a message flows
 
 1. `tell acme "..."` routes through a8s to the team node; the node's
