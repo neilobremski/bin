@@ -185,6 +185,9 @@ HARNESS_PRESETS: dict[str, dict] = {
 DEFAULT_TIMEOUT_SECONDS = 900
 DEFAULT_CONCURRENCY = 1
 DEFAULT_MAX_SENDS_PER_TURN = 6
+DEFAULT_HISTORY_MAX_BYTES = 8192
+DEFAULT_HISTORY_BODY_MAX = 2000
+DEFAULT_PROMPT_BODY_MAX = 4000
 DEFAULT_BUDGET_MAX = 8.0
 DEFAULT_BUDGET_EARN_PER_HOUR = 4.0
 DEFAULT_MAX_CONCURRENT = 1
@@ -221,6 +224,9 @@ class Rig:
     budget_earn_per_hour: float = DEFAULT_BUDGET_EARN_PER_HOUR
     rig_budget_max: float | None = None
     rig_budget_earn_per_hour: float | None = None
+    history_max_bytes: int = DEFAULT_HISTORY_MAX_BYTES
+    history_body_max: int = DEFAULT_HISTORY_BODY_MAX
+    prompt_body_max: int = DEFAULT_PROMPT_BODY_MAX
     model: str | None = None
     model_resolver: str | None = None
     error: str | None = None
@@ -627,6 +633,22 @@ def _parse_rig(name: str, raw: object) -> Rig:
     )
     if err:
         problems.append(f"budget_earn_per_hour: {err}")
+
+    # History/prompt sizing rides the rig — a capable preset (agy) carries far
+    # more context than an opencode-class local model. Defaults preserve today's
+    # hard-coded values.
+    hist_max, err = _positive_number(raw.get("history_max_bytes"), DEFAULT_HISTORY_MAX_BYTES)
+    if err:
+        problems.append(f"history_max_bytes: {err}")
+    rig.history_max_bytes = int(hist_max)
+    hist_body, err = _positive_number(raw.get("history_body_max"), DEFAULT_HISTORY_BODY_MAX)
+    if err:
+        problems.append(f"history_body_max: {err}")
+    rig.history_body_max = int(hist_body)
+    prompt_body, err = _positive_number(raw.get("prompt_body_max"), DEFAULT_PROMPT_BODY_MAX)
+    if err:
+        problems.append(f"prompt_body_max: {err}")
+    rig.prompt_body_max = int(prompt_body)
 
     # The rig spend bucket is opt-in: absent leaves both None and the rig gate
     # off. If present, both knobs are required — a real subscription always

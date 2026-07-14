@@ -53,9 +53,81 @@ from rig import RigConfig, RigError, Rig, load_rig_config, resolve_agy_model
 from notify import TellFn
 from roster import Member, Roster, RosterError, load_roster
 
-PROMPT_BODY_MAX = 4000
-HISTORY_BODY_MAX = 2000
 DRAIN_MAX_PASSES = 20
+
+# Default prompt text, overridable sparsely by key via the a8s node definition's
+# `prompts` object (#190). Substitution fields: {name}, {node}, {workplace},
+# {creator}, {thread}. Structural section headers stay in code (not doctrine).
+PROMPT_DEFAULTS: dict[str, str] = {
+    "intro": (
+        "You are {name}, a member of the {node} team, working in the team repo "
+        "at {workplace} (your current directory). Write files here with "
+        "relative paths only."
+    ),
+    "mission_header": "## The mission (MISSION.md — outranks every other document)",
+    "work_batch": (
+        "- This is one turn: you were woken with every message above at once. "
+        "Read them together and act on the current state, not each message in "
+        "sequence. Your process ends when you finish; you are woken again when "
+        "more messages arrive."
+    ),
+    "work_never_wait": (
+        "- Never wait for a reply inside a turn. If you need work from "
+        "teammates, message them and END your turn without answering the "
+        "original request; when their replies wake you later, answer the "
+        "person who asked once you have enough."
+    ),
+    "work_tell": (
+        "- Send messages with the `tell` shell command (run it via your shell "
+        "tool — printing it as text sends nothing):\n"
+        "    - reply to whoever asked: tell <name> \"<message>\"\n"
+        "    - a teammate: tell <name> \"<message>\". Teammates:"
+    ),
+    "work_direct": (
+        "- Speak to teammates directly and one at a time — do not post to "
+        "chat rooms or broadcast channels."
+    ),
+    "work_no_ack": (
+        "- Do not send acknowledgment-only messages. If you have nothing "
+        "substantive to add, send nothing — silence is fine."
+    ),
+    "work_body_only": (
+        "- Your tell's body is the only thing the recipient sees — anything you "
+        "write around it (framing, notes, your reasoning) is lost."
+    ),
+    "work_commit": "- Repo work is not done until it is committed.",
+    "quiet_nudge": (
+        "Thread {thread} has gone quiet and {creator} has not heard back. "
+        "Reply to them with where things stand — what is done and what remains. "
+        "You do not have to finish the work, just report current state."
+    ),
+    "mission_review": (
+        "The team's queues are empty and no thread is open, but the mission "
+        "may not be met. Review MISSION.md against where things stand and "
+        "decide the next move — delegate the next step down the tree if there "
+        "is one. No communication to the human NEEDS to happen: this is a "
+        "working review, not a status report, so do not message the human "
+        "unless you genuinely have something they must act on."
+    ),
+}
+
+
+def _load_prompt_overrides(definition_path: Path | None) -> dict[str, str]:
+    """Read the `prompts` object from the a8s node definition (sparse, by key).
+    Tolerates absence at every step → returns {} and all defaults apply."""
+    if not definition_path:
+        return {}
+    try:
+        data = json.loads(Path(definition_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    prompts = data.get("prompts") if isinstance(data, dict) else None
+    if not isinstance(prompts, dict):
+        return {}
+    return {
+        k: v for k, v in prompts.items()
+        if isinstance(v, str) and not k.startswith("_")
+    }
 
 RAN = "ran"
 REROUTED = "rerouted"
@@ -75,6 +147,10 @@ class DispatchContext:
     config_path: Path
     tell_fn: TellFn
     workplace: Path | None = None
+    comms: str = "open"
+    leader_sees_lateral: bool = False
+    egress: bool = True
+    definition_path: Path | None = None
 
     def __post_init__(self) -> None:
         # `root` is where the team's documents live (ROSTER.md, MISSION.md, the
@@ -83,6 +159,13 @@ class DispatchContext:
         # them equal.
         if self.workplace is None:
             self.workplace = self.root
+        self._prompts = _load_prompt_overrides(self.definition_path)
+
+    def prompt(self, key: str, **fields: object) -> str:
+        """Resolve a prompt bullet: the definition's override for `key`, else the
+        built-in default, with any substitution fields filled in."""
+        template = self._prompts.get(key) or PROMPT_DEFAULTS[key]
+        return template.format(**fields) if fields else template
 
 
 def split_recipient(to: str) -> tuple[str, str]:
@@ -285,7 +368,7 @@ def _mission_section(ctx: DispatchContext, roster: Roster, member: Member) -> li
     if not is_lead:
         return []
     return [
-        "## The mission (MISSION.md — outranks every other document)",
+        ctx.prompt("mission_header"),
         text,
         "",
     ]
@@ -296,6 +379,7 @@ def build_prompt(
     roster: Roster,
     member: Member,
     batch: list[dict],
+    rig: Rig,
 ) -> str:
     history = state.read_history(ctx.node, member.name)
     teammates = _teammate_lines(ctx, roster, member)
@@ -305,8 +389,8 @@ def build_prompt(
         thread = str(env.get("thread", "")) or "?"
         repeats = int(env.get("repeats", 1) or 1)
         body = str(env.get("body", "")).strip() or "(empty message)"
-        if len(body) > PROMPT_BODY_MAX:
-            body = body[:PROMPT_BODY_MAX] + "\n[... message truncated by r4t ...]"
+        if len(body) > rig.prompt_body_max:
+            body = body[:rig.prompt_body_max] + "\n[... message truncated by r4t ...]"
         if str(env.get("class", "")) == "error":
             header = f"From: {sender} (operational error, thread {thread})"
         else:
@@ -318,9 +402,12 @@ def build_prompt(
         message_lines.append(body)
         message_lines.append("")
     parts = [
-        f"You are {member.name}, a member of the {ctx.node} team, working in "
-        f"the team repo at {ctx.workplace.resolve()} (your current directory). "
-        "Write files here with relative paths only.",
+        ctx.prompt(
+            "intro",
+            name=member.name,
+            node=ctx.node,
+            workplace=ctx.workplace.resolve(),
+        ),
         "",
         *_mission_section(ctx, roster, member),
         "## Who you are (from the team roster)",
@@ -332,26 +419,14 @@ def build_prompt(
         "## Messages since your last turn",
         *(message_lines or ["(none)"]),
         "## How to work",
-        "- This is one turn: you were woken with every message above at once. "
-        "Read them together and act on the current state, not each message in "
-        "sequence. Your process ends when you finish; you are woken again when "
-        "more messages arrive.",
-        "- Never wait for a reply inside a turn. If you need work from "
-        "teammates, message them and END your turn without answering the "
-        "original request; when their replies wake you later, answer the "
-        "person who asked once you have enough.",
-        "- Send messages with the `tell` shell command (run it via your shell "
-        "tool — printing it as text sends nothing):",
-        "    - reply to whoever asked: tell <name> \"<message>\"",
-        "    - a teammate: tell <name> \"<message>\". Teammates:",
+        ctx.prompt("work_batch"),
+        ctx.prompt("work_never_wait"),
+        ctx.prompt("work_tell"),
         *(teammates or ["    - (none)"]),
-        "- Speak to teammates directly and one at a time — do not post to "
-        "chat rooms or broadcast channels.",
-        "- Do not send acknowledgment-only messages. If you have nothing "
-        "substantive to add, send nothing — silence is fine.",
-        "- Your tell's body is the only thing the recipient sees — anything you "
-        "write around it (framing, notes, your reasoning) is lost.",
-        "- Repo work is not done until it is committed.",
+        ctx.prompt("work_direct"),
+        ctx.prompt("work_no_ack"),
+        ctx.prompt("work_body_only"),
+        ctx.prompt("work_commit"),
     ]
     return "\n".join(parts)
 
@@ -681,6 +756,45 @@ def _reachable_names(
     return names
 
 
+def _copy_lateral_to_lead(
+    ctx: DispatchContext,
+    roster: Roster,
+    member: Member,
+    rig: Rig,
+    to: str,
+    body: str,
+    thread_id: str,
+) -> None:
+    """`leader_sees_lateral` (#185): land a read-only history copy of a lateral
+    (peer) delivery on the sender's lead so the lead sees it on its next real
+    turn — no turn is burned, and traffic UP to the lead is skipped (already
+    visible)."""
+    if not member.lead:
+        return
+    lead = roster.find(member.lead)
+    if lead is None or lead.is_human or lead.errors:
+        return
+    recipient_name = _display_name(ctx.node, to).strip().lower()
+    if recipient_name == lead.name.lower():
+        return
+    recipient = roster.find(recipient_name)
+    if recipient is None or recipient.is_human:
+        return
+    clip = body if len(body) <= rig.history_body_max else body[:rig.history_body_max] + " [...]"
+    state.append_history(
+        ctx.node,
+        lead.name,
+        f"## {state.utc_now()} lateral {member.name} -> "
+        f"{_display_name(ctx.node, to)} (thread {thread_id})\n\n{clip}",
+        max_bytes=rig.history_max_bytes,
+    )
+    state.append_log(
+        ctx.node,
+        f"r4t: LATERAL-COPY {member.name.lower()} -> {recipient_name} "
+        f"visible to lead {lead.name.lower()}",
+    )
+
+
 def release_staging(
     ctx: DispatchContext,
     config: RigConfig,
@@ -710,9 +824,14 @@ def release_staging(
     if newest is None:
         newest = (tasks.new_thread_id(), 0)
 
+    # `closed` comms keeps the hard reroute-through-lead; `open` (the default)
+    # delivers to any valid member and computes no reachability set.
     reachable = (
-        _reachable_names(ctx, roster, member, batch) if roster.declares_tree else None
+        _reachable_names(ctx, roster, member, batch)
+        if roster.declares_tree and ctx.comms == "closed"
+        else None
     )
+    top_leader = roster.leader()
 
     released = 0
     violations = 0
@@ -746,12 +865,44 @@ def release_staging(
             )
             continue
 
-        # Hard tree enforcement: an intra-team tell to a member who is not
-        # tree-adjacent (and did not message the sender this turn) reroutes to
-        # the sender's lead. The human seat and batch senders are always
-        # reachable — answering must never reroute. Unknown names fall through
-        # to the normal unknown-recipient dead letter, not to the lead.
-        if reachable is not None and _is_internal(ctx.node, to):
+        # Egress gate (#183): the org presents as a single a8s node, and only
+        # the topmost leader may originate external mail. A non-top member's
+        # external tell redirects to the top leader (the garden's voice),
+        # regardless of comms mode. When egress is disabled, not even the top
+        # leader may message out — its external tell dead-letters with an audit
+        # note; a non-top member's still redirects up.
+        redirected_to_top = False
+        if not _is_internal(ctx.node, to) and top_leader is not None:
+            is_top = member.name.lower() == top_leader.name.lower()
+            if is_top and not ctx.egress:
+                path.unlink(missing_ok=True)
+                violations += 1
+                state.record_dead_letter(
+                    ctx.node, reason="egress-disabled", sender=sender_addr, to=to,
+                    thread=newest[0], content=body,
+                )
+                state.append_log(
+                    ctx.node,
+                    f"r4t: EGRESS-BLOCKED {sender_addr} -> {to} "
+                    "(egress disabled; the org does not message outside)",
+                )
+                continue
+            if not is_top:
+                to = _canonical_recipient(ctx.node, roster, top_leader.name)
+                envelope["to"] = to
+                redirected_to_top = True
+                state.append_log(
+                    ctx.node,
+                    f"r4t: EGRESS-REDIRECT {sender_addr} -> external redirected "
+                    f"to top leader {top_leader.name.lower()}",
+                )
+
+        # Hard tree enforcement (comms=closed): an intra-team tell to a member
+        # who is not tree-adjacent (and did not message the sender this turn)
+        # reroutes to the sender's lead. The human seat and batch senders are
+        # always reachable — answering must never reroute. Unknown names fall
+        # through to the normal unknown-recipient dead letter, not to the lead.
+        if not redirected_to_top and reachable is not None and _is_internal(ctx.node, to):
             target = _display_name(ctx.node, to).strip().lower()
             recipient = roster.find(target)
             if (
@@ -780,12 +931,15 @@ def release_staging(
             ctx.node,
             member.name,
             f"## {state.utc_now()} to {_display_name(ctx.node, to)}\n\n"
-            + (body if len(body) <= HISTORY_BODY_MAX else body[:HISTORY_BODY_MAX] + " [...]"),
+            + (body if len(body) <= rig.history_body_max else body[:rig.history_body_max] + " [...]"),
+            max_bytes=rig.history_max_bytes,
         )
         _release_one(
             ctx, outbox, staging, envelope, sender_addr, thread_id, next_hop,
             body, roster, config,
         )
+        if ctx.leader_sees_lateral and _is_internal(ctx.node, to):
+            _copy_lateral_to_lead(ctx, roster, member, rig, to, body, thread_id)
         path.unlink(missing_ok=True)
         released += 1
 
@@ -859,7 +1013,7 @@ def _run_turn(
             "started": state.utc_now(),
         },
     )
-    prompt = build_prompt(ctx, roster, member, batch)
+    prompt = build_prompt(ctx, roster, member, batch, rig)
 
     env = dict(os.environ)
     env["TELL_OUTBOX_DIR"] = str(staging)
@@ -901,13 +1055,14 @@ def _run_turn(
     else:
         for env_msg in batch:
             entry_body = str(env_msg.get("body", ""))
-            if len(entry_body) > HISTORY_BODY_MAX:
-                entry_body = entry_body[:HISTORY_BODY_MAX] + " [...]"
+            if len(entry_body) > rig.history_body_max:
+                entry_body = entry_body[:rig.history_body_max] + " [...]"
             state.append_history(
                 ctx.node,
                 member.name,
                 f"## {state.utc_now()} from "
                 f"{_display_name(ctx.node, str(env_msg.get('from', '?')))}\n\n{entry_body}",
+                max_bytes=rig.history_max_bytes,
             )
         if not state.staged_envelopes(ctx.node, member.name):
             # The classic weak-rig shape: the model answers on stdout instead
@@ -1258,12 +1413,7 @@ def _quiet_task_sweep(
             continue
         thread_id = str(task["id"])
         creator = str(task.get("creator", "?"))
-        body = (
-            f"Thread {thread_id} has gone quiet and {creator} has not heard "
-            "back. Reply to them with where things stand — what is done and "
-            "what remains. You do not have to finish the work, just report "
-            "current state."
-        )
+        body = ctx.prompt("quiet_nudge", thread=thread_id, creator=creator)
         _ingest(
             ctx, f"r4t:{ctx.node}", f"{ctx.node}:{leader.name.lower()}", body,
             klass="auto", internal=True, thread=thread_id, hop=0,

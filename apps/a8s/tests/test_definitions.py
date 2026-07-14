@@ -145,6 +145,17 @@ class TestBuildCommand:
         argv = build_command(defn, msg, agent_root)
         assert argv == [f"{SCRIPT_DIR}/dummy-cli", "hi"]
 
+    def test_definition_path_substitution(self, agent_root):
+        defn = {"invoke": ["r4t", "--definition", "$DEFINITION_PATH", "-p", "$MESSAGE"]}
+        msg = {"from": "A", "to": "B", "content": "hi"}
+        argv = build_command(defn, msg, agent_root, "/path/to/defn.json")
+        assert argv == ["r4t", "--definition", "/path/to/defn.json", "-p", "hi"]
+
+    def test_definition_path_defaults_empty(self, agent_root):
+        defn = {"invoke": ["r4t", "$DEFINITION_PATH", "$MESSAGE"]}
+        argv = build_command(defn, {"from": "A", "to": "B", "content": "hi"}, agent_root)
+        assert argv == ["r4t", "", "hi"]
+
     def test_does_not_mutate_original_argv(self, agent_root):
         defn = {"invoke": ["claude", "-p", "$MESSAGE"]}
         original = list(defn["invoke"])

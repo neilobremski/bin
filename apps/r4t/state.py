@@ -46,7 +46,6 @@ from ulid import new as new_ulid
 
 _queue_seq = itertools.count()
 
-HISTORY_MAX_BYTES = 8192
 HISTORY_ENTRY_RE = re.compile(r"(?m)^(?=## )")
 VELOCITY_HEADER = "timestamp,agent,rig,thread,hop,duration_seconds,exit_code\n"
 
@@ -181,7 +180,7 @@ def _truncate_history(text: str, max_bytes: int) -> str:
 
 
 def append_history(
-    node: str, name: str, entry: str, *, max_bytes: int = HISTORY_MAX_BYTES
+    node: str, name: str, entry: str, *, max_bytes: int = 8192
 ) -> None:
     current = read_history(node, name).rstrip()
     combined = (current + "\n\n" if current else "") + entry.strip() + "\n"

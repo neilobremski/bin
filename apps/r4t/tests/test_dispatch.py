@@ -136,6 +136,7 @@ def tree_ctx(r4t_home, tmp_path, chatty_config, tells):
         roster_path=root / "ROSTER.md",
         config_path=chatty_config,
         tell_fn=capture,
+        comms="closed",  # the hard reroute-through-lead model these tests assert
     )
 
 
@@ -321,9 +322,11 @@ class TestStagingRelease:
     def test_external_release_strips_header_keeps_class(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
     ):
+        # Only the top leader (Gerry) may egress, so drive the external send
+        # through him — an external message enters at the top and wakes Gerry.
         monkeypatch.setenv("CHATTY_TO", "outsider")
         monkeypatch.setenv("CHATTY_BODY", "the fix is deployed")
-        assert run_one(chatty_ctx, "acme:gerry", "acme:phil", "deploy the fix") == 1
+        assert run_one(chatty_ctx, "boss", "acme", "deploy the fix") == 1
         envelopes = outbox_envelopes(repo)
         assert len(envelopes) == 1
         envelope = envelopes[0]
@@ -331,7 +334,7 @@ class TestStagingRelease:
         assert envelope["x_r4t_class"] == "auto"
         assert envelope["content"] == "the fix is deployed"
         assert not envelope["content"].startswith("[r4t")
-        assert not state.staging_dir(NODE, "phil").exists()
+        assert not state.staging_dir(NODE, "gerry").exists()
 
     def test_outbound_attributed_to_history(self, chatty_ctx, chatty_harness, monkeypatch):
         monkeypatch.setenv("CHATTY_TO", "neil")
@@ -342,11 +345,14 @@ class TestStagingRelease:
         assert "status: done" in history
 
     def test_quota_overflow_dead_letters(self, chatty_ctx, repo, chatty_harness, monkeypatch):
-        monkeypatch.setenv("CHATTY_TO", "outsider")
+        # Quota is orthogonal to egress; drive it on an intra-team fan-out from
+        # phil so the top-leader egress gate never enters the picture.
+        monkeypatch.setenv("CHATTY_TO", "gerry")
         monkeypatch.setenv("CHATTY_SENDS", "4")  # max_sends_per_turn is 2
         run_one(chatty_ctx, "acme:gerry", "acme:phil", "fan out")
-        assert len(outbox_envelopes(repo)) == 2
+        assert state.queue_depth(NODE, "gerry") == 2
         assert dead_reasons() == ["quota", "quota"]
+        assert outbox_envelopes(repo) == []
 
     def test_intra_team_release_enqueues_and_drains(
         self, chatty_ctx, chatty_harness, monkeypatch
@@ -390,7 +396,7 @@ class TestStagingRelease:
     ):
         monkeypatch.setenv("CHATTY_TO", "chatroom")
         monkeypatch.setenv("CHATTY_BODY", "#dev hello")
-        assert run_one(chatty_ctx, "acme:gerry", "acme:phil", "post an update") == 1
+        assert run_one(chatty_ctx, "boss", "acme", "post an update") == 1
         assert [e["to"] for e in outbox_envelopes(repo)] == ["chatroom"]
 
     def test_reply_to_human_creator_closes_thread(
@@ -432,7 +438,7 @@ class TestStagingRelease:
     ):
         monkeypatch.setenv("CHATTY_TO", "chatroom")
         monkeypatch.setenv("CHATTY_BODY", "#dev progress update")
-        assert run_one(chatty_ctx, "acme:gerry", "acme:phil", "post an update") == 1
+        assert run_one(chatty_ctx, "boss", "acme", "post an update") == 1
         assert tasks.list_tasks(NODE)[0]["status"] == tasks.STATUS_OPEN
 
     def test_released_envelope_claims_namespaced_sender(
@@ -440,8 +446,8 @@ class TestStagingRelease:
     ):
         monkeypatch.setenv("CHATTY_TO", "outsider")
         monkeypatch.setenv("CHATTY_BODY", "status: done")
-        run_one(chatty_ctx, "acme:gerry", "acme:phil", "report status")
-        assert [e["from"] for e in outbox_envelopes(repo)] == ["acme:phil"]
+        run_one(chatty_ctx, "boss", "acme", "report status")  # egress via top leader
+        assert [e["from"] for e in outbox_envelopes(repo)] == ["acme:gerry"]
 
     def test_reply_closes_only_the_answered_thread(self, ctx, repo, r4t_home):
         # Two originators queue work for gerry; gerry answers only neil.
@@ -1114,7 +1120,7 @@ MISSION_HEADING = "## The mission (MISSION.md — outranks every other document)
 class TestMissionInjection:
     def _prompt(self, ctx, name):
         roster = load_roster(ctx.roster_path)
-        return dispatch.build_prompt(ctx, roster, roster.find(name), [])
+        return dispatch.build_prompt(ctx, roster, roster.find(name), [], Rig(name="t"))
 
     def test_lead_with_reports_gets_mission(self, tree_ctx):
         (tree_ctx.root / "MISSION.md").write_text(MISSION_TEXT, encoding="utf-8")
@@ -1179,6 +1185,203 @@ class TestTreeEnforcement:
         assert run_one(tree_ctx, "acme:vic", "acme:ann", "work the design") == 1
         assert state.queue_depth(NODE, "bea") == 1  # same-cell delivery, no reroute
         assert "REROUTED" not in read_log()
+
+
+def _tree_ctx(tmp_path, config_path, tells, **settings):
+    root = tmp_path / "tree-repo"
+    if not root.exists():
+        root.mkdir()
+        (root / "ROSTER.md").write_text(TREE_ROSTER, encoding="utf-8")
+    _sent, capture = tells
+    return dispatch.DispatchContext(
+        root=root, node=NODE, roster_path=root / "ROSTER.md",
+        config_path=config_path, tell_fn=capture, **settings,
+    )
+
+
+class TestCommsSetting:
+    def test_open_delivers_non_adjacent(self, r4t_home, tmp_path, chatty_config, tells, monkeypatch):
+        ctx = _tree_ctx(tmp_path, chatty_config, tells)  # comms defaults to open
+        monkeypatch.setenv("CHATTY_TO", "Cal")
+        monkeypatch.setenv("CHATTY_BODY", "hey can you help with build")
+        # Ann -> Cal is not tree-adjacent, but open comms delivers it directly.
+        assert run_one(ctx, "acme:vic", "acme:ann", "work the design") == 1
+        assert state.queue_depth(NODE, "cal") == 1
+        assert "REROUTED" not in read_log()
+
+    def test_open_still_dead_letters_unknown_name(
+        self, r4t_home, tmp_path, chatty_config, tells, monkeypatch
+    ):
+        ctx = _tree_ctx(tmp_path, chatty_config, tells)
+        # An explicit internal sub-address that names no member still dead-letters
+        # (a bare unknown name is an external address, not an intra-team miss).
+        monkeypatch.setenv("CHATTY_TO", "acme:nobody")
+        monkeypatch.setenv("CHATTY_BODY", "who are you")
+        assert run_one(ctx, "acme:vic", "acme:ann", "work the design") == 1
+        assert "unknown-recipient" in dead_reasons()
+
+    def test_closed_reroutes_non_adjacent(
+        self, r4t_home, tmp_path, chatty_config, tells, monkeypatch
+    ):
+        ctx = _tree_ctx(tmp_path, chatty_config, tells, comms="closed")
+        monkeypatch.setenv("CHATTY_TO", "Cal")
+        monkeypatch.setenv("CHATTY_BODY", "hey can you help with build")
+        assert run_one(ctx, "acme:vic", "acme:ann", "work the design") == 1
+        assert state.queue_depth(NODE, "cal") == 0
+        assert state.queue_depth(NODE, "vic") == 1
+        assert "REROUTED" in read_log()
+
+
+class TestLeaderSeesLateral:
+    def test_off_no_copy_to_lead(self, r4t_home, tmp_path, chatty_config, tells, monkeypatch):
+        ctx = _tree_ctx(tmp_path, chatty_config, tells)  # leader_sees_lateral off
+        monkeypatch.setenv("CHATTY_TO", "Bea")
+        monkeypatch.setenv("CHATTY_BODY", "cell-mate take a look")
+        assert run_one(ctx, "acme:vic", "acme:ann", "work the design") == 1
+        assert "lateral" not in state.read_history(NODE, "vic")
+
+    def test_on_copies_history_no_turn_burned(
+        self, r4t_home, tmp_path, chatty_config, tells, monkeypatch
+    ):
+        ctx = _tree_ctx(tmp_path, chatty_config, tells, leader_sees_lateral=True)
+        monkeypatch.setenv("CHATTY_TO", "Bea")
+        monkeypatch.setenv("CHATTY_BODY", "cell-mate take a look")
+        # Ann -> Bea is lateral; Ann's lead is Vic, who gets a read-only copy.
+        assert run_one(ctx, "acme:vic", "acme:ann", "work the design") == 1
+        assert state.queue_depth(NODE, "vic") == 0  # no turn queued for the lead
+        history = state.read_history(NODE, "vic")
+        assert "lateral Ann -> bea" in history
+        assert "cell-mate take a look" in history
+        assert "LATERAL-COPY" in read_log()
+
+
+class TestEgressSetting:
+    def test_top_leader_egress_on_releases_external(
+        self, r4t_home, tmp_path, repo, chatty_config, tells, monkeypatch
+    ):
+        ctx = _tree_ctx(tmp_path, chatty_config, tells)  # egress defaults on
+        monkeypatch.setenv("CHATTY_TO", "outsider")
+        monkeypatch.setenv("CHATTY_BODY", "the org speaks")
+        assert run_one(ctx, "boss", "acme:vic", "report out") == 1  # vic is top leader
+        assert [e["to"] for e in outbox_envelopes(ctx.root)] == ["outsider"]
+
+    def test_egress_off_top_leader_dead_letters(
+        self, r4t_home, tmp_path, chatty_config, tells, monkeypatch
+    ):
+        ctx = _tree_ctx(tmp_path, chatty_config, tells, egress=False)
+        monkeypatch.setenv("CHATTY_TO", "outsider")
+        monkeypatch.setenv("CHATTY_BODY", "the org tries to speak")
+        assert run_one(ctx, "boss", "acme:vic", "report out") == 1
+        assert outbox_envelopes(ctx.root) == []
+        assert "egress-disabled" in dead_reasons()
+
+    def test_non_top_external_redirects_to_top_leader(
+        self, r4t_home, tmp_path, chatty_config, tells, monkeypatch
+    ):
+        ctx = _tree_ctx(tmp_path, chatty_config, tells)  # egress on, but ann is not top
+        monkeypatch.setenv("CHATTY_TO", "outsider")
+        monkeypatch.setenv("CHATTY_BODY", "let me tell the world")
+        assert run_one(ctx, "acme:vic", "acme:ann", "work the design") == 1
+        assert outbox_envelopes(ctx.root) == []
+        assert state.queue_depth(NODE, "vic") == 1  # redirected up to the top leader
+        assert "EGRESS-REDIRECT" in read_log()
+
+
+class TestPromptOverrides:
+    def _ctx_with_prompts(self, repo, rig_config, tells, tmp_path, prompts):
+        p = tmp_path / "defn.json"
+        p.write_text(json.dumps({"invoke": ["x"], "prompts": prompts}), encoding="utf-8")
+        _sent, capture = tells
+        return dispatch.DispatchContext(
+            root=repo, node=NODE, roster_path=repo / "ROSTER.md",
+            config_path=rig_config, tell_fn=capture, definition_path=p,
+        )
+
+    def _prompt(self, ctx, name="phil"):
+        roster = load_roster(ctx.roster_path)
+        return dispatch.build_prompt(ctx, roster, roster.find(name), [], Rig(name="t"))
+
+    def test_sparse_override_replaces_only_that_key(
+        self, r4t_home, repo, rig_config, tells, tmp_path
+    ):
+        ctx = self._ctx_with_prompts(
+            repo, rig_config, tells, tmp_path, {"work_commit": "- COMMIT OR ELSE."}
+        )
+        prompt = self._prompt(ctx)
+        assert "- COMMIT OR ELSE." in prompt
+        assert "not done until it is committed" not in prompt
+        assert "the only thing the recipient sees" in prompt  # untouched keys default
+
+    def test_intro_substitution_fields_fill_in(
+        self, r4t_home, repo, rig_config, tells, tmp_path
+    ):
+        ctx = self._ctx_with_prompts(
+            repo, rig_config, tells, tmp_path, {"intro": "I am {name} on {node}."}
+        )
+        assert "I am Phil on acme." in self._prompt(ctx)
+
+    def test_missing_definition_yields_all_defaults(self, ctx):
+        assert ctx.definition_path is None
+        prompt = self._prompt(ctx)
+        assert "not done until it is committed" in prompt
+        assert "You are Phil" in prompt
+
+    def test_load_overrides_tolerates_absence(self, tmp_path):
+        no_prompts = tmp_path / "d.json"
+        no_prompts.write_text(json.dumps({"invoke": ["x"]}), encoding="utf-8")
+        assert dispatch._load_prompt_overrides(no_prompts) == {}
+        assert dispatch._load_prompt_overrides(None) == {}
+        assert dispatch._load_prompt_overrides(tmp_path / "nope.json") == {}
+
+    def test_quiet_nudge_override_reaches_the_leader(
+        self, r4t_home, repo, rig_config, tells, tmp_path
+    ):
+        ctx = self._ctx_with_prompts(
+            repo, rig_config, tells, tmp_path, {"quiet_nudge": "PING {creator} re {thread}"}
+        )
+        task = tasks.new_task(new_ulid(), "acme:neil")
+        task["updated_at"] = "2020-01-01T00:00:00Z"
+        state.atomic_write_json(tasks.task_path(NODE, task["id"]), task)
+        roster = load_roster(ctx.roster_path)
+        config = load_rig_config(ctx.config_path)
+        assert dispatch._quiet_task_sweep(ctx, config, roster) == [task["id"]]
+        assert f"PING acme:neil re {task['id']}" in state.read_queue(NODE, "gerry")[0]["body"]
+
+
+class TestHistoryRigKnobs:
+    def _rig(self, tmp_path, **knobs):
+        invoke = ["echo", "{prompt}"]
+        config = {"worker": {"invoke": invoke, **knobs}}
+        path = tmp_path / "rigs.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        return load_rig_config(path).rigs["worker"]
+
+    def test_defaults(self, tmp_path):
+        rig = self._rig(tmp_path)
+        assert rig.history_max_bytes == 8192
+        assert rig.history_body_max == 2000
+        assert rig.prompt_body_max == 4000
+
+    def test_parsed_values(self, tmp_path):
+        rig = self._rig(
+            tmp_path, history_max_bytes=65536, history_body_max=8000, prompt_body_max=16000
+        )
+        assert rig.history_max_bytes == 65536
+        assert rig.history_body_max == 8000
+        assert rig.prompt_body_max == 16000
+
+    def test_bad_value_flags_rig_error(self, tmp_path):
+        rig = self._rig(tmp_path, history_max_bytes=-1)
+        assert rig.error and "history_max_bytes" in rig.error
+
+    def test_prompt_body_max_truncates_per_rig(self, ctx):
+        roster = load_roster(ctx.roster_path)
+        big = "z" * 50
+        batch = [{"from": "boss", "thread": "t", "body": big, "class": "human"}]
+        prompt = dispatch.build_prompt(
+            ctx, roster, roster.find("phil"), batch, Rig(name="t", prompt_body_max=10)
+        )
+        assert "message truncated by r4t" in prompt
 
 
 class TestCli:

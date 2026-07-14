@@ -5,7 +5,7 @@ import json
 import sys
 
 import state
-from org import ORG_CONFIG_NAME, check_org, load_org
+from org import COMMS_CLOSED, ORG_CONFIG_NAME, check_org, load_org
 from r4t import main as r4t_main
 
 NODE = "acme"
@@ -92,13 +92,40 @@ def test_malformed_config_degrades_but_check_reports(tmp_path):
     assert any("cannot read org config" in m for m in check_org(tmp_path))
 
 
-def test_check_reports_missing_repo_key_and_absent_workplace(tmp_path):
-    (tmp_path / ORG_CONFIG_NAME).write_text(json.dumps({"note": "oops"}), encoding="utf-8")
-    assert any('must set "repo"' in m for m in check_org(tmp_path))
+def test_repo_less_config_is_valid_in_repo_default(tmp_path):
+    # A config WITHOUT a repo key is legal — it exists purely to carry org
+    # settings; resolution falls back to the in-repo default.
+    (tmp_path / ORG_CONFIG_NAME).write_text(
+        json.dumps({"comms": "closed", "egress": False}), encoding="utf-8"
+    )
+    org = load_org(tmp_path)
+    assert not org.is_portable and org.workplace == tmp_path
+    assert org.comms == COMMS_CLOSED and org.egress is False
+    assert check_org(tmp_path) == []
+
+
+def test_check_reports_absent_workplace(tmp_path):
     (tmp_path / ORG_CONFIG_NAME).write_text(
         json.dumps({"repo": str(tmp_path / "nope")}), encoding="utf-8"
     )
     assert any("does not exist" in m for m in check_org(tmp_path))
+
+
+def test_settings_parse_with_defaults(tmp_path):
+    org = load_org(tmp_path)  # no config at all
+    assert org.comms == "open" and org.leader_sees_lateral is False and org.egress is True
+
+
+def test_check_flags_bad_setting_values(tmp_path):
+    (tmp_path / ORG_CONFIG_NAME).write_text(
+        json.dumps({"comms": "loud", "leader_sees_lateral": "yes"}), encoding="utf-8"
+    )
+    problems = check_org(tmp_path)
+    assert any('"comms" must be "open" or "closed"' in m for m in problems)
+    assert any('"leader_sees_lateral" must be true or false' in m for m in problems)
+    # load_org still degrades to safe defaults rather than raising
+    org = load_org(tmp_path)
+    assert org.comms == "open" and org.leader_sees_lateral is False
 
 
 # ---------- integration: turns resolve org dir vs workplace ----------

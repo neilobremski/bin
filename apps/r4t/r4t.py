@@ -148,6 +148,12 @@ def _context(args: argparse.Namespace, node: str) -> DispatchContext:
             simulate=simulate_enabled(getattr(args, "simulate_tell", False)),
         ),
         workplace=org.workplace,
+        comms=org.comms,
+        leader_sees_lateral=org.leader_sees_lateral,
+        egress=org.egress,
+        definition_path=(
+            Path(defn).expanduser() if (defn := getattr(args, "definition", None)) else None
+        ),
     )
 
 
@@ -1119,6 +1125,11 @@ def _add_common(p: argparse.ArgumentParser, *, with_node: bool = False) -> None:
     p.add_argument(
         "--rig-config",
         help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    p.add_argument(
+        "--definition",
+        help="This node's a8s definition path ($DEFINITION_PATH); read for "
+        "prompt overrides under its `prompts` key.",
     )
     if with_node:
         p.add_argument("--node", help="Team node name (default: sole ~/.config/r4t team).")
