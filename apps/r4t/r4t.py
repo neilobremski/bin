@@ -39,7 +39,11 @@ from rig import (
     preset_names,
     remove_rig,
     resolve_config_path,
+    rig_setting,
+    rig_settings,
+    set_rig_value,
     swap_preset_rig,
+    unset_rig_value,
 )
 from notify import resolve_tell_fn, simulate_enabled
 from org import check_org, load_org
@@ -55,6 +59,7 @@ COMMAND_HELP = [
     ("rig presets", "Named CLI presets aligned with a8s definitions"),
     ("rig add <rig> <preset>", "Add a rig to ~/.config/r4t/rigs.json from a preset"),
     ("rig remove <rig>", "Remove a rig from the config (alias: rm)"),
+    ("rig set <rig> <key> <val>", "Write a rig setting (get/unset/configure too)"),
     ("roster check", "Lint ROSTER.md against the rig config"),
     ("task list", "List conversation threads for a team"),
     ("task show <id>", "Show one task ledger record as JSON"),
@@ -806,6 +811,10 @@ RIG_COMMAND_HELP = [
     ("rig add <rig> <preset>", "Add a rig (creates the config if needed; --model M, --force)"),
     ("rig swap <rig> <preset>", "Switch an existing rig to a preset, keeping its settings"),
     ("rig remove <rig>...", "Remove one or more rigs from the config (alias: rm)"),
+    ("rig configure <rig>", "Walk a rig's settings one prompt at a time"),
+    ("rig set <rig> <key> <val>", "Write one explicit rig setting"),
+    ("rig get <rig> [<key>]", "Read a rig's effective settings, source-annotated"),
+    ("rig unset <rig> <key>...", "Drop explicit settings back to preset/built-in defaults"),
 ]
 
 
@@ -960,6 +969,95 @@ def cmd_rig_remove(args: argparse.Namespace) -> int:
             rc = 1
             continue
         print(f"removed rig {rig_key!r} from {config_path}")
+    return rc
+
+
+def _setting_bracket(s) -> str:
+    return f"[{s.display()}]" if s.explicit else f"[{s.display()}, {s.source}]"
+
+
+def cmd_rig_configure(args: argparse.Namespace) -> int:
+    config_path = resolve_config_path(args.rig_config)
+    rig_key = args.rig.strip().lower()
+    try:
+        settings = rig_settings(config_path, args.rig)
+    except RigError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    interactive = sys.stdin.isatty()
+    print(f"Configuring rig {rig_key!r} in {config_path} — Enter keeps the current value.")
+    for s in settings:
+        while True:
+            try:
+                typed = input(f"{s.key} {_setting_bracket(s)}: ").strip()
+            except EOFError:
+                print()
+                return 0
+            if typed == "":
+                break
+            try:
+                set_rig_value(config_path, args.rig, s.key, typed)
+                break
+            except RigError as e:
+                print(str(e), file=sys.stderr)
+                if interactive:
+                    continue
+                return 1
+    return 0
+
+
+def cmd_rig_set(args: argparse.Namespace) -> int:
+    config_path = resolve_config_path(args.rig_config)
+    rig_key = args.rig.strip().lower()
+    try:
+        s = set_rig_value(config_path, args.rig, args.key, args.value)
+    except RigError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    print(f"set {rig_key} {s.key} = {s.display()} in {config_path}")
+    return 0
+
+
+def cmd_rig_get(args: argparse.Namespace) -> int:
+    config_path = resolve_config_path(args.rig_config)
+    if args.key:
+        try:
+            s = rig_setting(config_path, args.rig, args.key)
+        except RigError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        print("" if s.value is None else s.display())
+        print(f"({s.source})", file=sys.stderr)
+        return 0
+    try:
+        settings = rig_settings(config_path, args.rig)
+    except RigError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    width = max(len(s.key) for s in settings)
+    for s in settings:
+        print(f"{s.key:<{width}}  {s.display()}  ({s.source})")
+    return 0
+
+
+def cmd_rig_unset(args: argparse.Namespace) -> int:
+    config_path = resolve_config_path(args.rig_config)
+    rig_key = args.rig.strip().lower()
+    rc = 0
+    for key in args.keys:
+        try:
+            removed = unset_rig_value(config_path, args.rig, key)
+        except RigError as e:
+            print(str(e), file=sys.stderr)
+            rc = 1
+            continue
+        if removed:
+            print(f"unset {rig_key} {key.strip().lower()} in {config_path}")
+        else:
+            print(
+                f"{rig_key} {key.strip().lower()} was not explicitly set; "
+                f"nothing to unset"
+            )
     return rc
 
 
@@ -1355,6 +1453,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="Harness config path (default: ~/.config/r4t/rigs.json).",
     )
     rig_remove_p.set_defaults(func=cmd_rig_remove)
+
+    rig_configure_p = rig_sub.add_parser(
+        "configure",
+        help="Walk a rig's settings one prompt at a time (Enter keeps each).",
+    )
+    rig_configure_p.add_argument("rig", help="Symbolic rig name to configure.")
+    rig_configure_p.add_argument(
+        "--rig-config",
+        help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    rig_configure_p.set_defaults(func=cmd_rig_configure)
+
+    rig_set_p = rig_sub.add_parser(
+        "set",
+        help="Write one explicit rig setting.",
+    )
+    rig_set_p.add_argument("rig", help="Symbolic rig name.")
+    rig_set_p.add_argument("key", help="Setting name (see `r4t rig get <rig>`).")
+    rig_set_p.add_argument("value", help="New value.")
+    rig_set_p.add_argument(
+        "--rig-config",
+        help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    rig_set_p.set_defaults(func=cmd_rig_set)
+
+    rig_get_p = rig_sub.add_parser(
+        "get",
+        help="Read a rig's effective settings (bare: all; with key: one value).",
+    )
+    rig_get_p.add_argument("rig", help="Symbolic rig name.")
+    rig_get_p.add_argument("key", nargs="?", help="Setting name; omit to list all.")
+    rig_get_p.add_argument(
+        "--rig-config",
+        help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    rig_get_p.set_defaults(func=cmd_rig_get)
+
+    rig_unset_p = rig_sub.add_parser(
+        "unset",
+        help="Drop explicit settings so they fall back to preset/built-in defaults.",
+    )
+    rig_unset_p.add_argument("rig", help="Symbolic rig name.")
+    rig_unset_p.add_argument("keys", nargs="+", help="Setting name(s) to unset.")
+    rig_unset_p.add_argument(
+        "--rig-config",
+        help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    rig_unset_p.set_defaults(func=cmd_rig_unset)
 
     task_p = sub.add_parser("task", help="Task ledger commands.")
     task_p.add_argument("action", choices=["list", "show"])

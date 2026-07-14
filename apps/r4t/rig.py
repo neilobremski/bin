@@ -599,10 +599,197 @@ def remove_rig(path: Path, rig_name: str) -> str:
     return rig_key
 
 
+CONFIGURABLE_INT_KEYS = (
+    "concurrency",
+    "history_max_bytes",
+    "history_body_max",
+    "prompt_body_max",
+)
+CONFIGURABLE_FLOAT_KEYS = ("rig_budget_max", "rig_budget_earn_per_hour")
+CONFIGURABLE_RIG_KEYS = (
+    "concurrency",
+    "rig_budget_max",
+    "rig_budget_earn_per_hour",
+    "history_max_bytes",
+    "history_body_max",
+    "prompt_body_max",
+    "model",
+)
+
+
+@dataclass
+class RigSetting:
+    """One effective rig setting and where it comes from. `explicit` is True
+    only when the value is written in rigs.json; inherited tier defaults and
+    built-in defaults are never materialized (so `rig swap` can re-resolve)."""
+
+    key: str
+    value: object
+    source: str
+    explicit: bool
+
+    def display(self) -> str:
+        if self.value is None:
+            return "unset"
+        if isinstance(self.value, float):
+            return f"{self.value:g}"
+        return str(self.value)
+
+
 def resolve_config_path(raw: str | None) -> Path:
     if raw:
         return Path(raw).expanduser().resolve()
     return default_config_path()
+
+
+def _unknown_setting_error(key: str) -> RigError:
+    valid = ", ".join(CONFIGURABLE_RIG_KEYS)
+    return RigError(
+        f"unknown rig setting {key!r} "
+        f"(try: r4t rig set <rig> <key> <value> with one of: {valid})"
+    )
+
+
+def _rig_entry(path: Path, rig_name: str) -> tuple[str, dict, dict]:
+    """Return (rig_key, entry, payload) for a rig that must already exist."""
+    rig_key = _validate_rig_name(rig_name)
+    payload = _load_config_payload(path)
+    entry = payload.get(rig_key)
+    if not isinstance(entry, dict):
+        raise RigError(
+            f"no rig {rig_key!r} in {path} (try: r4t rig add {rig_key} <preset>)"
+        )
+    return rig_key, entry, payload
+
+
+def _entry_preset(entry: dict) -> str | None:
+    preset = entry.get("preset")
+    if isinstance(preset, str) and preset.strip():
+        return preset.strip().lower()
+    return None
+
+
+def _resolve_setting(entry: dict, key: str) -> RigSetting:
+    preset = _entry_preset(entry)
+    if key == "model":
+        if entry.get("model"):
+            return RigSetting("model", str(entry["model"]), "explicit", True)
+        return RigSetting(
+            "model", None, "preset default" if preset else "built-in default", False
+        )
+    if key == "concurrency":
+        if "concurrency" in entry:
+            return RigSetting(key, int(entry["concurrency"]), "explicit", True)
+        return RigSetting(key, DEFAULT_CONCURRENCY, "built-in default", False)
+    if key in CONFIGURABLE_FLOAT_KEYS:
+        if key in entry:
+            return RigSetting(key, float(entry[key]), "explicit", True)
+        return RigSetting(key, None, "built-in default", False)
+    if key in entry:
+        return RigSetting(key, int(entry[key]), "explicit", True)
+    if preset and HARNESS_PRESETS.get(preset, {}).get("text_tier"):
+        return RigSetting(key, text_defaults(preset)[key], f"from preset {preset}", False)
+    return RigSetting(key, text_defaults(None)[key], "built-in default", False)
+
+
+def rig_settings(path: Path, rig_name: str) -> list[RigSetting]:
+    """Every configurable setting for a rig, effective value + source."""
+    _, entry, _ = _rig_entry(path, rig_name)
+    return [_resolve_setting(entry, key) for key in CONFIGURABLE_RIG_KEYS]
+
+
+def rig_setting(path: Path, rig_name: str, key: str) -> RigSetting:
+    key = key.strip().lower()
+    if key not in CONFIGURABLE_RIG_KEYS:
+        raise _unknown_setting_error(key)
+    _, entry, _ = _rig_entry(path, rig_name)
+    return _resolve_setting(entry, key)
+
+
+def _parse_setting_number(key: str, raw: object) -> int | float:
+    text = str(raw).strip()
+    try:
+        number = float(text)
+    except ValueError:
+        raise RigError(
+            f"{key} must be a number, got {raw!r} "
+            f"(try: r4t rig set <rig> {key} <number>)"
+        )
+    if number <= 0:
+        raise RigError(f"{key} must be a positive number, got {raw!r}")
+    if key in CONFIGURABLE_INT_KEYS:
+        if number != int(number):
+            raise RigError(f"{key} must be a whole number, got {raw!r}")
+        return int(number)
+    return number
+
+
+def set_rig_model(path: Path, rig_name: str, model: str) -> None:
+    """Re-resolve a rig's invoke for a new --model through its recorded preset,
+    exactly the way `rig add --model` does. agy keeps its live resolver; a rig
+    with no recorded preset errors, because there is nothing to substitute into."""
+    rig_key, entry, payload = _rig_entry(path, rig_name)
+    preset = _entry_preset(entry)
+    if preset is None:
+        raise RigError(
+            f"rig {rig_key!r} has no recorded preset to re-resolve model through "
+            f"(try: r4t rig swap {rig_key} <preset> --model {model})"
+        )
+    entry["invoke"] = build_preset_invoke(preset, model=model)
+    entry.pop("model", None)
+    entry.pop("model_resolver", None)
+    if HARNESS_PRESETS.get(preset, {}).get("model_resolver"):
+        entry["model"] = model.strip()
+        entry["model_resolver"] = HARNESS_PRESETS[preset]["model_resolver"]
+    atomic_write_json(path, payload)
+
+
+def set_rig_value(path: Path, rig_name: str, key: str, value: object) -> RigSetting:
+    """Write one explicit rig setting. Numeric keys validate as numbers; `model`
+    re-resolves the invoke through the preset. Returns the resulting setting."""
+    key = key.strip().lower()
+    if key not in CONFIGURABLE_RIG_KEYS:
+        raise _unknown_setting_error(key)
+    rig_key = _validate_rig_name(rig_name)
+    if key == "model":
+        model = str(value).strip()
+        set_rig_model(path, rig_key, model)
+        return RigSetting("model", model, "explicit", True)
+    number = _parse_setting_number(key, value)
+    _, entry, payload = _rig_entry(path, rig_name)
+    entry[key] = number
+    atomic_write_json(path, payload)
+    return RigSetting(key, number, "explicit", True)
+
+
+def unset_rig_value(path: Path, rig_name: str, key: str) -> bool:
+    """Drop an explicit setting so it falls back to preset tier / built-in
+    default. Returns True if something was removed, False if it was not
+    explicitly set (a friendly no-op). `model` re-resolves the invoke to the
+    preset's base."""
+    key = key.strip().lower()
+    if key not in CONFIGURABLE_RIG_KEYS:
+        raise _unknown_setting_error(key)
+    rig_key, entry, payload = _rig_entry(path, rig_name)
+    if key == "model":
+        preset = _entry_preset(entry)
+        if preset is None:
+            raise RigError(
+                f"rig {rig_key!r} has no recorded preset (try: r4t rig list)"
+            )
+        base_invoke = build_preset_invoke(preset)
+        had_model = "model" in entry or entry.get("invoke") != base_invoke
+        entry["invoke"] = base_invoke
+        entry.pop("model", None)
+        entry.pop("model_resolver", None)
+        if had_model:
+            atomic_write_json(path, payload)
+        return had_model
+    if key not in entry:
+        return False
+    del entry[key]
+    atomic_write_json(path, payload)
+    return True
 
 
 def _positive_number(raw: object, default: float) -> tuple[float, str | None]:
