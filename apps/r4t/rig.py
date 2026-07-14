@@ -36,6 +36,8 @@ notes.
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,6 +70,7 @@ HARNESS_PRESETS: dict[str, dict] = {
             "-p",
             "{prompt}",
         ],
+        "model_argv": ["--model", "{model}"],
     },
     "codex": {
         "description": "OpenAI Codex CLI — matches apps/a8s/definitions/codex.json",
@@ -80,6 +83,8 @@ HARNESS_PRESETS: dict[str, dict] = {
             "--skip-git-repo-check",
             "{prompt}",
         ],
+        "model_argv": ["-m", "{model}"],
+        "model_anchor": "exec",
     },
     "cursor": {
         "description": "Cursor Agent CLI (`agent`) — matches apps/a8s/definitions/cursor.json",
@@ -93,6 +98,7 @@ HARNESS_PRESETS: dict[str, dict] = {
             "--approve-mcps",
             "{prompt}",
         ],
+        "model_argv": ["--model", "{model}"],
     },
     "opencode": {
         "description": (
@@ -108,6 +114,8 @@ HARNESS_PRESETS: dict[str, dict] = {
             ".",
             "{prompt}",
         ],
+        "model_argv": ["-m", "{model}"],
+        "model_anchor": "run",
     },
     "opencode-ollama": {
         "description": (
@@ -158,6 +166,8 @@ HARNESS_PRESETS: dict[str, dict] = {
             "--print",
             "{prompt}",
         ],
+        "model_argv": ["--model", "{model}"],
+        "model_resolver": "agy-live",
     },
     "copilot": {
         "description": "GitHub Copilot CLI — matches apps/a8s/definitions/copilot.json",
@@ -211,6 +221,8 @@ class Rig:
     budget_earn_per_hour: float = DEFAULT_BUDGET_EARN_PER_HOUR
     rig_budget_max: float | None = None
     rig_budget_earn_per_hour: float | None = None
+    model: str | None = None
+    model_resolver: str | None = None
     error: str | None = None
 
     def pool(self) -> list[list[str]]:
@@ -286,22 +298,131 @@ def format_preset_invoke(preset: str) -> str:
 
 
 def build_preset_invoke(preset: str, *, model: str | None = None) -> list[str]:
-    """Materialize a preset argv, substituting {model} when the preset needs it."""
+    """Materialize a preset argv for a given --model.
+
+    Three shapes, keyed off the preset's metadata:
+
+    - Inline `{model}` presets (ollama, opencode-ollama): --model is REQUIRED
+      and substituted straight into the placeholder — the CLI has no default.
+    - `model_argv` presets with a live resolver (agy): splice the flag pair but
+      keep the `{model}` placeholder so dispatch re-resolves the friendly string
+      against `agy models` before every turn (the display names drift as agy
+      ships new versions, so a value baked in at add-time would go stale).
+    - `model_argv` presets without a resolver (claude/codex/cursor/opencode):
+      splice the flag pair with the resolved value now. --model is OPTIONAL —
+      absent, the base argv is returned and the CLI's own default applies.
+    """
     preset_key = preset.strip().lower()
     if preset_key not in HARNESS_PRESETS:
         known = ", ".join(preset_names())
         raise RigError(f"unknown preset {preset!r}; choose one of: {known}")
-    needs_model = any("{model}" in arg for arg in HARNESS_PRESETS[preset_key]["invoke"])
-    if needs_model and not (model or "").strip():
-        raise RigError(f"preset {preset_key!r} requires --model")
+    entry = HARNESS_PRESETS[preset_key]
     model_value = (model or "").strip()
-    argv: list[str] = []
-    for arg in HARNESS_PRESETS[preset_key]["invoke"]:
-        if arg == "{model}":
-            argv.append(model_value)
-        else:
-            argv.append(arg)
+
+    if any("{model}" in arg for arg in entry["invoke"]):
+        if not model_value:
+            raise RigError(f"preset {preset_key!r} requires --model")
+        return [model_value if arg == "{model}" else arg for arg in entry["invoke"]]
+
+    argv = list(entry["invoke"])
+    if not model_value:
+        return argv
+
+    model_argv = entry.get("model_argv")
+    if not model_argv:
+        raise RigError(f"preset {preset_key!r} does not support --model")
+    spliced = "{model}" if entry.get("model_resolver") else model_value
+    flag_pair = [spliced if arg == "{model}" else arg for arg in model_argv]
+    anchor = entry.get("model_anchor")
+    insert_at = argv.index(anchor) + 1 if anchor else 1
+    argv[insert_at:insert_at] = flag_pair
     return argv
+
+
+AGY_MODELS_TIMEOUT_SECONDS = 10
+
+# Effort/thinking suffix ranking used to break ties when a friendly string
+# matches several display names (e.g. `flash` hits Flash Low/Medium/High).
+_EFFORT_RANK = {"thinking": 4, "high": 3, "medium": 2, "low": 1}
+
+
+def _model_tokens(text: str) -> list[str]:
+    """Lowercase and split on runs of dashes/whitespace, dropping any wrapping
+    parens so `-` and ` ` are interchangeable: `gemini-3.5-flash` and
+    `Gemini 3.5 Flash` tokenize identically."""
+    return [t.strip("()") for t in re.split(r"[-\s]+", text.strip().lower()) if t.strip("()")]
+
+
+def _effort_rank(tokens: list[str]) -> int:
+    return max((_EFFORT_RANK.get(t, 0) for t in tokens), default=0)
+
+
+def fuzzy_match_model(query: str, names: list[str]) -> str:
+    """Resolve a friendly --model string to one exact display name.
+
+    A name matches when every query token is a substring of some name token,
+    after both sides are normalized by `_model_tokens` (case-insensitive, dashes
+    and spaces treated as the same separator, parens stripped). So `sonnet`,
+    `claude-sonnet`, and the exact `Claude Sonnet 4.6 (Thinking)` all resolve;
+    `gpt-oss-120b` matches `GPT-OSS 120B (Medium)`.
+
+    Tie-break when several names match, in order: fewest extra tokens (tightest
+    match) → highest effort/thinking suffix (thinking > high > medium > low) →
+    alphabetical. A miss raises RigError listing the available names — agy
+    silently ignores unknown --model strings, so an unresolved value must never
+    be passed through.
+    """
+    q = _model_tokens(query)
+    if not q:
+        raise RigError("empty --model value; nothing to match")
+    scored: list[tuple[int, int, str]] = []
+    for name in names:
+        name_tokens = _model_tokens(name)
+        if all(any(tok in cand for cand in name_tokens) for tok in q):
+            scored.append((len(name_tokens) - len(q), -_effort_rank(name_tokens), name))
+    if not scored:
+        listing = "\n".join(f"  {n}" for n in names)
+        raise RigError(
+            f"--model {query!r} matched no agy model. Available:\n{listing}\n"
+            f"(try: r4t rig swap <rig> agy --model <one of the above>)"
+        )
+    scored.sort()
+    return scored[0][2]
+
+
+def agy_model_names(timeout: float = AGY_MODELS_TIMEOUT_SECONDS) -> list[str]:
+    """The current `agy models` display names, one per line. Errors loudly —
+    never returns a partial or fabricated list."""
+    try:
+        proc = subprocess.run(
+            ["agy", "models"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError as e:
+        raise RigError(f"could not run `agy models` to resolve --model: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        raise RigError(
+            f"`agy models` timed out after {timeout:g}s while resolving --model"
+        ) from e
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise RigError(f"`agy models` failed (exit {proc.returncode}): {detail}")
+    names = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not names:
+        raise RigError("`agy models` returned no models to match against")
+    return names
+
+
+def resolve_agy_model(
+    query: str, *, timeout: float = AGY_MODELS_TIMEOUT_SECONDS, names: list[str] | None = None
+) -> str:
+    """Fuzzy-match `query` against the live `agy models` list. Nothing is cached:
+    the list is re-fetched per call so it stays current as agy ships versions."""
+    if names is None:
+        names = agy_model_names(timeout)
+    return fuzzy_match_model(query, names)
 
 
 def _validate_rig_name(name: str) -> str:
@@ -361,10 +482,14 @@ def add_preset_rig(
     )
     if model:
         note += f" model={model.strip()}."
-    payload[rig_key] = {
+    rig_entry: dict = {
         "_notes": note,
         "invoke": invoke,
     }
+    if model and entry.get("model_resolver"):
+        rig_entry["model"] = model.strip()
+        rig_entry["model_resolver"] = entry["model_resolver"]
+    payload[rig_key] = rig_entry
     atomic_write_json(path, payload)
     return rig_key
 
@@ -390,12 +515,37 @@ def swap_preset_rig(
             f"no rig {rig_key!r} to swap in {path} "
             f"(try: r4t rig add {rig_key} {preset_key})"
         )
+    entry = HARNESS_PRESETS[preset_key]
     invoke = build_preset_invoke(preset_key, model=model)
     note = f"Swapped to preset {preset_key!r} by `r4t rig swap`."
     if model:
         note += f" model={model.strip()}."
     existing["_notes"] = note
     existing["invoke"] = invoke
+    # A swap replaces the harness wholesale, so stale model resolution from the
+    # previous preset must not linger.
+    existing.pop("model", None)
+    existing.pop("model_resolver", None)
+    if model and entry.get("model_resolver"):
+        existing["model"] = model.strip()
+        existing["model_resolver"] = entry["model_resolver"]
+    atomic_write_json(path, payload)
+    return rig_key
+
+
+def remove_rig(path: Path, rig_name: str) -> str:
+    """Delete a symbolic rig from the config. Returns the removed key.
+
+    Fails loudly if the rig is absent — the same shape `swap` uses for an
+    unknown rig. Usage checks (roster/pin references) live in the CLI layer,
+    which can reach the roster."""
+    rig_key = _validate_rig_name(rig_name)
+    payload = _load_config_payload(path)
+    if rig_key not in payload or rig_key.startswith("_"):
+        raise RigError(
+            f"no rig {rig_key!r} to remove in {path} (try: r4t rig list)"
+        )
+    del payload[rig_key]
     atomic_write_json(path, payload)
     return rig_key
 
@@ -447,6 +597,11 @@ def _parse_rig(name: str, raw: object) -> Rig:
         rig.error = err
         return rig
     rig.invoke = invoke
+
+    resolver = raw.get("model_resolver")
+    if resolver is not None:
+        rig.model_resolver = str(resolver)
+        rig.model = str(raw.get("model") or "").strip() or None
 
     problems: list[str] = []
     rig.timeout_seconds, err = _positive_number(

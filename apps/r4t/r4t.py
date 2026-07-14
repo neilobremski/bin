@@ -37,6 +37,7 @@ from rig import (
     format_preset_invoke,
     load_rig_config,
     preset_names,
+    remove_rig,
     resolve_config_path,
     swap_preset_rig,
 )
@@ -53,6 +54,7 @@ COMMAND_HELP = [
     ("rig list", "Rig invoke lines, limits, and roster rig resolution"),
     ("rig presets", "Named CLI presets aligned with a8s definitions"),
     ("rig add <rig> <preset>", "Add a rig to ~/.config/r4t/rigs.json from a preset"),
+    ("rig remove <rig>", "Remove a rig from the config (alias: rm)"),
     ("roster check", "Lint ROSTER.md against the rig config"),
     ("task list", "List conversation threads for a team"),
     ("task show <id>", "Show one task ledger record as JSON"),
@@ -797,6 +799,7 @@ RIG_COMMAND_HELP = [
     ("rig presets", "Named CLI presets aligned with a8s definitions"),
     ("rig add <rig> <preset>", "Add a rig (creates the config if needed; --model M, --force)"),
     ("rig swap <rig> <preset>", "Switch an existing rig to a preset, keeping its settings"),
+    ("rig remove <rig>...", "Remove one or more rigs from the config (alias: rm)"),
 ]
 
 
@@ -868,6 +871,7 @@ def cmd_rig_add(args: argparse.Namespace) -> int:
         return 1
     print(f"added rig {rig_key!r} ({args.preset}) to {config_path}")
     print(f"  invoke: {' '.join(invoke)}")
+    _print_model_note(preset_key, args.model)
     print(f"Reference it from ROSTER.md: `- **Rig:** {rig_key}`")
     return 0
 
@@ -888,7 +892,69 @@ def cmd_rig_swap(args: argparse.Namespace) -> int:
         return 1
     print(f"swapped rig {rig_key!r} to {args.preset} in {config_path}")
     print(f"  invoke: {' '.join(invoke)}")
+    _print_model_note(preset_key, args.model)
     return 0
+
+
+def _print_model_note(preset_key: str, model: str | None) -> None:
+    if model and HARNESS_PRESETS.get(preset_key, {}).get("model_resolver") == "agy-live":
+        print(
+            f"  model: {model.strip()!r} — resolved live against `agy models` "
+            f"before every turn"
+        )
+
+
+def _rig_usage(config, roster, rig_key: str) -> list[str]:
+    """Members and pins still pointing at rig_key — used to refuse a remove that
+    would strand a live team."""
+    users: list[str] = []
+    for agent, pinned in config.pins.items():
+        if pinned == rig_key:
+            users.append(f"{agent} (pinned)")
+    if roster is not None:
+        for m in roster.members:
+            if (m.rig or "").strip().lower() == rig_key:
+                users.append(m.name)
+    return users
+
+
+def cmd_rig_remove(args: argparse.Namespace) -> int:
+    config_path = resolve_config_path(args.rig_config)
+    try:
+        config = load_rig_config(config_path)
+    except RigError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    roster = None
+    if not args.force:
+        roster_path = resolve_roster_path(
+            _resolve_root(getattr(args, "root", None)), getattr(args, "roster", None)
+        )
+        if roster_path.is_file():
+            try:
+                roster = load_roster(roster_path)
+            except RosterError:
+                roster = None
+    rc = 0
+    for name in args.rigs:
+        rig_key = name.strip().lower()
+        users = [] if args.force else _rig_usage(config, roster, rig_key)
+        if users:
+            print(
+                f"rig {rig_key!r} still used by {', '.join(users)}; not removed "
+                f"(try: repoint them, or r4t rig remove {rig_key} --force)",
+                file=sys.stderr,
+            )
+            rc = 1
+            continue
+        try:
+            remove_rig(config_path, name)
+        except RigError as e:
+            print(str(e), file=sys.stderr)
+            rc = 1
+            continue
+        print(f"removed rig {rig_key!r} from {config_path}")
+    return rc
 
 
 def cmd_task(args: argparse.Namespace) -> int:
@@ -1226,7 +1292,7 @@ def build_parser() -> argparse.ArgumentParser:
     rig_add_p.add_argument(
         "--model",
         metavar="MODEL",
-        help="Model name for presets that need it (e.g. opencode-ollama).",
+        help="Optional model for the preset (required for ollama; agy resolves it live).",
     )
     rig_add_p.add_argument(
         "--rig-config",
@@ -1257,6 +1323,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Harness config path (default: ~/.config/r4t/rigs.json).",
     )
     rig_swap_p.set_defaults(func=cmd_rig_swap)
+
+    rig_remove_p = rig_sub.add_parser(
+        "remove",
+        aliases=["rm"],
+        help="Remove one or more rigs from the rig config.",
+    )
+    rig_remove_p.add_argument(
+        "rigs",
+        nargs="+",
+        help="Symbolic rig name(s) to remove.",
+    )
+    rig_remove_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Remove even if a roster member or pin still references the rig.",
+    )
+    rig_remove_p.add_argument(
+        "--rig-config",
+        help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    rig_remove_p.set_defaults(func=cmd_rig_remove)
 
     task_p = sub.add_parser("task", help="Task ledger commands.")
     task_p.add_argument("action", choices=["list", "show"])

@@ -21,11 +21,15 @@ from rig import (
     build_preset_invoke,
     default_config_payload,
     format_preset_invoke,
+    fuzzy_match_model,
     load_rig_config,
     preset_names,
+    remove_rig,
+    resolve_agy_model,
     swap_preset_rig,
 )
 from roster import Member
+from r4t import main as r4t_main
 
 
 def write_config(tmp_path: Path, data: dict) -> Path:
@@ -404,3 +408,193 @@ class TestHarnessPresets:
     def test_build_preset_invoke_unknown(self):
         with pytest.raises(RigError, match="unknown preset"):
             build_preset_invoke("gemini")
+
+
+AGY_MODEL_LIST = [
+    "Gemini 3.5 Flash (Medium)",
+    "Gemini 3.5 Flash (High)",
+    "Gemini 3.5 Flash (Low)",
+    "Gemini 3.1 Pro (Low)",
+    "Gemini 3.1 Pro (High)",
+    "Claude Sonnet 4.6 (Thinking)",
+    "Claude Opus 4.6 (Thinking)",
+    "GPT-OSS 120B (Medium)",
+]
+
+
+class TestModelSplice:
+    """--model splices at the right position for each preset (see the ruling on
+    issue #186: static presets splice now, agy keeps a placeholder for live
+    resolution)."""
+
+    def test_optional_when_absent_returns_base(self):
+        for preset in ("claude", "codex", "cursor", "opencode", "agy"):
+            assert build_preset_invoke(preset) == HARNESS_PRESETS[preset]["invoke"]
+
+    def test_claude_splices_after_executable(self):
+        argv = build_preset_invoke("claude", model="sonnet")
+        assert argv[:3] == ["claude", "--model", "sonnet"]
+        assert argv[-2:] == ["-p", "{prompt}"]
+
+    def test_codex_splices_after_exec(self):
+        argv = build_preset_invoke("codex", model="gpt-5.6-sol")
+        assert argv[:4] == ["codex", "exec", "-m", "gpt-5.6-sol"]
+        assert argv[-1] == "{prompt}"
+
+    def test_cursor_splices_after_executable(self):
+        argv = build_preset_invoke("cursor", model="sonnet-4-thinking")
+        assert argv[:3] == ["agent", "--model", "sonnet-4-thinking"]
+
+    def test_opencode_splices_after_run(self):
+        argv = build_preset_invoke("opencode", model="anthropic/claude-sonnet-4-5")
+        assert argv[:4] == ["opencode", "run", "-m", "anthropic/claude-sonnet-4-5"]
+        assert "--auto" in argv
+
+    def test_agy_keeps_placeholder_for_live_resolution(self):
+        argv = build_preset_invoke("agy", model="sonnet")
+        assert argv[:3] == ["agy", "--model", "{model}"]
+        assert "sonnet" not in argv
+
+    def test_ollama_requires_model_and_substitutes(self):
+        with pytest.raises(RigError, match="requires --model"):
+            build_preset_invoke("ollama")
+        argv = build_preset_invoke("ollama", model="qwen2.5-coder:7b")
+        assert argv == ["ollama", "run", "qwen2.5-coder:7b", "{prompt}"]
+
+    def test_preset_without_model_support_refuses_model(self):
+        with pytest.raises(RigError, match="does not support --model"):
+            build_preset_invoke("copilot", model="opus")
+
+    def test_agy_add_persists_model_and_resolver(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "brain", "agy", model="sonnet")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert raw["brain"]["model"] == "sonnet"
+        assert raw["brain"]["model_resolver"] == "agy-live"
+        config = load_rig_config(path)
+        assert config.rigs["brain"].model == "sonnet"
+        assert config.rigs["brain"].model_resolver == "agy-live"
+
+    def test_static_add_does_not_persist_resolver(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "coder", "claude", model="opus")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert "model_resolver" not in raw["coder"]
+        assert raw["coder"]["invoke"][:3] == ["claude", "--model", "opus"]
+
+    def test_swap_off_agy_drops_stale_resolver(self, tmp_path):
+        path = write_config(tmp_path, {"worker": {"invoke": ["x", "{prompt}"]}})
+        swap_preset_rig(path, "worker", "agy", model="sonnet")
+        assert load_rig_config(path).rigs["worker"].model_resolver == "agy-live"
+        swap_preset_rig(path, "worker", "claude", model="opus")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert "model_resolver" not in raw["worker"]
+        assert "model" not in raw["worker"]
+
+
+class TestFuzzyMatchModel:
+    @pytest.mark.parametrize("query,expected", [
+        ("sonnet", "Claude Sonnet 4.6 (Thinking)"),
+        ("opus", "Claude Opus 4.6 (Thinking)"),
+        ("gpt-oss", "GPT-OSS 120B (Medium)"),
+        ("gpt-oss-120b", "GPT-OSS 120B (Medium)"),
+        ("claude-sonnet", "Claude Sonnet 4.6 (Thinking)"),
+        ("gemini-3.5-flash", "Gemini 3.5 Flash (High)"),
+        ("Claude Sonnet 4.6 (Thinking)", "Claude Sonnet 4.6 (Thinking)"),
+    ])
+    def test_resolves(self, query, expected):
+        assert fuzzy_match_model(query, AGY_MODEL_LIST) == expected
+
+    def test_dashes_and_spaces_interchangeable(self):
+        assert fuzzy_match_model("gemini 3.5 flash", AGY_MODEL_LIST) == fuzzy_match_model(
+            "gemini-3.5-flash", AGY_MODEL_LIST
+        )
+
+    def test_tiebreak_prefers_highest_effort(self):
+        # flash hits Low/Medium/High; the effort tie-break picks High.
+        assert fuzzy_match_model("flash", AGY_MODEL_LIST) == "Gemini 3.5 Flash (High)"
+
+    def test_ambiguous_family_tiebreak_is_deterministic(self):
+        # gemini hits every Gemini line; extra-token count ties, effort favors
+        # the High variants, alphabetical breaks Pro vs Flash -> Pro.
+        assert fuzzy_match_model("gemini", AGY_MODEL_LIST) == "Gemini 3.1 Pro (High)"
+        assert fuzzy_match_model("pro", AGY_MODEL_LIST) == "Gemini 3.1 Pro (High)"
+
+    def test_garbage_errors_loudly_with_listing(self):
+        with pytest.raises(RigError) as exc:
+            fuzzy_match_model("banana", AGY_MODEL_LIST)
+        msg = str(exc.value)
+        assert "matched no agy model" in msg
+        assert "Claude Sonnet 4.6 (Thinking)" in msg
+
+    def test_resolve_agy_model_uses_injected_names(self):
+        assert resolve_agy_model("opus", names=AGY_MODEL_LIST) == "Claude Opus 4.6 (Thinking)"
+
+
+class TestRemoveRig:
+    def test_remove_deletes_entry(self, tmp_path):
+        path = write_config(tmp_path, {
+            "worker": {"invoke": ["x", "{prompt}"]},
+            "spare": {"invoke": ["y", "{prompt}"]},
+        })
+        assert remove_rig(path, "worker") == "worker"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert "worker" not in raw
+        assert "spare" in raw
+
+    def test_remove_unknown_errors(self, tmp_path):
+        path = write_config(tmp_path, {"worker": {"invoke": ["x", "{prompt}"]}})
+        with pytest.raises(RigError, match="no rig 'ghost' to remove"):
+            remove_rig(path, "ghost")
+
+    def test_remove_missing_config_errors(self, tmp_path):
+        with pytest.raises(RigError, match="no rig"):
+            remove_rig(tmp_path / "rigs.json", "worker")
+
+
+class TestRemoveCLI:
+    def test_remove_via_cli(self, tmp_path):
+        path = write_config(tmp_path, {
+            "a": {"invoke": ["x", "{prompt}"]},
+            "b": {"invoke": ["y", "{prompt}"]},
+        })
+        assert r4t_main(["rig", "remove", "a", "--rig-config", str(path)]) == 0
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert "a" not in raw and "b" in raw
+
+    def test_rm_alias(self, tmp_path):
+        path = write_config(tmp_path, {"a": {"invoke": ["x", "{prompt}"]}})
+        assert r4t_main(["rig", "rm", "a", "--rig-config", str(path)]) == 0
+        assert "a" not in json.loads(path.read_text(encoding="utf-8"))
+
+    def test_remove_multiple(self, tmp_path):
+        path = write_config(tmp_path, {
+            "a": {"invoke": ["x", "{prompt}"]},
+            "b": {"invoke": ["y", "{prompt}"]},
+            "c": {"invoke": ["z", "{prompt}"]},
+        })
+        assert r4t_main(["rig", "remove", "a", "b", "--rig-config", str(path)]) == 0
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert "a" not in raw and "b" not in raw and "c" in raw
+
+    def test_remove_unknown_returns_1(self, tmp_path):
+        path = write_config(tmp_path, {"a": {"invoke": ["x", "{prompt}"]}})
+        assert r4t_main(["rig", "remove", "ghost", "--rig-config", str(path)]) == 1
+
+    def test_remove_refuses_pinned_rig(self, tmp_path):
+        path = write_config(tmp_path, {
+            "a": {"invoke": ["x", "{prompt}"]},
+            "pins": {"phil": "a"},
+        })
+        assert r4t_main(["rig", "remove", "a", "--rig-config", str(path)]) == 1
+        assert "a" in json.loads(path.read_text(encoding="utf-8"))
+
+    def test_remove_force_ignores_pin(self, tmp_path):
+        path = write_config(tmp_path, {
+            "a": {"invoke": ["x", "{prompt}"]},
+            "pins": {"phil": "a"},
+        })
+        assert r4t_main(
+            ["rig", "remove", "a", "--force", "--rig-config", str(path)]
+        ) == 0
+        assert "a" not in json.loads(path.read_text(encoding="utf-8"))

@@ -47,7 +47,7 @@ from pathlib import Path
 
 import state
 import tasks
-from rig import RigConfig, RigError, Rig, load_rig_config
+from rig import RigConfig, RigError, Rig, load_rig_config, resolve_agy_model
 from notify import TellFn
 from roster import Member, Roster, RosterError, load_roster
 
@@ -325,6 +325,16 @@ def run_harness(
     harness output is teed there line by line as it arrives, so a gemba attach
     can tail the turn live; the full output is still returned for staging."""
     argv = rig.argv(prompt, variant)
+    if rig.model_resolver == "agy-live":
+        # Resolve the friendly --model against the live `agy models` list before
+        # every turn — the display names drift as agy ships versions, and agy
+        # silently ignores an unrecognized string, so a stale/bad value must
+        # fail the turn loudly rather than run the account default.
+        try:
+            resolved = resolve_agy_model(rig.model or "")
+        except RigError as e:
+            return 127, f"agy --model {rig.model!r} did not resolve: {e}", 0.0, False
+        argv = [resolved if a == "{model}" else a for a in argv]
     live_log = (env or {}).get("R4T_LIVE_LOG")
     start = time.monotonic()
     try:
