@@ -1005,6 +1005,70 @@ class TestQuietSweep:
         assert summary["quiet_nudged"] == []
 
 
+class TestMissionReview:
+    def _review(self, ctx):
+        return run_idle(ctx)["mission_review"]
+
+    def test_no_fire_when_a_queue_is_nonempty(self, ctx, fake_harness):
+        # A resting member holds its queue: work remains, so never stalled.
+        empty_member_budget(ctx, "phil")
+        handle_message(ctx, "acme:gerry", "acme:phil", "job", drain_after=False)
+        assert self._review(ctx)["fired"] is False
+        assert self._review(ctx)["fired"] is False
+        assert not harness_calls(fake_harness)
+
+    def test_no_fire_with_an_open_thread(self, ctx, fake_harness):
+        tasks.ensure_task(NODE, new_ulid(), "acme:neil")  # open, but no queued work
+        self._review(ctx)
+        assert self._review(ctx)["fired"] is False
+
+    def test_no_fire_when_leader_is_resting(self, ctx, fake_harness):
+        empty_member_budget(ctx, "gerry")  # the top leader is broke
+        self._review(ctx)
+        review = self._review(ctx)  # second tick reaches the threshold, then budget-gates
+        assert review["fired"] is False and review.get("resting") is True
+        assert not harness_calls(fake_harness)
+
+    def test_fires_on_confirmed_stall_with_no_human_comms_line(self, ctx, fake_harness):
+        assert self._review(ctx)["fired"] is False  # first stalled tick: below threshold
+        review = self._review(ctx)  # second tick fires
+        assert review["fired"] is True and review["leader"] == "Gerry"
+        prompt = read_prompt(harness_calls(fake_harness)[-1])
+        assert "You are Gerry" in prompt
+        assert "No communication to the human NEEDS to happen" in prompt
+
+    def test_backoff_resets_on_real_work(self, ctx, fake_harness):
+        self._review(ctx)
+        assert self._review(ctx)["fired"] is True
+        assert state.read_mission_review(NODE)["silent_reviews"] == 1
+        handle_message(ctx, "acme:gerry", "acme:phil", "real work")  # a real turn flows
+        self._review(ctx)
+        st = state.read_mission_review(NODE)
+        assert st["silent_reviews"] == 0 and st["stalls"] == 0
+
+    def test_k_silent_reviews_go_dormant(self, ctx, fake_harness):
+        # Seed just below the third fire: stalls 7, two prior silent reviews.
+        state.write_mission_review(
+            NODE, {"stalls": 7, "silent_reviews": 2, "dormant": False, "mission_mtime": 0.0}
+        )
+        review = self._review(ctx)  # stalls -> 8 == threshold (2<<2); fires, third silent
+        assert review["fired"] is True and review["dormant"] is True
+        assert state.read_mission_review(NODE)["dormant"] is True
+        harness_before = len(harness_calls(fake_harness))
+        assert self._review(ctx)["fired"] is False  # dormant: no more nudges
+        assert len(harness_calls(fake_harness)) == harness_before
+
+    def test_dormant_rearms_on_mission_change(self, ctx, fake_harness):
+        (ctx.root / "MISSION.md").write_text("the mission", encoding="utf-8")
+        # Dormant, but with a stale recorded mtime — a MISSION.md change re-arms.
+        state.write_mission_review(
+            NODE, {"stalls": 0, "silent_reviews": 3, "dormant": True, "mission_mtime": 1.0}
+        )
+        assert self._review(ctx)["fired"] is False  # re-arm this tick (below threshold again)
+        st = state.read_mission_review(NODE)
+        assert st["dormant"] is False and st["silent_reviews"] == 0
+
+
 class TestRunHarness:
     def test_timeout_kills_process_group(self, tmp_path):
         script = tmp_path / "sleepy.py"

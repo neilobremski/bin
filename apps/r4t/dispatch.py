@@ -1429,17 +1429,148 @@ def _quiet_task_sweep(
     return nudged
 
 
+# ---------- mission-review idle turn (the furnace burns on its own) ----------
+
+MISSION_REVIEW_BACKOFF_BASE = 2
+MISSION_REVIEW_BACKOFF_CAP = 32
+MISSION_REVIEW_SILENT_CAP = 3
+
+
+def _has_open_threads(node: str) -> bool:
+    return any(t.get("status") == tasks.STATUS_OPEN for t in tasks.list_tasks(node))
+
+
+def _mission_mtime(ctx: DispatchContext) -> float:
+    try:
+        return (ctx.root / "MISSION.md").stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _mission_review(
+    ctx: DispatchContext,
+    config: RigConfig,
+    roster: Roster,
+    drained: int,
+    run_fn,
+) -> dict:
+    """When the org is structurally stalled — every queue empty, no open thread,
+    the drain ran nothing, no live turn — hand the top leader a budget-gated
+    mission-review turn so a done-looking-but-unmet mission does not sleep
+    forever (#189). r4t detects the STALL; the leader judges whether the mission
+    is met (§5.3). A backoff widens the cadence (2->4->8... stalled ticks); K
+    silent reviews (the leader stages nothing) go dormant until a real message
+    or a MISSION.md change re-arms it. The nudge must not train leaders to
+    doorbell the human every cycle (§5.6)."""
+    stalled = (
+        drained == 0
+        and not state.members_with_queue(ctx.node)
+        and not _has_open_threads(ctx.node)
+        and not state.live_locks(ctx.node)
+    )
+    st = state.read_mission_review(ctx.node)
+    mtime = _mission_mtime(ctx)
+    if not stalled:
+        # Real work is flowing — the furnace does not need a nudge; reset.
+        if st.get("stalls") or st.get("silent_reviews") or st.get("dormant"):
+            state.write_mission_review(
+                ctx.node, {"stalls": 0, "silent_reviews": 0, "dormant": False, "mission_mtime": mtime}
+            )
+        return {"fired": False}
+
+    if st.get("dormant"):
+        if mtime == st.get("mission_mtime"):
+            return {"fired": False, "dormant": True}
+        st = {"stalls": 0, "silent_reviews": 0, "dormant": False}  # MISSION changed -> re-arm
+
+    stalls = int(st.get("stalls", 0)) + 1
+    silent = int(st.get("silent_reviews", 0))
+    threshold = min(MISSION_REVIEW_BACKOFF_BASE << silent, MISSION_REVIEW_BACKOFF_CAP)
+    if stalls < threshold:
+        state.write_mission_review(
+            ctx.node,
+            {"stalls": stalls, "silent_reviews": silent, "dormant": False, "mission_mtime": mtime},
+        )
+        return {"fired": False, "stalls": stalls}
+
+    leader = roster.leader()
+    if leader is None or leader.errors:
+        return {"fired": False}
+    rig, _err, _pinned = config.rig_for(leader)
+    if rig is None:
+        return {"fired": False}
+    runnable, reason = _runnable(ctx, config, leader, rig)
+    if not runnable:
+        # A broke leader is a non-issue by construction — hold the counter at the
+        # threshold so the review fires the moment the bucket refills (#189).
+        state.write_mission_review(
+            ctx.node,
+            {"stalls": stalls, "silent_reviews": silent, "dormant": False, "mission_mtime": mtime},
+        )
+        state.append_log(
+            ctx.node,
+            f"r4t: MISSION-REVIEW deferred — leader {leader.name.lower()} {reason}",
+        )
+        return {"fired": False, "resting": True}
+
+    state.enqueue(
+        ctx.node,
+        leader.name,
+        {
+            "from": f"r4t:{ctx.node}",
+            "to": f"{ctx.node}:{leader.name.lower()}",
+            "thread": tasks.new_thread_id(),
+            "hop": 0,
+            "class": "auto",
+            "body": ctx.prompt("mission_review"),
+        },
+    )
+    state.append_log(
+        ctx.node,
+        f"r4t: MISSION-REVIEW fired -> {leader.name.lower()} "
+        f"(stall {stalls}, review {silent + 1})",
+    )
+    # Run just the leader's review turn to observe whether it delegates: a
+    # productive review opens threads / queues work; a silent one leaves the org
+    # still stalled and widens the backoff toward dormancy.
+    _run_member_turn(ctx, config, roster, leader, rig, run_fn)
+    produced = bool(state.members_with_queue(ctx.node)) or _has_open_threads(ctx.node)
+    if produced:
+        silent = 0
+        dormant = False
+    else:
+        silent += 1
+        dormant = silent >= MISSION_REVIEW_SILENT_CAP
+        if dormant:
+            state.append_log(
+                ctx.node,
+                f"r4t: MISSION-REVIEW dormant after {silent} silent review(s) — "
+                "leader judged the mission met; a real message or MISSION.md "
+                "change re-arms it",
+            )
+    state.write_mission_review(
+        ctx.node,
+        {"stalls": 0, "silent_reviews": silent, "dormant": dormant, "mission_mtime": mtime},
+    )
+    return {"fired": True, "leader": leader.name, "silent_reviews": silent, "dormant": dormant}
+
+
 def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
-    """One idle pass: nudge the leader about quiet unanswered threads, then
-    drain every runnable member's queue. Crash recovery needs no special path
-    — a turn that never completed left its messages in the queue (they were
-    claimed only at a turn that ran), so the next runnable turn picks them up."""
+    """One idle pass: nudge the leader about quiet unanswered threads, drain
+    every runnable member's queue, then — if the org is structurally stalled —
+    hand the top leader a budget-gated mission-review turn. Crash recovery needs
+    no special path — a turn that never completed left its messages in the queue
+    (they were claimed only at a turn that ran), so the next runnable turn picks
+    them up."""
     try:
         roster = load_roster(ctx.roster_path)
         config = load_rig_config(ctx.config_path)
     except (RosterError, RigError) as e:
         state.append_log(ctx.node, f"r4t: IDLE-SKIPPED {e}")
-        return {"quiet_nudged": [], "drained": 0, "error": str(e)}
+        return {"quiet_nudged": [], "drained": 0, "mission_review": {"fired": False}, "error": str(e)}
     nudged = _quiet_task_sweep(ctx, config, roster)
     drained = drain_until_quiet(ctx, run_fn=run_fn)
-    return {"quiet_nudged": nudged, "drained": drained}
+    review = _mission_review(ctx, config, roster, drained, run_fn)
+    if review.get("fired"):
+        drained += drain_until_quiet(ctx, run_fn=run_fn)
+    return {"quiet_nudged": nudged, "drained": drained, "mission_review": review}

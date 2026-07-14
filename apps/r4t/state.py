@@ -597,6 +597,27 @@ def clear_turn(node: str, name: str) -> None:
         pass
 
 
+# ---------- mission-review backoff (idle liveness) ----------
+
+def mission_review_path(node: str) -> Path:
+    return team_dir(node) / "mission-review.json"
+
+
+def read_mission_review(node: str) -> dict:
+    path = mission_review_path(node)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_mission_review(node: str, data: dict) -> None:
+    atomic_write_json(mission_review_path(node), data)
+
+
 def staging_dir(node: str, name: str) -> Path:
     return agent_dir(node, name) / "staging"
 
