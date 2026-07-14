@@ -26,6 +26,7 @@ Detailed docs live in [`docs/`](docs/):
 | [secrets.md](docs/secrets.md) | `n0b secrets` | Get/set secrets — env, `~/lib`, Keychain, dotenv |
 | [ai-speak.md](docs/ai-speak.md) | `n0b ai speak` | Local Kokoro text-to-speech, markdown-aware |
 | [transcribe.md](docs/transcribe.md) | `n0b ai transcribe` | Local Whisper speech-to-text, hints + replacement files |
+| [quota.md](docs/quota.md) | `n0b quota` | Live AI tool rate limits (Antigravity / `agy`) |
 
 ### Quick reference (no separate doc yet)
 
@@ -37,6 +38,7 @@ Detailed docs live in [`docs/`](docs/):
 | `mqtt` | `pub`, `sub` | `mosquitto_*` with `MQTT_HOST`, `MQTT_PORT`, `MQTT_USER`, `MQTT_PASS` |
 | `ai` | `image`, `video`, `audio`, `research`, `speak`, `transcribe` | See [ltx-video.md](docs/ltx-video.md) for video; [research.md](docs/research.md) for deep research; [ai-speak.md](docs/ai-speak.md) for text-to-speech; [transcribe.md](docs/transcribe.md) for speech-to-text |
 | `video` | `last-frame` | Extract last frame with `ffmpeg` |
+| `quota` | `[agy]` | Live AI tool quotas (`agy` = Antigravity language-server API) |
 
 ### AI model defaults
 
