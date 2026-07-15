@@ -23,3 +23,14 @@ story unfolds; the text is the source, the m4a is the listenable cut.
    liveness gap surfaces in a team quietly dying of politeness; speed
    against gates emerges as the real axis. Recorded 2026-07-13. See the
    [n5a retrospective](../experiments/n5a/RETRO.md) for the full result.
+4. [04-the-verification-day](04-the-verification-day.txt) —
+   the comms re-founding merges; the d5n-m4 experiment is falsified by
+   silently-hung free models, then delivers M4 in ~23 minutes on repinned
+   rigs; independent real-key verification passes but Neil's own playthrough
+   catches literal `\n\n` the eyes missed; bones and eyes catch disjoint
+   failures, so the verification round is built (`r4t check` + doorbell
+   gate); the builder of the anti-self-certification machine is caught
+   self-certifying; d5n drifts into an un-blessed M5 and self-corrects.
+   Recorded 2026-07-14. See the
+   [d5n-m4 experiment notebook](../experiments/d5n-m4/notebook.md) for the
+   full run.
