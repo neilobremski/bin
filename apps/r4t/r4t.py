@@ -156,6 +156,7 @@ def _context(args: argparse.Namespace, node: str) -> DispatchContext:
         comms=org.comms,
         leader_sees_lateral=org.leader_sees_lateral,
         egress=org.egress,
+        doorbell_check=org.doorbell_check,
         definition_path=(
             Path(defn).expanduser() if (defn := getattr(args, "definition", None)) else None
         ),
@@ -734,6 +735,28 @@ def cmd_logs(args: argparse.Namespace) -> int:
             time.sleep(0.5)
     except KeyboardInterrupt:
         return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    node = _resolve_node(args.node)
+    if node is None:
+        return 2
+    root = _resolve_root(args.root)
+    if not getattr(args, "root", None):
+        stamped = state.read_root(node)
+        if stamped is not None and stamped.is_dir():
+            root = stamped
+    org = load_org(root)
+    if not org.workplace.is_dir():
+        print(
+            f"check: workplace {org.workplace} does not exist "
+            f"(try: r4t roster check --node {node})",
+            file=sys.stderr,
+        )
+        return 2
+    from check import run as run_check
+
+    return run_check(node, org.workplace)
 
 
 def _ensure_tell_outbox(ctx: DispatchContext) -> None:
@@ -1384,6 +1407,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only one member's activity; with --full, their captured turns.",
     )
     logs_p.set_defaults(func=cmd_logs)
+
+    check_p = sub.add_parser(
+        "check",
+        help="Forbidden-pattern sweep: opaque pass/fail on stdout, findings on "
+        "stderr. Patterns live in ~/.config/r4t/checklists/.",
+    )
+    _add_common(check_p)
+    check_p.add_argument(
+        "node", nargs="?",
+        help="Team node name (default: sole ~/.config/r4t team).",
+    )
+    check_p.set_defaults(func=cmd_check)
 
     chat_p = sub.add_parser(
         "chat", help="Interactive human seat: messages and team activity in one window."

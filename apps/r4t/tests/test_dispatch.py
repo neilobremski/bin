@@ -6,6 +6,7 @@ import os
 import sys
 import textwrap
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -1820,3 +1821,48 @@ class TestLiveLogTee:
         handle_message(ctx, "acme:gerry", "acme:phil", "hi")
         text = state.live_log_path(NODE, "phil").read_text(encoding="utf-8")
         assert "fake harness ran" in text
+
+
+class TestDoorbellGate:
+    def test_no_setting_rings_as_today(self, ctx, tells, fake_harness):
+        sent, _ = tells
+        handle_message(ctx, "acme:gerry", "acme:neil", "hi")
+        assert ("neil", "hi") in sent
+        assert "GATE" not in read_log()
+
+    def test_gate_pass_rings(self, ctx, tells, fake_harness):
+        sent, _ = tells
+        gated = replace(ctx, doorbell_check="exit 0")
+        handle_message(gated, "acme:gerry", "acme:neil", "hi")
+        assert ("neil", "hi") in sent
+        assert "GATE acme passed" in read_log()
+
+    def test_gate_fail_parks_without_ring(self, ctx, tells, fake_harness):
+        sent, _ = tells
+        cmd = "echo 'check failed: 2 finding(s)'; echo 'doc.md:2: bad' 1>&2; exit 1"
+        gated = replace(ctx, doorbell_check=cmd)
+        handle_message(gated, "acme:gerry", "acme:neil", "hi")
+        assert ("neil", "hi") not in sent
+        assert [m["from"] for m in seat_messages()] == ["acme:gerry"]
+        assert any("seat unreachable: check failed: 2 finding(s)" in b for _, b in sent)
+        log = read_log()
+        assert "r4t: GATE acme doc.md:2: bad" in log
+        assert "doorbell BLOCKED" in log
+
+    def test_gate_timeout_fails_closed(self, ctx, tells, fake_harness, monkeypatch):
+        sent, _ = tells
+        monkeypatch.setattr(dispatch, "DOORBELL_CHECK_TIMEOUT", 0.3)
+        gated = replace(ctx, doorbell_check="sleep 5")
+        handle_message(gated, "acme:gerry", "acme:neil", "hi")
+        assert ("neil", "hi") not in sent
+        assert [m["from"] for m in seat_messages()] == ["acme:gerry"]
+        assert any("seat unreachable: check did not complete" in b for _, b in sent)
+        assert "timed out" in read_log()
+
+    def test_gate_skipped_when_seat_attached(self, ctx, tells, fake_harness):
+        sent, _ = tells
+        state.touch_seat_presence(NODE, "Neil")
+        gated = replace(ctx, doorbell_check="exit 1")
+        handle_message(gated, "acme:gerry", "acme:neil", "hi")
+        assert not sent
+        assert "GATE" not in read_log()

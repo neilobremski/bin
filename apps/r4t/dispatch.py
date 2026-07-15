@@ -150,6 +150,7 @@ class DispatchContext:
     comms: str = "open"
     leader_sees_lateral: bool = False
     egress: bool = True
+    doorbell_check: str | None = None
     definition_path: Path | None = None
 
     def __post_init__(self) -> None:
@@ -291,18 +292,87 @@ def _tell_error(
     ctx.tell_fn(recipient, f"[r4t {ctx.node}] {text}")
 
 
-def _park_seat(ctx: DispatchContext, member: Member, sender: str, body: str) -> None:
+DOORBELL_CHECK_TIMEOUT = 120
+
+
+def _run_doorbell_check(ctx: DispatchContext, command: str) -> tuple[bool, str, list[str]]:
+    """Run the org's `doorbell_check` before a ring. Returns
+    (ring_ok, sender_reason, log_lines). A nonzero exit reports the check's
+    first stdout line to the sender and its stderr to the node log; a timeout or
+    exec failure fails CLOSED — a broken gate must never become a silently
+    broken doorbell."""
+    env = dict(os.environ, R4T_NODE=ctx.node)
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(ctx.workplace),
+            capture_output=True,
+            text=True,
+            timeout=DOORBELL_CHECK_TIMEOUT,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "check did not complete", [
+            f"check timed out after {DOORBELL_CHECK_TIMEOUT}s: {command}"
+        ]
+    except OSError as e:
+        return False, "check did not complete", [f"check failed to run: {e}"]
+    if proc.returncode == 0:
+        return True, "", []
+    stdout_lines = proc.stdout.strip().splitlines()
+    reason = stdout_lines[0] if stdout_lines else "check failed"
+    return False, reason, [l for l in proc.stderr.splitlines() if l.strip()]
+
+
+def _park_seat(
+    ctx: DispatchContext,
+    member: Member,
+    sender: str,
+    body: str,
+    *,
+    thread: str | None = None,
+    roster: Roster | None = None,
+) -> None:
     """Deliver a message to a roster human: park it in the node's seat
     mailbox, and ring the `Address:` doorbell (a forwarded copy over a8s)
-    only when no seat session is attached to read it live."""
+    only when no seat session is attached to read it live. When the org sets a
+    `doorbell_check`, that command gates the ring — the message is always parked
+    first (seat mail is never lost), and a failing gate suppresses only the
+    ring and replies to the sender with an error."""
     state.park_seat_message(ctx.node, member.name, sender, body)
-    bell = ""
-    if member.address and not state.seat_attached(ctx.node, member.name):
-        ctx.tell_fn(member.address, body)
-        bell = f", doorbell -> {member.address}"
+    if not (member.address and not state.seat_attached(ctx.node, member.name)):
+        state.append_log(
+            ctx.node, f"r4t: SEAT {member.name.lower()} <- {sender} (parked)"
+        )
+        return
+    command = (ctx.doorbell_check or "").strip()
+    if command:
+        ring_ok, reason, log_lines = _run_doorbell_check(ctx, command)
+        if not ring_ok:
+            for line in log_lines:
+                state.append_log(ctx.node, f"r4t: GATE {ctx.node} {line}")
+            state.append_log(
+                ctx.node,
+                f"r4t: GATE {ctx.node} doorbell BLOCKED for "
+                f"{member.name.lower()}: {reason}",
+            )
+            _tell_error(
+                ctx, sender, f"seat unreachable: {reason}",
+                thread=thread, roster=roster,
+            )
+            state.append_log(
+                ctx.node,
+                f"r4t: SEAT {member.name.lower()} <- {sender} "
+                "(parked, doorbell blocked by gate)",
+            )
+            return
+        state.append_log(ctx.node, f"r4t: GATE {ctx.node} passed")
+    ctx.tell_fn(member.address, body)
     state.append_log(
         ctx.node,
-        f"r4t: SEAT {member.name.lower()} <- {sender} (parked{bell})",
+        f"r4t: SEAT {member.name.lower()} <- {sender} "
+        f"(parked, doorbell -> {member.address})",
     )
 
 
@@ -605,7 +675,7 @@ def _ingest(
             return DEAD
 
     if member.is_human:
-        _park_seat(ctx, member, sender, body)
+        _park_seat(ctx, member, sender, body, thread=thread, roster=roster)
         return SKIPPED
 
     if member.errors:
