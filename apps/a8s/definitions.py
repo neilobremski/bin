@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from core import (
     DEFINITIONS_DIR,
@@ -323,11 +324,69 @@ def batch_limit(definition: dict) -> int:
     return max(1, v)
 
 
+class BatchEntry(NamedTuple):
+    """One inbox envelope handed to `build_batch_command`. `msg` is the
+    parsed envelope dict; it is None if the file failed to parse, in which
+    case `name`/`error` are used to render a visible placeholder instead of
+    silently dropping the message (a batch wake must account for every file
+    it trashed)."""
+    msg: dict | None
+    name: str
+    error: str | None = None
+
+
+def format_batch_message(msg: dict) -> str:
+    """Render one envelope as a '----' block, in the same voice
+    `build_command` uses for a single message: sender, human age (falling
+    back to the raw ISO date, then 'unknown time'), and content."""
+    sender = (msg.get("from") or "").strip() or "unknown"
+    date_str = (msg.get("date") or "").strip()
+    age = _format_age(date_str) or date_str or "unknown time"
+    content = msg.get("content", "")
+    return f"----\n{sender} sent ({age}): {content}"
+
+
+def format_batch_placeholder(name: str, error: str) -> str:
+    """Visible stand-in for an envelope file that failed to parse — batch
+    delivery must never silently drop a message."""
+    return f"---- [unreadable message file {name}: {error}]"
+
+
+def build_batch_prompt(recipient: str, entries: list[BatchEntry]) -> str:
+    """Compose the single prompt string passed to `batch.invoke`: the same
+    header `build_command` implies via the single-message CLI convention,
+    followed by one '----' block per entry (or a placeholder for one that
+    failed to parse).
+
+    This replaces the old contract of handing the invoked command N raw
+    envelope file paths and trusting it to re-parse them — that second,
+    schema-divergent parser (in the external `bulk-invoke` helper) is what
+    silently broke batch delivery. Composing the prompt here means there is
+    only one place in the pipeline that understands the envelope schema."""
+    header = (
+        f"You are receiving messages as '{recipient}'. Use bash CLI "
+        "`tell [--attach /path/to/file] <recipient> <message>` to send asynchronously."
+    )
+    blocks = [header]
+    for entry in entries:
+        if entry.msg is None:
+            blocks.append(
+                format_batch_placeholder(entry.name, entry.error or "unknown error")
+            )
+        else:
+            blocks.append(format_batch_message(entry.msg))
+    return "\n".join(blocks)
+
+
 def build_batch_command(
-    definition: dict, agent_name: str, msg_paths: list[Path], definition_path: str = ""
+    definition: dict,
+    agent_name: str,
+    entries: list[BatchEntry],
+    definition_path: str = "",
 ) -> list[str]:
-    """Expand `batch.invoke` like idle (no incoming message) and append each
-    message file path as a trailing argv element."""
+    """Expand `batch.invoke` like idle (no incoming message) and append ONE
+    composed prompt string (see `build_batch_prompt`) as the trailing argv
+    element — not raw envelope paths."""
     batch = definition.get("batch")
     if not isinstance(batch, dict):
         raise ValueError("definition missing 'batch'")
@@ -335,7 +394,7 @@ def build_batch_command(
     if not argv:
         raise ValueError("definition missing 'batch.invoke'")
     cmd = _expand_argv(list(argv), "", agent_name, "", "", "", definition_path)
-    cmd.extend(str(p.resolve()) for p in msg_paths)
+    cmd.append(build_batch_prompt(agent_name, entries))
     return cmd
 
 

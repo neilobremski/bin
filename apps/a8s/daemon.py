@@ -53,6 +53,7 @@ from core import (
     unique_path,
 )
 from definitions import (
+    BatchEntry,
     batch_limit,
     build_batch_command,
     build_command,
@@ -386,13 +387,16 @@ def wake_batch(
 
     trashed: list[Path] = []
     previews: list[str] = []
+    entries: list[BatchEntry] = []
     for msg_path in msg_paths:
         try:
             with msg_path.open("r", encoding="utf-8") as f:
                 msg = json.load(f)
             previews.append(_preview(msg.get("content", "")))
-        except (OSError, json.JSONDecodeError):
+            entries.append(BatchEntry(msg, msg_path.name))
+        except (OSError, json.JSONDecodeError) as e:
             previews.append(msg_path.name)
+            entries.append(BatchEntry(None, msg_path.name, str(e)))
         dest = unique_path(trash_dir(p.name) / msg_path.name)
         msg_path.rename(dest)
         trashed.append(dest)
@@ -405,7 +409,7 @@ def wake_batch(
         f"[{p.name}] batch waking ({len(trashed)}): {summary}",
     )
     p.files_path().mkdir(parents=True, exist_ok=True)
-    cmd = build_batch_command(definition, p.name, trashed, resolve_definition_path(p.name))
+    cmd = build_batch_command(definition, p.name, entries, resolve_definition_path(p.name))
     out_agent(p.name, f"[{p.name}] batch exec: {shlex.join(cmd)}")
     max_sec = max_wake_seconds(definition)
     if async_wake:
