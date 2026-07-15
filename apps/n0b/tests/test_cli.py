@@ -13,13 +13,19 @@ N0B_PY = Path(__file__).resolve().parents[1] / "n0b.py"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from commands.ai_cmd import (  # noqa: E402
+    apply_pronunciations,
     apply_replacements,
+    apply_speak_replacements,
     cmd_ai,
+    cmd_speak,
     cmd_transcribe,
     merged_hints,
     read_replacements,
+    resolve_speak_voice,
     save_hints,
     save_replacements,
+    save_sticky_voice,
+    speakable,
 )
 from commands.secrets_cmd import cmd_set, resolve  # noqa: E402
 
@@ -291,3 +297,105 @@ def test_transcribe_help():
     assert proc.returncode == 0
     assert "--hint" in proc.stdout
     assert "--language" in proc.stdout
+
+
+def test_speakable_keeps_phoneme_overrides():
+    md = "See [Pay-i](/pˈeɪ ˈaɪ/) and [docs](https://example.com/x)."
+    assert speakable(md) == "See [Pay-i](/pˈeɪ ˈaɪ/) and docs."
+
+
+def test_speakable_drops_fences_and_tables():
+    md = "# Title\n\n| a | b |\n|---|---|\n\nHello\n\n```py\nx=1\n```\n"
+    assert speakable(md) == " Title\n\n\nHello\n"
+
+
+def test_apply_speak_replacements_substitutes():
+    text, applied = apply_speak_replacements(
+        "a8s ships via tell.", [("\\ba8s\\b", "A eight S")]
+    )
+    assert text == "A eight S ships via tell."
+    assert applied == ["\\ba8s\\b => A eight S (x1)"]
+
+
+def test_apply_pronunciations_wraps_ipa():
+    text, applied = apply_pronunciations(
+        "Pay-i uses k7e.", [("Pay-i", "pˈeɪ ˈaɪ")]
+    )
+    assert text == "[Pay-i](/pˈeɪ ˈaɪ/) uses k7e."
+    assert applied == ["Pay-i => /pˈeɪ ˈaɪ/ (x1)"]
+
+
+def test_resolve_speak_voice_sticky(tmp_path, monkeypatch):
+    voice_file = tmp_path / "speak-voice.txt"
+    voice_file.write_text("af_nicole\n")
+    with patch("commands.ai_cmd.SPEAK_VOICE_FILE", voice_file):
+        assert resolve_speak_voice(None) == ("af_nicole", str(voice_file))
+        assert resolve_speak_voice("af_bella") == ("af_bella", "cli")
+
+
+def test_resolve_speak_voice_builtin_default(tmp_path):
+    missing = tmp_path / "missing.txt"
+    with patch("commands.ai_cmd.SPEAK_VOICE_FILE", missing):
+        assert resolve_speak_voice(None) == ("af_heart", "built-in default")
+
+
+def test_save_sticky_voice(tmp_path):
+    voice_file = tmp_path / "speak-voice.txt"
+    with patch("commands.ai_cmd.SPEAK_VOICE_FILE", voice_file):
+        assert save_sticky_voice("af_bella", voice_file) == 0
+    assert voice_file.read_text() == "af_bella\n"
+
+
+def test_speak_save_voice_only(tmp_path):
+    voice_file = tmp_path / "speak-voice.txt"
+    with patch("commands.ai_cmd.SPEAK_VOICE_FILE", voice_file):
+        rc = cmd_speak(None, None, "af_nicole", 1.0, save=True)
+    assert rc == 0
+    assert voice_file.read_text() == "af_nicole\n"
+
+
+def test_speak_save_replacements_only(tmp_path):
+    repl = tmp_path / "speak-replacements.txt"
+    with (
+        patch("commands.ai_cmd.SPEAK_REPLACEMENTS_FILE", repl),
+        patch("commands.ai_cmd.SPEAK_PRONUNCIATIONS_FILE", tmp_path / "p.txt"),
+    ):
+        rc = cmd_speak(
+            None, None, None, 1.0, save=True, replaces=["\\ba8s\\b => A eight S"]
+        )
+    assert rc == 0
+    assert repl.read_text() == "\\ba8s\\b => A eight S\n"
+
+
+def test_speak_applies_teachings_before_kokoro(tmp_path, capsys):
+    src = tmp_path / "note.txt"
+    src.write_text("a8s ready")
+    repl = tmp_path / "speak-replacements.txt"
+    repl.write_text("\\ba8s\\b => A eight S\n")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    captured: dict[str, str] = {}
+    with (
+        patch("commands.ai_cmd._kokoro_python", return_value=fake_python),
+        patch("commands.ai_cmd.SPEAK_REPLACEMENTS_FILE", repl),
+        patch("commands.ai_cmd.SPEAK_PRONUNCIATIONS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_cmd.SPEAK_VOICE_FILE", tmp_path / "missing-voice.txt"),
+        patch("commands.ai_cmd.subprocess.run") as run,
+    ):
+        def capture_run(cmd, **kwargs):
+            captured["text"] = Path(cmd[3]).read_text(encoding="utf-8")
+            run.return_value.returncode = 0
+            return run.return_value
+
+        run.side_effect = capture_run
+        rc = cmd_speak(str(src), str(tmp_path / "out.wav"), None, 1.0)
+    assert rc == 0
+    assert captured["text"] == "A eight S ready"
+    err = capsys.readouterr().err
+    assert "replacements applied" in err
+
+
+def test_speak_help():
+    proc = run_n0b("ai", "speak", "--help")
+    assert proc.returncode == 0
+    assert "--pronounce" in proc.stdout
+    assert "--save" in proc.stdout
