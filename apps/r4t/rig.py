@@ -148,6 +148,73 @@ HARNESS_PRESETS: dict[str, dict] = {
             "{prompt}",
         ],
     },
+    "claude-ollama": {
+        "text_tier": "small",
+        "description": (
+            "Claude Code via `ollama launch` — local models, no cloud quota; "
+            "requires --model"
+        ),
+        "a8s_definition": "claude.json",
+        "headless": "ollama launch claude --model MODEL -y -- --permission-mode dontAsk -p",
+        "invoke": [
+            "ollama",
+            "launch",
+            "claude",
+            "--model",
+            "{model}",
+            "-y",
+            "--",
+            "--permission-mode",
+            "dontAsk",
+            "--allowedTools",
+            "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
+            "-p",
+            "{prompt}",
+        ],
+    },
+    "codex-ollama": {
+        "text_tier": "small",
+        "description": (
+            "Codex via `ollama launch` — local models, no cloud quota; "
+            "requires --model (the launcher owns -m)"
+        ),
+        "a8s_definition": "codex.json",
+        "headless": "ollama launch codex --model MODEL -y -- exec --full-auto",
+        "invoke": [
+            "ollama",
+            "launch",
+            "codex",
+            "--model",
+            "{model}",
+            "-y",
+            "--",
+            "exec",
+            "--full-auto",
+            "--skip-git-repo-check",
+            "{prompt}",
+        ],
+    },
+    "copilot-ollama": {
+        "text_tier": "small",
+        "description": (
+            "Copilot CLI via `ollama launch` — local models, no cloud quota; "
+            "requires --model"
+        ),
+        "a8s_definition": "copilot.json",
+        "headless": "ollama launch copilot --model MODEL -y -- --allow-all-tools -p",
+        "invoke": [
+            "ollama",
+            "launch",
+            "copilot",
+            "--model",
+            "{model}",
+            "-y",
+            "--",
+            "--allow-all-tools",
+            "-p",
+            "{prompt}",
+        ],
+    },
     "ollama": {
         "text_tier": "small",
         "description": (

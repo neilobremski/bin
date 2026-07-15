@@ -36,8 +36,10 @@ fail closed — see the [tutorial](docs/tutorial.md#missing-rig-no-default--fail
 (`claude`, `codex`, `cursor`, `opencode`) it is spliced into the invoke at add
 time — `--model <alias>` for claude, `-m <id>` after `exec` for codex, after
 `run` for opencode — and omitting it lets the CLI's own default apply. The
-`ollama` and `opencode-ollama` presets have no default, so their `--model` is
-required and names a local model tag.
+`ollama` preset and the `ollama launch`-wrapped presets (`opencode-ollama`,
+`claude-ollama`, `codex-ollama`, `copilot-ollama` — see
+[docs/harness-ollama-launch.md](docs/harness-ollama-launch.md)) have no
+default, so their `--model` is required and names a local model tag.
 
 `agy` is different: its `--model` takes an exact display name from `agy models`
 (short aliases are silently ignored), and those names carry version numbers

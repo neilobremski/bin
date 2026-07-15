@@ -279,8 +279,8 @@ class TestDefaultPayload:
 class TestHarnessPresets:
     def test_preset_names_match_a8s_kinds(self):
         assert preset_names() == [
-            "agy", "claude", "codex", "copilot", "cursor", "ollama", "opencode",
-            "opencode-ollama",
+            "agy", "claude", "claude-ollama", "codex", "codex-ollama", "copilot",
+            "copilot-ollama", "cursor", "ollama", "opencode", "opencode-ollama",
         ]
 
     def test_every_preset_declares_a_known_text_tier(self):
@@ -292,6 +292,8 @@ class TestHarnessPresets:
             "agy": "big", "claude": "big", "codex": "big",
             "copilot": "moderate", "cursor": "moderate", "opencode": "moderate",
             "ollama": "small", "opencode-ollama": "small",
+            "claude-ollama": "small", "codex-ollama": "small",
+            "copilot-ollama": "small",
         }
 
     def test_text_tier_anchors(self):
@@ -491,6 +493,27 @@ class TestHarnessPresets:
         assert argv[4] == "qwen2.5-coder:7b"
         assert argv[5:8] == ["--", "run", "--auto"]
         assert "{prompt}" in argv
+
+    def test_build_preset_invoke_launch_wrapped_presets_require_model(self):
+        for name in ("claude-ollama", "codex-ollama", "copilot-ollama"):
+            with pytest.raises(RigError, match="requires --model"):
+                build_preset_invoke(name)
+
+    def test_build_preset_invoke_launch_wrapped_presets(self):
+        parent_headless = {
+            "claude-ollama": HARNESS_PRESETS["claude"]["invoke"][:-1],
+            "codex-ollama": HARNESS_PRESETS["codex"]["invoke"][:-1],
+            "copilot-ollama": HARNESS_PRESETS["copilot"]["invoke"][:-1],
+        }
+        for name, tail in parent_headless.items():
+            argv = build_preset_invoke(name, model="qwen3.6:latest")
+            parent = name.removesuffix("-ollama")
+            assert argv[:7] == [
+                "ollama", "launch", parent, "--model", "qwen3.6:latest", "-y", "--",
+            ]
+            assert argv[7:-1] == tail[1:]
+            assert argv[-1] == "{prompt}"
+            assert "-m" not in argv[7:]
 
     def test_build_preset_invoke_unknown(self):
         with pytest.raises(RigError, match="unknown preset"):
