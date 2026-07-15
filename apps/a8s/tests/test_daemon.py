@@ -820,8 +820,31 @@ class TestBatchWake:
         assert "BATCH|TO:B" in log
         assert log.count("MOCK-CLI: BATCH|TO:B") == 1
         assert log.count("SINGLE|") == 0
+        # The daemon composes one prompt from all 3 envelopes (not raw file
+        # paths) — every message body shows up, plus the shared header.
+        assert "receiving messages as 'B'" in log
         for i in range(3):
-            assert str(trash_dir("B") / f"msg{i}.json") in log or f"msg{i}.json" in log
+            assert f"msg-{i}" in log
+
+    def test_unreadable_envelope_gets_visible_placeholder(self, fake_home, tmp_path, fixtures_dir):
+        # One malformed file among otherwise-good ones must never be silently
+        # dropped — it shows up as a placeholder block in the composed prompt
+        # instead of vanishing (or, pre-fix, poisoning the whole batch).
+        d = tmp_path / "b"
+        d.mkdir()
+        save_registry({
+            "B": {"root": str(d), "definition": str(fixtures_dir / "mock-batch.json")},
+        })
+        ensure_mailboxes(Participant("B", d))
+        self._queue_inbox("B", 2)
+        (inbox_dir("B") / "corrupt.json").write_text("{not json")
+
+        rc = attached_loop(["B"], 0.1, single_pass=True)
+        assert rc == 0
+        log = _read_log("B")
+        assert log.count("batch exec:") == 1
+        assert "msg-0" in log and "msg-1" in log
+        assert "unreadable message file corrupt.json" in log
 
     def test_single_message_uses_normal_invoke(self, fake_home, tmp_path, fixtures_dir):
         d = tmp_path / "b"
@@ -870,10 +893,14 @@ class TestBatchWake:
         attached_loop(["B"], 0.1, single_pass=True)
         log = _read_log("B")
         assert log.count("batch exec:") == 2
-        first_batch = log.split("batch exec:")[1].split("\n")[0]
-        assert first_batch.count(".json") == 5
-        second_batch = log.split("batch exec:")[2].split("\n")[0]
-        assert second_batch.count(".json") == 2
+        # First batch: files are queued/consumed in name order (q0..q6), so
+        # the 5-cap takes q-0..q-4 and the drained remainder is q-5/q-6.
+        first_batch = log.split("batch exec:")[1].split("batch exec:")[0]
+        for i in range(5):
+            assert f"q-{i}" in first_batch
+        second_batch = log.split("batch exec:")[2]
+        for i in (5, 6):
+            assert f"q-{i}" in second_batch
 
 
 class TestPauseBeforeWake:

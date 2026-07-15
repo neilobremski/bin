@@ -483,23 +483,50 @@ class TestBatchInvoke:
         defn = {"invoke": ["x"], "batch": {"invoke": ["y"], "limit": "nope"}}
         assert batch_limit(defn) == 5
 
-    def test_build_batch_command_appends_paths(self, tmp_path):
-        from definitions import build_batch_command
-        p1 = tmp_path / "a.json"
-        p2 = tmp_path / "b.json"
-        p1.write_text("{}")
-        p2.write_text("{}")
+    def test_build_batch_command_appends_one_composed_prompt(self):
+        from definitions import BatchEntry, build_batch_command
+        entries = [
+            BatchEntry({"from": "A", "date": "2026-04-28T14:30:00Z", "content": "hi"}, "a.json"),
+            BatchEntry({"from": "B", "date": "2026-04-28T14:29:00Z", "content": "yo"}, "b.json"),
+        ]
         defn = {"invoke": ["x"], "batch": {"invoke": ["agent", "--batch", "$RECIPIENT"]}}
-        argv = build_batch_command(defn, "neil", [p1, p2])
-        assert argv == ["agent", "--batch", "neil", str(p1.resolve()), str(p2.resolve())]
+        argv = build_batch_command(defn, "neil", entries)
+        assert argv[:3] == ["agent", "--batch", "neil"]
+        assert len(argv) == 4
+        prompt = argv[3]
+        assert "receiving messages as 'neil'" in prompt
+        assert "A sent" in prompt and "hi" in prompt
+        assert "B sent" in prompt and "yo" in prompt
 
-    def test_build_batch_command_empty_message_fields(self):
+    def test_build_batch_command_empty_entries_still_has_header(self):
         from definitions import build_batch_command
         defn = {"invoke": ["x"], "batch": {"invoke": [
             "echo", "S=$SENDER", "M=$MESSAGE", "T=$TIMESTAMP", "A=$AGE",
         ]}}
         argv = build_batch_command(defn, "neil", [])
-        assert argv == ["echo", "S=", "M=", "T=", "A="]
+        assert argv[:-1] == ["echo", "S=", "M=", "T=", "A="]
+        assert "receiving messages as 'neil'" in argv[-1]
+
+    def test_build_batch_command_placeholder_for_unreadable_entry(self):
+        from definitions import BatchEntry, build_batch_command
+        entries = [
+            BatchEntry({"from": "A", "date": "2026-04-28T14:30:00Z", "content": "hi"}, "a.json"),
+            BatchEntry(None, "corrupt.json", "Expecting value: line 1 column 1 (char 0)"),
+        ]
+        defn = {"invoke": ["x"], "batch": {"invoke": ["agent"]}}
+        prompt = build_batch_command(defn, "neil", entries)[-1]
+        assert "A sent" in prompt and "hi" in prompt
+        assert "unreadable message file corrupt.json" in prompt
+        assert "Expecting value" in prompt
+
+    def test_format_batch_message_and_placeholder(self):
+        from definitions import format_batch_message, format_batch_placeholder
+        block = format_batch_message({"from": "A", "date": "2026-04-28T14:30:00Z", "content": "hi"})
+        assert block.startswith("----\n")
+        assert "A sent" in block and "hi" in block
+
+        placeholder = format_batch_placeholder("bad.json", "boom")
+        assert placeholder == "---- [unreadable message file bad.json: boom]"
 
 
 # ---------- build_idle_command + idle_timeout_seconds ----------
