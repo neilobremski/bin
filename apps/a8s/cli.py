@@ -44,6 +44,7 @@ from commands import (
 COMMANDS: list[tuple[str, str, str]] = [
     ("add",      "<name> <dir> [<def>]",      "Register a node."),
     ("remove",   "<name>",                    "Unregister a node and delete its mailbox."),
+    ("rm",       "<name>",                    "Alias for remove."),
     ("ls",       "[-q]",                      "List all registered nodes, running or not."),
     ("discover", "<path>",                    "Scan a path for nodes and suggest `add` commands."),
     ("define",   "<name> [<path>]",           "Show or set an agent's command definition."),
@@ -94,7 +95,7 @@ CLI_EPILOG = "Commands:\n" + _format_commands(COMMANDS)
 def dispatch(cmd: str, args: list[str], interval: float) -> int:
     if cmd == "add":
         return cmd_add(args)
-    if cmd == "remove":
+    if cmd in ("remove", "rm"):
         return cmd_remove(args)
     if cmd == "ls":
         return cmd_ls(args)
