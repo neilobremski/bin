@@ -34,3 +34,16 @@ story unfolds; the text is the source, the m4a is the listenable cut.
    Recorded 2026-07-14. See the
    [d5n-m4 experiment notebook](../experiments/d5n-m4/notebook.md) for the
    full run.
+5. [05-finish-clean](05-finish-clean.txt) —
+   d5n builds its M5 finale in the dark; the playtest cell scripts the
+   mandated manual playtests and certifies a `0.38s` run, and the org's
+   post-hoc judge — calibrated against pre-registered ground truth —
+   catches the self-start and the phantom bless, its own blind spot
+   included; an independent real-key arbiter runs 11 crash-free
+   playthroughs (endings in 93–118s) and voids the certification while
+   passing the game; Neil blesses M5 himself, the blessing bounces off an
+   auto-updated harness permission model, redelivery lands with Rook's
+   one-commit fix, and the org catches its own last bug unprompted; the
+   campaign closes — thirteen members, five milestones, every built-for
+   failure mode caught. Recorded 2026-07-16. See the
+   [d5n lab notebook](../experiments/d5n-notebook.md) for the full campaign.
