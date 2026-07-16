@@ -104,6 +104,13 @@ The router (`mailbox.py:_process_pending`) force-overwrites `from` based on
 which agent owns the enclosing root — the filesystem is the unforgeable
 identity.
 
+Remote inbox writes emit content-free delivery receipts as normal envelopes
+with an `a8s_control` extension and reserved `to: __a8s_receipt__`. Consume
+control envelopes before participant routing, never place them in an inbox,
+and never generate receipts for them. Older subscribers safely drop the
+reserved destination. `a8s trace <ULID>` reads correlated boundaries from
+`~/.a8s/transactions.tsv`.
+
 Run `a8s install` from an agent root to link bundled skills into
 `.claude/skills/`, `.cursor/skills/`, and `.codex/skills/` there. Use `a8s install --global` for
 user-home install; `source ~/bin/install.sh --skills` for top-level doc skills.

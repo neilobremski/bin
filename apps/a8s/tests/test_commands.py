@@ -23,6 +23,7 @@ from commands import (
     cmd_remove,
     cmd_storage,
     cmd_tell,
+    cmd_trace,
     cmd_unalias,
     cmd_unnamespace,
     cmd_unremote,
@@ -1021,4 +1022,38 @@ class TestCmdLogs:
         assert cmd_logs(["claude", "--tail", "2"]) == 0
         assert capsys.readouterr().out.splitlines() == ["line2", "line3"]
 
+
+class TestCmdTrace:
+    def test_prints_correlated_boundaries(self, fake_home, capsys):
+        from txlog import log
+        from ulid import new as new_ulid
+
+        msg_id = new_ulid()
+        log("PUBLISHED", msg_id=msg_id, sender="alice", recipient="bob", remote="mqtt")
+        log(
+            "DELIVERY_RECEIPT",
+            msg_id=msg_id,
+            sender="alice",
+            recipient="bob",
+            remote="mqtt",
+            detail="inbox_write",
+        )
+
+        assert cmd_trace([msg_id.lower()]) == 0
+        output = capsys.readouterr().out
+        assert f"trace {msg_id}" in output
+        assert "PUBLISHED" in output
+        assert "DELIVERY_RECEIPT" in output
+        assert "detail=inbox_write" in output
+
+    def test_rejects_invalid_id(self, fake_home, capsys):
+        assert cmd_trace(["not-a-ulid"]) == 2
+        assert "usage: a8s trace <ULID>" in capsys.readouterr().err
+
+    def test_reports_no_events(self, fake_home, capsys):
+        from ulid import new as new_ulid
+
+        msg_id = new_ulid()
+        assert cmd_trace([msg_id]) == 1
+        assert f"no transaction events for {msg_id}" in capsys.readouterr().err
 

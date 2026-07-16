@@ -40,6 +40,11 @@ from core import (
     out_agent,
     seen_ids_path,
 )
+from delivery_receipt import (
+    build_delivery_receipt,
+    is_control_envelope,
+    parse_delivery_receipt,
+)
 from registry import resolve_name
 from services import StorageService
 from transports import OnMessage, Transport, TransportError
@@ -57,7 +62,12 @@ _REMOTE_DIAGNOSTIC_INTERVAL_S = 300.0
 _REMOTE_DIAGNOSTIC_MAX_KEYS = 256
 
 
-def _remote_drop_diagnostic(msg_id: str, recipient: str, reason: str) -> None:
+def _remote_drop_diagnostic(
+    msg_id: str,
+    recipient: str,
+    reason: str,
+    remote_id: str = "remote",
+) -> None:
     """Rate-limited shared-topic miss diagnostic; never includes content."""
     key = (reason, recipient.lower())
     now = time.monotonic()
@@ -74,7 +84,7 @@ def _remote_drop_diagnostic(msg_id: str, recipient: str, reason: str) -> None:
         "DROPPED",
         msg_id=msg_id,
         recipient=recipient,
-        remote="remote",
+        remote=remote_id,
         detail=reason,
     )
 
@@ -332,6 +342,8 @@ def receive_envelope(
     envelope: bytes,
     all_agents: list[Participant],
     services: list[StorageService] | None = None,
+    publish_control: Callable[[bytes], None] | None = None,
+    remote_id: str = "remote",
 ) -> None:
     """Decode an incoming envelope, dedupe, filter against the local
     registry, and atomically write into each matched local recipient's
@@ -343,7 +355,10 @@ def receive_envelope(
     envelope's `files[i].storage` URLs point at a service we know, the
     helper downloads each file into the recipient's `<root>/.files/` and
     rewrites the entry to local `{filename, path}` shape. None / empty
-    falls back to the v1 limitation (strip files; log warning)."""
+    falls back to the v1 limitation (strip files; log warning).
+
+    `publish_control` is an optional same-transport publisher for internal
+    receipt envelopes. Omitting it preserves receive-only behavior."""
     try:
         msg = json.loads(envelope)
         if not isinstance(msg, dict):
@@ -357,6 +372,10 @@ def receive_envelope(
         return
     if seen_id_contains(msg_id):
         return  # already delivered — silent dedup
+    if is_control_envelope(msg):
+        _receive_control_envelope(msg, all_agents, remote_id)
+        seen_id_append(msg_id)
+        return
     recipient_name = (msg.get("to") or "").strip()
     if not recipient_name:
         return  # malformed; nothing to filter on
@@ -364,7 +383,7 @@ def receive_envelope(
     try:
         kind, member_names = resolve_name(recipient_name)
     except (KeyError, ValueError):
-        _remote_drop_diagnostic(msg_id, recipient_name, "not in local registry")
+        _remote_drop_diagnostic(msg_id, recipient_name, "not in local registry", remote_id)
         return
     recipients: list[Participant] = []
     for m in member_names:
@@ -375,8 +394,21 @@ def receive_envelope(
             # is the dual-name foot-gun. Per the design, deliver locally.
             recipients.append(rp)
     if not recipients:
-        _remote_drop_diagnostic(msg_id, recipient_name, f"{kind} resolved to zero local recipients")
+        _remote_drop_diagnostic(
+            msg_id,
+            recipient_name,
+            f"{kind} resolved to zero local recipients",
+            remote_id,
+        )
         return
+    txlog.log(
+        "RESOLVED_REMOTE",
+        msg_id=msg_id,
+        sender=msg.get("from") or "?",
+        recipient=",".join(recipient.name for recipient in recipients),
+        remote=remote_id,
+        detail=f"{kind} resolved to {len(recipients)} local recipient(s)",
+    )
     # File payloads (#90): when storage services are configured, download
     # each file's bytes into the recipient's `.files/` and rewrite the
     # envelope entry to local-path shape. Without storage services
@@ -411,7 +443,7 @@ def receive_envelope(
                 msg_id=msg_id,
                 sender=msg.get("from") or "?",
                 recipient=recipient.name,
-                remote="remote",
+                remote=remote_id,
                 detail="inbox already contained envelope",
             )
             delivered_names.append(recipient.name)
@@ -432,7 +464,7 @@ def receive_envelope(
             sender=sender_label,
             recipient=recipient.name,
             files=file_names or None,
-            remote="remote",
+            remote=remote_id,
             detail="inbox write complete",
         )
         delivered_names.append(recipient.name)
@@ -441,21 +473,85 @@ def receive_envelope(
 
         convo.record(msg, recipients=delivered_names)
     seen_id_append(msg_id)
+    if delivered_names and publish_control is not None:
+        _publish_delivery_receipt(msg, delivered_names, publish_control, remote_id)
+
+
+def _receive_control_envelope(
+    message: dict,
+    all_agents: list[Participant],
+    remote_id: str,
+) -> None:
+    receipt = parse_delivery_receipt(message)
+    if receipt is None:
+        out(f"WARN: dropped unsupported or malformed a8s control envelope id={message.get('id', '?')}")
+        return
+    local_sender = next(
+        (agent for agent in all_agents if agent.name.lower() == receipt.sender.lower()),
+        None,
+    )
+    if local_sender is None:
+        return
+    recipients = ",".join(receipt.recipients)
+    out_agent(
+        local_sender.name,
+        f"delivery confirmed id={receipt.for_id} -> {recipients} ({receipt.stage})",
+    )
+    txlog.log(
+        "DELIVERY_RECEIPT",
+        msg_id=receipt.for_id,
+        sender=local_sender.name,
+        recipient=recipients,
+        remote=remote_id,
+        detail=f"{receipt.stage}; receipt_id={receipt.receipt_id}",
+    )
+
+
+def _publish_delivery_receipt(
+    original: dict,
+    delivered_names: list[str],
+    publish_control: Callable[[bytes], None],
+    remote_id: str,
+) -> None:
+    receipt = build_delivery_receipt(original, delivered_names)
+    if receipt is None:
+        return
+    try:
+        publish_control(json.dumps(receipt).encode("utf-8"))
+        txlog.log(
+            "RECEIPT_PUBLISHED",
+            msg_id=original["id"],
+            sender=original.get("from") or "?",
+            recipient=",".join(delivered_names),
+            remote=remote_id,
+            detail=f"receipt_id={receipt['id']}",
+        )
+    except Exception as e:
+        out(f"WARN: delivery receipt publish failed id={original.get('id', '?')} remote={remote_id}: {e}")
 
 
 def make_receive_callback(
     get_participants: Callable[[], list[Participant]],
     services: list[StorageService] | None = None,
+    publish_control: Callable[[bytes], None] | None = None,
+    remote_id: str = "remote",
 ) -> OnMessage:
     """Wrap `receive_envelope` so the subscriber thread always passes the
     CURRENT participant list — agents added via `a8s add` after the
     subscriber started are picked up without restarting the loop. Storage
     services (#90) are passed in once at startup; the receive helper uses
-    them to download cross-cluster `FILE:` payloads."""
+    them to download cross-cluster `FILE:` payloads. `publish_control`
+    enables content-free delivery receipts on that same transport."""
 
     def callback(envelope: bytes) -> None:
         try:
-            receive_envelope(envelope, get_participants(), services=services)
+            receive_envelope(
+                envelope,
+                get_participants(),
+                services=services,
+                publish_control=publish_control,
+                remote_id=remote_id,
+            )
         except Exception as e:
             out(f"WARN: receive_envelope raised: {e}")
 
@@ -478,9 +574,14 @@ def start_remotes(
     `.files/` as envelopes arrive. None / empty preserves pre-#90
     behavior (incoming files are stripped + warned)."""
     started: list[Transport] = []
-    cb = make_receive_callback(get_participants, services=services)
     for r in remotes:
         try:
+            cb = make_receive_callback(
+                get_participants,
+                services=services,
+                publish_control=r.publish,
+                remote_id=r.id,
+            )
             r.start(cb)
             started.append(r)
             out(f"remote {r.id}: subscriber started")

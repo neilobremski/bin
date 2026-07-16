@@ -66,6 +66,8 @@ from registry import (
     save_namespaces,
     save_registry,
 )
+from txlog import read_events
+from ulid import is_ulid
 
 
 # ---------- skill installation helpers ----------
@@ -1394,6 +1396,27 @@ def cmd_convo(args: list[str]) -> int:
     )
     if text:
         print(text)
+    return 0
+
+
+# ---------- trace / logs ----------
+
+def cmd_trace(args: list[str]) -> int:
+    if len(args) != 1 or not is_ulid(args[0]):
+        print("usage: a8s trace <ULID>", file=sys.stderr)
+        return 2
+    msg_id = args[0].upper()
+    events = read_events(msg_id)
+    if not events:
+        print(f"no transaction events for {msg_id}", file=sys.stderr)
+        return 1
+    print(f"trace {msg_id}")
+    for event in events:
+        fields = [event["timestamp"], event["event"]]
+        for key in ("from", "to", "remote", "files", "detail"):
+            if event[key]:
+                fields.append(f"{key}={event[key]}")
+        print("  " + " ".join(fields))
     return 0
 
 

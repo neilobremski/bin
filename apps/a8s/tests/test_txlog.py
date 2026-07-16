@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from txlog import HEADER, _sanitize, _ts, _txlog_path, log
+from txlog import HEADER, _sanitize, _ts, _txlog_path, log, read_events
 
 
 class TestTxlogPath:
@@ -120,6 +120,20 @@ class TestLogFieldFormat:
         lines = _txlog_path().read_text().splitlines()
         data_line = lines[1]
         assert data_line.split("\t")[1] == "DROPPED"
+
+
+class TestReadEvents:
+    def test_filters_one_message_and_preserves_order(self, fake_home):
+        log("PUBLISHED", msg_id="01ABC", sender="A", recipient="B")
+        log("DROPPED", msg_id="02DEF", sender="C", recipient="D")
+        log("DELIVERY_RECEIPT", msg_id="01ABC", sender="A", recipient="B")
+
+        events = read_events("01abc")
+        assert [event["event"] for event in events] == ["PUBLISHED", "DELIVERY_RECEIPT"]
+        assert all(event["msg_id"] == "01ABC" for event in events)
+
+    def test_missing_log_returns_empty(self, fake_home):
+        assert read_events("01ABC") == []
 
 
 class TestLogOSError:
