@@ -11,7 +11,10 @@ escalation to an absent human (the doorbell — see
 [verification.md](verification.md)). Member work never waits, and a
 deliverable message is never dropped.
 The economics are *budgets, not cuts* — an agent that is out of budget does
-not run (its mail queues), rather than having its mail thrown away.
+not run (its mail queues), rather than having its mail thrown away. The point
+is not only that no team overspends the plan, but that the plan you already
+pay for keeps earning: held queues mean refill is the retry, so capacity is
+spent on work rather than left idle.
 
 ## The failure modes
 
