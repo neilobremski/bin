@@ -240,13 +240,19 @@ HARNESS_PRESETS: dict[str, dict] = {
         "text_tier": "big",
         "description": (
             "Antigravity 1.1+ — --print for headless turns; --mode accept-edits "
-            "so edits skip the review prompt. No --sandbox: it confines child "
-            "writes to CWD, blocking tell's staging outbox (see docs/harness-agy.md)"
+            "so edits skip the review prompt. --dangerously-skip-permissions "
+            "because 1.1.3+ auto-denies command tools in headless --print runs "
+            "(toolPermission=request-review can't prompt), which accept-edits no "
+            "longer covers — roster members must run tell and git. OS isolation, "
+            "not the harness permission layer, is the security boundary. "
+            "No --sandbox: it confines child writes to CWD, blocking tell's "
+            "staging outbox (see docs/harness-agy.md)"
         ),
         "a8s_definition": "agy.json",
         "headless": "--print",
         "invoke": [
             "agy",
+            "--dangerously-skip-permissions",
             "--mode",
             "accept-edits",
             "--print",

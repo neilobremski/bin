@@ -470,15 +470,21 @@ class TestHarnessPresets:
         raw = json.loads(path.read_text(encoding="utf-8"))
         assert "qwen2.5-coder:7b" in raw["worker"]["_notes"]
 
-    def test_opencode_and_agy_presets_avoid_skip_permissions(self):
+    def test_opencode_avoids_skip_permissions(self):
         opencode = " ".join(HARNESS_PRESETS["opencode"]["invoke"])
-        agy = " ".join(HARNESS_PRESETS["agy"]["invoke"])
         assert "dangerously-skip-permissions" not in opencode
-        assert "dangerously-skip-permissions" not in agy
         assert "--auto" in opencode
+        assert "-i" not in opencode
+
+    def test_agy_preset_carries_skip_permissions(self):
+        # agy 1.1.3+ auto-denies command tools in headless --print runs
+        # (toolPermission=request-review can't prompt); accept-edits no longer
+        # covers commands, so roster members that must run tell/git need the
+        # skip. OS isolation is the security boundary, not this flag.
+        agy = " ".join(HARNESS_PRESETS["agy"]["invoke"])
+        assert "--dangerously-skip-permissions" in agy
         assert "--mode" in agy and "accept-edits" in agy
         assert "--print" in agy
-        assert "-i" not in opencode
 
     def test_build_preset_invoke_opencode(self):
         argv = build_preset_invoke("opencode")

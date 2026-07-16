@@ -72,6 +72,29 @@ Two things make it work:
    requires dispatch to inject the per-turn staging path into the argv, since
    the path is per-node/per-member. Not currently wired.
 
+## Update: headless command permissions (2026-07-16, agy 1.1.3)
+
+agy 1.1.3 introduced a new permission model, `toolPermission=request-review`.
+In headless `--print` runs any tool needing the **"command"** permission is
+**auto-denied** — headless mode has no way to surface the review prompt, so the
+turn produces only the denial text (`a tool required the "command" permission
+that headless mode cannot prompt for, so it was auto-denied`). Crucially,
+`--mode accept-edits` covers *file edits* but **not commands**: a member that
+runs `tell` or `git` now stalls even though it never touches `--sandbox`.
+
+The r4t `agy` preset therefore now passes **`--dangerously-skip-permissions`**,
+matching what `apps/a8s/definitions/agy.json` already does. This is consistent
+with r4t doctrine (ISOLATE-SPEC): the security line is the **OS isolation
+boundary**, not the harness's own sandbox/permission layer, which r4t already
+trusts for its peers.
+
+The narrow alternative is per-target allow rules —
+`command(<target>)` entries under `permissions.allow` in
+`~/.gemini/antigravity-cli/settings.json`. That works for a rig that only ever
+runs a fixed, known command set, but it is impractical for roster members that
+need broad shell access (arbitrary `git`, `tell`, build tooling), so r4t skips
+permissions wholesale instead.
+
 ## Recommended invocations per role
 
 - **A rig that must `tell`** (any r4t member): no `--sandbox`. Keep
