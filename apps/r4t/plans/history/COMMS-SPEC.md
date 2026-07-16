@@ -2,9 +2,9 @@
 
 *2026-07-14. Decisions locked with Neil in the rulings on #192, #185, #189,
 #190, #160, #183 (all dated 2026-07-14) and motivated by the n5a
-[RETRO.md](../experiments/n5a/RETRO.md). Six issues, ONE implementation PR,
+[RETRO.md](../../experiments/n5a/RETRO.md). Six issues, ONE implementation PR,
 spec first (this doc). Style and rigor follow
-[history/CELL-SPEC.md](history/CELL-SPEC.md), the record of the re-founding this
+[CELL-SPEC.md](CELL-SPEC.md), the record of the re-founding this
 one builds on. This is the active spec; every open question is resolved inline
 below (marked DECIDED).*
 

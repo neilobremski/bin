@@ -6,8 +6,10 @@ the LLM. Prompt etiquette ("don't send ack-only messages") is kept as a
 courtesy, but no mechanism depends on an agent obeying it.
 
 Everything here runs autonomously. There are knobs (config) and lenses
-(`r4t status`, the dead-letter dir, a8s logs) but no gates: the system never
-parks work waiting for a human, and it never drops a deliverable message.
+(`r4t status`, the dead-letter dir, a8s logs); the only gate is on
+escalation to an absent human (the doorbell — see
+[verification.md](verification.md)). Member work never waits, and a
+deliverable message is never dropped.
 The economics are *budgets, not cuts* — an agent that is out of budget does
 not run (its mail queues), rather than having its mail thrown away.
 
