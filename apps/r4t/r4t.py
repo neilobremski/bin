@@ -60,6 +60,7 @@ COMMAND_HELP = [
     ("rig add <rig> <preset>", "Add a rig to ~/.config/r4t/rigs.json from a preset"),
     ("rig remove <rig>", "Remove a rig from the config (alias: rm)"),
     ("rig set <rig> <key> <val>", "Write a rig setting (get/unset/configure too)"),
+    ("judge <node> --rig <rig>", "Grade a finished run against the MAST failure taxonomy"),
     ("roster check", "Lint ROSTER.md against the rig config"),
     ("task list", "List conversation threads for a team"),
     ("task show <id>", "Show one task ledger record as JSON"),
@@ -759,6 +760,20 @@ def cmd_check(args: argparse.Namespace) -> int:
     return run_check(node, org.workplace)
 
 
+def cmd_judge(args: argparse.Namespace) -> int:
+    node = _resolve_node(args.node)
+    if node is None:
+        return 2
+    from judge import run as run_judge
+
+    return run_judge(
+        node,
+        rig_name=args.rig,
+        config_path=resolve_config_path(args.rig_config),
+        json_mode=args.json,
+    )
+
+
 def _ensure_tell_outbox(ctx: DispatchContext) -> None:
     """Directly-invoked seat/chat sessions have no a8s-injected outbox env;
     give `tell` subprocesses (the Address: doorbell, error notices) the same
@@ -1419,6 +1434,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Team node name (default: sole ~/.config/r4t team).",
     )
     check_p.set_defaults(func=cmd_check)
+
+    judge_p = sub.add_parser(
+        "judge",
+        help="Grade a finished run against the MAST failure taxonomy "
+        "(post-hoc; the report is for humans, not agents).",
+    )
+    judge_p.add_argument(
+        "node", nargs="?",
+        help="Team node name (default: sole ~/.config/r4t team).",
+    )
+    judge_p.add_argument(
+        "--rig", required=True,
+        help="Configured rig that runs the judge prompts.",
+    )
+    judge_p.add_argument(
+        "--json", action="store_true",
+        help="Machine-readable report on stdout.",
+    )
+    judge_p.add_argument(
+        "--rig-config",
+        help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    judge_p.set_defaults(func=cmd_judge)
 
     chat_p = sub.add_parser(
         "chat", help="Interactive human seat: messages and team activity in one window."

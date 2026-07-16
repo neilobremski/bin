@@ -30,3 +30,18 @@ Set `doorbell_check` in `r4t-org.json` (see [org.md](org.md#org-settings)) to
 run any command — the sweep or a test suite — before the org may ring an
 absent human, and a failing check parks the message without ringing rather
 than losing it.
+
+## The post-hoc judge
+
+`r4t check` and the doorbell gate act on a live run; the judge is the third
+leg — it grades a finished run. `r4t judge <node> --rig <rig>` reads a
+completed run's recorded transcripts and scores them against the MAST
+multi-agent failure taxonomy ("Why Do Multi-Agent LLM Systems Fail?",
+arXiv:2503.13657), plus one r4t extension mode for mutual-wait deadlock, a
+failure MAST has no single mode for.
+
+It is post-hoc and out-of-band by design: a graded org changes behavior, and
+an agent that could read its own grade would learn to game it. Reports land
+under the team dir's `judge/` — a surface no roster agent ever reads — never
+inside the workplace repo. Pass `--json` instead of the sectioned panel to
+derive an experiment-ledger column.
