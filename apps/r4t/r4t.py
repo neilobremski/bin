@@ -1319,6 +1319,46 @@ def cmd_sandbox(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_lab_overview(_args: argparse.Namespace) -> int:
+    from lab import cmd_list
+
+    return cmd_list()
+
+
+def cmd_lab_list(_args: argparse.Namespace) -> int:
+    from lab import cmd_list
+
+    return cmd_list()
+
+
+def cmd_lab_run(args: argparse.Namespace) -> int:
+    from lab import cmd_run
+
+    overrides: dict[str, str] = {}
+    for item in args.rig or []:
+        if "=" not in item:
+            print(f"lab run: --rig expects ROLE=RIG, got {item!r}", file=sys.stderr)
+            return 2
+        role, rig = item.split("=", 1)
+        overrides[role.strip()] = rig.strip()
+    return cmd_run(
+        args.name, arm=args.arm, n=args.trials, fake=args.fake,
+        rig_overrides=overrides, rig_config=args.rig_config,
+    )
+
+
+def cmd_lab_report(args: argparse.Namespace) -> int:
+    from lab import cmd_report
+
+    return cmd_report(args.name)
+
+
+def cmd_lab_ledger(args: argparse.Namespace) -> int:
+    from lab import cmd_ledger
+
+    return cmd_ledger(args.name, as_json=args.json)
+
+
 def _add_common(p: argparse.ArgumentParser, *, with_node: bool = False) -> None:
     p.add_argument("--root", help="Team repo root (default: cwd).")
     p.add_argument(
@@ -1696,6 +1736,56 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sandbox_p.add_argument("--timeout", type=float, default=1800, metavar="SECS")
     sandbox_p.set_defaults(func=cmd_sandbox)
+
+    lab_p = sub.add_parser(
+        "lab",
+        help="Run repo-bundled repeatable experiments (see apps/r4t/experiments/).",
+    )
+    lab_p.set_defaults(func=cmd_lab_overview)
+    lab_sub = lab_p.add_subparsers(dest="action", required=False)
+
+    lab_list_p = lab_sub.add_parser(
+        "list", help="Experiments bundled in this repo + rig/model prereq status."
+    )
+    lab_list_p.set_defaults(func=cmd_lab_list)
+
+    lab_run_p = lab_sub.add_parser(
+        "run", help="Run N trials of an experiment (arms alternate unless --arm)."
+    )
+    lab_run_p.add_argument("name", help="Experiment name (see `r4t lab list`).")
+    lab_run_p.add_argument("--arm", help="Run only this arm (default: all arms).")
+    lab_run_p.add_argument(
+        "-n", "--trials", type=int, default=None, metavar="N",
+        help="Trials per arm (default: the manifest's trials_per_arm).",
+    )
+    lab_run_p.add_argument(
+        "--rig", action="append", metavar="ROLE=RIG",
+        help="Rebind a role to a different symbolic rig (repeatable).",
+    )
+    lab_run_p.add_argument(
+        "--rig-config",
+        help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    lab_run_p.add_argument(
+        "--fake", action="store_true",
+        help="Use the deterministic fake judge (no LLM calls).",
+    )
+    lab_run_p.set_defaults(func=cmd_lab_run)
+
+    lab_report_p = lab_sub.add_parser(
+        "report", help="Aggregate the ledger: pattern over N, prediction scoring."
+    )
+    lab_report_p.add_argument("name", help="Experiment name.")
+    lab_report_p.set_defaults(func=cmd_lab_report)
+
+    lab_ledger_p = lab_sub.add_parser(
+        "ledger", help="Raw trial rows for an experiment."
+    )
+    lab_ledger_p.add_argument("name", help="Experiment name.")
+    lab_ledger_p.add_argument(
+        "--json", action="store_true", help="Emit the rows as JSON."
+    )
+    lab_ledger_p.set_defaults(func=cmd_lab_ledger)
 
     return p
 
