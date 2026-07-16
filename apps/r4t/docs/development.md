@@ -30,7 +30,8 @@ python3 -m pytest apps/r4t/tests/     # from anywhere in ~/bin — the repo
 release, quiet-thread sweep, mission-review) · `tasks.py` (thread ledger) · `state.py`
 (all on-disk state under `$R4T_HOME`) · `rig.py` (rig config, presets,
 model resolution) · `roster.py` · `org.py` (org dirs + settings) ·
-`check.py` (verification sweep) · `verdict.py` (health verdicts +
+`check.py` (verification sweep) · `judge.py` (post-hoc MAST judge) ·
+`verdict.py` (health verdicts +
 dead-letter rollup, shared by status and chat) · `chat.py` (seat feed +
 line UI) · `chat_tui.py` (Textual front end) · `notify.py` (doorbell) ·
 `sandbox.py` + `sandbox/` (the end-to-end harness).
