@@ -192,6 +192,7 @@ any prefixes pointing at it.
 | `tells [--timeout SEC]` (top-level shim, `[~/bin/tells](/Users/neilo/bin/tells)`) | Receive-side complement of `tell` (`apps/a8s/tells.py`). Resolves the node from `TELL_OUTBOX_DIR`, then blocks up to `--timeout` (default 5s) for new envelopes in `.inbox`, prints each `sender: body`, and exits 0; exit 1 on timeout. Non-destructive; Windows: `tells.cmd`. |
 | `a8s logs <name>... [--tail N] [-f]`                                        | Read per-agent log files; one agent in append order, multiple merge by ISO timestamp. `-f` follows.                                                                                                                                                                                                                       |
 | `a8s convo <name> [--limit N]`                                              | Markdown conversation history for an agent (messages to or from). Default `--limit 10`. Outbound headings use `##`, inbound use `###`. Archive: `~/.a8s/conversations.jsonl` (machine-wide; rotates at `convo_max_limit`, default 1000 — `a8s config`). |
+| `a8s trace <ULID>`                                                          | Show locally observed transaction boundaries for one envelope: routing, remote publication/resolution, inbox write, delivery receipt, and agent wake. |
 | `a8s drain <name>`                                                          | Move pending inbox JSON to trash without waking the agent.                                                                                                                                                                                                                                                                |
 
 
@@ -521,6 +522,38 @@ The most common causes:
 - **Codex without `stdin=DEVNULL`.** Codex CLI hangs reading stdin in headless mode. a8s already passes `stdin=subprocess.DEVNULL` for every wake (`daemon.run_with_prefix`), so this only bites if you're running the underlying CLI manually.
 - **Headless permission denial.** Gemini without `--yolo`, Claude without `--permission-mode dontAsk`, Copilot without `--allow-all-tools`, OpenCode without `--dangerously-skip-permissions`, Cursor without `-p --force` — all silently deny tool calls in non-interactive mode and the wake stalls. The bundled `definitions/<kind>.json` files include the required flag for each kind; only worry if you write a custom definition.
 - **Ollama model still loading.** A cold-start of a 20B model can take 10–30s before any output. `ps aux | grep ollama` should show a `runner` process consuming RAM proportional to the model size.
+
+## Remote delivery receipts
+
+Remote inbox writes produce a best-effort, content-free delivery receipt on
+the same transport. This is an extension of the existing envelope shape:
+
+```json
+{
+  "id": "<receipt ULID>",
+  "date": "<ISO-8601 UTC>",
+  "from": "_a8s",
+  "to": "__a8s_receipt__",
+  "content": "",
+  "files": [],
+  "a8s_control": {
+    "type": "delivery_receipt",
+    "version": 1,
+    "for_id": "<original envelope ULID>",
+    "sender": "alice",
+    "recipients": ["bob"],
+    "stage": "inbox_write"
+  }
+}
+```
+
+The reserved target is not a participant. A8s consumes supported control
+envelopes before normal routing, so they never enter an agent inbox and never
+generate receipts themselves. Subscribers without receipt support treat the
+target as unknown and drop it. Only a cluster with the named original sender
+records the receipt. Receipt publication is best-effort; absence of a receipt
+does not prove non-delivery. Use `a8s trace <original ULID>` to distinguish the
+last locally confirmed boundary.
 
 ## Roadmap
 

@@ -33,6 +33,7 @@ from commands import (
     cmd_storage,
     cmd_tell,
     cmd_tells,
+    cmd_trace,
     cmd_unalias,
     cmd_unnamespace,
     cmd_unremote,
@@ -64,6 +65,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("drain",    "<name>",                   "Move local inbox to trash without invoking."),
     ("config",   "[get|set|unset ...]",      "List all knobs or edit ~/.a8s/settings.json."),
     ("convo",    "<name> [--limit N]",       "Show markdown conversation history for an agent."),
+    ("trace",    "<ULID>",                   "Show transaction boundaries for one message."),
     ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
     ("remote",   "[<name> [<broker> <topic> [--<k> <v> ...]]]", "List, show, or set a cross-machine remote."),
     ("unremote", "<name>",                    "Remove a configured remote."),
@@ -136,6 +138,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_config(args)
     if cmd == "convo":
         return cmd_convo(args)
+    if cmd == "trace":
+        return cmd_trace(args)
     if cmd == "install":
         return cmd_install(args)
     if cmd == "install-client":

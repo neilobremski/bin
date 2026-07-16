@@ -14,11 +14,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-__all__ = ["log"]
+__all__ = ["log", "read_events"]
 
 Event = Literal[
     "ROUTED",
     "RECEIVED_REMOTE",
+    "RESOLVED_REMOTE",
+    "RECEIPT_PUBLISHED",
+    "DELIVERY_RECEIPT",
     "FILE_DELIVERED",
     "FILE_UPLOAD_FAILED",
     "PUBLISHED",
@@ -89,3 +92,23 @@ def log(
             f.write(line)
     except OSError:
         pass
+
+
+def read_events(msg_id: str) -> list[dict[str, str]]:
+    """Return transaction events correlated to one message ULID."""
+    path = _txlog_path()
+    if not path.is_file():
+        return []
+    events: list[dict[str, str]] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                values = line.rstrip("\n").split("\t")
+                if values == _COLUMNS or len(values) != len(_COLUMNS):
+                    continue
+                event = dict(zip(_COLUMNS, values))
+                if event["msg_id"].upper() == msg_id.upper():
+                    events.append(event)
+    except OSError:
+        return []
+    return events

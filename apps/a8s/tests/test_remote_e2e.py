@@ -71,7 +71,8 @@ def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
     sender_p = Participant("SENDER", sender_root)
     ensure_mailboxes(sender_p)
     from mailbox import _write_outbox
-    _write_outbox("SENDER", sender_root, "TARGET", "ping from A", [])
+    out_path = _write_outbox("SENDER", sender_root, "TARGET", "ping from A", [])
+    msg_id = out_path.stem
     from daemon import attached_loop
     rc = attached_loop(["SENDER"], 0.2, single_pass=True)
     assert rc == 0
@@ -95,6 +96,32 @@ def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
         assert body["to"] == "TARGET"
     finally:
         stop_remotes(rx_remotes)
+
+    # Step 4: cluster A reconnects its persistent subscriber and consumes
+    # the internal receipt emitted by cluster B after the inbox write.
+    monkeypatch.setenv("HOME", str(cluster_a_home))
+    core.PRINT_LOCK = None
+    receipt_remotes = start_remotes(load_remotes(), lambda: [sender_p])
+    try:
+        from txlog import read_events
+
+        deadline = time.time() + 5.0
+        receipt_events = []
+        while time.time() < deadline:
+            receipt_events = [
+                event for event in read_events(msg_id)
+                if event["event"] == "DELIVERY_RECEIPT"
+            ]
+            if receipt_events:
+                break
+            time.sleep(0.1)
+        assert len(receipt_events) == 1
+        assert receipt_events[0]["from"] == "SENDER"
+        assert receipt_events[0]["to"] == "TARGET"
+        assert "inbox_write" in receipt_events[0]["detail"]
+        assert "ping from A" not in receipt_events[0]["detail"]
+    finally:
+        stop_remotes(receipt_remotes)
 
 
 def test_remote_round_trip_with_file_via_storage(tmp_path, mqtt_broker, monkeypatch):

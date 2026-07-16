@@ -34,6 +34,7 @@ from network import (
 from registry import save_aliases, save_namespaces, save_registry
 from transports import Transport, TransportError
 from ulid import new as new_ulid
+from delivery_receipt import build_delivery_receipt, parse_delivery_receipt
 
 
 # ---------- StubTransport for tests ----------
@@ -308,6 +309,112 @@ class TestReceiveEnvelope:
             "detail": "inbox write complete",
         }]
         assert "private text" not in repr(received)
+
+    def test_valid_delivery_publishes_correlated_receipt(self, two_local_agents):
+        published = []
+        msg_id = new_ulid()
+        receive_envelope(json.dumps({
+            "id": msg_id, "from": "A", "to": "B", "content": "private", "files": [],
+        }).encode(), two_local_agents, publish_control=published.append, remote_id="mqtt-one")
+
+        assert len(published) == 1
+        receipt = parse_delivery_receipt(json.loads(published[0]))
+        assert receipt is not None
+        assert receipt.for_id == msg_id
+        assert receipt.sender == "A"
+        assert receipt.recipients == ("B",)
+        assert "private" not in published[0].decode()
+
+    def test_receipt_is_internal_idempotent_and_never_receipted(
+        self, two_local_agents, monkeypatch,
+    ):
+        events = []
+        republished = []
+        monkeypatch.setattr(network.txlog, "log", lambda event, **fields: events.append((event, fields)))
+        original_id = new_ulid()
+        envelope = build_delivery_receipt(
+            {"id": original_id, "from": "A"},
+            ["B"],
+        )
+        payload = json.dumps(envelope).encode()
+
+        receive_envelope(
+            payload,
+            two_local_agents,
+            publish_control=republished.append,
+            remote_id="mqtt-one",
+        )
+        receive_envelope(
+            payload,
+            two_local_agents,
+            publish_control=republished.append,
+            remote_id="mqtt-one",
+        )
+
+        receipts = [fields for event, fields in events if event == "DELIVERY_RECEIPT"]
+        assert len(receipts) == 1
+        assert receipts[0]["msg_id"] == original_id
+        assert receipts[0]["recipient"] == "B"
+        assert republished == []
+        assert all(not inbox_dir(name).exists() for name in ("A", "B"))
+
+    def test_receipt_for_nonlocal_sender_is_ignored_without_loop(self, two_local_agents):
+        envelope = build_delivery_receipt(
+            {"id": new_ulid(), "from": "REMOTE_SENDER"},
+            ["B"],
+        )
+        republished = []
+        receive_envelope(
+            json.dumps(envelope).encode(),
+            two_local_agents,
+            publish_control=republished.append,
+        )
+        assert republished == []
+
+    def test_malformed_control_warning_is_rate_limited_per_remote(
+        self, two_local_agents, monkeypatch,
+    ):
+        diagnostics = []
+        events = []
+        network._REMOTE_DIAGNOSTIC_LAST.clear()
+        monkeypatch.setattr(network, "out", diagnostics.append)
+        monkeypatch.setattr(network.txlog, "log", lambda event, **fields: events.append((event, fields)))
+
+        for remote_id in ("one", "one", "two"):
+            envelope = build_delivery_receipt(
+                {"id": new_ulid(), "from": "A"},
+                ["B"],
+            )
+            envelope["a8s_control"]["version"] = 2
+            receive_envelope(
+                json.dumps(envelope).encode(),
+                two_local_agents,
+                remote_id=remote_id,
+            )
+
+        assert len(diagnostics) == 2
+        assert all("unsupported or malformed a8s control envelope" in line for line in diagnostics)
+        drops = [fields for event, fields in events if event == "DROPPED"]
+        assert [fields["remote"] for fields in drops] == ["one", "two"]
+
+    def test_receipt_publish_failure_does_not_undo_inbox_write(
+        self, two_local_agents, monkeypatch,
+    ):
+        diagnostics = []
+        monkeypatch.setattr(network, "out", diagnostics.append)
+        msg_id = new_ulid()
+
+        def fail_publish(_payload):
+            raise RuntimeError("broker unavailable")
+
+        receive_envelope(json.dumps({
+            "id": msg_id, "from": "A", "to": "B", "content": "private", "files": [],
+        }).encode(), two_local_agents, publish_control=fail_publish, remote_id="mqtt-one")
+
+        assert (inbox_dir("B") / f"{msg_id}.json").is_file()
+        assert len(diagnostics) == 1
+        assert "delivery receipt publish failed" in diagnostics[0]
+        assert "private" not in diagnostics[0]
 
     def test_dedup_by_ulid(self, two_local_agents):
         msg_id = new_ulid()
