@@ -2,7 +2,7 @@
 
 An agent cannot be the judge of its own deliverable, so the judge is
 machinery it cannot see into. Design history and the incident that drove it:
-[../plans/VERIFY-SPEC.md](../plans/VERIFY-SPEC.md).
+[../plans/history/VERIFY-SPEC.md](../plans/history/VERIFY-SPEC.md).
 
 ## `r4t check`
 

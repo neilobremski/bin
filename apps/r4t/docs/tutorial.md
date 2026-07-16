@@ -12,10 +12,10 @@ table see [rigs.md](rigs.md#governance-knobs).
 | File | Where | What it defines |
 |------|-------|-----------------|
 | **`ROSTER.md`** | In the team repo | *Who* is on the team and which **symbolic rig** each AI member uses |
-| **`~/.config/r4t/rigs.json`** | Out of repo (`R4T_HOME`) | What each rig **actually runs** — CLI argv, timeouts, hop limits |
+| **`~/.config/r4t/rigs.json`** | Out of repo (`R4T_HOME`) | What each rig **actually runs** — CLI argv, timeouts, budgets |
 
-The roster never contains shell commands. A line like `Harness: opencode` is
-wrong — `opencode` is a CLI, not a rig name. You write `Harness: worker`
+The roster never contains shell commands. A line like `Rig: opencode` is
+wrong — `opencode` is a CLI, not a rig name. You write `Rig: worker`
 and define `worker` in the rig config.
 
 This split is deliberate: the in-repo roster cannot smuggle in arbitrary
@@ -95,7 +95,7 @@ Humans use `Status: Human` and never get a rig. Optional
 ### 5. Lint before going live
 
 ```bash
-r4t roster check      # roster shape + every Harness resolves to a rig
+r4t roster check      # roster shape + every Rig line resolves to a rig
 r4t rig list      # rigs, invoke lines, and roster resolution
 ```
 
@@ -131,16 +131,16 @@ graduate by copying the two files into the repo and deleting `r4t-org.json`.
 ```
 ROSTER.md                      rigs.json
 ───────────                    ────────────────
-Lead   → Harness: leader    →  "leader":  { invoke: [...] }
-Dev    → Harness: member    →  "member":  { invoke: [...] }
-Reviewer → Harness: reviewer → "reviewer": { ... }   ← you must add this
+Lead   → Rig: leader    →  "leader":  { invoke: [...] }
+Dev    → Rig: member    →  "member":  { invoke: [...] }
+Reviewer → Rig: reviewer → "reviewer": { ... }   ← you must add this
 ```
 
 **Preset names** (`claude`, `opencode`, …) populate rig definitions via
 `r4t rig add`. **Rig names** (`leader`, `reviewer`, …) are what the
 roster references.
 
-Optional **pins** in `rigs.json` override a member's roster harness
+Optional **pins** in `rigs.json` override a member's roster rig
 silently — an in-repo roster edit cannot upgrade a pinned agent:
 
 ```json
@@ -188,19 +188,10 @@ r4t rig add junior-dev opencode
 
 ## How a message flows
 
-1. `tell myrepo "..."` routes through a8s to the team node; the node's
-   definition invokes `r4t dispatch`. External messages always enter at the
-   roster leader — the topmost leader IS the garden from outside; only the
-   team itself (and the human seat) addresses individual members.
-2. r4t loads the roster, resolves the leader's rig, checks governance
-   gates, and runs the rig's CLI with a prompt (persona, history, incoming
-   message).
-3. The harness's `$TELL_OUTBOX_DIR` points at a per-turn staging dir. The
-   agent replies with ordinary `tell`. After the turn, r4t releases staged
-   envelopes: stamps headers, applies quotas, writes history, moves messages
-   to the node's outbox for a8s.
-4. Agents never wait for replies inside a turn. Delegate, end the turn, get
-   woken when replies arrive, answer the originator when there is enough.
+`tell myrepo "..."` routes through a8s to the team node, enters at the
+roster leader, and r4t runs the rig's CLI with a prompt; replies stage via
+ordinary `tell` and release after the turn. Full walk-through:
+[message-flow.md](message-flow.md).
 
 ## Command reference
 
