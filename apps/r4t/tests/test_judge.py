@@ -173,6 +173,20 @@ def test_prompt_carries_taxonomy_captures_and_context(
     assert "budget" in prompt
 
 
+def test_prompt_teaches_stdout_fallback_semantics(
+    r4t_home, judge_config, judge_harness
+):
+    _script, calls = judge_harness
+    _seed_capture()
+    code, _out, _err = _run(judge_config)
+    assert code == 0
+    prompt = (calls / "call-000.txt").read_text(encoding="utf-8")
+    assert "stdout fallback" in prompt
+    assert "ONE reply to the sender" in prompt
+    assert "recipients other than" in prompt
+    assert "genuinely silent or chrome-only" in prompt
+
+
 def test_chunking_invokes_per_chunk_and_aggregates(
     r4t_home, judge_config, judge_harness, monkeypatch
 ):

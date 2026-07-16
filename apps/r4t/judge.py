@@ -120,6 +120,28 @@ names):
 """
 
 
+FALLBACK_NOTE = """\
+Delivery semantics you must apply before grading "printed instead of sending":
+this team has a stdout fallback. A turn that ends without staging any message
+but prints a non-trivial prose answer does NOT lose that answer — the cleaned
+stdout is delivered as ONE reply to the sender of the message the turn was
+answering. Prose-only output is therefore a normal, delivered reply, not a
+dropped one. Do not raise FM-1.1, FM-2.5, or FM-2.6 merely because a member
+answered in prose without an explicit send.
+
+Prose-only output IS a genuine failure only when one of these holds:
+- the output narrates messages to recipients other than (or in addition to)
+  the one inbound sender — the fallback reaches the inbound sender alone, so
+  "I told Rook and Faye and Neil" as prose reaches only whoever last wrote in;
+  the other named recipients never receive it;
+- the turn is genuinely silent or chrome-only — no answer worth relaying, so
+  nothing is delivered at all; or
+- a required non-message action (writing a file, running a command) is
+  narrated as done but was not actually performed in the turn.
+Grade those normally. A plain prose answer to the inbound sender is delivered
+and is not a finding on its own."""
+
+
 @dataclass
 class Unit:
     member: str
@@ -250,6 +272,8 @@ r4t extension):
 {_taxonomy_block()}
 
 {EXAMPLES}
+
+{FALLBACK_NOTE}
 
 Rules:
 - Report a finding only when the transcript text in front of you shows it.
