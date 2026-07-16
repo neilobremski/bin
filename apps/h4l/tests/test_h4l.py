@@ -166,19 +166,19 @@ class TestPost:
             store,
             sender="ALICE",
             node="CHATROOM",
-            message="#everyone @knobert I'm testing out chat rooms.",
+            message="#everyone @pat I'm testing out chat rooms.",
             tell_fn=tell_fn,
         )
         meta = store.load_meta("everyone")
-        assert "knobert" in {m.lower() for m in store.member_names(meta)}
+        assert "pat" in {m.lower() for m in store.member_names(meta)}
         messages = store.list_messages("everyone")
         assert len(messages) == 1
-        assert messages[0]["content"] == "@knobert I'm testing out chat rooms."
-        knobert_msgs = [b for a, b in sent if a.lower() == "knobert"]
-        assert len(knobert_msgs) == 1
-        assert "@knobert I'm testing out chat rooms." in knobert_msgs[0]
-        assert "posted in #everyone" in knobert_msgs[0]
-        assert "invited" not in knobert_msgs[0]
+        assert messages[0]["content"] == "@pat I'm testing out chat rooms."
+        pat_msgs = [b for a, b in sent if a.lower() == "pat"]
+        assert len(pat_msgs) == 1
+        assert "@pat I'm testing out chat rooms." in pat_msgs[0]
+        assert "posted in #everyone" in pat_msgs[0]
+        assert "invited" not in pat_msgs[0]
 
     def test_multiple_at_mentions(self, store, tells):
         sent, tell_fn = tells
