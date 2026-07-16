@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 import pytest
+import network
 
 from core import (
     MAX_SEEN_IDS,
@@ -237,16 +238,76 @@ class TestReceiveEnvelope:
         assert body["from"] == "REMOTE_X"
         assert body["content"] == "hello via remote"
 
-    def test_unknown_recipient_dropped_silently(self, two_local_agents):
+    def test_unknown_recipient_records_rate_limited_diagnostic(
+        self, two_local_agents, monkeypatch,
+    ):
+        diagnostics = []
+        tx_events = []
+        network._REMOTE_DIAGNOSTIC_LAST.clear()
+        monkeypatch.setattr(network, "out", diagnostics.append)
+        monkeypatch.setattr(network.txlog, "log", lambda event, **fields: tx_events.append((event, fields)))
+        msg_id = new_ulid()
         envelope = json.dumps({
-            "id": new_ulid(), "from": "X", "to": "GHOST",
+            "id": msg_id, "from": "X", "to": "GHOST",
             "content": "ignored", "files": [],
         }).encode()
         receive_envelope(envelope, two_local_agents)
+        receive_envelope(json.dumps({
+            "id": new_ulid(), "from": "X", "to": "GHOST",
+            "content": "different secret", "files": [],
+        }).encode(), two_local_agents)
+        assert diagnostics == [f"REMOTE_DROP id={msg_id} to='GHOST' reason=not in local registry"]
+        assert tx_events[0] == (
+            "DROPPED",
+            {
+                "msg_id": msg_id,
+                "recipient": "GHOST",
+                "remote": "remote",
+                "detail": "not in local registry",
+            },
+        )
+        assert "ignored" not in diagnostics[0]
         # No inbox writes anywhere — the dirs may not even exist.
         for n in ("A", "B"):
             d = inbox_dir(n)
             assert not d.exists() or list(d.iterdir()) == []
+
+    def test_alias_with_no_local_participants_records_diagnostic(
+        self, fake_home, tmp_path, monkeypatch,
+    ):
+        root = tmp_path / "A"
+        root.mkdir()
+        save_registry({"A": {"root": str(root)}, "B": {"root": str(tmp_path / "B")}})
+        save_aliases({"team": ["B"]})
+        diagnostics = []
+        network._REMOTE_DIAGNOSTIC_LAST.clear()
+        monkeypatch.setattr(network, "out", diagnostics.append)
+        receive_envelope(json.dumps({
+            "id": new_ulid(), "from": "X", "to": "team", "content": "secret", "files": [],
+        }).encode(), [Participant("A", root)])
+        assert len(diagnostics) == 1
+        assert "alias resolved to zero local recipients" in diagnostics[0]
+        assert "secret" not in diagnostics[0]
+
+    def test_valid_delivery_txlog_marks_inbox_write_without_content(
+        self, two_local_agents, monkeypatch,
+    ):
+        events = []
+        monkeypatch.setattr(network.txlog, "log", lambda event, **fields: events.append((event, fields)))
+        msg_id = new_ulid()
+        receive_envelope(json.dumps({
+            "id": msg_id, "from": "X", "to": "B", "content": "private text", "files": [],
+        }).encode(), two_local_agents)
+        received = [fields for event, fields in events if event == "RECEIVED_REMOTE"]
+        assert received == [{
+            "msg_id": msg_id,
+            "sender": "X",
+            "recipient": "B",
+            "files": None,
+            "remote": "remote",
+            "detail": "inbox write complete",
+        }]
+        assert "private text" not in repr(received)
 
     def test_dedup_by_ulid(self, two_local_agents):
         msg_id = new_ulid()
