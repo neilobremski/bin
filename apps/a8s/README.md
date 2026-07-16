@@ -109,7 +109,7 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 |                                |                                                                                                                                                                |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s add <name> <dir> [<def>]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given.                                                                 |
-| `a8s remove <name>`            | Unregister an agent. Wipes `~/.a8s/agents/<NAME>/` and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running. |
+| `a8s remove <name>` / `a8s rm <name>` | Unregister an agent. Wipes `~/.a8s/agents/<NAME>/` and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running. |
 | `a8s define <name> [<path>]`   | Show or set the agent's definition file.                                                                                                                       |
 | `a8s discover <path>`          | Walk a path for marker files; print suggested `add`+`define` commands. Read-only.                                                                              |
 | `a8s ls [-q]`                  | List every registered node, running or not: NAME, STATUS (`running (pid N)` / `stopped`), KIND, ROOT, and bound namespaces. `-q` prints just names.             |
