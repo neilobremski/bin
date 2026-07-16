@@ -563,7 +563,7 @@ def _load_config_payload(path: Path) -> dict:
         "_notes": (
             "Created by `r4t rig add`. Rig names are SYMBOLIC — ROSTER.md "
             "Rig lines reference them. See `r4t rig presets` and "
-            "apps/r4t/README.md."
+            "apps/r4t/docs/rigs.md."
         ),
     }
 
@@ -1051,7 +1051,7 @@ def default_config_payload() -> dict:
             "  r4t rig add <rig> <preset>",
             "Presets mirror apps/a8s/definitions/ (claude, codex, cursor, ...).",
             "invoke may also be a LIST of argvs (a pool, rotated round-robin).",
-            "All governance knobs default sanely; see apps/r4t/README.md.",
+            "All governance knobs default sanely; see apps/r4t/docs/rigs.md.",
         ],
         "leader": {
             "invoke": ["opencode", "run", "--auto", "--dir", ".", "{prompt}"],
