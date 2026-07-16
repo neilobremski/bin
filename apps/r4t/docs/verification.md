@@ -33,6 +33,13 @@ than losing it.
 
 ## The post-hoc judge
 
+How best to ask a judge is an open question the field is actively
+arguing — published work reports pairwise comparison more reliable than
+absolute scores, and persona-anchored evaluation of uncertain benefit —
+so the judging shape here (yes/no flags, persona anchoring proposed) is
+held as a hypothesis: the experiment ladder's E5 rung tests it before it
+hardens into doctrine.
+
 `r4t check` and the doorbell gate act on a live run; the judge is the third
 leg — it grades a finished run. `r4t judge <node> --rig <rig>` reads a
 completed run's recorded transcripts and scores them against the MAST

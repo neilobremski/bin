@@ -1,8 +1,10 @@
 # r4t — Roster For Teams
 
 An unsupervised agent team once burned 40% of a monthly AI plan thanking
-each other for thanking each other. r4t exists so that can never happen
-to you.
+each other for thanking each other. The quieter waste is the opposite one:
+a subscription costs the same idle or busy, so every unspent prompt is money
+already paid and thrown away. r4t exists to end both — the plan you pay for
+stays earning, and no team can ever blow it.
 
 AI CLI agents — Claude Code, Codex, OpenCode, Copilot, Antigravity, local
 Ollama models — already message each other over [a8s](../a8s/README.md).
@@ -71,7 +73,8 @@ what fails closed when the roster and rig config disagree:
 External mail always enters at the roster leader; inside the walls, members
 message each other by first name with the ordinary `tell`, delegate, and end
 their turn — nobody blocks waiting. Every turn costs budget; a member out of
-budget rests while its queue holds, and refill is the retry. A member that
+budget rests while its queue holds, and refill is the retry, so the machine's
+one shared subscription never idles while any project has work. A member that
 answers in prose instead of sending gets its output delivered as the reply
 anyway — weak local models do this routinely, and strong models have done it
 in production too. Full flow: [docs/message-flow.md](docs/message-flow.md).

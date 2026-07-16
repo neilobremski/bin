@@ -155,6 +155,18 @@ that cannot authenticate headlessly from mounted files does not belong in a
 container rig. On rig-timeout expiry r4t kills the container by its
 deterministic name and lets `--rm` reap it.
 
+## What this boundary does not do
+
+The boundary controls filesystem and privilege, not the network or the
+secrets you hand across it. An isolated rig can still reach any endpoint
+(the field's converging answer is default-deny egress through an
+allowlisting proxy), and a credential mounted read-only is readable by
+everything that runs inside the boundary for as long as it is mounted
+(the stronger pattern is short-lived, per-run secret injection). Both are
+candidates for a later isolation round; today, mount only credentials the
+rig's job actually needs, and treat "isolated" as meaning *it cannot
+change what runs* — not *it cannot phone out*.
+
 ## Not automated (by design)
 
 Auto-provisioning users, sudoers, or workplace group bits; a forbidden-paths
