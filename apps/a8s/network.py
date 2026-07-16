@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -50,6 +51,32 @@ from ulid import is_ulid
 # threads (one per remote) call seen_id_append concurrently; the append
 # itself is atomic per POSIX, but the truncate-after-rotate is not.
 _SEEN_IDS_LOCK = threading.Lock()
+_REMOTE_DIAGNOSTIC_LOCK = threading.Lock()
+_REMOTE_DIAGNOSTIC_LAST: dict[tuple[str, str], float] = {}
+_REMOTE_DIAGNOSTIC_INTERVAL_S = 300.0
+_REMOTE_DIAGNOSTIC_MAX_KEYS = 256
+
+
+def _remote_drop_diagnostic(msg_id: str, recipient: str, reason: str) -> None:
+    """Rate-limited shared-topic miss diagnostic; never includes content."""
+    key = (reason, recipient.lower())
+    now = time.monotonic()
+    with _REMOTE_DIAGNOSTIC_LOCK:
+        last = _REMOTE_DIAGNOSTIC_LAST.get(key)
+        if last is not None and now - last < _REMOTE_DIAGNOSTIC_INTERVAL_S:
+            return
+        _REMOTE_DIAGNOSTIC_LAST[key] = now
+        if len(_REMOTE_DIAGNOSTIC_LAST) > _REMOTE_DIAGNOSTIC_MAX_KEYS:
+            oldest = min(_REMOTE_DIAGNOSTIC_LAST, key=_REMOTE_DIAGNOSTIC_LAST.get)
+            del _REMOTE_DIAGNOSTIC_LAST[oldest]
+    out(f"REMOTE_DROP id={msg_id} to={recipient!r} reason={reason}")
+    txlog.log(
+        "DROPPED",
+        msg_id=msg_id,
+        recipient=recipient,
+        remote="remote",
+        detail=reason,
+    )
 
 
 # ---------- network.json ----------
@@ -308,8 +335,8 @@ def receive_envelope(
 ) -> None:
     """Decode an incoming envelope, dedupe, filter against the local
     registry, and atomically write into each matched local recipient's
-    inbox. Drops silently if the recipient isn't ours, the envelope is
-    malformed, or the ULID has been seen before — nothing should crash the
+    inbox. Unknown local destinations emit bounded, rate-limited diagnostics;
+    malformed or duplicate envelopes drop silently. Nothing should crash the
     subscriber thread.
 
     `services`: configured storage services (#90). When set and the
@@ -337,9 +364,7 @@ def receive_envelope(
     try:
         kind, member_names = resolve_name(recipient_name)
     except (KeyError, ValueError):
-        # Recipient name unknown locally — receive-side filter says "not
-        # for me." Drop silently; logging every miss would be noisy on a
-        # busy network.
+        _remote_drop_diagnostic(msg_id, recipient_name, "not in local registry")
         return
     recipients: list[Participant] = []
     for m in member_names:
@@ -350,7 +375,8 @@ def receive_envelope(
             # is the dual-name foot-gun. Per the design, deliver locally.
             recipients.append(rp)
     if not recipients:
-        return  # alias resolved to nothing locally
+        _remote_drop_diagnostic(msg_id, recipient_name, f"{kind} resolved to zero local recipients")
+        return
     # File payloads (#90): when storage services are configured, download
     # each file's bytes into the recipient's `.files/` and rewrite the
     # envelope entry to local-path shape. Without storage services
@@ -380,6 +406,14 @@ def receive_envelope(
         inbox_tmp_dir(recipient.name).mkdir(parents=True, exist_ok=True)
         final = inbox_dir(recipient.name) / f"{msg_id}.json"
         if final.is_file():
+            txlog.log(
+                "RECEIVED_REMOTE",
+                msg_id=msg_id,
+                sender=msg.get("from") or "?",
+                recipient=recipient.name,
+                remote="remote",
+                detail="inbox already contained envelope",
+            )
             delivered_names.append(recipient.name)
             continue
         staging = inbox_tmp_dir(recipient.name) / f"{msg_id}.json"
@@ -392,7 +426,15 @@ def receive_envelope(
             continue
         out_agent(recipient.name, f"received from {sender_label} (via remote): {preview}")
         file_names = [e.get("filename", "") for e in (msg_for_recipient.get("files") or []) if e.get("filename")]
-        txlog.log("RECEIVED_REMOTE", msg_id=msg_id, sender=sender_label, recipient=recipient.name, files=file_names or None, remote="remote", detail=preview)
+        txlog.log(
+            "RECEIVED_REMOTE",
+            msg_id=msg_id,
+            sender=sender_label,
+            recipient=recipient.name,
+            files=file_names or None,
+            remote="remote",
+            detail="inbox write complete",
+        )
         delivered_names.append(recipient.name)
     if delivered_names:
         import convo
@@ -453,5 +495,3 @@ def stop_remotes(remotes: list[Transport]) -> None:
             r.stop()
         except Exception as e:
             out(f"WARN: remote {r.id} stop raised: {e}")
-
-
