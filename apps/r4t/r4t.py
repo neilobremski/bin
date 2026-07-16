@@ -192,7 +192,8 @@ def _print_rig_summary(config_path: Path, roster_path: Path | None = None) -> No
                 f" rig-budget={rig.rig_budget_max:g}/"
                 f"+{rig.rig_budget_earn_per_hour:g}per-h"
             )
-        print(f"  {name}: {argv}  ({limits})")
+        iso = _isolation_tag(rig)
+        print(f"  {name}: {argv}  ({limits})" + (f"  {iso}" if iso else ""))
     if config.pins:
         print("  pins:")
         for agent in sorted(config.pins):
@@ -479,6 +480,15 @@ def _roster_rows(
     return rows
 
 
+def _isolation_tag(rig) -> str:
+    """The rig's OS-level boundary at a glance, or "" for a bare rig."""
+    if rig.run_as:
+        return f"[user:{rig.run_as}]"
+    if rig.container:
+        return f"[container:{rig.container}]"
+    return ""
+
+
 def _rig_rows(
     ctx: DispatchContext, config
 ) -> list[tuple[bool | None, str, str, str | None]]:
@@ -508,7 +518,9 @@ def _rig_rows(
                 f" rig-budget={rig.rig_budget_max:g}/"
                 f"+{rig.rig_budget_earn_per_hour:g}per-h"
             )
-        rows.append((True, name, f"{argv}  ({limits})", None))
+        iso = _isolation_tag(rig)
+        detail = f"{argv}  ({limits})" + (f"  {iso}" if iso else "")
+        rows.append((True, name, detail, None))
     for agent in sorted(config.pins):
         rows.append((None, "pin", f"{agent} -> {config.pins[agent]}", None))
     rows.append((

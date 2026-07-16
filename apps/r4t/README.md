@@ -86,6 +86,7 @@ in production too. Full flow: [docs/message-flow.md](docs/message-flow.md).
 - [Verification](docs/verification.md) — `r4t check`, checklists, doorbell gate, the post-hoc judge
 - [Governance](docs/governance.md) — why each layer exists, with prior art
 - [Security model](docs/security.md) — what a repo edit can never change
+- [Isolation](docs/isolation.md) — run a rig behind a Unix user or a container
 - [Development](docs/development.md) — sandbox testing, module layout
 - Harness notes: [agy](docs/harness-agy.md) ·
   [ollama launch](docs/harness-ollama-launch.md)
