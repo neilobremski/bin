@@ -1,11 +1,10 @@
 # r4t — Roster For Teams
 
-An AI subscription costs the same idle or busy, so unspent quota is money
-already paid and thrown away — r4t's first job is keeping the plan you buy
-earning. Its second job is that you never overspend: an unsupervised agent
-team once burned 40% of a monthly AI plan thanking each other for thanking
-each other. r4t exists so that can never happen to you — and so the quota
-you're paying for never sits idle either.
+An unsupervised agent team once burned 40% of a monthly AI plan thanking
+each other for thanking each other. The quieter waste is the opposite one:
+a subscription costs the same idle or busy, so every unspent prompt is money
+already paid and thrown away. r4t exists to end both — the plan you pay for
+stays earning, and no team can ever blow it.
 
 AI CLI agents — Claude Code, Codex, OpenCode, Copilot, Antigravity, local
 Ollama models — already message each other over [a8s](../a8s/README.md).
@@ -77,7 +76,8 @@ their turn — nobody blocks waiting. Every turn costs budget; a member out of
 budget rests while its queue holds, and refill is the retry, so the machine's
 one shared subscription never idles while any project has work. A member that
 answers in prose instead of sending gets its output delivered as the reply
-anyway. Full flow: [docs/message-flow.md](docs/message-flow.md).
+anyway — weak local models do this routinely, and strong models have done it
+in production too. Full flow: [docs/message-flow.md](docs/message-flow.md).
 
 ## Learn more
 
