@@ -57,7 +57,7 @@ from ulid import is_ulid
 # itself is atomic per POSIX, but the truncate-after-rotate is not.
 _SEEN_IDS_LOCK = threading.Lock()
 _REMOTE_DIAGNOSTIC_LOCK = threading.Lock()
-_REMOTE_DIAGNOSTIC_LAST: dict[tuple[str, str], float] = {}
+_REMOTE_DIAGNOSTIC_LAST: dict[tuple[str, str, str], float] = {}
 _REMOTE_DIAGNOSTIC_INTERVAL_S = 300.0
 _REMOTE_DIAGNOSTIC_MAX_KEYS = 256
 
@@ -69,7 +69,7 @@ def _remote_drop_diagnostic(
     remote_id: str = "remote",
 ) -> None:
     """Rate-limited shared-topic miss diagnostic; never includes content."""
-    key = (reason, recipient.lower())
+    key = (remote_id, reason, recipient.lower())
     now = time.monotonic()
     with _REMOTE_DIAGNOSTIC_LOCK:
         last = _REMOTE_DIAGNOSTIC_LAST.get(key)
@@ -484,7 +484,12 @@ def _receive_control_envelope(
 ) -> None:
     receipt = parse_delivery_receipt(message)
     if receipt is None:
-        out(f"WARN: dropped unsupported or malformed a8s control envelope id={message.get('id', '?')}")
+        _remote_drop_diagnostic(
+            str(message.get("id", "?")),
+            str(message.get("to", "?")),
+            "unsupported or malformed a8s control envelope",
+            remote_id,
+        )
         return
     local_sender = next(
         (agent for agent in all_agents if agent.name.lower() == receipt.sender.lower()),

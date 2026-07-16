@@ -371,6 +371,51 @@ class TestReceiveEnvelope:
         )
         assert republished == []
 
+    def test_malformed_control_warning_is_rate_limited_per_remote(
+        self, two_local_agents, monkeypatch,
+    ):
+        diagnostics = []
+        events = []
+        network._REMOTE_DIAGNOSTIC_LAST.clear()
+        monkeypatch.setattr(network, "out", diagnostics.append)
+        monkeypatch.setattr(network.txlog, "log", lambda event, **fields: events.append((event, fields)))
+
+        for remote_id in ("one", "one", "two"):
+            envelope = build_delivery_receipt(
+                {"id": new_ulid(), "from": "A"},
+                ["B"],
+            )
+            envelope["a8s_control"]["version"] = 2
+            receive_envelope(
+                json.dumps(envelope).encode(),
+                two_local_agents,
+                remote_id=remote_id,
+            )
+
+        assert len(diagnostics) == 2
+        assert all("unsupported or malformed a8s control envelope" in line for line in diagnostics)
+        drops = [fields for event, fields in events if event == "DROPPED"]
+        assert [fields["remote"] for fields in drops] == ["one", "two"]
+
+    def test_receipt_publish_failure_does_not_undo_inbox_write(
+        self, two_local_agents, monkeypatch,
+    ):
+        diagnostics = []
+        monkeypatch.setattr(network, "out", diagnostics.append)
+        msg_id = new_ulid()
+
+        def fail_publish(_payload):
+            raise RuntimeError("broker unavailable")
+
+        receive_envelope(json.dumps({
+            "id": msg_id, "from": "A", "to": "B", "content": "private", "files": [],
+        }).encode(), two_local_agents, publish_control=fail_publish, remote_id="mqtt-one")
+
+        assert (inbox_dir("B") / f"{msg_id}.json").is_file()
+        assert len(diagnostics) == 1
+        assert "delivery receipt publish failed" in diagnostics[0]
+        assert "private" not in diagnostics[0]
+
     def test_dedup_by_ulid(self, two_local_agents):
         msg_id = new_ulid()
         envelope = json.dumps({
