@@ -108,6 +108,31 @@ use cases. Rung 1 is the next thing that runs.
   measured basis for "flat for drafts, tree for deliverables."
 - **Box:** 60 minutes per run.
 
+### E5 — Personality-anchored judging: named persona vs anonymous rubric
+
+- **Decision:** do review and judge agents anchor to a single well-known
+  industry personality? (2026-07-16 memo: a name is a packed token — a
+  whole principle-tree from the training data for the cost of two words;
+  a single persona should hold stable principles where an anonymous
+  rubric, or a blend of personas, answers paraphrased questions
+  inconsistently.)
+- **Arms:** A = the judge/review prompt as-is (anonymous rubric). B = the
+  same rubric fronted by ONE named persona fitting the material (e.g. a
+  famously exacting systems programmer for code review).
+- **Method:** no live org needed — post-hoc, the cheapest rung, runnable
+  out of order. Both arms judge the same frozen artifacts (a finished ttt
+  run's captures and one code sample) through a fixed list of YES/NO
+  questions that includes paraphrase pairs — the same question asked in
+  different words. Three passes per arm on a mid-tier rig. Judging lists
+  are yes/no flags with a why per answer, synthesized into one report —
+  never essays, never analog 1-to-10 grades.
+- **Metrics:** paraphrase-consistency rate (same answer on reworded
+  pairs); cross-pass verdict stability; human spot-agreement on five
+  sampled verdicts per arm.
+- **Hypothesis:** B lifts paraphrase consistency by ≥20 points at equal
+  cost; if it doesn't, names stay flavor and rubrics stay anonymous.
+- **Box:** 30 minutes per arm.
+
 ## 3. Execution rules
 
 - One rung at a time; a rung's ruling lands (default changed, doctrine
