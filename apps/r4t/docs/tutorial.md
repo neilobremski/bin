@@ -5,7 +5,7 @@ machine: what the two config files mean, how to define rigs, and
 what happens when the roster and rig config disagree.
 
 For governance rationale see [governance.md](governance.md). For the knob
-table see [README.md](../README.md#governance-knobs).
+table see [rigs.md](rigs.md#governance-knobs).
 
 ## Two files, two jobs
 
@@ -123,7 +123,7 @@ down to their ICs. Keep it under a page — `roster check` warns past ~40 lines.
 repo (`{ "repo": "/path/to/repo" }`) and register the a8s node at the org dir.
 Turns run in the repo; the roster and mission read from the org dir. Two org
 dirs can point at two clones of one project (same mission, different rosters)
-without their state colliding. See the README's *Portable orgs* section;
+without their state colliding. See [org.md](org.md#portable-orgs);
 graduate by copying the two files into the repo and deleting `r4t-org.json`.
 
 ## Mental model
