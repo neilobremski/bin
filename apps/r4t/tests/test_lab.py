@@ -343,6 +343,73 @@ def test_e5a_manifest_and_persona_only_line_differs():
     assert pa.split("\n", 1)[1] == pb.split("\n", 1)[1]  # rubric body identical
 
 
+# ----------------------------------------------------------------------------
+# Non-ollama judge rigs (posthoc on any preset)
+# ----------------------------------------------------------------------------
+
+def _cloud_config(tmp_path, invoke, name="cloud", preset="opencode") -> Path:
+    path = tmp_path / "rigs.json"
+    path.write_text(json.dumps({name: {"preset": preset, "invoke": invoke}}),
+                    encoding="utf-8")
+    return path
+
+
+def test_non_ollama_rig_resolves_environment(tmp_path, monkeypatch):
+    config = _cloud_config(
+        tmp_path,
+        ["opencode", "run", "-m", "opencode/nemotron-3-ultra-free", "--auto", "{prompt}"],
+    )
+    monkeypatch.setattr(lab.shutil, "which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr(lab, "_binary_version", lambda b: ("opencode 1.17.0", None))
+    manifest = lab.load_manifest(E0)  # pin qwen3.6
+    info = lab.resolve_role(manifest, "judge", "cloud", config)
+    assert info["preset"] == "opencode"
+    assert info["resolved_model"] == "opencode/nemotron-3-ultra-free"
+    assert info["model_digest"] is None  # digest is an ollama-only concept
+    assert info["harness_version"] == "opencode 1.17.0"
+    assert info["pin_mismatch"] is True  # outside the qwen3.6 series
+    assert "harness_version_note" not in info
+
+
+def test_non_ollama_rig_without_version_notes_it(tmp_path, monkeypatch):
+    config = _cloud_config(tmp_path, ["mycli", "--model", "some/model", "{prompt}"],
+                           preset="codex")
+    monkeypatch.setattr(lab.shutil, "which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr(lab, "_binary_version",
+                        lambda b: (None, f"{b} has no usable --version"))
+    manifest = lab.load_manifest(E0)
+    info = lab.resolve_role(manifest, "judge", "cloud", config)
+    assert info["harness_version"] is None
+    assert info["harness_version_note"] == "mycli has no usable --version"
+
+
+def test_non_ollama_rig_without_model_refuses(tmp_path, monkeypatch):
+    config = _cloud_config(tmp_path, ["opencode", "run", "--auto", "{prompt}"])
+    monkeypatch.setattr(lab.shutil, "which", lambda b: f"/usr/bin/{b}")
+    manifest = lab.load_manifest(E0)
+    with pytest.raises(lab.LabError, match="declares no model"):
+        lab.resolve_role(manifest, "judge", "cloud", config)
+
+
+def test_null_digest_models_never_pool():
+    manifest = lab.load_manifest(E0)
+    a_ans = {"Q1": "yes", "Q2": "no", "Q3": "yes", "Q4": "no"}
+    rows = [
+        _fake_row("A", None, "opencode/nemotron-3-ultra-free", a_ans, 1.0, mismatch=True),
+        _fake_row("A", None, "opencode/other-model", a_ans, 0.5, mismatch=True),
+        _fake_row("A", "digest1", "qwen3.6:latest", a_ans, 1.0),
+    ]
+    by_model = lab.aggregate(manifest, rows)
+    # Two null-digest models land in separate columns, never a shared one.
+    assert len(by_model) == 3
+    resolved = {m["resolved"] for m in by_model.values()}
+    assert resolved == {"opencode/nemotron-3-ultra-free", "opencode/other-model",
+                        "qwen3.6:latest"}
+    report = lab.render_report(manifest, rows)
+    assert "opencode/nemotron-3-ultra-free (no digest)" in report
+    assert "pin_mismatch" in report
+
+
 def test_e5a_fake_run_reports_paraphrase_and_kappa(tmp_path, monkeypatch):
     monkeypatch.setenv("R4T_HOME", str(tmp_path / "home"))
     rc = lab.run_experiment(E5A, arm=None, n=3, fake=True, log=lambda m: None)

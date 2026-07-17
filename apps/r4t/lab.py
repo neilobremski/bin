@@ -300,13 +300,50 @@ def _ollama_model_of(invoke: list) -> str | None:
         return None
 
 
+def _rig_model_of(rig) -> str | None:
+    """The explicit model string a non-ollama rig declares: the rig's `model`
+    field first, else the concrete value after `--model`/`-m` in its invoke.
+    None when the rig names no model — the trial cannot record what it cannot
+    resolve."""
+    if rig.model and "{model}" not in str(rig.model):
+        return str(rig.model).strip()
+    argv = rig.pool()[0] if rig.pool() else rig.invoke
+    for flag in ("--model", "-m"):
+        try:
+            candidate = argv[argv.index(flag) + 1]
+        except (ValueError, IndexError):
+            continue
+        if candidate and candidate != "{model}":
+            return candidate
+    return None
+
+
+def _binary_version(binary: str) -> tuple[str | None, str | None]:
+    """(first `--version` line, note). Version is None with a note when the
+    binary has no usable --version — recorded, never invented."""
+    try:
+        proc = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, f"{binary} has no usable --version"
+    text = (proc.stdout or proc.stderr).strip()
+    if proc.returncode != 0 or not text:
+        return None, f"{binary} has no usable --version"
+    return text.splitlines()[0], None
+
+
 def resolve_role(
     manifest: Manifest, role: str, rig_name: str, config_path: Path
 ) -> dict:
     """Bind one role to its rig and resolve the model. Raises LabError (with a
     `(try:)` hint) when the rig is missing/invalid or its harness cannot run.
     A rig that resolves OUTSIDE the manifest pin's series still resolves — the
-    caller flags `pin_mismatch` and never pools it (spec 5)."""
+    caller flags `pin_mismatch` and never pools it (spec 5).
+
+    Ollama rigs resolve to a (name, digest) pair — the frozen tier. Any other
+    preset resolves generically: the rig's explicit model string, no digest
+    (an ollama-only concept), and the preset binary's --version."""
     pin = str((manifest.roles.get(role) or {}).get("pin", "")).strip()
     if not rig_name:
         raise LabError(f"role {role!r} has no rig binding (set roles.{role}.rig)")
@@ -314,43 +351,68 @@ def resolve_role(
     if config.missing:
         raise LabError(
             f"no rig config at {config_path} "
-            f"(try: r4t rig add {rig_name} ollama --model {pin or 'MODEL'})"
+            f"(try: r4t rig add {rig_name} <preset> --model {pin or 'MODEL'})"
         )
     rig = config.rigs.get(rig_name.lower())
     if rig is None:
         raise LabError(
             f"rig {rig_name!r} not in {config_path} "
-            f"(try: r4t rig add {rig_name} ollama --model {pin or 'MODEL'})"
+            f"(try: r4t rig add {rig_name} <preset> --model {pin or 'MODEL'})"
         )
     if rig.error:
         raise LabError(f"rig {rig_name!r} is invalid: {rig.error}")
     preset = _rig_preset(config_path, rig_name)
-    if preset != "ollama":
+    invoke = list(rig.pool()[0]) if rig.pool() else list(rig.invoke)
+
+    if preset == "ollama":
+        if not shutil.which("ollama"):
+            raise LabError("ollama not on PATH (try: install ollama)")
+        model = _ollama_model_of(rig.invoke)
+        if not model:
+            raise LabError(f"rig {rig_name!r} has no ollama model in its invoke")
+        try:
+            resolved, digest = resolve_ollama_model(model)
+        except LabError as e:
+            raise LabError(f"{e} (try: ollama pull {model})") from e
+        return {
+            "role": role,
+            "rig": rig_name,
+            "preset": preset,
+            "pin": pin,
+            "resolved_model": resolved,
+            "model_digest": digest,
+            "pin_mismatch": bool(pin) and _series(resolved) != _series(pin),
+            "invoke": invoke,
+            "harness_version": _ollama_version(),
+        }
+
+    binary = invoke[0] if invoke else None
+    if not binary:
+        raise LabError(f"rig {rig_name!r} has an empty invoke")
+    if not shutil.which(binary):
+        raise LabError(f"{binary} not on PATH (try: install {binary})")
+    resolved = _rig_model_of(rig)
+    if not resolved:
         raise LabError(
-            f"posthoc PR 1 supports only ollama-preset judge rigs; "
-            f"rig {rig_name!r} preset is {preset!r} "
-            f"(try: r4t rig swap {rig_name} ollama --model {pin or 'MODEL'})"
+            f"rig {rig_name!r} ({preset}) declares no model — the trial cannot "
+            f"record what it cannot resolve "
+            f"(try: r4t rig swap {rig_name} {preset or '<preset>'} --model MODEL)"
         )
-    if not shutil.which("ollama"):
-        raise LabError("ollama not on PATH (try: install ollama)")
-    model = _ollama_model_of(rig.invoke)
-    if not model:
-        raise LabError(f"rig {rig_name!r} has no ollama model in its invoke")
-    try:
-        resolved, digest = resolve_ollama_model(model)
-    except LabError as e:
-        raise LabError(f"{e} (try: ollama pull {model})") from e
-    return {
+    version, version_note = _binary_version(binary)
+    info = {
         "role": role,
         "rig": rig_name,
         "preset": preset,
         "pin": pin,
         "resolved_model": resolved,
-        "model_digest": digest,
+        "model_digest": None,
         "pin_mismatch": bool(pin) and _series(resolved) != _series(pin),
-        "invoke": list(rig.pool()[0]) if rig.pool() else list(rig.invoke),
-        "harness_version": _ollama_version(),
+        "invoke": invoke,
+        "harness_version": version,
     }
+    if version_note:
+        info["harness_version_note"] = version_note
+    return info
 
 
 def _fake_role(manifest: Manifest, role: str, rig_name: str) -> dict:
@@ -408,8 +470,9 @@ def probe_prereqs(
     parts = []
     for role, info in roles.items():
         flag = " [pin_mismatch]" if info["pin_mismatch"] else ""
+        digest = info["model_digest"] or "no digest"
         parts.append(f"{role}={info['rig']} -> {info['resolved_model']} "
-                     f"({info['model_digest']}){flag}")
+                     f"({digest}){flag}")
     return True, "; ".join(parts)
 
 
@@ -644,7 +707,8 @@ def run_experiment(
     arms = [arm] if arm is not None else manifest.arm_names()
     environment = capture_environment(manifest, bindings, config_path, fake=fake)
     mismatch = " [pin_mismatch]" if environment.get("pin_mismatch") else ""
-    log(f"environment: {environment['resolved_model']} ({environment['model_digest']})"
+    digest = environment.get("model_digest") or "no digest"
+    log(f"environment: {environment['resolved_model']} ({digest})"
         f"{mismatch}, harness {environment['harness_version']}, r4t {environment['r4t_git']}")
 
     # Alternate arms so time-drift does not confound one arm (spec 4).
@@ -906,10 +970,15 @@ def aggregate(manifest: Manifest, rows: list[dict]) -> dict:
     "aggregates": {(metric, scope): value}}}."""
     by_model: dict[str, dict] = {}
     for row in rows:
-        digest = row.get("environment", {}).get("model_digest", "?")
-        resolved = row.get("environment", {}).get("resolved_model", "?")
+        env = row.get("environment", {})
+        digest = env.get("model_digest")
+        resolved = env.get("resolved_model", "?")
+        # Digest is the frozen-tier identity (ollama); rigs without one group
+        # by resolved model string — distinct models never pool under a shared
+        # null digest.
+        key = digest if digest else f"model:{resolved}"
         model = by_model.setdefault(
-            digest, {"resolved": resolved, "digest": digest, "rows": []}
+            key, {"resolved": resolved, "digest": digest, "rows": []}
         )
         model["rows"].append(row)
 
@@ -1003,11 +1072,12 @@ def render_report(manifest: Manifest, rows: list[dict]) -> str:
     by_model = aggregate(manifest, rows)
     arms = manifest.arm_names()
 
-    for digest, model in by_model.items():
+    for model in by_model.values():
         mismatch = any(
             r.get("environment", {}).get("pin_mismatch") for r in model["rows"]
         )
         flag = "  [pin_mismatch — outside intended series]" if mismatch else ""
+        digest = model["digest"] or "no digest"
         lines.append(f"Model  {model['resolved']} ({digest}){flag}")
         per_arm = model["arms"]
         pertrial = [m for m in manifest.metrics if m in PER_TRIAL_METRICS]
