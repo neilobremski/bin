@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -550,11 +551,13 @@ def parse_answers(output: str, expected_ids: list[str]) -> dict | None:
     return None
 
 
-def _run_judge(invoke: list[str], prompt: str, timeout: float) -> tuple[int, str, str]:
+def _run_judge(
+    invoke: list[str], prompt: str, timeout: float, cwd: Path
+) -> tuple[int, str, str]:
     argv = [prompt if a == "{prompt}" else a for a in invoke]
     try:
         proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout
+            argv, capture_output=True, text=True, timeout=timeout, cwd=str(cwd)
         )
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
@@ -602,8 +605,18 @@ def run_one_posthoc_trial(
 
     trial_id = ulid.new()
     invoke = environment["roles"]["judge"]["invoke"]
+    # Hermetic per-trial cwd: tool-enabled judge harnesses (observed live with
+    # `opencode --auto`) can write scratch files into their working directory —
+    # that must never be the operator's repo. The scratch dir dies with the
+    # trial.
+    workdir = Path(tempfile.mkdtemp(prefix=f"r4t-lab-{manifest.name}-"))
     start = time.time()
-    code, out, err = _run_judge(invoke, prompt, float(manifest.box_seconds))
+    try:
+        code, out, err = _run_judge(
+            invoke, prompt, float(manifest.box_seconds), workdir
+        )
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
     wall = time.time() - start
     raw_output = out if out.strip() else err
 

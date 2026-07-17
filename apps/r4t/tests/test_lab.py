@@ -133,6 +133,34 @@ def test_fake_run_single_arm(tmp_path, monkeypatch):
     assert {r["arm"] for r in rows} == {"A"}
 
 
+def test_posthoc_judge_runs_in_hermetic_cwd(tmp_path, monkeypatch):
+    """A tool-enabled judge that writes into its cwd (observed live with
+    `opencode --auto`) must land in the trial's own temp dir — never the
+    operator's cwd — and that dir dies with the trial."""
+    monkeypatch.setenv("R4T_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("R4T_LAB_FAKE_SCRATCH", "1")
+    operator_cwd = tmp_path / "operator"
+    operator_cwd.mkdir()
+    monkeypatch.chdir(operator_cwd)
+
+    rc = lab.run_experiment(E0, arm="A", n=1, fake=True, log=lambda m: None)
+    assert rc == 0
+    rows = lab.read_ledger(E0)
+    assert len(rows) == 1 and not rows[0]["excluded"]  # scratch line is noise
+
+    raw = (Path(rows[0]["report_path"]).parent / f"{rows[0]['trial']}.raw.txt")
+    scratch_line = next(
+        line for line in raw.read_text(encoding="utf-8").splitlines()
+        if line.startswith("scratch: ")
+    )
+    scratch = Path(scratch_line.removeprefix("scratch: "))
+    assert scratch.parent != operator_cwd  # never the operator's repo
+    assert "r4t-lab-" in scratch.parent.name  # the trial's own workspace
+    assert not scratch.exists()  # gone with teardown
+    assert not scratch.parent.exists()
+    assert list(operator_cwd.iterdir()) == []  # operator cwd untouched
+
+
 def test_unparseable_output_excluded_not_dropped(tmp_path, monkeypatch):
     monkeypatch.setenv("R4T_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("R4T_LAB_FAKE_PARSE_ERROR", "1")
