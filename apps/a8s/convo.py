@@ -7,21 +7,27 @@ from `~/.a8s/settings.json` (default 1000).
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from core import conversations_path
+from core import conversations_path, inbound_bundle_dir
 from settings import get_int
 
 __all__ = [
     "DEFAULT_HEADING_IN",
     "DEFAULT_HEADING_OUT",
+    "emit_block",
     "format_conversation",
     "format_entry",
     "follow_conversation",
     "involves_agent",
     "load_entries",
+    "print_entries",
     "record",
 ]
 
@@ -131,6 +137,29 @@ def _format_heading(template: str, entry: dict[str, Any]) -> str:
     )
 
 
+def _attachment_lines(agent: str, entry: dict[str, Any]) -> list[str]:
+    names = [str(name).strip() for name in (entry.get("files") or []) if str(name).strip()]
+    if not names:
+        return []
+    msg_id = (entry.get("id") or "").strip()
+    bundle_root: Path | None = None
+    if msg_id:
+        from registry import find_participant, participants_from_registry
+
+        participant = find_participant(participants_from_registry(), agent)
+        if participant is not None:
+            bundle_root = inbound_bundle_dir(participant.files_path(), msg_id)
+    lines: list[str] = []
+    for name in names:
+        if bundle_root is not None:
+            path = bundle_root / name
+            if path.is_file():
+                lines.append(f"- attachment: {path}")
+                continue
+        lines.append(f"- attachment: {name}")
+    return lines
+
+
 def format_entry(
     agent: str,
     entry: dict[str, Any],
@@ -145,11 +174,50 @@ def format_entry(
     block = heading
     if content:
         block = f"{heading}\n\n{content}"
-    files = entry.get("files") or []
-    if files:
-        file_lines = "\n".join(f"- attachment: {name}" for name in files)
-        block = f"{block}\n\n{file_lines}" if block else file_lines
+    file_lines = _attachment_lines(agent, entry)
+    if file_lines:
+        joined = "\n".join(file_lines)
+        block = f"{block}\n\n{joined}" if block else joined
     return block
+
+
+def emit_block(block: str, *, glow: bool = False) -> None:
+    """Print one message block; with glow, pipe this block alone to `glow -`."""
+    if not block:
+        return
+    if glow:
+        glow_bin = shutil.which("glow")
+        if glow_bin:
+            proc = subprocess.run(
+                [glow_bin, "-"],
+                input=block + "\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                sys.stdout.write(proc.stdout)
+                if not proc.stdout.endswith("\n"):
+                    sys.stdout.write("\n")
+                sys.stdout.flush()
+                return
+    print(block, flush=True)
+
+
+def print_entries(
+    agent: str,
+    entries: list[dict[str, Any]],
+    *,
+    glow: bool = False,
+    heading_out: str = DEFAULT_HEADING_OUT,
+    heading_in: str = DEFAULT_HEADING_IN,
+) -> None:
+    for entry in entries:
+        block = format_entry(agent, entry, heading_out=heading_out, heading_in=heading_in)
+        if not block:
+            continue
+        emit_block(block, glow=glow)
+        print(flush=True)
 
 
 def format_conversation(
@@ -195,15 +263,19 @@ def follow_conversation(
     heading_out: str = DEFAULT_HEADING_OUT,
     heading_in: str = DEFAULT_HEADING_IN,
     poll_interval: float = 1.0,
+    glow: bool = False,
 ) -> None:
     """Print the last `limit` messages, then block printing new archive rows."""
     seen: set[str] = set()
     rows = [e for e in load_entries() if involves_agent(e, agent)]
+    print_entries(
+        agent,
+        rows[-limit:],
+        glow=glow,
+        heading_out=heading_out,
+        heading_in=heading_in,
+    )
     for entry in rows[-limit:]:
-        block = format_entry(agent, entry, heading_out=heading_out, heading_in=heading_in)
-        if block:
-            print(block)
-            print()
         _remember_entry_id(seen, entry)
 
     path = conversations_path()
@@ -221,12 +293,13 @@ def follow_conversation(
                 msg_id = (entry.get("id") or "").strip()
                 if msg_id and msg_id in seen:
                     continue
-                block = format_entry(
-                    agent, entry, heading_out=heading_out, heading_in=heading_in
+                print_entries(
+                    agent,
+                    [entry],
+                    glow=glow,
+                    heading_out=heading_out,
+                    heading_in=heading_in,
                 )
-                if block:
-                    print(block)
-                    print()
                 _remember_entry_id(seen, entry)
                 continue
 

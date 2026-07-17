@@ -1319,18 +1319,21 @@ def cmd_config(args: list[str]) -> int:
 # ---------- convo ----------
 
 def cmd_convo(args: list[str]) -> int:
-    """`a8s convo <name> [--limit N] [-f|--follow] [--heading-out T] [--heading-in T]` —
+    """`a8s convo <name> [--limit N] [-f|--follow] [--glow] [--heading-out T] [--heading-in T]` —
     markdown history of messages to or from an agent."""
     from convo import (
         DEFAULT_HEADING_IN,
         DEFAULT_HEADING_OUT,
         follow_conversation,
         format_conversation,
+        involves_agent,
+        load_entries,
+        print_entries,
     )
 
     if not args:
         print(
-            "usage: a8s convo <name> [--limit N] [-f|--follow] "
+            "usage: a8s convo <name> [--limit N] [-f|--follow] [--glow] "
             "[--heading-out TEMPLATE] [--heading-in TEMPLATE]",
             file=sys.stderr,
         )
@@ -1339,6 +1342,7 @@ def cmd_convo(args: list[str]) -> int:
     name: str | None = None
     limit = 10
     follow = False
+    glow = False
     heading_out = DEFAULT_HEADING_OUT
     heading_in = DEFAULT_HEADING_IN
     i = 0
@@ -1346,6 +1350,10 @@ def cmd_convo(args: list[str]) -> int:
         a = args[i]
         if a in ("-f", "--follow"):
             follow = True
+            i += 1
+            continue
+        if a == "--glow":
+            glow = True
             i += 1
             continue
         if a == "--limit":
@@ -1384,7 +1392,7 @@ def cmd_convo(args: list[str]) -> int:
 
     if name is None:
         print(
-            "usage: a8s convo <name> [--limit N] [-f|--follow] "
+            "usage: a8s convo <name> [--limit N] [-f|--follow] [--glow] "
             "[--heading-out TEMPLATE] [--heading-in TEMPLATE]",
             file=sys.stderr,
         )
@@ -1403,9 +1411,22 @@ def cmd_convo(args: list[str]) -> int:
                 limit=limit,
                 heading_out=heading_out,
                 heading_in=heading_in,
+                glow=glow,
             )
         except KeyboardInterrupt:
             pass
+        return 0
+
+    rows = [e for e in load_entries() if involves_agent(e, agent_name)]
+    rows = rows[-limit:]
+    if glow:
+        print_entries(
+            agent_name,
+            rows,
+            glow=True,
+            heading_out=heading_out,
+            heading_in=heading_in,
+        )
         return 0
 
     text = format_conversation(

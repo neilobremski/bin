@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from convo import (
+    emit_block,
     follow_conversation,
     format_conversation,
     format_entry,
@@ -169,6 +170,70 @@ class TestFormatConversation:
             heading_in="IN",
         )
         assert "OUT Bob->Alice @ 2026-06-18T17:00:00.000000Z" in text
+
+    def test_attachment_shows_full_path_when_on_disk(self, fake_home, tmp_path):
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root.resolve())}})
+        msg_id = "01JATT000000000000000000"
+        attachment = root / ".files" / msg_id / "note.md"
+        attachment.parent.mkdir(parents=True)
+        attachment.write_text("payload", encoding="utf-8")
+        record(
+            {
+                "id": msg_id,
+                "date": "2026-06-18T18:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "see attached",
+                "files": [{"filename": "note.md"}],
+            },
+            recipients=["Bob"],
+        )
+        text = format_conversation("Bob", limit=1)
+        assert f"attachment: {attachment.resolve()}" in text
+
+    def test_attachment_falls_back_to_basename_when_missing(self, fake_home, tmp_path):
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root.resolve())}})
+        record(
+            {
+                "id": "01JMISSING000000000000000",
+                "date": "2026-06-18T18:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "gone",
+                "files": [{"filename": "missing.pdf"}],
+            },
+            recipients=["Bob"],
+        )
+        text = format_conversation("Bob", limit=1)
+        assert "attachment: missing.pdf" in text
+        assert "missing.pdf" == text.split("attachment: ")[-1].strip()
+
+
+class TestEmitBlock:
+    def test_glow_invokes_per_block(self, monkeypatch, capsys):
+        calls: list[str] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(kwargs.get("input", ""))
+            class Result:
+                returncode = 0
+                stdout = "GLOWED\n"
+
+            return Result()
+
+        monkeypatch.setattr("convo.shutil.which", lambda _name: "/usr/bin/glow")
+        monkeypatch.setattr("convo.subprocess.run", fake_run)
+        emit_block("# hello\n\nbody", glow=True)
+        assert calls == ["# hello\n\nbody\n"]
+        assert capsys.readouterr().out == "GLOWED\n"
 
 
 class TestCmdConvo:

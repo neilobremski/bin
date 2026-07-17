@@ -65,7 +65,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("tells",    "[--timeout SEC]",          "Wait for the next inbound message to this node."),
     ("drain",    "<name>",                   "Move local inbox to trash without invoking."),
     ("config",   "[get|set|unset ...]",      "List all knobs or edit ~/.a8s/settings.json."),
-    ("convo",    "<name> [--limit N] [-f]",  "Show markdown conversation history for an agent."),
+    ("convo",    "<name> [--limit N] [-f] [--glow]", "Show markdown conversation history for an agent."),
     ("trace",    "<ULID>",                   "Show transaction boundaries for one message."),
     ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
     ("remote",   "[<name> [<broker> <topic> [--<k> <v> ...]]]", "List, show, or set a cross-machine remote."),
