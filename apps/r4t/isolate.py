@@ -1,12 +1,16 @@
-"""OS-level isolation for rig invocation — run-as-user and container variants.
+"""OS-level isolation for turn invocation — run-as-user and container variants.
 
 The through-line (see plans/ISOLATE-SPEC.md): harness sandbox flags are not a
-security boundary; the operating system is. A rig may name `run_as` (a Unix
-user with no sudo) or `container` (an image) and the agent runs fully
-permissive INSIDE that boundary. r4t never provisions the boundary — it
-verifies operator-provisioned prerequisites and fails closed with an
-action-first error — except for the shared message dirs, which are r4t's own
-state and are re-asserted to the correct owner-group/mode before every turn.
+security boundary; the operating system is. An ORG may name `run_as` (a Unix
+user with no sudo) or `container` (an image) and every member turn runs fully
+permissive INSIDE that boundary regardless of rig — isolation is a per-project
+decision, so it lives with the org (org.py), not the machine-global rig.
+Machinery outside, hands inside: r4t/a8s code runs as the operator, and the
+boundary applies at the moment a member's turn invoke runs. r4t never provisions
+the boundary — it verifies operator-provisioned prerequisites and fails closed
+with an action-first error — except for the shared message dirs, which are
+r4t's own state and are re-asserted to the correct owner-group/mode before
+every turn.
 
 Both wrappers are pure argv builders so the exact shape is unit-testable
 against fake `sudo`/`docker` binaries; nothing here shells out except the
@@ -14,14 +18,23 @@ prereq probes and the container kill, which run the real tool by name.
 """
 from __future__ import annotations
 
+import json
 import os
 import pwd
 import re
 import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 PROBE_TIMEOUT_SECONDS = 10
+
+# The org's isolation choice rides to run_harness through the turn env (like
+# R4T_NODE/R4T_MEMBER), so the run_fn contract stays (rig, prompt, cwd, env,
+# variant) — dispatch never has to widen it or thread a new positional.
+ENV_RUN_AS = "R4T_RUN_AS"
+ENV_CONTAINER = "R4T_CONTAINER"
+ENV_CONTAINER_ARGS = "R4T_CONTAINER_ARGS"
 
 # The bash the wrapped `sudo` runs: env cannot survive sudoers env_reset, so
 # TELL_OUTBOX_DIR rides as $1 and the workplace as $2; `exec "$@"` hands the
@@ -37,6 +50,57 @@ _CONTAINER_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:
 
 class IsolationError(Exception):
     pass
+
+
+@dataclass
+class Isolation:
+    """The org's OS-level boundary (plans/ISOLATE-SPEC.md). Applies to EVERY
+    member turn of the org, whatever rig runs it — one Unix user or one image
+    per org. `run_as` and `container` are mutually exclusive; the parse in
+    org.py rejects both-set, so a live Isolation carries at most one."""
+
+    run_as: str | None = None
+    container: str | None = None
+    container_args: list = field(default_factory=list)
+
+    @property
+    def active(self) -> bool:
+        return bool(self.run_as or self.container)
+
+    def to_env(self) -> dict[str, str]:
+        """The env keys run_harness reads to wrap a turn. Empty when isolation
+        is off, so a bare org adds nothing to the turn environment."""
+        env: dict[str, str] = {}
+        if self.run_as:
+            env[ENV_RUN_AS] = self.run_as
+        elif self.container:
+            env[ENV_CONTAINER] = self.container
+            if self.container_args:
+                env[ENV_CONTAINER_ARGS] = json.dumps(self.container_args)
+        return env
+
+
+def isolation_from_env(env: dict | None) -> Isolation:
+    """Reconstruct the org's Isolation from the turn env. Trusted internal
+    round-trip of `Isolation.to_env`; a malformed container_args degrades to
+    none rather than raising inside a turn."""
+    env = env or {}
+    run_as = (env.get(ENV_RUN_AS) or "").strip() or None
+    if run_as:
+        return Isolation(run_as=run_as)
+    container = (env.get(ENV_CONTAINER) or "").strip() or None
+    if not container:
+        return Isolation()
+    args: list = []
+    raw = env.get(ENV_CONTAINER_ARGS) or ""
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            args = [str(a) for a in parsed]
+    return Isolation(container=container, container_args=args)
 
 
 def a8s_client_dir() -> Path:
@@ -165,7 +229,7 @@ def build_container_argv(
     """`docker run --rm` with the workplace bind-mounted rw at the same path and
     used as workdir, the staging dir rw at the same path with TELL_OUTBOX_DIR
     injected (no env_reset inside a container), the a8s client ro with a PATH
-    shim, an optional delivered-files dir ro, then per-rig container_args
+    shim, an optional delivered-files dir ro, then the org's container_args
     verbatim, then the image and the harness argv. r4t never builds, pulls, or
     inspects the image — a missing image is an ordinary turn failure."""
     client = Path(client_dir) if client_dir is not None else a8s_client_dir()

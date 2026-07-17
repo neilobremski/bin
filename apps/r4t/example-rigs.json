@@ -48,13 +48,7 @@
     "rig_budget_earn_per_hour": 20
   },
 
-  "walled": {
-    "_notes": "Isolated rig — the security boundary is the OS, not a harness flag. `run_as` wraps the turn in `sudo -u <user>` (a Unix user with no sudo); `container` runs it under `docker run --rm` with `container_args` appended verbatim (e.g. read-only credential mounts). The two are mutually exclusive. Prereqs are operator-provisioned and probed per turn — see docs/isolation.md. Behind the wall, choose the most-permissive preset.",
-    "invoke": ["claude", "--permission-mode", "dontAsk", "-p", "{prompt}"],
-    "run_as": "r4t-worker",
-    "_container_example": "img/claude:latest",
-    "_container_args_example": ["-v", "/home/router/.config/anthropic:/root/.config/anthropic:ro"]
-  },
+  "_isolation_note": "OS-level isolation (run_as / container) is NOT a rig key — it is a per-ORG setting in r4t-org.json (one Unix user or image serves an org's whole roster, whatever rig runs a member). Behind the wall, choose the most-permissive preset. See docs/isolation.md.",
 
   "pins": {
     "_notes": "agent name -> rig. A pinned agent's rig comes from HERE, silently overriding the roster's Rig line — an in-repo roster edit can't upgrade a pinned agent.",

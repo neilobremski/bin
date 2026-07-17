@@ -35,12 +35,10 @@ record it). It defaults the text knobs (`history_max_bytes` /
 `history_body_max` / `prompt_body_max`) by the preset's text tier (TEXT_TIERS);
 explicit values always win, and a rig with no preset gets the small tier.
 
-`run_as` / `container` — OS-level isolation (mutually exclusive; both set is a
-config error and the rig fails closed). `run_as: "<username>"` wraps the invoke
-in `sudo -u <user>`; `container: "<image>"` runs it under `docker run --rm`,
-with `container_args` appended verbatim. Prerequisites are operator-provisioned
-and probed per turn — r4t never creates users, sudoers grants, or images. See
-apps/r4t/docs/isolation.md.
+OS-level isolation (`run_as` / `container`) is NOT a rig key — it is a
+per-org decision (rigs are machine-global and shared across orgs, so one Unix
+user or image serves an org's whole roster). It lives in `r4t-org.json`; see
+org.py and apps/r4t/docs/isolation.md.
 
 Keys starting with `_` anywhere are ignored so shipped examples can carry
 notes.
@@ -349,9 +347,6 @@ class Rig:
     prompt_body_max: int = DEFAULT_PROMPT_BODY_MAX
     model: str | None = None
     model_resolver: str | None = None
-    run_as: str | None = None
-    container: str | None = None
-    container_args: list = field(default_factory=list)
     error: str | None = None
 
     def pool(self) -> list[list[str]]:
@@ -975,35 +970,6 @@ def _parse_rig(name: str, raw: object) -> Rig:
                 problems.append(f"rig_budget_earn_per_hour: {err}")
     elif raw_rig_earn is not None:
         problems.append("rig_budget_earn_per_hour set but rig_budget_max missing")
-
-    # OS-level isolation (plans/ISOLATE-SPEC.md). run_as and container are
-    # mutually exclusive — both set is a config error and the rig fails closed,
-    # same posture as a rig missing from config.
-    run_as = raw.get("run_as")
-    container = raw.get("container")
-    if run_as is not None and container is not None:
-        problems.append("run_as and container are mutually exclusive; set only one")
-    else:
-        if run_as is not None:
-            if not isinstance(run_as, str) or not run_as.strip():
-                problems.append("run_as must be a non-empty username string")
-            else:
-                rig.run_as = run_as.strip()
-        if container is not None:
-            if not isinstance(container, str) or not container.strip():
-                problems.append("container must be a non-empty image string")
-            else:
-                rig.container = container.strip()
-    container_args = raw.get("container_args")
-    if container_args is not None:
-        if not isinstance(container_args, list) or not all(
-            isinstance(a, str) for a in container_args
-        ):
-            problems.append("container_args must be a list of strings")
-        elif container is None:
-            problems.append("container_args set but container is not")
-        else:
-            rig.container_args = list(container_args)
 
     if problems:
         rig.error = "; ".join(problems)

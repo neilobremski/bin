@@ -158,6 +158,7 @@ def _context(args: argparse.Namespace, node: str) -> DispatchContext:
         leader_sees_lateral=org.leader_sees_lateral,
         egress=org.egress,
         doorbell_check=org.doorbell_check,
+        isolation=org.isolation,
         definition_path=(
             Path(defn).expanduser() if (defn := getattr(args, "definition", None)) else None
         ),
@@ -192,8 +193,7 @@ def _print_rig_summary(config_path: Path, roster_path: Path | None = None) -> No
                 f" rig-budget={rig.rig_budget_max:g}/"
                 f"+{rig.rig_budget_earn_per_hour:g}per-h"
             )
-        iso = _isolation_tag(rig)
-        print(f"  {name}: {argv}  ({limits})" + (f"  {iso}" if iso else ""))
+        print(f"  {name}: {argv}  ({limits})")
     if config.pins:
         print("  pins:")
         for agent in sorted(config.pins):
@@ -480,12 +480,13 @@ def _roster_rows(
     return rows
 
 
-def _isolation_tag(rig) -> str:
-    """The rig's OS-level boundary at a glance, or "" for a bare rig."""
-    if rig.run_as:
-        return f"[user:{rig.run_as}]"
-    if rig.container:
-        return f"[container:{rig.container}]"
+def _isolation_tag(isolation) -> str:
+    """The org's OS-level boundary at a glance, or "" for a bare org. Isolation
+    is per-org (org.py), so one badge covers the whole roster."""
+    if isolation.run_as:
+        return f"[user:{isolation.run_as}]"
+    if isolation.container:
+        return f"[container:{isolation.container}]"
     return ""
 
 
@@ -518,9 +519,7 @@ def _rig_rows(
                 f" rig-budget={rig.rig_budget_max:g}/"
                 f"+{rig.rig_budget_earn_per_hour:g}per-h"
             )
-        iso = _isolation_tag(rig)
-        detail = f"{argv}  ({limits})" + (f"  {iso}" if iso else "")
-        rows.append((True, name, detail, None))
+        rows.append((True, name, f"{argv}  ({limits})", None))
     for agent in sorted(config.pins):
         rows.append((None, "pin", f"{agent} -> {config.pins[agent]}", None))
     rows.append((
@@ -596,6 +595,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     ctx = _context(args, node)
     print(f"team: {node}")
     print(f"state: {state.team_dir(node)}")
+    iso = _isolation_tag(ctx.isolation)
+    if iso:
+        print(f"isolation: {iso}  (every member turn runs behind this boundary)")
     print()
 
     roster = None

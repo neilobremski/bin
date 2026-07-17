@@ -36,6 +36,12 @@ home — this file is the org-level home):
   may ring an absent human's doorbell. Exit 0 lets the ring through; nonzero
   parks the message without ringing (the gate protects attention, not the
   mailbox). Absent or empty is today's behavior — no gate.
+- `run_as` / `container` (+ `container_args`, all default absent): OS-level
+  isolation for every member turn (plans/ISOLATE-SPEC.md). Isolation is a
+  per-project decision — one Unix user or one container image serves the org's
+  whole roster whatever rig runs a member — so it lives here, not on the
+  machine-global rig. `run_as` and `container` are mutually exclusive.
+  The mechanics live in isolate.py; dispatch wraps the turn from this setting.
 
 Graduation is trivial: copy ROSTER.md + MISSION.md into the repo and drop the
 `repo` key (or the whole file, if it carries no settings). Resolution falls
@@ -44,8 +50,10 @@ back to the in-repo default with no other change.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from isolate import Isolation
 
 ORG_CONFIG_NAME = "r4t-org.json"
 
@@ -66,6 +74,7 @@ class Org:
     leader_sees_lateral: bool = False
     egress: bool = True
     doorbell_check: str | None = None
+    isolation: Isolation = field(default_factory=Isolation)
 
     @property
     def is_portable(self) -> bool:
@@ -115,6 +124,43 @@ def _parse_str(raw: object, key: str) -> tuple[str | None, str | None]:
     return raw, None
 
 
+def _parse_isolation(data: dict) -> tuple[Isolation, list[str]]:
+    """OS-level isolation for every member turn. `run_as` and `container` are
+    mutually exclusive; both set is a config error and the org degrades to no
+    isolation (fail closed reports through check_org). `container_args` needs a
+    `container` to attach to."""
+    errors: list[str] = []
+    iso = Isolation()
+    run_as = data.get("run_as")
+    container = data.get("container")
+    if run_as is not None and container is not None:
+        errors.append(
+            'org config "run_as" and "container" are mutually exclusive; set only one'
+        )
+    else:
+        if run_as is not None:
+            if not isinstance(run_as, str) or not run_as.strip():
+                errors.append('org config "run_as" must be a non-empty username string')
+            else:
+                iso.run_as = run_as.strip()
+        if container is not None:
+            if not isinstance(container, str) or not container.strip():
+                errors.append('org config "container" must be a non-empty image string')
+            else:
+                iso.container = container.strip()
+    container_args = data.get("container_args")
+    if container_args is not None:
+        if not isinstance(container_args, list) or not all(
+            isinstance(a, str) for a in container_args
+        ):
+            errors.append('org config "container_args" must be a list of strings')
+        elif iso.container is None:
+            errors.append('org config "container_args" set but "container" is not')
+        else:
+            iso.container_args = list(container_args)
+    return iso, errors
+
+
 def _parse_settings(data: dict) -> tuple[dict, list[str]]:
     errors: list[str] = []
     comms = data.get("comms", COMMS_OPEN)
@@ -130,11 +176,14 @@ def _parse_settings(data: dict) -> tuple[dict, list[str]]:
     doorbell_check, err = _parse_str(data.get("doorbell_check"), "doorbell_check")
     if err:
         errors.append(err)
+    isolation, iso_errors = _parse_isolation(data)
+    errors.extend(iso_errors)
     return {
         "comms": comms,
         "leader_sees_lateral": lsl,
         "egress": egress,
         "doorbell_check": doorbell_check,
+        "isolation": isolation,
     }, errors
 
 
