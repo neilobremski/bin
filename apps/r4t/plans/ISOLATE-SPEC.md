@@ -1,5 +1,7 @@
 # The isolation phase — implementation spec
 
+*2026-07-16 ruling: isolation config moved rig → org (per-project decision; rigs span the system); border unchanged. Implemented in the PR that carries this note.*
+
 *2026-07-15. Follows the verification round (VERIFY-SPEC.md) and Neil's
 ruling that morning: run-as-user and run-via-container become first-class
 r4t features, buildable in parallel with the verification work. One issue,

@@ -1,5 +1,9 @@
 """OS-level isolation — run_as and container variants (plans/ISOLATE-SPEC.md §7).
 
+Isolation is a PER-ORG setting (the 2026-07-16 ruling): one Unix user or one
+image serves an org's whole roster, so it lives in r4t-org.json, not on the
+machine-global rig. The org's choice rides to run_harness through the turn env.
+
 Wrapper argv is asserted EXACTLY; the prereq probe and the container kill run
 against fake `sudo`/`docker` binaries put on PATH — no real sudo, docker, or
 LLM. State stays under the tmp R4T_HOME the shared fixtures set; the live
@@ -13,14 +17,15 @@ import stat
 import sys
 import textwrap
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 import isolate
 import state
 from dispatch import DispatchContext, drain, handle_message, run_harness
-from rig import Rig, RigConfig, Throttle, load_rig_config
+from isolate import Isolation
+from org import ORG_CONFIG_NAME, check_org, load_org
+from rig import Rig, load_rig_config
 from roster import Member
 
 NODE = "acme"
@@ -106,40 +111,66 @@ class TestBuildContainer:
         assert isolate.container_name("ac me", "Phil/1", ts=7) == "r4t-ac-me-Phil-1-7"
 
 
-class TestMutualExclusion:
-    def _load(self, tmp_path, entry: dict) -> RigConfig:
-        path = tmp_path / "rigs.json"
-        path.write_text(json.dumps({"iso": {"invoke": ["h", "{prompt}"], **entry}}))
-        return load_rig_config(path)
+class TestOrgConfigValidation:
+    """Isolation now parses out of r4t-org.json (org.py), validated where
+    `doorbell_check` is: load_org degrades to no isolation on a bad value,
+    check_org reports it."""
+
+    def _write(self, tmp_path, settings: dict) -> Path:
+        (tmp_path / ORG_CONFIG_NAME).write_text(json.dumps(settings), encoding="utf-8")
+        return tmp_path
 
     def test_both_set_is_config_error(self, tmp_path):
-        config = self._load(tmp_path, {"run_as": "u", "container": "img"})
-        assert "mutually exclusive" in (config.rigs["iso"].error or "")
+        self._write(tmp_path, {"run_as": "u", "container": "img"})
+        assert any("mutually exclusive" in m for m in check_org(tmp_path))
 
-    def test_both_set_fails_closed_no_run(self, tmp_path):
-        config = self._load(tmp_path, {"run_as": "u", "container": "img"})
-        member = Member(name="Bob", rig="iso")
-        rig, error, _pinned = config.rig_for(member)
-        assert rig is None and "invalid" in (error or "")
+    def test_both_set_degrades_to_no_isolation(self, tmp_path):
+        self._write(tmp_path, {"run_as": "u", "container": "img"})
+        assert not load_org(tmp_path).isolation.active  # fail closed: neither applies
 
     def test_container_args_without_container_errors(self, tmp_path):
-        config = self._load(tmp_path, {"container_args": ["--gpus", "all"]})
-        assert "container_args set but container is not" in (config.rigs["iso"].error or "")
+        self._write(tmp_path, {"container_args": ["--gpus", "all"]})
+        assert any(
+            'container_args" set but "container" is not' in m for m in check_org(tmp_path)
+        )
 
     def test_blank_run_as_errors(self, tmp_path):
-        config = self._load(tmp_path, {"run_as": "   "})
-        assert "non-empty username" in (config.rigs["iso"].error or "")
+        self._write(tmp_path, {"run_as": "   "})
+        assert any("non-empty username" in m for m in check_org(tmp_path))
 
     def test_valid_run_as_parses(self, tmp_path):
-        config = self._load(tmp_path, {"run_as": "agent-x"})
-        assert config.rigs["iso"].error is None
-        assert config.rigs["iso"].run_as == "agent-x"
+        self._write(tmp_path, {"run_as": "agent-x"})
+        org = load_org(tmp_path)
+        assert check_org(tmp_path) == []
+        assert org.isolation.run_as == "agent-x" and org.isolation.active
 
     def test_valid_container_parses_with_args(self, tmp_path):
-        config = self._load(tmp_path, {"container": "img", "container_args": ["-v", "/c:/c:ro"]})
-        rig = config.rigs["iso"]
-        assert rig.error is None
-        assert rig.container == "img" and rig.container_args == ["-v", "/c:/c:ro"]
+        self._write(tmp_path, {"container": "img", "container_args": ["-v", "/c:/c:ro"]})
+        org = load_org(tmp_path)
+        assert check_org(tmp_path) == []
+        assert org.isolation.container == "img"
+        assert org.isolation.container_args == ["-v", "/c:/c:ro"]
+
+    def test_absent_isolation_is_the_default(self, tmp_path):
+        assert not load_org(tmp_path).isolation.active
+
+
+class TestEnvRoundTrip:
+    """The org's choice reaches run_harness through the turn env only — the
+    run_fn contract stays (rig, prompt, cwd, env, variant)."""
+
+    def test_run_as_round_trips(self):
+        env = Isolation(run_as="agent-x").to_env()
+        assert isolate.isolation_from_env(env).run_as == "agent-x"
+
+    def test_container_and_args_round_trip(self):
+        env = Isolation(container="img", container_args=["-v", "/c:/c:ro"]).to_env()
+        got = isolate.isolation_from_env(env)
+        assert got.container == "img" and got.container_args == ["-v", "/c:/c:ro"]
+
+    def test_bare_org_adds_nothing_to_env(self):
+        assert Isolation().to_env() == {}
+        assert not isolate.isolation_from_env({}).active
 
 
 class TestSharedDirAssertion:
@@ -190,7 +221,7 @@ ROSTER = textwrap.dedent(
 )
 
 
-def _iso_config(tmp_path, fake_harness, junior_extra: dict) -> Path:
+def _iso_config(tmp_path, fake_harness) -> Path:
     script, _out = fake_harness
     invoke = [sys.executable, str(script), "{prompt}"]
     payload = {
@@ -200,7 +231,7 @@ def _iso_config(tmp_path, fake_harness, junior_extra: dict) -> Path:
         "leader": {"invoke": invoke, "timeout_seconds": 30, "budget_max": 100, "budget_earn_per_hour": 50},
         "junior-dev": {
             "invoke": invoke, "timeout_seconds": 30, "budget_max": 100,
-            "budget_earn_per_hour": 50, **junior_extra,
+            "budget_earn_per_hour": 50,
         },
         "pins": {"gerry": "leader"},
     }
@@ -211,7 +242,7 @@ def _iso_config(tmp_path, fake_harness, junior_extra: dict) -> Path:
 
 @pytest.fixture
 def iso_ctx_factory(r4t_home, tmp_path, fake_harness, tells):
-    def make(junior_extra: dict) -> DispatchContext:
+    def make(isolation: dict | None = None) -> DispatchContext:
         root = tmp_path / "iso-repo"
         root.mkdir(exist_ok=True)
         (root / "ROSTER.md").write_text(ROSTER, encoding="utf-8")
@@ -220,8 +251,9 @@ def iso_ctx_factory(r4t_home, tmp_path, fake_harness, tells):
             root=root,
             node=NODE,
             roster_path=root / "ROSTER.md",
-            config_path=_iso_config(tmp_path, fake_harness, junior_extra),
+            config_path=_iso_config(tmp_path, fake_harness),
             tell_fn=capture,
+            isolation=Isolation(**(isolation or {})),
         )
 
     return make
@@ -241,14 +273,74 @@ class TestRunAsProbeFailsClosed:
         assert state.queue_depth(NODE, "phil") >= 1  # message returned to the queue
         assert state.read_meta(NODE, "phil")["consecutive_failures"] == 1  # breaker counts it
 
-    def test_probe_error_surfaces_the_fix(self, iso_ctx_factory, fakebin):
+    def test_probe_error_surfaces_the_fix(self, fakebin):
         _fake_bin(fakebin, "sudo", "import sys\nsys.exit(1)\n")
-        rig = Rig(name="junior-dev", invoke=["true", "{prompt}"], run_as="agent-x")
-        code, out, _dur, timed = run_harness(
-            rig, "p", Path("/tmp"), env={"TELL_OUTBOX_DIR": "/tmp/s"}
-        )
+        rig = Rig(name="junior-dev", invoke=["true", "{prompt}"])
+        env = {"TELL_OUTBOX_DIR": "/tmp/s", **Isolation(run_as="agent-x").to_env()}
+        code, out, _dur, timed = run_harness(rig, "p", Path("/tmp"), env=env)
         assert code == 126 and not timed
         assert "no passwordless sudo" in out and "docs/isolation.md" in out
+
+
+class TestOrgIsolationAppliesToEveryRig:
+    """One org setting wraps every member turn identically, whatever rig runs
+    it — the whole point of moving the knob rig -> org."""
+
+    def test_same_run_as_wraps_two_different_rigs_identically(self, tmp_path, fakebin):
+        record = tmp_path / "sudo-argv.txt"
+        _fake_bin(
+            fakebin, "sudo",
+            f"""
+            import sys
+            a = sys.argv[1:]
+            # record only the real wrapped invoke (the bootstrap -c string), not
+            # the two prereq probes; then exit 0 so probes pass and the run is a
+            # no-op we can inspect.
+            if "-c" in a and a[a.index("-c") + 1].startswith("export TELL_OUTBOX_DIR"):
+                open({str(record)!r}, "a").write(repr(a) + "\\n")
+            sys.exit(0)
+            """,
+        )
+        env = dict(os.environ)  # keep PATH so the real wrapped `sudo` resolves the stub
+        env["TELL_OUTBOX_DIR"] = str(tmp_path / "stg")
+        env.update(Isolation(run_as="agent-x").to_env())
+        leader = Rig(name="leader", invoke=["claude-harness", "-p", "{prompt}"])
+        junior = Rig(name="junior", invoke=["codex-harness", "exec", "{prompt}"])
+
+        run_harness(leader, "P", tmp_path, env=dict(env))
+        run_harness(junior, "P", tmp_path, env=dict(env))
+
+        lines = record.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2
+        recorded = [eval(line) for line in lines]  # noqa: S307 — test-owned stub output
+        # Both turns are wrapped by the SAME boundary (sudo -u agent-x ...); only
+        # the trailing harness argv differs, proving isolation is rig-agnostic.
+        for a in recorded:
+            assert a[:5] == ["-u", "agent-x", "bash", "--login", "-c"]
+        assert recorded[0][-3:] == ["claude-harness", "-p", "P"]
+        assert recorded[1][-3:] == ["codex-harness", "exec", "P"]
+
+
+class TestRigLevelIsolationIsGone:
+    """Rig-level run_as/container ceased to exist (pre-v1 scorch-the-earth). A
+    stray key in rigs.json follows rig.py's unknown-key convention: ignored,
+    not an error — and it never wraps a turn."""
+
+    def test_rig_run_as_and_container_keys_are_ignored_not_errors(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        path.write_text(
+            json.dumps(
+                {"iso": {"invoke": ["h", "{prompt}"], "run_as": "u", "container": "img"}}
+            ),
+            encoding="utf-8",
+        )
+        config = load_rig_config(path)
+        rig = config.rigs["iso"]
+        assert rig.error is None  # unknown keys are ignored, not rejected
+        assert not hasattr(rig, "run_as") and not hasattr(rig, "container")
+        member = Member(name="Bob", rig="iso")
+        resolved, err, _pinned = config.rig_for(member)
+        assert resolved is not None and err is None  # the rig still runs; no isolation
 
 
 class TestContainerTimeoutKill:
@@ -265,14 +357,12 @@ class TestContainerTimeoutKill:
                 open({str(record)!r}, "a").write(args[1] + "\\n")
             """,
         )
-        rig = Rig(
-            name="c", invoke=["harness", "{prompt}"], container="img",
-            timeout_seconds=0.5,
-        )
+        rig = Rig(name="c", invoke=["harness", "{prompt}"], timeout_seconds=0.5)
         env = dict(os.environ)
         env["TELL_OUTBOX_DIR"] = str(tmp_path / "stg")
         env["R4T_NODE"] = "acme"
         env["R4T_MEMBER"] = "phil"
+        env.update(Isolation(container="img").to_env())
 
         _code, _out, _dur, timed_out = run_harness(rig, "p", tmp_path, env=env)
 
@@ -286,21 +376,23 @@ class TestStatusRowRendering:
     def test_isolation_tag(self):
         from r4t import _isolation_tag
 
-        assert _isolation_tag(Rig(name="a", run_as="agent-x")) == "[user:agent-x]"
-        assert _isolation_tag(Rig(name="b", container="img:1")) == "[container:img:1]"
-        assert _isolation_tag(Rig(name="c")) == ""
+        assert _isolation_tag(Isolation(run_as="agent-x")) == "[user:agent-x]"
+        assert _isolation_tag(Isolation(container="img:1")) == "[container:img:1]"
+        assert _isolation_tag(Isolation()) == ""
 
-    def test_rig_row_shows_boundary(self):
-        from r4t import _rig_rows
+    def test_status_header_shows_the_org_boundary(self, r4t_home, tmp_path, fake_harness, capsys):
+        # The badge is one org-level line now, not a per-rig tag.
+        from r4t import main as r4t_main
 
-        config = RigConfig(
-            path=Path("/x/rigs.json"),
-            rigs={
-                "iso": Rig(name="iso", invoke=["claude", "-p", "{prompt}"], run_as="agent-x"),
-            },
-            throttle=Throttle(),
+        org_dir = tmp_path / "iso-repo"
+        org_dir.mkdir()
+        (org_dir / "ROSTER.md").write_text(ROSTER, encoding="utf-8")
+        (org_dir / ORG_CONFIG_NAME).write_text(
+            json.dumps({"run_as": "agent-x"}), encoding="utf-8"
         )
-        ctx = SimpleNamespace(node=NODE, config_path=config.path)
-        rows = _rig_rows(ctx, config)
-        iso_row = next(r for r in rows if r[1] == "iso")
-        assert "[user:agent-x]" in iso_row[2]
+        state.stamp_root(NODE, org_dir)
+        cfg = _iso_config(tmp_path, fake_harness)
+        rc = r4t_main(["status", "--node", NODE, "--rig-config", str(cfg)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "isolation: [user:agent-x]" in out

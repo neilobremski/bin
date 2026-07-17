@@ -1,16 +1,33 @@
-# Isolation — a real OS boundary per rig
+# Isolation — a real OS boundary per org
 
 Harness sandbox flags are not a security boundary: a CLI's `--sandbox` is
 model-discretionary and drifts between versions. The boundary that holds is the
 one the operating system already enforces — a Unix user with no sudo, or a
-container. r4t makes either a per-rig property. Inside the boundary the agent
-runs fully permissive; the OS, not a flag, is what contains it.
+container. r4t makes either a per-**org** property. Inside the boundary the
+agent runs fully permissive; the OS, not a flag, is what contains it.
 
-Two mutually exclusive rig keys (both set is a config error and the rig fails
-closed):
+## Why per-org, not per-rig
 
-- `run_as: "<username>"` — wrap the turn in `sudo -u <username>`.
-- `container: "<image>"` — run the turn under `docker run --rm`.
+Isolation is a per-project decision; rigs span the system. A rig maps to a real
+subscription and is machine-global — the same `leader` rig backs every org on
+the box. So the containment choice cannot ride the rig: an org with ten rigs
+must need **one** Unix user (or one image), not ten. A production box runs one
+agent user whose `$HOME` holds the credentials for every CLI, and every rig
+runs as that one user.
+
+The border sits at the turn invoke and nowhere else. r4t and a8s are
+deterministic machinery — routing, staging, budgeting — and run as the
+operator/a8s user; the probabilistic thing, the roster member's harness turn,
+is what gets wrapped. **Machinery outside, hands inside.** One user serves an
+arbitrary roster.
+
+## Setting the boundary
+
+Two mutually exclusive org keys in `r4t-org.json` (both set is a config error,
+reported by `r4t roster check`; the org degrades to no isolation):
+
+- `run_as: "<username>"` — wrap every member turn in `sudo -u <username>`.
+- `container: "<image>"` — run every member turn under `docker run --rm`.
 
 r4t **verifies** the prerequisites before every turn and fails closed with an
 action-first error; it never creates users, sudoers grants, workplace
@@ -18,20 +35,18 @@ permissions, or images. Provisioning is the operator's, once, below. A failed
 check is an ordinary failed turn: the batch stays queued, the breaker counts
 it, and `r4t status` shows the member unhealthy with the real error.
 
-Set the boundary on an existing rig by editing `~/.config/r4t/rigs.json`:
+Set the boundary by editing the org's `r4t-org.json` (the same file that carries
+`comms`, `egress`, and `doorbell_check`):
 
 ```json
 {
-  "leader": {
-    "preset": "claude",
-    "invoke": ["claude", "--permission-mode", "dontAsk", "...", "-p", "{prompt}"],
-    "run_as": "r4t-leader"
-  }
+  "run_as": "r4t-agent"
 }
 ```
 
-`r4t rig list` and `r4t status` then tag the rig `[user:r4t-leader]` /
-`[container:<image>]` so the boundary is visible at a glance.
+`r4t status` then prints one org-level line — `isolation: [user:r4t-agent]` /
+`[container:<image>]` — so the boundary that covers the whole roster is visible
+at a glance.
 
 ## Posture: most-permissive preset behind the boundary
 
@@ -132,21 +147,17 @@ docker run --rm --name r4t-<node>-<member>-<ts> \
 
 ### `container_args` — credentials and everything else
 
-A per-rig `container_args` list is appended to `docker run` verbatim (the
+An org-level `container_args` list is appended to `docker run` verbatim (the
 option-passthrough principle). Cloud-CLI credentials ride here as
 operator-chosen read-only mounts:
 
 ```json
 {
-  "cloud-rig": {
-    "preset": "claude",
-    "invoke": ["claude", "--permission-mode", "dontAsk", "...", "-p", "{prompt}"],
-    "container": "r4t/claude:latest",
-    "container_args": [
-      "-v", "/home/router/.config/anthropic:/root/.config/anthropic:ro",
-      "--network", "host"
-    ]
-  }
+  "container": "r4t/claude:latest",
+  "container_args": [
+    "-v", "/home/router/.config/anthropic:/root/.config/anthropic:ro",
+    "--network", "host"
+  ]
 }
 ```
 
@@ -166,6 +177,28 @@ everything that runs inside the boundary for as long as it is mounted
 candidates for a later isolation round; today, mount only credentials the
 rig's job actually needs, and treat "isolated" as meaning *it cannot
 change what runs* — not *it cannot phone out*.
+
+## Whole-node containment (a deployment choice, not a feature)
+
+The org boundary wraps each member's turn. Because r4t anchors a team on a
+directory and runs as ordinary machinery, an operator who wants a coarser wall
+can simply run the **entire node** — the r4t daemon, a8s, everything — under one
+Unix user or inside one container, as a deployment choice. Nothing in r4t needs
+to know: it is just `sudo -u node-user r4t ...` or a node-wide container image.
+Per-org `run_as`/`container` and whole-node containment compose; pick the grain
+your threat model wants.
+
+## Testing the real boundary
+
+`tests/docker/run-as.sh` is the reference provisioning sequence: it builds an
+`ubuntu:24.04` container and, as root inside it, creates a sudo-less agent user,
+a shared work group, a scoped `visudo`-validated sudoers drop-in, and setgid
+`2770` staging/workplace dirs — then runs a real org-level `run_as` dispatch turn
+and asserts the boundary holds from inside (the turn's effective user is the
+agent user, `TELL_OUTBOX_DIR` survived `env_reset`, staging writes are
+group-writable, the agent cannot sudo, and it cannot read the router's home).
+Run it directly (`apps/r4t/tests/docker/run-as.sh`); CI runs it on r4t changes.
+It doubles as a copy-pasteable provisioning checklist for a real deployment.
 
 ## Not automated (by design)
 

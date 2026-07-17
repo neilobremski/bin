@@ -13,6 +13,18 @@ _PKG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG))
 
 
+def pytest_configure(config):
+    # Registered so a future in-pytest hook for the real-boundary docker test
+    # has a home. The current integration lives entirely in tests/docker/ and
+    # is driven by run-as.sh (Docker is the only entry point), so nothing under
+    # the default suite carries this marker today.
+    config.addinivalue_line(
+        "markers",
+        "isolation_integration: real OS-boundary test; run via "
+        "tests/docker/run-as.sh, excluded from the default suite",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _restore_tell_outbox_env():
     """r4t's seat/chat CLIs set TELL_OUTBOX_DIR in os.environ (so child `tell`

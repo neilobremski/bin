@@ -44,7 +44,7 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import isolate
@@ -152,6 +152,7 @@ class DispatchContext:
     leader_sees_lateral: bool = False
     egress: bool = True
     doorbell_check: str | None = None
+    isolation: isolate.Isolation = field(default_factory=isolate.Isolation)
     definition_path: Path | None = None
 
     def __post_init__(self) -> None:
@@ -516,10 +517,11 @@ def run_harness(
     harness output is teed there line by line as it arrives, so a gemba attach
     can tail the turn live; the full output is still returned for staging.
 
-    When the rig sets `run_as` or `container` (rig.py; plans/ISOLATE-SPEC.md)
-    the argv is wrapped in the OS-level boundary. An isolation prereq that fails
-    closed returns a nonzero exit like any other failed turn — the batch stays
-    queued and the breaker counts it."""
+    When the org sets `run_as` or `container` (org.py; plans/ISOLATE-SPEC.md)
+    the choice rides in via the turn env and the argv is wrapped in the OS-level
+    boundary — every member turn of that org, whatever rig. An isolation prereq
+    that fails closed returns a nonzero exit like any other failed turn — the
+    batch stays queued and the breaker counts it."""
     argv = rig.argv(prompt, variant)
     if rig.model_resolver == "agy-live":
         # Resolve the friendly --model against the live `agy models` list before
@@ -533,26 +535,27 @@ def run_harness(
         argv = [resolved if a == "{model}" else a for a in argv]
 
     staging = (env or {}).get("TELL_OUTBOX_DIR", "")
+    isolation = isolate.isolation_from_env(env)
     kill_container_name: str | None = None
-    if rig.run_as:
-        probe_error = isolate.probe_run_as(rig.run_as, cwd)
+    if isolation.run_as:
+        probe_error = isolate.probe_run_as(isolation.run_as, cwd)
         if probe_error:
-            return 126, f"run_as {rig.run_as!r} isolation failed: {probe_error}", 0.0, False
+            return 126, f"run_as {isolation.run_as!r} isolation failed: {probe_error}", 0.0, False
         if staging:
-            isolate.assert_writable_shared_dir(staging, isolate.agent_gid(rig.run_as))
-        argv = isolate.wrap_run_as(argv, rig.run_as, staging, cwd)
-    elif rig.container:
+            isolate.assert_writable_shared_dir(staging, isolate.agent_gid(isolation.run_as))
+        argv = isolate.wrap_run_as(argv, isolation.run_as, staging, cwd)
+    elif isolation.container:
         kill_container_name = isolate.container_name(
             (env or {}).get("R4T_NODE", ""), (env or {}).get("R4T_MEMBER", "")
         )
         argv = isolate.build_container_argv(
             argv,
-            rig.container,
+            isolation.container,
             name=kill_container_name,
             staging_dir=staging,
             workplace=cwd,
             tell_outbox=staging,
-            container_args=rig.container_args,
+            container_args=isolation.container_args,
         )
 
     live_log = (env or {}).get("R4T_LIVE_LOG")
@@ -1166,10 +1169,13 @@ def _run_turn(
     env = dict(os.environ)
     env["TELL_OUTBOX_DIR"] = str(staging)
     env["R4T_LIVE_LOG"] = str(state.reset_live_log(ctx.node, member.name))
-    # Carried so run_harness can name a container rig's container deterministically
+    # Carried so run_harness can name a container's container deterministically
     # (r4t-<node>-<member>-<ts>) without widening the run_fn contract.
     env["R4T_NODE"] = ctx.node
     env["R4T_MEMBER"] = member.name
+    # The org's OS-level boundary (org.py) rides in the same way — one setting
+    # wraps every member turn regardless of rig (machinery outside, hands inside).
+    env.update(ctx.isolation.to_env())
     state.append_log(
         ctx.node,
         f"## {state.utc_now()} dispatch {len(batch)} message(s) -> {member.name} "

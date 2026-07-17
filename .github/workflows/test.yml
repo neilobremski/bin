@@ -11,6 +11,7 @@ jobs:
     outputs:
       l9m: ${{ steps.filter.outputs.l9m }}
       llm: ${{ steps.filter.outputs.llm }}
+      r4t: ${{ steps.filter.outputs.r4t }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -22,6 +23,8 @@ jobs:
               - 'l9m'
               - 'docs/l9m.md'
               - 'apps/q3w/**'
+            r4t:
+              - 'apps/r4t/**'
             llm:
               - 'apps/l9m/**'
               - 'l9m'
@@ -67,6 +70,15 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest
       - run: python -m pytest apps/k7e/tests/ -x -q -m "not llm"
+
+  r4t-isolation:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.r4t == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Real run_as OS-boundary integration test (Docker)
+        run: apps/r4t/tests/docker/run-as.sh
 
   l9m:
     runs-on: ubuntu-latest
