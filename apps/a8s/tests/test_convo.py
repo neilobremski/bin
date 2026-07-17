@@ -4,7 +4,9 @@ from __future__ import annotations
 import pytest
 
 from convo import (
+    follow_conversation,
     format_conversation,
+    format_entry,
     involves_agent,
     load_entries,
     record,
@@ -174,6 +176,25 @@ class TestCmdConvo:
         assert cmd_convo(["nope"]) == 1
         assert "no agent named" in capsys.readouterr().err
 
+    def test_follow_flag_parses(self, fake_home, tmp_path, monkeypatch):
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root)}})
+
+        def fake_follow(agent, **kwargs):
+            fake_follow.agent = agent
+            fake_follow.kwargs = kwargs
+            raise KeyboardInterrupt
+
+        import convo as convo_mod
+
+        monkeypatch.setattr(convo_mod, "follow_conversation", fake_follow)
+        assert cmd_convo(["bob", "-f", "--limit", "3"]) == 0
+        assert fake_follow.agent == "Bob"
+        assert fake_follow.kwargs["limit"] == 3
+
     def test_prints_formatted_history(self, fake_home, tmp_path, capsys):
         from registry import save_registry
 
@@ -265,3 +286,47 @@ class TestRoutingIntegration:
 
 def test_default_max_limit_is_1000():
     assert DEFAULTS["convo_max_limit"] == 1000
+
+
+class TestFollowConversation:
+    def test_follow_prints_new_entry(self, fake_home, tmp_path, capsys, monkeypatch):
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root)}})
+        record(
+            {
+                "id": "01JOLD000000000000000000",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "old",
+            },
+            recipients=["Bob"],
+        )
+
+        sleeps = {"n": 0}
+
+        def fake_sleep(_interval: float) -> None:
+            sleeps["n"] += 1
+            if sleeps["n"] == 1:
+                record(
+                    {
+                        "id": "01JNEW000000000000000000",
+                        "date": "2026-06-18T11:00:00.000000Z",
+                        "from": "Alice",
+                        "to": "Bob",
+                        "content": "fresh",
+                    },
+                    recipients=["Bob"],
+                )
+                return
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("convo.time.sleep", fake_sleep)
+        with pytest.raises(KeyboardInterrupt):
+            follow_conversation("Bob", limit=1, poll_interval=0.01)
+        out = capsys.readouterr().out
+        assert "old" in out
+        assert "fresh" in out

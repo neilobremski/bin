@@ -1319,28 +1319,35 @@ def cmd_config(args: list[str]) -> int:
 # ---------- convo ----------
 
 def cmd_convo(args: list[str]) -> int:
-    """`a8s convo <name> [--limit N] [--heading-out T] [--heading-in T]` —
+    """`a8s convo <name> [--limit N] [-f|--follow] [--heading-out T] [--heading-in T]` —
     markdown history of messages to or from an agent."""
     from convo import (
         DEFAULT_HEADING_IN,
         DEFAULT_HEADING_OUT,
+        follow_conversation,
         format_conversation,
     )
 
     if not args:
         print(
-            "usage: a8s convo <name> [--limit N] [--heading-out TEMPLATE] [--heading-in TEMPLATE]",
+            "usage: a8s convo <name> [--limit N] [-f|--follow] "
+            "[--heading-out TEMPLATE] [--heading-in TEMPLATE]",
             file=sys.stderr,
         )
         return 2
 
     name: str | None = None
     limit = 10
+    follow = False
     heading_out = DEFAULT_HEADING_OUT
     heading_in = DEFAULT_HEADING_IN
     i = 0
     while i < len(args):
         a = args[i]
+        if a in ("-f", "--follow"):
+            follow = True
+            i += 1
+            continue
         if a == "--limit":
             if i + 1 >= len(args):
                 print("--limit requires a number", file=sys.stderr)
@@ -1377,7 +1384,8 @@ def cmd_convo(args: list[str]) -> int:
 
     if name is None:
         print(
-            "usage: a8s convo <name> [--limit N] [--heading-out TEMPLATE] [--heading-in TEMPLATE]",
+            "usage: a8s convo <name> [--limit N] [-f|--follow] "
+            "[--heading-out TEMPLATE] [--heading-in TEMPLATE]",
             file=sys.stderr,
         )
         return 2
@@ -1387,6 +1395,18 @@ def cmd_convo(args: list[str]) -> int:
         print(f"no agent named {name!r}", file=sys.stderr)
         return 1
     agent_name = match[0]
+
+    if follow:
+        try:
+            follow_conversation(
+                agent_name,
+                limit=limit,
+                heading_out=heading_out,
+                heading_in=heading_in,
+            )
+        except KeyboardInterrupt:
+            pass
+        return 0
 
     text = format_conversation(
         agent_name,

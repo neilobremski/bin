@@ -1,4 +1,4 @@
 {
-  "description": "Human seat: file-proxy delivery. Messages land as JSON files in <root>/.inbox instead of waking a CLI; read them with `r4t chat` or any file watcher.",
+  "description": "Human seat: file-proxy delivery. Messages land as JSON files in <root>/.inbox instead of waking a CLI; watch with `a8s convo -f` or poll the directory.",
   "proxy": "file"
 }

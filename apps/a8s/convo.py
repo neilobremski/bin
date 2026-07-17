@@ -7,6 +7,7 @@ from `~/.a8s/settings.json` (default 1000).
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -17,6 +18,8 @@ __all__ = [
     "DEFAULT_HEADING_IN",
     "DEFAULT_HEADING_OUT",
     "format_conversation",
+    "format_entry",
+    "follow_conversation",
     "involves_agent",
     "load_entries",
     "record",
@@ -128,6 +131,27 @@ def _format_heading(template: str, entry: dict[str, Any]) -> str:
     )
 
 
+def format_entry(
+    agent: str,
+    entry: dict[str, Any],
+    *,
+    heading_out: str = DEFAULT_HEADING_OUT,
+    heading_in: str = DEFAULT_HEADING_IN,
+) -> str:
+    agent_key = _name_key(agent)
+    sent = _name_key(entry.get("from", "")) == agent_key
+    heading = _format_heading(heading_out if sent else heading_in, entry)
+    content = entry.get("content", "")
+    block = heading
+    if content:
+        block = f"{heading}\n\n{content}"
+    files = entry.get("files") or []
+    if files:
+        file_lines = "\n".join(f"- attachment: {name}" for name in files)
+        block = f"{block}\n\n{file_lines}" if block else file_lines
+    return block
+
+
 def format_conversation(
     agent: str,
     *,
@@ -140,19 +164,77 @@ def format_conversation(
         return ""
     rows = [e for e in load_entries() if involves_agent(e, agent)]
     rows = rows[-limit:]
-    parts: list[str] = []
-    agent_key = _name_key(agent)
-    for entry in rows:
-        sent = _name_key(entry.get("from", "")) == agent_key
-        heading = _format_heading(heading_out if sent else heading_in, entry)
-        content = entry.get("content", "")
-        block = heading
-        if content:
-            block = f"{heading}\n\n{content}"
-        files = entry.get("files") or []
-        if files:
-            file_lines = "\n".join(f"- attachment: {name}" for name in files)
-            block = f"{block}\n\n{file_lines}" if block else file_lines
-        parts.append(block)
+    parts = [
+        format_entry(agent, entry, heading_out=heading_out, heading_in=heading_in)
+        for entry in rows
+    ]
     return "\n\n".join(parts)
+
+
+def _remember_entry_id(seen: set[str], entry: dict[str, Any]) -> None:
+    msg_id = (entry.get("id") or "").strip()
+    if msg_id:
+        seen.add(msg_id)
+
+
+def _parse_convo_line(line: str) -> dict[str, Any] | None:
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        row = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return row if isinstance(row, dict) else None
+
+
+def follow_conversation(
+    agent: str,
+    *,
+    limit: int = 10,
+    heading_out: str = DEFAULT_HEADING_OUT,
+    heading_in: str = DEFAULT_HEADING_IN,
+    poll_interval: float = 1.0,
+) -> None:
+    """Print the last `limit` messages, then block printing new archive rows."""
+    seen: set[str] = set()
+    rows = [e for e in load_entries() if involves_agent(e, agent)]
+    for entry in rows[-limit:]:
+        block = format_entry(agent, entry, heading_out=heading_out, heading_in=heading_in)
+        if block:
+            print(block)
+            print()
+        _remember_entry_id(seen, entry)
+
+    path = conversations_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
+
+    with path.open("r", encoding="utf-8") as handle:
+        handle.seek(0, 2)
+        while True:
+            line = handle.readline()
+            if line:
+                entry = _parse_convo_line(line)
+                if entry is None or not involves_agent(entry, agent):
+                    continue
+                msg_id = (entry.get("id") or "").strip()
+                if msg_id and msg_id in seen:
+                    continue
+                block = format_entry(
+                    agent, entry, heading_out=heading_out, heading_in=heading_in
+                )
+                if block:
+                    print(block)
+                    print()
+                _remember_entry_id(seen, entry)
+                continue
+
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            if handle.tell() > size:
+                handle.seek(0)
+            time.sleep(poll_interval)
 
