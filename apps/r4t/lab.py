@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -300,13 +301,50 @@ def _ollama_model_of(invoke: list) -> str | None:
         return None
 
 
+def _rig_model_of(rig) -> str | None:
+    """The explicit model string a non-ollama rig declares: the rig's `model`
+    field first, else the concrete value after `--model`/`-m` in its invoke.
+    None when the rig names no model — the trial cannot record what it cannot
+    resolve."""
+    if rig.model and "{model}" not in str(rig.model):
+        return str(rig.model).strip()
+    argv = rig.pool()[0] if rig.pool() else rig.invoke
+    for flag in ("--model", "-m"):
+        try:
+            candidate = argv[argv.index(flag) + 1]
+        except (ValueError, IndexError):
+            continue
+        if candidate and candidate != "{model}":
+            return candidate
+    return None
+
+
+def _binary_version(binary: str) -> tuple[str | None, str | None]:
+    """(first `--version` line, note). Version is None with a note when the
+    binary has no usable --version — recorded, never invented."""
+    try:
+        proc = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, f"{binary} has no usable --version"
+    text = (proc.stdout or proc.stderr).strip()
+    if proc.returncode != 0 or not text:
+        return None, f"{binary} has no usable --version"
+    return text.splitlines()[0], None
+
+
 def resolve_role(
     manifest: Manifest, role: str, rig_name: str, config_path: Path
 ) -> dict:
     """Bind one role to its rig and resolve the model. Raises LabError (with a
     `(try:)` hint) when the rig is missing/invalid or its harness cannot run.
     A rig that resolves OUTSIDE the manifest pin's series still resolves — the
-    caller flags `pin_mismatch` and never pools it (spec 5)."""
+    caller flags `pin_mismatch` and never pools it (spec 5).
+
+    Ollama rigs resolve to a (name, digest) pair — the frozen tier. Any other
+    preset resolves generically: the rig's explicit model string, no digest
+    (an ollama-only concept), and the preset binary's --version."""
     pin = str((manifest.roles.get(role) or {}).get("pin", "")).strip()
     if not rig_name:
         raise LabError(f"role {role!r} has no rig binding (set roles.{role}.rig)")
@@ -314,43 +352,68 @@ def resolve_role(
     if config.missing:
         raise LabError(
             f"no rig config at {config_path} "
-            f"(try: r4t rig add {rig_name} ollama --model {pin or 'MODEL'})"
+            f"(try: r4t rig add {rig_name} <preset> --model {pin or 'MODEL'})"
         )
     rig = config.rigs.get(rig_name.lower())
     if rig is None:
         raise LabError(
             f"rig {rig_name!r} not in {config_path} "
-            f"(try: r4t rig add {rig_name} ollama --model {pin or 'MODEL'})"
+            f"(try: r4t rig add {rig_name} <preset> --model {pin or 'MODEL'})"
         )
     if rig.error:
         raise LabError(f"rig {rig_name!r} is invalid: {rig.error}")
     preset = _rig_preset(config_path, rig_name)
-    if preset != "ollama":
+    invoke = list(rig.pool()[0]) if rig.pool() else list(rig.invoke)
+
+    if preset == "ollama":
+        if not shutil.which("ollama"):
+            raise LabError("ollama not on PATH (try: install ollama)")
+        model = _ollama_model_of(rig.invoke)
+        if not model:
+            raise LabError(f"rig {rig_name!r} has no ollama model in its invoke")
+        try:
+            resolved, digest = resolve_ollama_model(model)
+        except LabError as e:
+            raise LabError(f"{e} (try: ollama pull {model})") from e
+        return {
+            "role": role,
+            "rig": rig_name,
+            "preset": preset,
+            "pin": pin,
+            "resolved_model": resolved,
+            "model_digest": digest,
+            "pin_mismatch": bool(pin) and _series(resolved) != _series(pin),
+            "invoke": invoke,
+            "harness_version": _ollama_version(),
+        }
+
+    binary = invoke[0] if invoke else None
+    if not binary:
+        raise LabError(f"rig {rig_name!r} has an empty invoke")
+    if not shutil.which(binary):
+        raise LabError(f"{binary} not on PATH (try: install {binary})")
+    resolved = _rig_model_of(rig)
+    if not resolved:
         raise LabError(
-            f"posthoc PR 1 supports only ollama-preset judge rigs; "
-            f"rig {rig_name!r} preset is {preset!r} "
-            f"(try: r4t rig swap {rig_name} ollama --model {pin or 'MODEL'})"
+            f"rig {rig_name!r} ({preset}) declares no model — the trial cannot "
+            f"record what it cannot resolve "
+            f"(try: r4t rig swap {rig_name} {preset or '<preset>'} --model MODEL)"
         )
-    if not shutil.which("ollama"):
-        raise LabError("ollama not on PATH (try: install ollama)")
-    model = _ollama_model_of(rig.invoke)
-    if not model:
-        raise LabError(f"rig {rig_name!r} has no ollama model in its invoke")
-    try:
-        resolved, digest = resolve_ollama_model(model)
-    except LabError as e:
-        raise LabError(f"{e} (try: ollama pull {model})") from e
-    return {
+    version, version_note = _binary_version(binary)
+    info = {
         "role": role,
         "rig": rig_name,
         "preset": preset,
         "pin": pin,
         "resolved_model": resolved,
-        "model_digest": digest,
+        "model_digest": None,
         "pin_mismatch": bool(pin) and _series(resolved) != _series(pin),
-        "invoke": list(rig.pool()[0]) if rig.pool() else list(rig.invoke),
-        "harness_version": _ollama_version(),
+        "invoke": invoke,
+        "harness_version": version,
     }
+    if version_note:
+        info["harness_version_note"] = version_note
+    return info
 
 
 def _fake_role(manifest: Manifest, role: str, rig_name: str) -> dict:
@@ -408,8 +471,9 @@ def probe_prereqs(
     parts = []
     for role, info in roles.items():
         flag = " [pin_mismatch]" if info["pin_mismatch"] else ""
+        digest = info["model_digest"] or "no digest"
         parts.append(f"{role}={info['rig']} -> {info['resolved_model']} "
-                     f"({info['model_digest']}){flag}")
+                     f"({digest}){flag}")
     return True, "; ".join(parts)
 
 
@@ -441,11 +505,34 @@ def load_answers(manifest: Manifest) -> dict:
     return json.loads(_read_fixture(manifest, spec))
 
 
+def load_pairs(manifest: Manifest) -> list[dict]:
+    """Within-arm paraphrase pairing: each entry is {"orig", "para", "anchor"}.
+    Empty when the experiment declares no `posthoc.pairs` (e.g. E0, which pairs
+    across arms instead)."""
+    spec = manifest.posthoc.get("pairs")
+    if not spec:
+        return []
+    data = json.loads(_read_fixture(manifest, spec))
+    if not isinstance(data, list) or not data:
+        raise LabError(f"manifest {manifest.name}: pairs must be a non-empty list")
+    for p in data:
+        if "orig" not in p or "para" not in p:
+            raise LabError(f"manifest {manifest.name}: each pair needs 'orig' and 'para'")
+    return data
+
+
 def build_judge_prompt(manifest: Manifest, arm: str, questions: list[dict]) -> str:
     template = _read_fixture(manifest, manifest.posthoc["judge_prompt"])
     transcript = _read_fixture(manifest, manifest.posthoc["transcript"])
     rendered = "\n".join(f"{q['id']}: {q['text']}" for q in questions)
-    return template.replace("{transcript}", transcript).replace("{questions}", rendered)
+    persona_spec = manifest.posthoc.get("personas", {}).get(arm)
+    persona = _read_fixture(manifest, persona_spec).strip() if persona_spec else ""
+    return (
+        template
+        .replace("{persona}", persona)
+        .replace("{transcript}", transcript)
+        .replace("{questions}", rendered)
+    )
 
 
 _ANSWER_RE = re.compile(r"(?im)^\s*(Q\d+)\s*[:\.\)]\s*(yes|no)\b")
@@ -464,11 +551,13 @@ def parse_answers(output: str, expected_ids: list[str]) -> dict | None:
     return None
 
 
-def _run_judge(invoke: list[str], prompt: str, timeout: float) -> tuple[int, str, str]:
+def _run_judge(
+    invoke: list[str], prompt: str, timeout: float, cwd: Path
+) -> tuple[int, str, str]:
     argv = [prompt if a == "{prompt}" else a for a in invoke]
     try:
         proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout
+            argv, capture_output=True, text=True, timeout=timeout, cwd=str(cwd)
         )
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
@@ -516,8 +605,18 @@ def run_one_posthoc_trial(
 
     trial_id = ulid.new()
     invoke = environment["roles"]["judge"]["invoke"]
+    # Hermetic per-trial cwd: tool-enabled judge harnesses (observed live with
+    # `opencode --auto`) can write scratch files into their working directory —
+    # that must never be the operator's repo. The scratch dir dies with the
+    # trial.
+    workdir = Path(tempfile.mkdtemp(prefix=f"r4t-lab-{manifest.name}-"))
     start = time.time()
-    code, out, err = _run_judge(invoke, prompt, float(manifest.box_seconds))
+    try:
+        code, out, err = _run_judge(
+            invoke, prompt, float(manifest.box_seconds), workdir
+        )
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
     wall = time.time() - start
     raw_output = out if out.strip() else err
 
@@ -539,7 +638,14 @@ def run_one_posthoc_trial(
         else:
             exit_reason = "ok"
             truth = answers_truth.get(arm, {})
-            metrics["accuracy"] = accuracy(parsed, truth)
+            if "accuracy" in manifest.metrics:
+                metrics["accuracy"] = accuracy(parsed, truth)
+            if "anchor_accuracy" in manifest.metrics:
+                metrics["anchor_accuracy"] = anchor_accuracy(parsed, truth)
+            if "paraphrase_consistency" in manifest.metrics:
+                pc = paraphrase_consistency(parsed, load_pairs(manifest))
+                if pc is not None:
+                    metrics["paraphrase_consistency"] = pc
 
     report_path = _write_trial_report(
         manifest.name, trial_id, arm, environment, prompt, raw_output, parsed, exit_reason,
@@ -563,9 +669,9 @@ def run_one_posthoc_trial(
     _append_ledger(manifest.name, row)
     if log:
         status = exit_reason if not excluded else f"EXCLUDED ({excluded_reason})"
-        acc = metrics.get("accuracy")
-        acc_s = f" acc={acc:.2f}" if acc is not None else ""
-        log(f"trial {trial_id} arm {arm}: {status}{acc_s} in {wall:.1f}s")
+        summary = "  ".join(f"{m}={v:.2f}" for m, v in metrics.items())
+        summary = f" {summary}" if summary else ""
+        log(f"trial {trial_id} arm {arm}: {status}{summary} in {wall:.1f}s")
     return row
 
 
@@ -614,7 +720,8 @@ def run_experiment(
     arms = [arm] if arm is not None else manifest.arm_names()
     environment = capture_environment(manifest, bindings, config_path, fake=fake)
     mismatch = " [pin_mismatch]" if environment.get("pin_mismatch") else ""
-    log(f"environment: {environment['resolved_model']} ({environment['model_digest']})"
+    digest = environment.get("model_digest") or "no digest"
+    log(f"environment: {environment['resolved_model']} ({digest})"
         f"{mismatch}, harness {environment['harness_version']}, r4t {environment['r4t_git']}")
 
     # Alternate arms so time-drift does not confound one arm (spec 4).
@@ -642,6 +749,32 @@ def accuracy(answers: dict, truth: dict) -> float:
         return 0.0
     correct = sum(1 for qid, val in truth.items() if answers.get(qid) == val)
     return correct / len(truth)
+
+
+def anchor_accuracy(answers: dict, truth: dict) -> float:
+    """Accuracy over only the ground-truth-bearing questions. Debatable
+    questions carry a null truth (no defensible right answer) and are skipped —
+    scoring them against a made-up key would punish legitimate judgment."""
+    scored = {qid: val for qid, val in truth.items() if val is not None}
+    if not scored:
+        return 0.0
+    correct = sum(1 for qid, val in scored.items() if answers.get(qid) == val)
+    return correct / len(scored)
+
+
+def paraphrase_consistency(answers: dict, pairs: list[dict]) -> float | None:
+    """Fraction of paraphrase pairs the judge answered the SAME way within one
+    trial (original twin == paraphrase twin). None when no pairs are declared.
+    This is the primary metric: a rubric that is robust to wording answers a
+    question and its reworded twin identically."""
+    if not pairs:
+        return None
+    agree = sum(
+        1 for p in pairs
+        if answers.get(p["orig"]) is not None
+        and answers.get(p["orig"]) == answers.get(p["para"])
+    )
+    return agree / len(pairs)
 
 
 def _modal(values: list[str]) -> str:
@@ -689,9 +822,11 @@ def cross_arm_agreement(
 
 
 # Registry: which metric names the loader accepts, and how they are surfaced.
-PER_TRIAL_METRICS = frozenset({"accuracy"})
-AGGREGATE_METRICS = frozenset({"within_arm_consistency", "cross_arm_agreement"})
-ALL_METRICS = PER_TRIAL_METRICS | AGGREGATE_METRICS
+# Per-trial metrics are computed from a single judge output and flow through the
+# sign test / bootstrap; aggregate metrics are computed across an arm's trials.
+PER_TRIAL_METRICS = ("accuracy", "anchor_accuracy", "paraphrase_consistency")
+AGGREGATE_METRICS = ("within_arm_consistency", "cross_arm_agreement")
+ALL_METRICS = frozenset(PER_TRIAL_METRICS) | frozenset(AGGREGATE_METRICS)
 
 
 # ----------------------------------------------------------------------------
@@ -772,6 +907,13 @@ def sign_verdict(test: dict) -> str:
     return "mixed — needs more trials"
 
 
+# Prediction ops: `delta_*` compare the between-arm difference (B - A) stored
+# under the (metric, "delta") aggregate key; the word-form aliases exist so a
+# manifest can read as prose (`"op": "gte"`). Both reduce to `_compare`.
+_DELTA_OPS = {"delta_gte": ">=", "delta_gt": ">", "delta_lte": "<=", "delta_lt": "<"}
+_OP_ALIASES = {"gte": ">=", "gt": ">", "lte": "<=", "lt": "<"}
+
+
 def score_prediction(prediction: dict, aggregates: dict) -> dict:
     """Score one pre-registered prediction against computed aggregates:
     held / falsified / undecided, plus this report's Brier term."""
@@ -787,13 +929,21 @@ def score_prediction(prediction: dict, aggregates: dict) -> dict:
     op = check.get("op", ">=")
     value = check.get("value")
     scope = check.get("scope", "overall")
-    observed = aggregates.get((metric, scope)) if scope == "each_arm" else aggregates.get((metric, "overall"))
+    if op in _DELTA_OPS:
+        observed = aggregates.get((metric, "delta"))
+        base_op, scope_label = _DELTA_OPS[op], "delta"
+    else:
+        base_op = _OP_ALIASES.get(op, op)
+        key = (metric, scope) if scope == "each_arm" else (metric, "overall")
+        observed = aggregates.get(key)
+        scope_label = scope
     if observed is None:
-        result["detail"] = f"{metric} ({scope}) not yet computable"
+        result["detail"] = f"{metric} ({scope_label}) not yet computable"
         return result
-    held = _compare(observed, op, value)
+    held = _compare(observed, base_op, value)
     result["outcome"] = "held" if held else "falsified"
-    result["detail"] = f"{metric} ({scope}) = {observed:.3f} {op} {value}"
+    obs_s = f"{observed:+.3f}" if scope_label == "delta" else f"{observed:.3f}"
+    result["detail"] = f"{metric} ({scope_label}) = {obs_s} {op} {value}"
     if isinstance(confidence, (int, float)):
         result["brier"] = (float(confidence) - (1.0 if held else 0.0)) ** 2
     return result
@@ -833,14 +983,20 @@ def aggregate(manifest: Manifest, rows: list[dict]) -> dict:
     "aggregates": {(metric, scope): value}}}."""
     by_model: dict[str, dict] = {}
     for row in rows:
-        digest = row.get("environment", {}).get("model_digest", "?")
-        resolved = row.get("environment", {}).get("resolved_model", "?")
+        env = row.get("environment", {})
+        digest = env.get("model_digest")
+        resolved = env.get("resolved_model", "?")
+        # Digest is the frozen-tier identity (ollama); rigs without one group
+        # by resolved model string — distinct models never pool under a shared
+        # null digest.
+        key = digest if digest else f"model:{resolved}"
         model = by_model.setdefault(
-            digest, {"resolved": resolved, "digest": digest, "rows": []}
+            key, {"resolved": resolved, "digest": digest, "rows": []}
         )
         model["rows"].append(row)
 
     pairing = _pairing(manifest) if len(manifest.arm_names()) >= 2 else []
+    pair_list = load_pairs(manifest)
     arms = manifest.arm_names()
 
     for model in by_model.values():
@@ -850,14 +1006,16 @@ def aggregate(manifest: Manifest, rows: list[dict]) -> dict:
         per_arm: dict[str, dict] = {}
         for a in arms:
             arm_rows = [r for r in kept if r.get("arm") == a]
-            per_arm[a] = {
+            entry = {
                 "n": len(arm_rows),
-                "accuracy": [r["metrics"].get("accuracy") for r in arm_rows
-                             if r.get("metrics", {}).get("accuracy") is not None],
                 "within_arm_consistency": within_arm_consistency(arm_rows),
                 "modal": arm_modal_answers(arm_rows),
                 "rows": arm_rows,
             }
+            for m in PER_TRIAL_METRICS:
+                entry[m] = [r["metrics"].get(m) for r in arm_rows
+                            if r.get("metrics", {}).get(m) is not None]
+            per_arm[a] = entry
         model["arms"] = per_arm
 
         aggregates: dict = {}
@@ -866,7 +1024,36 @@ def aggregate(manifest: Manifest, rows: list[dict]) -> dict:
         if wac_values:
             aggregates[("within_arm_consistency", "overall")] = mean(wac_values)
             aggregates[("within_arm_consistency", "each_arm")] = min(wac_values)
-        if pairing and len(arms) >= 2:
+
+        # Per-trial aggregate metrics: overall (mean of arm means), each_arm
+        # (worst arm), and the between-arm delta (B - A) that `delta_*`
+        # predictions score against.
+        for m in ("paraphrase_consistency", "anchor_accuracy"):
+            if m not in manifest.metrics:
+                continue
+            arm_means = {a: mean(per_arm[a][m]) for a in arms if per_arm[a][m]}
+            if len(arm_means) == len(arms):
+                aggregates[(m, "overall")] = mean(list(arm_means.values()))
+                aggregates[(m, "each_arm")] = min(arm_means.values())
+                if len(arms) >= 2:
+                    aggregates[(m, "delta")] = arm_means[arms[1]] - arm_means[arms[0]]
+
+        # kappa_floor: chance-corrected paraphrase agreement per arm (the two
+        # question halves as two raters), worst arm reported against the floor.
+        if pair_list and "paraphrase_consistency" in manifest.metrics:
+            arm_kappa: dict = {}
+            for a in arms:
+                modal = per_arm[a]["modal"]
+                r1 = [modal.get(p["orig"]) for p in pair_list]
+                r2 = [modal.get(p["para"]) for p in pair_list]
+                if all(x is not None for x in r1 + r2):
+                    arm_kappa[a] = cohen_kappa(r1, r2)
+            model["arm_kappa"] = arm_kappa
+            valid = [k for k in arm_kappa.values() if k is not None]
+            if len(valid) == len(arms):
+                aggregates[("kappa_floor", "overall")] = min(valid)
+
+        if pairing and len(arms) >= 2 and "cross_arm_agreement" in manifest.metrics:
             caa = cross_arm_agreement(
                 per_arm[arms[0]]["modal"], per_arm[arms[1]]["modal"], pairing
             )
@@ -898,18 +1085,22 @@ def render_report(manifest: Manifest, rows: list[dict]) -> str:
     by_model = aggregate(manifest, rows)
     arms = manifest.arm_names()
 
-    for digest, model in by_model.items():
+    for model in by_model.values():
         mismatch = any(
             r.get("environment", {}).get("pin_mismatch") for r in model["rows"]
         )
         flag = "  [pin_mismatch — outside intended series]" if mismatch else ""
+        digest = model["digest"] or "no digest"
         lines.append(f"Model  {model['resolved']} ({digest}){flag}")
         per_arm = model["arms"]
+        pertrial = [m for m in manifest.metrics if m in PER_TRIAL_METRICS]
         for a in arms:
             info = per_arm[a]
-            accs = info["accuracy"]
-            acc_s = f"{mean(accs):.3f} (n={len(accs)})" if accs else "n/a"
-            lines.append(f"  arm {a}: {info['n']} kept · accuracy {acc_s}")
+            cells = [f"{info['n']} kept"]
+            for m in pertrial:
+                vals = info[m]
+                cells.append(f"{m} {mean(vals):.3f} (n={len(vals)})" if vals else f"{m} n/a")
+            lines.append(f"  arm {a}: " + " · ".join(cells))
         if model["excluded"]:
             reasons: dict[str, int] = {}
             for r in model["excluded"]:
@@ -918,13 +1109,15 @@ def render_report(manifest: Manifest, rows: list[dict]) -> str:
         lines.append("")
 
         # Per per-trial metric: A vs B effect size + bootstrap CI + sign test.
-        if len(arms) >= 2 and "accuracy" in manifest.metrics:
-            a_acc = per_arm[arms[0]]["accuracy"]
-            b_acc = per_arm[arms[1]]["accuracy"]
-            if a_acc and b_acc:
-                point, lo, hi = bootstrap_diff_ci(a_acc, b_acc)
-                test = sign_test(a_acc, b_acc)
-                lines.append(f"  Pattern — accuracy ({arms[0]} vs {arms[1]})")
+        if len(arms) >= 2:
+            for m in pertrial:
+                a_vals = per_arm[arms[0]][m]
+                b_vals = per_arm[arms[1]][m]
+                if not (a_vals and b_vals):
+                    continue
+                point, lo, hi = bootstrap_diff_ci(a_vals, b_vals)
+                test = sign_test(a_vals, b_vals)
+                lines.append(f"  Pattern — {m} ({arms[0]} vs {arms[1]})")
                 lines.append(f"    effect size: {point:+.3f}  95% CI [{lo:+.3f}, {hi:+.3f}] (bootstrap 10k)")
                 lines.append(f"    sign test: {test['wins']}W-{test['losses']}L-{test['ties']}T "
                              f"(n={test['n']}, two-sided p={test['p']:.3f})")
@@ -940,6 +1133,25 @@ def render_report(manifest: Manifest, rows: list[dict]) -> str:
             )
             lines.append(f"  within_arm_consistency: {agg[('within_arm_consistency','overall')]:.3f} "
                          f"(per arm: {per})")
+        if ("paraphrase_consistency", "delta") in agg:
+            per = "  ".join(
+                f"{a}={mean(per_arm[a]['paraphrase_consistency']):.3f}"
+                for a in arms if per_arm[a]["paraphrase_consistency"]
+            )
+            lines.append(
+                f"  paraphrase_consistency: overall {agg[('paraphrase_consistency','overall')]:.3f}  "
+                f"delta(B-A) {agg[('paraphrase_consistency','delta')]:+.3f}  (per arm: {per})"
+            )
+        if model.get("arm_kappa"):
+            ks = "  ".join(
+                f"{a} κ={('%.3f' % k) if k is not None else 'n/a'}"
+                for a, k in model["arm_kappa"].items()
+            )
+            floor = agg.get(("kappa_floor", "overall"))
+            floor_s = (f"  min κ={floor:.3f} "
+                       f"({'≥' if floor >= KAPPA_FLOOR else '<'} {KAPPA_FLOOR} floor)"
+                       if floor is not None else "")
+            lines.append(f"  paraphrase κ (chance-corrected): {ks}{floor_s}")
         if "cross_arm" in model:
             caa = model["cross_arm"]
             k = caa["kappa"]

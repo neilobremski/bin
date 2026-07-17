@@ -11,6 +11,7 @@ import pytest
 import lab
 
 E0 = "e0-noise-floor"
+E5A = "e5a-persona-presence"
 
 
 # ----------------------------------------------------------------------------
@@ -130,6 +131,34 @@ def test_fake_run_single_arm(tmp_path, monkeypatch):
     rows = lab.read_ledger(E0)
     assert len(rows) == 2
     assert {r["arm"] for r in rows} == {"A"}
+
+
+def test_posthoc_judge_runs_in_hermetic_cwd(tmp_path, monkeypatch):
+    """A tool-enabled judge that writes into its cwd (observed live with
+    `opencode --auto`) must land in the trial's own temp dir — never the
+    operator's cwd — and that dir dies with the trial."""
+    monkeypatch.setenv("R4T_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("R4T_LAB_FAKE_SCRATCH", "1")
+    operator_cwd = tmp_path / "operator"
+    operator_cwd.mkdir()
+    monkeypatch.chdir(operator_cwd)
+
+    rc = lab.run_experiment(E0, arm="A", n=1, fake=True, log=lambda m: None)
+    assert rc == 0
+    rows = lab.read_ledger(E0)
+    assert len(rows) == 1 and not rows[0]["excluded"]  # scratch line is noise
+
+    raw = (Path(rows[0]["report_path"]).parent / f"{rows[0]['trial']}.raw.txt")
+    scratch_line = next(
+        line for line in raw.read_text(encoding="utf-8").splitlines()
+        if line.startswith("scratch: ")
+    )
+    scratch = Path(scratch_line.removeprefix("scratch: "))
+    assert scratch.parent != operator_cwd  # never the operator's repo
+    assert "r4t-lab-" in scratch.parent.name  # the trial's own workspace
+    assert not scratch.exists()  # gone with teardown
+    assert not scratch.parent.exists()
+    assert list(operator_cwd.iterdir()) == []  # operator cwd untouched
 
 
 def test_unparseable_output_excluded_not_dropped(tmp_path, monkeypatch):
@@ -274,3 +303,154 @@ def test_report_empty_ledger():
     manifest = lab.load_manifest(E0)
     report = lab.render_report(manifest, [])
     assert "No trials yet" in report
+
+
+# ----------------------------------------------------------------------------
+# E5a: within-arm paraphrase metrics, persona injection, delta predictions
+# ----------------------------------------------------------------------------
+
+def test_anchor_accuracy_skips_null_truth():
+    # Null-truth (debatable) questions are not scored; only anchors count.
+    truth = {"Q1": "yes", "Q2": "no", "Q3": None, "Q4": None}
+    answers = {"Q1": "yes", "Q2": "no", "Q3": "yes", "Q4": "no"}
+    assert lab.anchor_accuracy(answers, truth) == pytest.approx(1.0)
+    answers_bad = {"Q1": "no", "Q2": "no", "Q3": "yes", "Q4": "no"}
+    assert lab.anchor_accuracy(answers_bad, truth) == pytest.approx(0.5)
+    assert lab.anchor_accuracy(answers, {"Q3": None}) == 0.0  # no anchors
+
+
+def test_paraphrase_consistency():
+    pairs = [{"orig": "Q1", "para": "Q7"}, {"orig": "Q2", "para": "Q8"},
+             {"orig": "Q3", "para": "Q9"}]
+    # Q1/Q7 agree, Q2/Q8 agree, Q3/Q9 disagree -> 2/3.
+    answers = {"Q1": "yes", "Q7": "yes", "Q2": "no", "Q8": "no",
+               "Q3": "yes", "Q9": "no"}
+    assert lab.paraphrase_consistency(answers, pairs) == pytest.approx(2 / 3)
+    assert lab.paraphrase_consistency(answers, []) is None
+
+
+def test_score_prediction_delta_and_alias_ops():
+    aggregates = {("paraphrase_consistency", "delta"): 0.25,
+                  ("kappa_floor", "overall"): 0.55}
+    big = lab.score_prediction(
+        {"claim": "B beats A by >=0.20", "confidence": 0.45,
+         "check": {"metric": "paraphrase_consistency", "op": "delta_gte", "value": 0.20}},
+        aggregates,
+    )
+    assert big["outcome"] == "held"
+    assert "+0.250" in big["detail"]
+
+    floor = lab.score_prediction(
+        {"claim": "both arms >= floor", "confidence": 0.5,
+         "check": {"metric": "kappa_floor", "op": "gte", "value": 0.6}},
+        aggregates,
+    )
+    assert floor["outcome"] == "falsified"  # 0.55 < 0.6, gte alias resolves
+
+    positive = lab.score_prediction(
+        {"claim": "any positive", "confidence": 0.6,
+         "check": {"metric": "paraphrase_consistency", "op": "delta_gte", "value": 0.0}},
+        aggregates,
+    )
+    assert positive["outcome"] == "held"
+
+
+def test_e5a_manifest_and_persona_only_line_differs():
+    manifest = lab.load_manifest(E5A)
+    assert lab.protocol_placeholders(manifest) == []
+    assert manifest.cls == "posthoc"
+    assert manifest.roles["judge"]["rig"] == "local"
+    assert manifest.metrics == ["paraphrase_consistency",
+                                "within_arm_consistency", "anchor_accuracy"]
+    # Only the persona line moves between arms: everything after it is identical.
+    qa = lab.load_questions(manifest, "A")
+    qb = lab.load_questions(manifest, "B")
+    pa = lab.build_judge_prompt(manifest, "A", qa)
+    pb = lab.build_judge_prompt(manifest, "B", qb)
+    assert "Grace Hopper" in pb and "Grace Hopper" not in pa
+    assert pa.split("\n", 1)[1] == pb.split("\n", 1)[1]  # rubric body identical
+
+
+# ----------------------------------------------------------------------------
+# Non-ollama judge rigs (posthoc on any preset)
+# ----------------------------------------------------------------------------
+
+def _cloud_config(tmp_path, invoke, name="cloud", preset="opencode") -> Path:
+    path = tmp_path / "rigs.json"
+    path.write_text(json.dumps({name: {"preset": preset, "invoke": invoke}}),
+                    encoding="utf-8")
+    return path
+
+
+def test_non_ollama_rig_resolves_environment(tmp_path, monkeypatch):
+    config = _cloud_config(
+        tmp_path,
+        ["opencode", "run", "-m", "opencode/nemotron-3-ultra-free", "--auto", "{prompt}"],
+    )
+    monkeypatch.setattr(lab.shutil, "which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr(lab, "_binary_version", lambda b: ("opencode 1.17.0", None))
+    manifest = lab.load_manifest(E0)  # pin qwen3.6
+    info = lab.resolve_role(manifest, "judge", "cloud", config)
+    assert info["preset"] == "opencode"
+    assert info["resolved_model"] == "opencode/nemotron-3-ultra-free"
+    assert info["model_digest"] is None  # digest is an ollama-only concept
+    assert info["harness_version"] == "opencode 1.17.0"
+    assert info["pin_mismatch"] is True  # outside the qwen3.6 series
+    assert "harness_version_note" not in info
+
+
+def test_non_ollama_rig_without_version_notes_it(tmp_path, monkeypatch):
+    config = _cloud_config(tmp_path, ["mycli", "--model", "some/model", "{prompt}"],
+                           preset="codex")
+    monkeypatch.setattr(lab.shutil, "which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr(lab, "_binary_version",
+                        lambda b: (None, f"{b} has no usable --version"))
+    manifest = lab.load_manifest(E0)
+    info = lab.resolve_role(manifest, "judge", "cloud", config)
+    assert info["harness_version"] is None
+    assert info["harness_version_note"] == "mycli has no usable --version"
+
+
+def test_non_ollama_rig_without_model_refuses(tmp_path, monkeypatch):
+    config = _cloud_config(tmp_path, ["opencode", "run", "--auto", "{prompt}"])
+    monkeypatch.setattr(lab.shutil, "which", lambda b: f"/usr/bin/{b}")
+    manifest = lab.load_manifest(E0)
+    with pytest.raises(lab.LabError, match="declares no model"):
+        lab.resolve_role(manifest, "judge", "cloud", config)
+
+
+def test_null_digest_models_never_pool():
+    manifest = lab.load_manifest(E0)
+    a_ans = {"Q1": "yes", "Q2": "no", "Q3": "yes", "Q4": "no"}
+    rows = [
+        _fake_row("A", None, "opencode/nemotron-3-ultra-free", a_ans, 1.0, mismatch=True),
+        _fake_row("A", None, "opencode/other-model", a_ans, 0.5, mismatch=True),
+        _fake_row("A", "digest1", "qwen3.6:latest", a_ans, 1.0),
+    ]
+    by_model = lab.aggregate(manifest, rows)
+    # Two null-digest models land in separate columns, never a shared one.
+    assert len(by_model) == 3
+    resolved = {m["resolved"] for m in by_model.values()}
+    assert resolved == {"opencode/nemotron-3-ultra-free", "opencode/other-model",
+                        "qwen3.6:latest"}
+    report = lab.render_report(manifest, rows)
+    assert "opencode/nemotron-3-ultra-free (no digest)" in report
+    assert "pin_mismatch" in report
+
+
+def test_e5a_fake_run_reports_paraphrase_and_kappa(tmp_path, monkeypatch):
+    monkeypatch.setenv("R4T_HOME", str(tmp_path / "home"))
+    rc = lab.run_experiment(E5A, arm=None, n=3, fake=True, log=lambda m: None)
+    assert rc == 0
+    rows = lab.read_ledger(E5A)
+    assert len(rows) == 6
+    assert all("paraphrase_consistency" in r["metrics"] for r in rows)
+    assert all("anchor_accuracy" in r["metrics"] for r in rows)
+
+    manifest = lab.load_manifest(E5A)
+    report = lab.render_report(manifest, rows)
+    assert "paraphrase_consistency" in report
+    assert "paraphrase κ (chance-corrected)" in report
+    assert "delta(B-A)" in report
+    # The delta and floor predictions are machine-scored (held/falsified).
+    assert "kappa_floor" in report
