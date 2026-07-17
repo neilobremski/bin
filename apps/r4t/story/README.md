@@ -47,3 +47,16 @@ story unfolds; the text is the source, the m4a is the listenable cut.
    campaign closes — thirteen members, five milestones, every built-for
    failure mode caught. Recorded 2026-07-16. See the
    [d5n lab notebook](../experiments/d5n-notebook.md) for the full campaign.
+6. [06-rung-zero](06-rung-zero.txt) ([audio, ~8.8 min](06-rung-zero.m4a)) —
+   the campaign closed, and r4t is named: an opinionated operating system for
+   AI with knobs to refuse it, born of the builder's honest fear of his own
+   tool; the answer is bounded blast radius, defaults that promise reliable.
+   The lab is built on the sandbox — experiment, arm, trial, ledger; model
+   pins name a series so churn becomes an axis; a deep-research gate and a new
+   law that features must win an experiment to ship. Rung zero (e0) calibrates
+   the instrument: a null noise-floor experiment, 8 trials, perfect stability.
+   Rung one (e5a) asks whether a persona judge steadies verdicts — and the
+   answer, across two model families, is no; the narrator's own prediction
+   falsified honestly, the org's false-certification episode reused as
+   calibration fixtures. Isolation goes org-level with a CI test that proves
+   the Unix border in 31 seconds. Recorded 2026-07-16.
