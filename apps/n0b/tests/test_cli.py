@@ -19,8 +19,10 @@ from commands.ai_cmd import (  # noqa: E402
     cmd_ai,
     cmd_speak,
     cmd_transcribe,
+    load_speak_text,
     merged_hints,
     read_replacements,
+    resolve_speak_engine,
     resolve_speak_voice,
     save_hints,
     save_replacements,
@@ -329,14 +331,28 @@ def test_resolve_speak_voice_sticky(tmp_path, monkeypatch):
     voice_file = tmp_path / "speak-voice.txt"
     voice_file.write_text("af_nicole\n")
     with patch("commands.ai_cmd.SPEAK_VOICE_FILE", voice_file):
-        assert resolve_speak_voice(None) == ("af_nicole", str(voice_file))
-        assert resolve_speak_voice("af_bella") == ("af_bella", "cli")
+        assert resolve_speak_voice(None, "kokoro") == ("af_nicole", str(voice_file))
+        assert resolve_speak_voice("af_bella", "kokoro") == ("af_bella", "cli")
 
 
 def test_resolve_speak_voice_builtin_default(tmp_path):
     missing = tmp_path / "missing.txt"
     with patch("commands.ai_cmd.SPEAK_VOICE_FILE", missing):
-        assert resolve_speak_voice(None) == ("af_heart", "built-in default")
+        assert resolve_speak_voice(None, "kokoro") == ("af_heart", "built-in default")
+        assert resolve_speak_voice(None, "say") == (None, "system default")
+
+
+def test_load_speak_text_inline_and_file(tmp_path):
+    assert load_speak_text(["hello", "world"]) == "hello world"
+    f = tmp_path / "note.txt"
+    f.write_text("from file")
+    assert load_speak_text([str(f)]) == "from file"
+
+
+def test_resolve_speak_engine_prefers_say():
+    with patch("commands.ai_cmd.shutil.which", return_value="/usr/bin/say"):
+        assert resolve_speak_engine(None) == "say"
+        assert resolve_speak_engine("kokoro") == "kokoro"
 
 
 def test_save_sticky_voice(tmp_path):
@@ -387,11 +403,25 @@ def test_speak_applies_teachings_before_kokoro(tmp_path, capsys):
             return run.return_value
 
         run.side_effect = capture_run
-        rc = cmd_speak(str(src), str(tmp_path / "out.wav"), None, 1.0)
+        rc = cmd_speak(
+            [str(src)], str(tmp_path / "out.wav"), None, 1.0, engine="kokoro"
+        )
     assert rc == 0
     assert captured["text"] == "A eight S ready"
     err = capsys.readouterr().err
     assert "replacements applied" in err
+
+
+def test_speak_say_play_inline(tmp_path):
+    with patch("commands.ai_cmd.resolve_speak_engine", return_value="say"), \
+            patch("commands.ai_cmd.subprocess.run") as run:
+        run.return_value.returncode = 0
+        rc = cmd_speak(["hello"], None, None, 1.0, engine="say")
+    assert rc == 0
+    argv = run.call_args[0][0]
+    assert argv[0] == "say"
+    assert "-f" in argv
+    assert "-o" not in argv
 
 
 def test_speak_help():
@@ -399,3 +429,5 @@ def test_speak_help():
     assert proc.returncode == 0
     assert "--pronounce" in proc.stdout
     assert "--save" in proc.stdout
+    assert "--engine" in proc.stdout
+    assert "play on speakers" in proc.stdout
