@@ -10,6 +10,7 @@ from commands import (
     cmd_alias,
     cmd_aliases,
     cmd_define,
+    cmd_definitions,
     cmd_discover,
     cmd_drain,
     cmd_config,
@@ -47,7 +48,9 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("rm",       "<name>",                    "Alias for remove."),
     ("ls",       "[-q]",                      "List all registered nodes, running or not."),
     ("discover", "<path>",                    "Scan a path for nodes and suggest `add` commands."),
-    ("define",   "<name> [<def>]",            "Show or set an agent's definition (path or bare bundled name)."),
+    ("define",   "<name> [<def>]",            "Show or set an agent's definition (path or bare name)."),
+    ("definitions", "[add|rm|ls ...]",       "Manage user-installed definition templates (~/.a8s/definitions)."),
+    ("defs",     "[add|rm|ls ...]",          "Alias for definitions."),
     ("alias",    "[<name> [<member>]]",       "Group agents under an alias name; show one with `<name>`."),
     ("unalias",  "<alias> [<member>]",        "Remove a member from an alias, or the whole alias."),
     ("aliases",  "",                          "List aliases and their members."),
@@ -103,6 +106,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_discover(args)
     if cmd == "define":
         return cmd_define(args)
+    if cmd in ("definitions", "defs"):
+        return cmd_definitions(args)
     if cmd == "alias":
         return cmd_alias(args)
     if cmd == "unalias":

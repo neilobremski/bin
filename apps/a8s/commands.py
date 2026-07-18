@@ -39,8 +39,16 @@ from core import (
     pid_path,
     trash_dir,
     unique_path,
+    user_definitions_dir,
 )
-from definitions import _autodiscover_definition, default_definition_path, resolve_definition_arg
+from definitions import (
+    _autodiscover_definition,
+    builtin_definition_stems,
+    default_definition_path,
+    definition_stem,
+    list_definition_entries,
+    resolve_definition_arg,
+)
 from daemon import (
     _clear_kill_request,
     _read_handler_pid,
@@ -174,8 +182,9 @@ def cmd_add(args: list[str]) -> int:
     auto-linked. Multiple or zero markers fall back to the bundled default.
 
     With `<definition>`, the JSON file is validated and set as the agent's
-    definition. A bare name (`filedrop`, `claude`, `filedrop.json`) resolves against
-    bundled `apps/a8s/definitions/`; any other path is used as-is.
+    definition. A bare name (`filedrop`, `claude`, `filedrop.json`) resolves
+    against bundled `apps/a8s/definitions/`, then user-installed
+    ``~/.a8s/definitions/`` (`a8s defs add`); any other path is used as-is.
 
     Errors on duplicate name (vs. agents or aliases) or non-directory path."""
     if len(args) < 2 or len(args) > 3:
@@ -355,6 +364,121 @@ def cmd_define(args: list[str]) -> int:
     info["definition"] = str(path)
     save_registry(reg)
     print(f"{target_key}: definition set to {path}")
+    return 0
+
+
+_DEF_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _definitions_usage() -> int:
+    print(
+        "usage: a8s definitions|defs                        # list all\n"
+        "       a8s definitions|defs list|ls                # list all\n"
+        "       a8s definitions|defs add <path.json>        # install as bare name\n"
+        "       a8s definitions|defs remove|rm <name>       # uninstall user definition\n"
+        "\n"
+        "Copies into ~/.a8s/definitions/<basename>.json. Basename must not\n"
+        "collide with a repo built-in. Bare names then work with add/define.",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def cmd_definitions(args: list[str]) -> int:
+    """`a8s definitions|defs` — manage user-installed definition templates.
+
+    Forms:
+      a8s defs                         list builtin + user
+      a8s defs list|ls                 list
+      a8s defs add <path.json>         copy into ~/.a8s/definitions/
+      a8s defs remove|rm <name>        delete a user definition (not builtins)
+    """
+    if len(args) == 0:
+        return _cmd_definitions_list()
+    sub = args[0]
+    if sub in ("list", "ls"):
+        if len(args) != 1:
+            return _definitions_usage()
+        return _cmd_definitions_list()
+    if sub == "add":
+        if len(args) != 2:
+            return _definitions_usage()
+        return _cmd_definitions_add(args[1])
+    if sub in ("remove", "rm"):
+        if len(args) != 2:
+            return _definitions_usage()
+        return _cmd_definitions_remove(args[1])
+    return _definitions_usage()
+
+
+def _cmd_definitions_list() -> int:
+    rows = [
+        (name, source, str(path))
+        for name, source, path in list_definition_entries()
+    ]
+    if not rows:
+        print("(no definitions)")
+        return 0
+    _print_table(["NAME", "SOURCE", "PATH"], rows)
+    return 0
+
+
+def _cmd_definitions_add(src: str) -> int:
+    path = Path(src).expanduser()
+    if not path.is_file():
+        print(f"not a file: {src}", file=sys.stderr)
+        return 1
+    if path.suffix != ".json":
+        print(f"definition must be a .json file: {src}", file=sys.stderr)
+        return 2
+    name = definition_stem(path.name)
+    if not _DEF_NAME_RE.match(name):
+        print(
+            f"definition name must be alphanumeric (with -, _, .): {name!r}",
+            file=sys.stderr,
+        )
+        return 2
+    builtins = {s.lower() for s in builtin_definition_stems()}
+    if name.lower() in builtins:
+        print(
+            f"cannot install {name!r}: conflicts with a repo built-in",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            json.loads(f.read())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"definition is not valid JSON: {e}", file=sys.stderr)
+        return 1
+    dest_dir = user_definitions_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{name}.json"
+    overwriting = dest.is_file()
+    shutil.copy2(path, dest)
+    verb = "updated" if overwriting else "added"
+    print(f"{verb} definition {name} -> {dest}")
+    return 0
+
+
+def _cmd_definitions_remove(name: str) -> int:
+    stem = definition_stem(name)
+    if not _DEF_NAME_RE.match(stem):
+        print(
+            f"definition name must be alphanumeric (with -, _, .): {stem!r}",
+            file=sys.stderr,
+        )
+        return 2
+    builtins = {s.lower() for s in builtin_definition_stems()}
+    if stem.lower() in builtins:
+        print(f"cannot remove built-in definition: {stem}", file=sys.stderr)
+        return 1
+    dest = user_definitions_dir() / f"{stem}.json"
+    if not dest.is_file():
+        print(f"no user definition named {stem!r}", file=sys.stderr)
+        return 1
+    dest.unlink()
+    print(f"removed definition {stem}")
     return 0
 
 

@@ -273,6 +273,28 @@ class TestResolveDefinitionArg:
         with pytest.raises(FileNotFoundError):
             resolve_definition_arg("no-such-definition-kind")
 
+    def test_user_installed_bare(self, fake_home):
+        from core import user_definitions_dir
+        from definitions import list_definition_entries
+
+        d = user_definitions_dir()
+        d.mkdir(parents=True)
+        custom = d / "my-custom-definition.json"
+        custom.write_text('{"invoke": ["echo"]}')
+        assert resolve_definition_arg("my-custom-definition") == custom.resolve()
+        assert resolve_definition_arg("my-custom-definition.json") == custom.resolve()
+        entries = {name: source for name, source, _ in list_definition_entries()}
+        assert entries["my-custom-definition"] == "user"
+        assert entries["filedrop"] == "builtin"
+
+    def test_builtin_wins_over_user_same_stem(self, fake_home):
+        from core import user_definitions_dir
+
+        d = user_definitions_dir()
+        d.mkdir(parents=True)
+        (d / "filedrop.json").write_text('{"invoke": ["echo", "shadow"]}')
+        assert resolve_definition_arg("filedrop") == default_definition_path("filedrop").resolve()
+
 
 # ---------- _autodiscover_definition ----------
 

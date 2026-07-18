@@ -118,9 +118,10 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 
 |                                |                                                                                                                                                                |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `a8s add <name> <dir> [<def>]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given (path, or bare name like `human` / `claude` from bundled `definitions/`). |
+| `a8s add <name> <dir> [<def>]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given (path, or bare name from bundled `definitions/` or `a8s defs add`). |
 | `a8s remove <name>` / `a8s rm <name>` | Unregister an agent. Wipes `~/.a8s/agents/<NAME>/` and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running. |
-| `a8s define <name> [<path>]`   | Show or set the agent's definition file.                                                                                                                       |
+| `a8s define <name> [<path>]`   | Show or set the agent's definition file (path or bare name).                                                                                              |
+| `a8s definitions` / `a8s defs` | Manage user-installed templates in `~/.a8s/definitions/` (`add` / `rm` / `ls`). Basename must not collide with a repo built-in; bare names then work with `add`/`define`. |
 | `a8s discover <path>`          | Walk a path for marker files; print suggested `add`+`define` commands. Read-only.                                                                              |
 | `a8s ls [-q]`                  | List every registered node, running or not: NAME, STATUS (`running (pid N)` / `stopped`), DEFINITION, ROOT, and bound namespaces. `-q` prints just names. |
 
@@ -321,7 +322,9 @@ Argv elements run through six substitutions:
 
 `$TIMESTAMP` and `$AGE` are empty for any message without a `date` field (defensive — every `_write_outbox` stamps one).
 
-Override per-agent with `a8s define <name> <definition>` — a filesystem path or a bare bundled name (`filedrop`, `claude`). The file isn't moved or copied; the registry stores the resolved path.
+Override per-agent with `a8s define <name> <definition>` — a filesystem path or a bare name (`filedrop`, `claude`, or a user template from `a8s defs add`). The file isn't moved or copied into the agent root; the registry stores the resolved path.
+
+Install reusable custom templates with `a8s defs add /path/to/mine.json` (copies into `~/.a8s/definitions/mine.json`). Basename must not collide with a repo built-in. `a8s defs ls` lists both; `a8s defs rm <name>` removes user installs only.
 
 ### max_wake_seconds (optional)
 

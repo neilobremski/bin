@@ -22,3 +22,14 @@ def test_remove_still_dispatches_to_same_handler(monkeypatch):
 
     assert cli.dispatch("remove", ["alice"], interval=1.0) == 0
     assert calls == [["alice"]]
+
+
+def test_defs_is_alias_for_definitions(monkeypatch):
+    assert "defs" in cli.KNOWN_COMMANDS
+    assert "definitions" in cli.KNOWN_COMMANDS
+    calls = []
+    monkeypatch.setattr(cli, "cmd_definitions", lambda args: calls.append(args) or 3)
+
+    assert cli.dispatch("defs", ["ls"], interval=1.0) == 3
+    assert cli.dispatch("definitions", ["add", "x.json"], interval=1.0) == 3
+    assert calls == [["ls"], ["add", "x.json"]]
