@@ -2,12 +2,14 @@
 
 Schema:
   {
-    "agents":     {"<NAME>": {"root": "...", "definition": "...?", "safe_dirs": ["..."]}},
+    "agents":     {"<NAME>": {"root": "...", "definition": "...?", "safe_dirs": ["..."], "vars": {"KEY": "..."}}},
     "aliases":    {"<ALIAS>": ["<NAME-or-ALIAS>", ...]},
     "namespaces": {"<PREFIX>": "<AGENT>"}
   }
   `safe_dirs` — optional extra directories (absolute paths) where FILE
   attachments may originate at routing time, in addition to `root`.
+  `vars` — optional per-node a8s variables (`a8s vars`); expanded as `$KEY` in
+  definition argv. Not OS environment variables.
   `namespaces` — prefix routing (#148): a recipient `<PREFIX>:<sub-address>`
   routes to the single bound agent with the full address preserved in `to`.
 Aliases are disjoint from both agents and namespaces. A namespace prefix may

@@ -54,6 +54,7 @@ from core import (
 )
 from definitions import (
     BatchEntry,
+    UndefinedVarsError,
     batch_limit,
     build_batch_command,
     build_command,
@@ -62,6 +63,7 @@ from definitions import (
     has_batch_invoke,
     idle_timeout_seconds,
     is_file_proxy,
+    load_agent_vars,
     load_definition,
     resolve_definition_path,
     max_wake_seconds,
@@ -359,7 +361,17 @@ def wake_once(p: Participant, msg_path: Path, *, async_wake: bool = False) -> bo
     msg_path.rename(trashed)
     out_agent(p.name, f"[{p.name}] waking from {trashed.name}: {_preview(msg.get('content', ''))}")
     p.files_path().mkdir(parents=True, exist_ok=True)
-    cmd = build_command(definition, msg, p.root, resolve_definition_path(p.name))
+    try:
+        cmd = build_command(
+            definition,
+            msg,
+            p.root,
+            resolve_definition_path(p.name),
+            vars=load_agent_vars(p.name),
+        )
+    except UndefinedVarsError as e:
+        out_agent(p.name, f"[{p.name}] wake aborted: {e}")
+        return False
     out_agent(p.name, f"[{p.name}] exec: {shlex.join(cmd)}")
     max_sec = max_wake_seconds(definition)
     if async_wake:
@@ -415,7 +427,17 @@ def wake_batch(
         f"[{p.name}] batch waking ({len(trashed)}): {summary}",
     )
     p.files_path().mkdir(parents=True, exist_ok=True)
-    cmd = build_batch_command(definition, p.name, entries, resolve_definition_path(p.name))
+    try:
+        cmd = build_batch_command(
+            definition,
+            p.name,
+            entries,
+            resolve_definition_path(p.name),
+            vars=load_agent_vars(p.name),
+        )
+    except UndefinedVarsError as e:
+        out_agent(p.name, f"[{p.name}] batch wake aborted: {e}")
+        return False
     out_agent(p.name, f"[{p.name}] batch exec: {shlex.join(cmd)}")
     max_sec = max_wake_seconds(definition)
     if async_wake:
@@ -488,9 +510,6 @@ def maybe_run_idle(p: Participant, *, async_wake: bool = False) -> bool:
         touch_last_active(p.name)
         return True
 
-    cmd = build_idle_command(definition, p.name, resolve_definition_path(p.name))
-    if cmd is None:
-        return False
     last = read_last_active(p.name)
     if last is None:
         # No prior activity recorded — initialize and let the next iteration
@@ -499,6 +518,18 @@ def maybe_run_idle(p: Participant, *, async_wake: bool = False) -> bool:
         return False
     elapsed = (datetime.now(timezone.utc) - last).total_seconds()
     if elapsed < timeout:
+        return False
+    try:
+        cmd = build_idle_command(
+            definition,
+            p.name,
+            resolve_definition_path(p.name),
+            vars=load_agent_vars(p.name),
+        )
+    except UndefinedVarsError as e:
+        out_agent(p.name, f"[{p.name}] idle aborted: {e}")
+        return False
+    if cmd is None:
         return False
     out_agent(
         p.name,

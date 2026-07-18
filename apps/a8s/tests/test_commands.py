@@ -22,6 +22,9 @@ from commands import (
     cmd_namespaces,
     cmd_remote,
     cmd_remove,
+    cmd_restart,
+    cmd_start,
+    cmd_stop,
     cmd_storage,
     cmd_tell,
     cmd_trace,
@@ -29,6 +32,7 @@ from commands import (
     cmd_unnamespace,
     cmd_unremote,
     cmd_unstorage,
+    cmd_vars,
 )
 from core import Participant, TELL_OUTBOX_DIR_ENV, agent_dir, agent_log_path, files_dir, kill_request_path, outbox_bundle_dir, outbox_dir, pid_path, user_definitions_dir
 from mailbox import ensure_mailboxes
@@ -110,6 +114,35 @@ class TestCmdAddBundledDefinition:
         custom.write_text('{"proxy": "file"}')
         assert cmd_add(["seat", str(agent_root), str(custom)]) == 0
         assert load_registry()["seat"]["definition"] == str(custom.resolve())
+
+    def test_add_with_var_flag(self, fake_home, agent_root, capsys):
+        from definitions import default_definition_path
+
+        rc = cmd_add([
+            "bob", str(agent_root), "ollama-opencode", "--model=qwen3.6",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "var: MODEL=qwen3.6" in out
+        reg = load_registry()["bob"]
+        assert reg["definition"] == str(default_definition_path("ollama-opencode"))
+        assert reg["vars"] == {"MODEL": "qwen3.6"}
+
+    def test_add_var_flag_case_insensitive(self, fake_home, agent_root):
+        assert cmd_add([
+            "bob", str(agent_root), "ollama-opencode", "--Model=qwen3.6",
+        ]) == 0
+        assert load_registry()["bob"]["vars"]["MODEL"] == "qwen3.6"
+
+    def test_add_rejects_bad_var_flag(self, fake_home, agent_root, capsys):
+        rc = cmd_add(["bob", str(agent_root), "filedrop", "--model"])
+        assert rc == 2
+        assert "expected --KEY=value" in capsys.readouterr().err
+
+    def test_add_rejects_var_named_builtin(self, fake_home, agent_root, capsys):
+        rc = cmd_add(["bob", str(agent_root), "filedrop", "--message=x"])
+        assert rc == 2
+        assert "reserved" in capsys.readouterr().err
 
 
 class TestCmdAddAliasCollision:
@@ -504,6 +537,154 @@ class TestCmdKillPerAgent:
         assert "not running" in out
 
 
+class TestCmdStopAndRestart:
+    def test_stop_waits_until_pid_gone(self, fake_home, tmp_path, monkeypatch, capsys):
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({"claude": {"root": str(d)}})
+        holder = os.getppid()
+        pid_path("claude").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("claude").write_text(str(holder))
+
+        signaled = []
+        polls = {"n": 0}
+
+        def fake_kill(pid, sig):
+            if sig == 0:
+                if not pid_path("claude").is_file():
+                    raise ProcessLookupError()
+                return
+            signaled.append((pid, sig))
+
+        def fake_alive(pid):
+            polls["n"] += 1
+            if polls["n"] >= 3:
+                pid_path("claude").unlink(missing_ok=True)
+                return False
+            return pid == holder
+
+        monkeypatch.setattr("commands.os.kill", fake_kill)
+        monkeypatch.setattr("daemon.os.kill", fake_kill)
+        monkeypatch.setattr("core.os.kill", fake_kill)
+        monkeypatch.setattr("commands._pid_alive", fake_alive)
+        monkeypatch.setattr("daemon._pid_alive", lambda pid: pid_path("claude").is_file())
+        monkeypatch.setattr("core._pid_alive", lambda pid: pid_path("claude").is_file())
+        monkeypatch.setattr("commands.STOP_POLL_S", 0.01)
+        monkeypatch.setattr("commands.STOP_WAIT_S", 2.0)
+
+        rc = cmd_stop(["claude"])
+        assert rc == 0
+        assert signaled == [(holder, signal.SIGTERM)]
+        out = capsys.readouterr().out
+        assert "waiting" in out
+        assert "stopped" in out
+
+    def test_stop_force_sends_second_sigterm(self, fake_home, tmp_path, monkeypatch, capsys):
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({"claude": {"root": str(d)}})
+        holder = os.getppid()
+        pid_path("claude").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("claude").write_text(str(holder))
+
+        signaled = []
+
+        def fake_kill(pid, sig):
+            if sig == 0:
+                if not pid_path("claude").is_file():
+                    raise ProcessLookupError()
+                return
+            signaled.append((pid, sig))
+            if len(signaled) >= 2:
+                pid_path("claude").unlink(missing_ok=True)
+
+        monkeypatch.setattr("commands.os.kill", fake_kill)
+        monkeypatch.setattr("daemon.os.kill", fake_kill)
+        monkeypatch.setattr("core.os.kill", fake_kill)
+        monkeypatch.setattr("commands._pid_alive", lambda pid: pid_path("claude").is_file())
+        monkeypatch.setattr("commands.STOP_POLL_S", 0.01)
+        monkeypatch.setattr("commands.STOP_FORCE_WAIT_S", 2.0)
+
+        rc = cmd_stop(["claude", "--force"])
+        assert rc == 0
+        assert signaled == [(holder, signal.SIGTERM), (holder, signal.SIGTERM)]
+        assert "second SIGTERM" in capsys.readouterr().out
+
+    def test_stop_timeout_suggests_force(self, fake_home, tmp_path, monkeypatch, capsys):
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({"claude": {"root": str(d)}})
+        holder = os.getppid()
+        pid_path("claude").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("claude").write_text(str(holder))
+
+        def fake_kill(pid, sig):
+            if sig == 0:
+                return
+            return None
+
+        monkeypatch.setattr("commands.os.kill", fake_kill)
+        monkeypatch.setattr("daemon.os.kill", fake_kill)
+        monkeypatch.setattr("core.os.kill", fake_kill)
+        monkeypatch.setattr("commands._pid_alive", lambda pid: True)
+        monkeypatch.setattr("daemon._pid_alive", lambda pid: True)
+        monkeypatch.setattr("commands.STOP_POLL_S", 0.01)
+        monkeypatch.setattr("commands.STOP_WAIT_S", 0.05)
+
+        rc = cmd_stop(["claude"])
+        assert rc == 1
+        assert "try `a8s stop --force`" in capsys.readouterr().err
+
+    def test_restart_stops_then_starts(self, fake_home, tmp_path, monkeypatch, capsys):
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({"claude": {"root": str(d)}})
+        holder = os.getppid()
+        pid_path("claude").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("claude").write_text(str(holder))
+
+        calls = []
+
+        def fake_kill(pid, sig):
+            if sig == 0:
+                if not pid_path("claude").is_file():
+                    raise ProcessLookupError()
+                return
+            calls.append(("kill", pid, sig))
+            pid_path("claude").unlink(missing_ok=True)
+
+        class FakeProc:
+            pid = 99999
+
+        def fake_popen(*a, **k):
+            calls.append(("popen", a[0]))
+            return FakeProc()
+
+        monkeypatch.setattr("commands.os.kill", fake_kill)
+        monkeypatch.setattr("daemon.os.kill", fake_kill)
+        monkeypatch.setattr("core.os.kill", fake_kill)
+        monkeypatch.setattr("commands._pid_alive", lambda pid: False)
+        monkeypatch.setattr("commands.subprocess.Popen", fake_popen)
+        monkeypatch.setattr("commands.STOP_POLL_S", 0.01)
+
+        rc = cmd_restart(["claude"])
+        assert rc == 0
+        assert any(c[0] == "kill" for c in calls)
+        assert any(c[0] == "popen" for c in calls)
+        out = capsys.readouterr().out
+        assert "started claude" in out
+
+    def test_restart_when_not_running_just_starts(self, fake_home, tmp_path, monkeypatch, capsys):
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({"claude": {"root": str(d)}})
+
+        class FakeProc:
+            pid = 42
+
+        monkeypatch.setattr(
+            "commands.subprocess.Popen", lambda *a, **k: FakeProc()
+        )
+        rc = cmd_restart(["claude"])
+        assert rc == 0
+        assert "started claude as PID 42" in capsys.readouterr().out
+
+
 def _claim(name: str) -> None:
     """Write a live pid file so `name` reads as running (the pytest process
     is alive, so its own pid passes the liveness check)."""
@@ -659,6 +840,61 @@ class TestCmdDefinitions:
         assert cmd_add(["alice", str(agent_root), "my-custom-definition"]) == 0
         reg = load_registry()
         assert Path(reg["alice"]["definition"]).name == "my-custom-definition.json"
+
+
+class TestCmdVars:
+    def test_set_list_unset(self, fake_home, agent_root, capsys):
+        assert cmd_add(["bob", str(agent_root)]) == 0
+        capsys.readouterr()
+        assert cmd_vars(["bob", "set", "MODEL", "qwen3.6"]) == 0
+        assert load_registry()["bob"]["vars"]["MODEL"] == "qwen3.6"
+        capsys.readouterr()
+        assert cmd_vars(["bob"]) == 0
+        out = capsys.readouterr().out
+        assert "MODEL" in out and "qwen3.6" in out
+        assert cmd_vars(["bob", "unset", "MODEL"]) == 0
+        assert "vars" not in load_registry()["bob"]
+
+    def test_vars_case_insensitive(self, fake_home, agent_root):
+        assert cmd_add(["bob", str(agent_root)]) == 0
+        assert cmd_vars(["bob", "set", "model", "qwen3.6"]) == 0
+        assert load_registry()["bob"]["vars"] == {"MODEL": "qwen3.6"}
+        assert cmd_vars(["bob", "unset", "MoDeL"]) == 0
+        assert "vars" not in load_registry()["bob"]
+
+    def test_set_rejects_builtin_name(self, fake_home, agent_root, capsys):
+        assert cmd_add(["bob", str(agent_root)]) == 0
+        capsys.readouterr()
+        assert cmd_vars(["bob", "set", "message", "x"]) == 2
+        assert "reserved" in capsys.readouterr().err
+
+    def test_build_command_uses_registry_vars(self, fake_home, agent_root):
+        from definitions import build_command, load_agent_vars
+
+        assert cmd_add(["bob", str(agent_root)]) == 0
+        assert cmd_vars(["bob", "set", "model", "qwen3.6"]) == 0
+        defn = {"invoke": ["x", "--model", "$MODEL", "$MESSAGE"]}
+        argv = build_command(
+            defn,
+            {"from": "a", "to": "bob", "content": "hi"},
+            agent_root,
+            vars=load_agent_vars("bob"),
+        )
+        assert argv == ["x", "--model", "qwen3.6", "hi"]
+
+    def test_lowercase_placeholder_matches_var(self, fake_home, agent_root):
+        from definitions import build_command, load_agent_vars
+
+        assert cmd_add(["bob", str(agent_root)]) == 0
+        assert cmd_vars(["bob", "set", "MODEL", "qwen3.6"]) == 0
+        defn = {"invoke": ["x", "$model"]}
+        argv = build_command(
+            defn,
+            {"from": "a", "to": "bob", "content": "hi"},
+            agent_root,
+            vars=load_agent_vars("bob"),
+        )
+        assert argv == ["x", "qwen3.6"]
 
 
 class TestCmdRemote:

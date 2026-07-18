@@ -2,10 +2,15 @@
 
 Each agent has a definition JSON (built-in or custom) that encodes one argv
 under the `invoke` key. `build_command` substitutes `$SENDER` / `$RECIPIENT`
-/ `$MESSAGE` / `$TIMESTAMP` / `$AGE` / `$A8S_DIR` / `$DEFINITION_PATH` into it.
+/ `$MESSAGE` / `$TIMESTAMP` / `$AGE` / `$A8S_DIR` / `$DEFINITION_PATH` into it,
+plus any per-node a8s vars (`a8s vars <name> set KEY value`) as `$KEY`.
 `$DEFINITION_PATH` is the resolved path of the agent's own definition file, so
 a self-contained node (e.g. r4t) can read its own definition for settings the
 wire does not carry.
+
+A8s vars are NOT process environment variables — they live on the agent in
+the registry and expand only through this interpolator. A `$NAME` that is
+neither a built-in placeholder nor a set a8s var is a hard error.
 
 Strict opacity (issues #69, #70): the recipient sees only sender + message
 content — no `alias` or `others_count` leak. A direct tell and an
@@ -17,6 +22,7 @@ mailing list: you know it came via the list, you don't know who else got it).
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -30,9 +36,75 @@ from core import (
     resolve_outbox_path,
     user_definitions_dir,
 )
-from registry import load_registry
+from registry import load_registry, resolve_recipient
 
 ATTACHED_FILE_PREFIX = "ATTACHED FILE: "
+
+BUILTIN_PLACEHOLDERS = frozenset({
+    "SENDER",
+    "RECIPIENT",
+    "MESSAGE",
+    "TIMESTAMP",
+    "AGE",
+    "A8S_DIR",
+    "DEFINITION_PATH",
+})
+
+PLACEHOLDER_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class UndefinedVarsError(ValueError):
+    """Definition argv referenced `$NAME` that is not a built-in and not set."""
+
+    def __init__(self, names: list[str]):
+        self.names = list(names)
+        label = "undefined a8s var" if len(self.names) == 1 else "undefined a8s vars"
+        refs = ", ".join(f"${n}" for n in self.names)
+        super().__init__(f"{label}: {refs}")
+
+
+def validate_var_name(name: str) -> str:
+    """Return the canonical (uppercase) a8s var key, or raise ValueError.
+
+    Names are case-insensitive: ``model`` and ``MODEL`` are the same var.
+    """
+    if not VAR_NAME_RE.match(name):
+        raise ValueError(
+            f"var name must match [A-Za-z_][A-Za-z0-9_]*: {name!r}"
+        )
+    canon = name.upper()
+    if canon in BUILTIN_PLACEHOLDERS:
+        raise ValueError(f"var name {name!r} is reserved for built-in interpolation")
+    return canon
+
+
+def load_agent_vars(name: str) -> dict[str, str]:
+    """Per-node a8s vars from the registry (`agents.<name>.vars`).
+
+    Keys are returned uppercase (canonical). Duplicate spellings collapse.
+    """
+    match = resolve_recipient(name)
+    if match is None:
+        return {}
+    _, info = match
+    raw = info.get("vars")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if isinstance(k, str) and isinstance(v, str):
+            out[k.upper()] = v
+    return out
+
+
+def placeholder_names(argv: list[str]) -> set[str]:
+    """All `$NAME` identifiers referenced in an argv template."""
+    found: set[str] = set()
+    for a in argv:
+        for m in PLACEHOLDER_RE.finditer(a):
+            found.add(m.group(1))
+    return found
 
 
 def default_definition_path(kind: str) -> Path:
@@ -269,37 +341,54 @@ def _expand_argv(
     timestamp: str = "",
     age: str = "",
     definition_path: str = "",
+    vars: dict[str, str] | None = None,
 ) -> list[str]:
-    """Expand placeholders in argv:
+    """Expand placeholders in argv.
+
+    Built-ins:
       - `$SENDER`     sender's canonical name (empty for senderless prompts)
       - `$RECIPIENT`  what the sender wrote in `to` (alias for fanned, agent for direct)
       - `$MESSAGE`    content + any ATTACHED FILE: lines
-      - `$TIMESTAMP`  ISO 8601 UTC time the message was queued (e.g.,
-                      `2026-04-28T14:30:00.123456Z`); empty for invokeClear
-                      and for messages without a `date` field
-      - `$AGE`        human-readable age relative to now (e.g.,
-                      `5 minutes ago`); same emptiness rules as $TIMESTAMP
-      - `$A8S_DIR`    the apps/a8s/ directory (so default.json can reference
-                      bundled scripts like dummy-cli without hardcoding paths)
-      - `$DEFINITION_PATH`  the resolved path of this agent's definition file
-                      (empty when the caller did not resolve it)
+      - `$TIMESTAMP`  ISO 8601 UTC time the message was queued
+      - `$AGE`        human-readable age relative to now
+      - `$A8S_DIR`    the apps/a8s/ directory
+      - `$DEFINITION_PATH`  this agent's definition file path
+
+    Plus per-node a8s vars (`vars`) as `$KEY` (case-insensitive). Not OS
+    environment. Any `$NAME` that is neither a built-in nor present in `vars`
+    raises ``UndefinedVarsError``.
     """
-    a8s_dir = str(SCRIPT_DIR)
-    out: list[str] = []
-    for a in argv:
-        a = a.replace("$SENDER", sender)
-        a = a.replace("$RECIPIENT", recipient)
-        a = a.replace("$MESSAGE", message)
-        a = a.replace("$TIMESTAMP", timestamp)
-        a = a.replace("$AGE", age)
-        a = a.replace("$A8S_DIR", a8s_dir)
-        a = a.replace("$DEFINITION_PATH", definition_path)
-        out.append(a)
-    return out
+    node_vars = {k.upper(): v for k, v in (vars or {}).items()}
+    refs = {n.upper() for n in placeholder_names(argv)}
+    missing = sorted(
+        n for n in refs if n not in BUILTIN_PLACEHOLDERS and n not in node_vars
+    )
+    if missing:
+        raise UndefinedVarsError(missing)
+
+    values: dict[str, str] = {
+        **node_vars,
+        "SENDER": sender,
+        "RECIPIENT": recipient,
+        "MESSAGE": message,
+        "TIMESTAMP": timestamp,
+        "AGE": age,
+        "A8S_DIR": str(SCRIPT_DIR),
+        "DEFINITION_PATH": definition_path,
+    }
+
+    def repl(m: re.Match[str]) -> str:
+        return values[m.group(1).upper()]
+
+    return [PLACEHOLDER_RE.sub(repl, a) for a in argv]
 
 
 def build_command(
-    definition: dict, msg: dict, agent_root: Path, definition_path: str = ""
+    definition: dict,
+    msg: dict,
+    agent_root: Path,
+    definition_path: str = "",
+    vars: dict[str, str] | None = None,
 ) -> list[str]:
     """Pick the `invoke` argv from `definition` and expand interpolation
     variables. There is one verb — every routed message is a `tell` — so
@@ -318,12 +407,22 @@ def build_command(
     date_str = (msg.get("date") or "").strip()
     age = _format_age(date_str)
     return _expand_argv(
-        list(argv), sender, recipient, body, date_str, age, definition_path
+        list(argv),
+        sender,
+        recipient,
+        body,
+        date_str,
+        age,
+        definition_path,
+        vars=vars,
     )
 
 
 def build_idle_command(
-    definition: dict, agent_name: str, definition_path: str = ""
+    definition: dict,
+    agent_name: str,
+    definition_path: str = "",
+    vars: dict[str, str] | None = None,
 ) -> list[str] | None:
     """Pick the `idle.invoke` argv from `definition` and expand the same
     interpolation variables `build_command` does. Returns None if the agent
@@ -339,7 +438,9 @@ def build_idle_command(
     argv = idle.get("invoke")
     if not argv:
         return None
-    return _expand_argv(list(argv), "", agent_name, "", "", "", definition_path)
+    return _expand_argv(
+        list(argv), "", agent_name, "", "", "", definition_path, vars=vars
+    )
 
 
 def pause_seconds(definition: dict) -> float:
@@ -444,6 +545,7 @@ def build_batch_command(
     agent_name: str,
     entries: list[BatchEntry],
     definition_path: str = "",
+    vars: dict[str, str] | None = None,
 ) -> list[str]:
     """Expand `batch.invoke` like idle (no incoming message) and append ONE
     composed prompt string (see `build_batch_prompt`) as the trailing argv
@@ -454,7 +556,9 @@ def build_batch_command(
     argv = batch.get("invoke")
     if not argv:
         raise ValueError("definition missing 'batch.invoke'")
-    cmd = _expand_argv(list(argv), "", agent_name, "", "", "", definition_path)
+    cmd = _expand_argv(
+        list(argv), "", agent_name, "", "", "", definition_path, vars=vars
+    )
     cmd.append(build_batch_prompt(agent_name, entries))
     return cmd
 

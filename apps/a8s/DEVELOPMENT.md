@@ -7,9 +7,11 @@ Read `README.md` first for concept and usage.
 
 - **`cmd_start` re-execs via `core.ENTRYPOINT`**, not `__file__`.
 - **Argv interpolation** (`$SENDER`, `$RECIPIENT`, `$MESSAGE`, `$TIMESTAMP`,
-  `$AGE`, `$A8S_DIR`) expands via `definitions._expand_argv`. Per-message
-  wakes use `invoke` via `build_command`; batch wakes use `batch.invoke` via
-  `build_batch_command` with message file paths appended as trailing argv.
+  `$AGE`, `$A8S_DIR`, `$DEFINITION_PATH`, plus per-node a8s vars as `$KEY`)
+  expands via `definitions._expand_argv`. Vars are registry-backed (`a8s vars`),
+  not OS environment. Used-but-unset raises `UndefinedVarsError` before spawn.
+  Per-message wakes use `invoke` via `build_command`; batch wakes use
+  `batch.invoke` via `build_batch_command` with a composed prompt appended.
 - **`core.PRINT_LOCK` is the cross-module log lock.** Only set when
   `daemon.attached_loop` starts.
 - **`run_with_prefix` uses `start_new_session=True`** — don't drop this.

@@ -9,6 +9,7 @@ import pytest
 from datetime import datetime, timezone
 
 from definitions import (
+    UndefinedVarsError,
     _autodiscover_definition,
     _expand_argv,
     _format_age,
@@ -20,6 +21,7 @@ from definitions import (
     resolve_files_dir,
     resolve_inbox_dir,
     resolve_outbox_dir,
+    validate_var_name,
 )
 
 
@@ -254,6 +256,53 @@ class TestExpandArgv:
         from core import SCRIPT_DIR
         assert _expand_argv(["$A8S_DIR/x"], "", "", "") == [f"{SCRIPT_DIR}/x"]
 
+    def test_node_var_expands(self):
+        assert _expand_argv(
+            ["ollama", "--model", "$MODEL", "$MESSAGE"],
+            "A",
+            "B",
+            "hi",
+            vars={"MODEL": "qwen3.6"},
+        ) == ["ollama", "--model", "qwen3.6", "hi"]
+
+    def test_var_case_insensitive(self):
+        assert _expand_argv(
+            ["$model"],
+            "A",
+            "B",
+            "hi",
+            vars={"MoDeL": "qwen3.6"},
+        ) == ["qwen3.6"]
+
+    def test_undefined_var_raises(self):
+        with pytest.raises(UndefinedVarsError) as ei:
+            _expand_argv(["--model", "$MODEL"], "A", "B", "hi")
+        assert ei.value.names == ["MODEL"]
+        assert "$MODEL" in str(ei.value)
+
+    def test_os_environ_does_not_fill_var(self, monkeypatch):
+        monkeypatch.setenv("MODEL", "from-shell")
+        with pytest.raises(UndefinedVarsError):
+            _expand_argv(["$MODEL"], "A", "B", "hi")
+
+    def test_builtin_not_overridden_by_vars_map(self):
+        assert _expand_argv(
+            ["$SENDER"],
+            "alice",
+            "bob",
+            "x",
+            vars={"SENDER": "eve"},
+        ) == ["alice"]
+
+    def test_lowercase_builtin_still_builtin(self):
+        assert _expand_argv(["$message"], "A", "B", "hi") == ["hi"]
+
+    def test_validate_var_name_rejects_builtin(self):
+        with pytest.raises(ValueError, match="reserved"):
+            validate_var_name("message")
+
+    def test_validate_var_name_canonicalizes(self):
+        assert validate_var_name("model") == "MODEL"
 
 # ---------- resolve_definition_arg ----------
 

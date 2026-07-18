@@ -27,6 +27,7 @@ from commands import (
     cmd_namespaces,
     cmd_remote,
     cmd_remove,
+    cmd_restart,
     cmd_run,
     cmd_start,
     cmd_step,
@@ -39,11 +40,12 @@ from commands import (
     cmd_unnamespace,
     cmd_unremote,
     cmd_unstorage,
+    cmd_vars,
 )
 
 
 COMMANDS: list[tuple[str, str, str]] = [
-    ("add",      "<name> <dir> [<def>]",      "Register a node."),
+    ("add",      "<name> <dir> [<def>] [--K=v ...]", "Register a node (optional a8s vars)."),
     ("remove",   "<name>",                    "Unregister a node and delete its mailbox."),
     ("rm",       "<name>",                    "Alias for remove."),
     ("ls",       "[-q]",                      "List all registered nodes, running or not."),
@@ -51,6 +53,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("define",   "<name> [<def>]",            "Show or set an agent's definition (path or bare name)."),
     ("definitions", "[add|rm|ls ...]",       "Manage user-installed definition templates (~/.a8s/definitions)."),
     ("defs",     "[add|rm|ls ...]",          "Alias for definitions."),
+    ("vars",     "<name> [set|unset ...]",   "Get/set per-node a8s vars for definition $KEY interpolation."),
     ("alias",    "[<name> [<member>]]",       "Group agents under an alias name; show one with `<name>`."),
     ("unalias",  "<alias> [<member>]",        "Remove a member from an alias, or the whole alias."),
     ("aliases",  "",                          "List aliases and their members."),
@@ -60,7 +63,8 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("start",    "<name>",                    "Run an agent in the background."),
     ("run",      "<name> [--drain <sec>]",     "Run an agent in the foreground."),
     ("step",     "<name>",                    "Run an agent for one pass and exit."),
-    ("stop",     "<name>",                    "Stop a running agent."),
+    ("stop",     "<name> [--force]",          "Stop a node; wait until detached (finish current wake unless --force)."),
+    ("restart",  "<name> [--force]",          "Stop (wait) then start a node."),
     ("kill",     "<name>",                    "Force-stop a running agent."),
     ("exit",     "",                          "Stop every running agent."),
     ("ps",       "[-q]",                      "List running node processes."),
@@ -108,6 +112,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_define(args)
     if cmd in ("definitions", "defs"):
         return cmd_definitions(args)
+    if cmd == "vars":
+        return cmd_vars(args)
     if cmd == "alias":
         return cmd_alias(args)
     if cmd == "unalias":
@@ -128,6 +134,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_step(args, interval)
     if cmd == "stop":
         return cmd_stop(args)
+    if cmd == "restart":
+        return cmd_restart(args)
     if cmd == "kill":
         return cmd_kill(args)
     if cmd == "exit":
