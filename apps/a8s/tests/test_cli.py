@@ -49,3 +49,11 @@ def test_restart_dispatches(monkeypatch):
     monkeypatch.setattr(cli, "cmd_restart", lambda args: calls.append(args) or 0)
     assert cli.dispatch("restart", ["qwen", "--force"], interval=1.0) == 0
     assert calls == [["qwen", "--force"]]
+
+
+def test_update_dispatches(monkeypatch):
+    assert "update" in cli.KNOWN_COMMANDS
+    calls = []
+    monkeypatch.setattr(cli, "cmd_update", lambda args: calls.append(args) or 0)
+    assert cli.dispatch("update", ["--force"], interval=1.0) == 0
+    assert calls == [["--force"]]

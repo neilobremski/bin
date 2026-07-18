@@ -32,12 +32,14 @@ from commands import (
     cmd_unnamespace,
     cmd_unremote,
     cmd_unstorage,
+    cmd_update,
     cmd_vars,
+    _update_restart_targets,
 )
 from core import Participant, TELL_OUTBOX_DIR_ENV, agent_dir, agent_log_path, files_dir, kill_request_path, outbox_bundle_dir, outbox_dir, pid_path, user_definitions_dir
 from mailbox import ensure_mailboxes
 from network import load_network_config, save_network_config
-from registry import load_aliases, load_namespaces, load_registry, save_namespaces, save_registry
+from registry import load_aliases, load_namespaces, load_registry, save_aliases, save_namespaces, save_registry
 from definitions import resolve_definition_arg
 
 
@@ -683,6 +685,64 @@ class TestCmdStopAndRestart:
         rc = cmd_restart(["claude"])
         assert rc == 0
         assert "started claude as PID 42" in capsys.readouterr().out
+
+
+class TestCmdUpdate:
+    def test_no_nodes_running(self, fake_home, capsys):
+        assert cmd_update([]) == 0
+        assert "no nodes running" in capsys.readouterr().out
+
+    def test_prefers_alias_for_shared_pid(self, fake_home, tmp_path):
+        a = tmp_path / "a"; a.mkdir()
+        b = tmp_path / "b"; b.mkdir()
+        save_registry({"claude": {"root": str(a)}, "gemini": {"root": str(b)}})
+        save_aliases({"devs": ["claude", "gemini"]})
+        assert _update_restart_targets({100: ["claude", "gemini"]}) == ["devs"]
+
+    def test_individuals_when_no_alias_match(self, fake_home, tmp_path):
+        a = tmp_path / "a"; a.mkdir()
+        b = tmp_path / "b"; b.mkdir()
+        save_registry({"claude": {"root": str(a)}, "gemini": {"root": str(b)}})
+        assert _update_restart_targets({100: ["claude"], 200: ["gemini"]}) == [
+            "claude",
+            "gemini",
+        ]
+
+    def test_update_restarts_running(self, fake_home, tmp_path, monkeypatch, capsys):
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({"claude": {"root": str(d)}})
+        holder = os.getppid()
+        pid_path("claude").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("claude").write_text(str(holder))
+
+        restarts = []
+
+        def fake_restart(args):
+            restarts.append(list(args))
+            pid_path("claude").unlink(missing_ok=True)
+            return 0
+
+        monkeypatch.setattr("commands.cmd_restart", fake_restart)
+        # Also need _read_handler_pid to see the running node before restart
+        rc = cmd_update([])
+        assert rc == 0
+        assert restarts == [["claude"]]
+        out = capsys.readouterr().out
+        assert "update complete" in out
+
+    def test_update_passes_force(self, fake_home, tmp_path, monkeypatch):
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({"claude": {"root": str(d)}})
+        pid_path("claude").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("claude").write_text(str(os.getppid()))
+
+        restarts = []
+        monkeypatch.setattr(
+            "commands.cmd_restart",
+            lambda args: restarts.append(list(args)) or 0,
+        )
+        assert cmd_update(["--force"]) == 0
+        assert restarts == [["claude", "--force"]]
 
 
 def _claim(name: str) -> None:
