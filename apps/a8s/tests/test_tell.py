@@ -313,6 +313,69 @@ def test_tell_multiple_attachments(tmp_path):
     _assert_staged_files(tmp_path / ".outbox", msg, ["a.txt", "b.txt"])
 
 
+def test_tell_attach_equals_form(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "b.txt").write_text("b")
+    res = _run(tmp_path, "gerry", "--attach=./a.txt", "--file=./b.txt", "eq form")
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    _assert_staged_files(tmp_path / ".outbox", msg, ["a.txt", "b.txt"])
+
+
+def test_tell_attach_multiple_paths_after_one_flag(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "b.txt").write_text("b")
+    res = _run(tmp_path, "gerry", "--attach", "./a.txt", "./b.txt", "multi path")
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    _assert_staged_files(tmp_path / ".outbox", msg, ["a.txt", "b.txt"])
+
+
+def test_tell_rejects_oversized_attachment_without_split(tmp_path, monkeypatch):
+    from core import TELL_FILE_MAX_ENV
+
+    (tmp_path / ".outbox").mkdir()
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * 2000)
+    monkeypatch.setenv(TELL_FILE_MAX_ENV, "1000")
+    res = _run(tmp_path, "gerry", "--attach", str(big), "too big")
+    assert res.returncode == 1
+    assert "pass --split" in res.stderr
+    assert "big.bin" in res.stderr
+    assert list((tmp_path / ".outbox").glob("*.json")) == []
+
+
+def test_tell_split_chunks_oversized_attachment(tmp_path, monkeypatch):
+    from core import TELL_FILE_MAX_ENV
+
+    (tmp_path / ".outbox").mkdir()
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"abcdefghij" * 200)  # 2000 bytes
+    monkeypatch.setenv(TELL_FILE_MAX_ENV, "1000")
+    res = _run(tmp_path, "gerry", "--attach", str(big), "--split", "chunked")
+    assert res.returncode == 0, res.stderr
+    assert "splitting" in res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    names = [e["filename"] for e in msg["files"]]
+    assert names == ["big.bin.part001of002", "big.bin.part002of002"]
+    outbox = tmp_path / ".outbox"
+    bundle = outbox_bundle_dir(outbox, msg["id"])
+    assert (bundle / names[0]).stat().st_size == 1000
+    assert (bundle / names[1]).stat().st_size == 1000
+    assert not (outbox / f".{msg['id']}.parts").exists()
+
+
+def test_parse_byte_size_suffixes():
+    from tell import parse_byte_size
+
+    assert parse_byte_size("1000") == 1000
+    assert parse_byte_size("2k") == 2048
+    assert parse_byte_size("1MB") == 1024 * 1024
+    assert parse_byte_size("50m") == 50 * 1024 * 1024
+
+
 def test_tell_staged_duplicate_basenames_use_separate_message_dirs(tmp_path):
     (tmp_path / ".outbox").mkdir()
     doc = tmp_path / "untitled.doc"

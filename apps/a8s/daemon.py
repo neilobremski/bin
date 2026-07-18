@@ -278,7 +278,13 @@ def run_with_prefix(
 
 
 def _tell_outbox_env(p: Participant) -> dict[str, str]:
-    return {TELL_OUTBOX_DIR_ENV: str(p.outbox_path())}
+    from core import TELL_FILE_MAX_ENV
+    from settings import get_int
+
+    return {
+        TELL_OUTBOX_DIR_ENV: str(p.outbox_path()),
+        TELL_FILE_MAX_ENV: str(get_int("max_file_bytes")),
+    }
 
 
 def _deliver_file_proxy(p: Participant) -> None:

@@ -24,9 +24,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core import _preview, out_agent, outbox_bundle_dir, TELL_OUTBOX_DIR_ENV
+from core import _preview, out_agent, outbox_bundle_dir, TELL_FILE_MAX_ENV, TELL_OUTBOX_DIR_ENV
 from mailbox import _split_content_and_files
 from ulid import new as new_ulid
+
+DEFAULT_FILE_MAX_BYTES = 50 * 1024 * 1024
 
 
 def _probe_outbox_writable(outbox: Path) -> str | None:
@@ -170,23 +172,151 @@ def _normalize_file_entries(entries: list[dict]) -> list[dict]:
     return normalized
 
 
-def _validate_attachment_sources(entries: list[dict]) -> int:
-    if not entries:
-        return 0
-    for entry in entries:
+def _argv_looks_like_option(arg: str) -> bool:
+    return arg.startswith("-") and arg != "-"
+
+
+def parse_byte_size(raw: str) -> int:
+    """Parse a positive byte size: plain int, or with k/kb/m/mb/g/gb suffix."""
+    text = raw.strip().lower().replace("_", "")
+    if not text:
+        raise ValueError("empty size")
+    mult = 1
+    for suffix, factor in (
+        ("kb", 1024),
+        ("k", 1024),
+        ("mb", 1024**2),
+        ("m", 1024**2),
+        ("gb", 1024**3),
+        ("g", 1024**3),
+        ("b", 1),
+    ):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)].strip()
+            mult = factor
+            break
+    value = int(text)
+    if value < 0:
+        raise ValueError("size must be zero or positive")
+    return value * mult
+
+
+def file_max_bytes() -> int:
+    """Effective attachment size cap for tell.
+
+    Prefer `TELL_FILE_MAX` (set by a8s on wake, or by the operator). Else
+    `max_file_bytes` from settings when `~/.a8s` is reachable. Else 50 MiB.
+    """
+    raw = os.environ.get(TELL_FILE_MAX_ENV, "").strip()
+    if raw:
+        try:
+            return parse_byte_size(raw)
+        except ValueError as e:
+            raise ValueError(f"{TELL_FILE_MAX_ENV}={raw!r}: {e}") from e
+    try:
+        from settings import get_int
+
+        return get_int("max_file_bytes")
+    except (OSError, ValueError, ImportError):
+        return DEFAULT_FILE_MAX_BYTES
+
+
+def _format_bytes(n: int) -> str:
+    if n < 1024:
+        return f"{n} bytes"
+    if n < 1024**2:
+        return f"{n / 1024:.1f} KiB"
+    if n < 1024**3:
+        return f"{n / (1024**2):.1f} MiB"
+    return f"{n / (1024**3):.2f} GiB"
+
+
+def _split_path_into_parts(src: Path, chunk_size: int, dest_dir: Path) -> list[Path]:
+    size = src.stat().st_size
+    if size <= chunk_size:
+        return [src]
+    n_parts = (size + chunk_size - 1) // chunk_size
+    width = max(3, len(str(n_parts)))
+    parts: list[Path] = []
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with src.open("rb") as handle:
+        for index in range(1, n_parts + 1):
+            name = f"{src.name}.part{index:0{width}d}of{n_parts:0{width}d}"
+            part_path = dest_dir / name
+            remaining = chunk_size
+            with part_path.open("wb") as out:
+                while remaining > 0:
+                    buf = handle.read(min(65536, remaining))
+                    if not buf:
+                        break
+                    out.write(buf)
+                    remaining -= len(buf)
+            parts.append(part_path)
+    return parts
+
+
+def _prepare_attachment_entries(
+    files: list[dict],
+    *,
+    split: bool,
+    work_dir: Path,
+) -> tuple[list[dict], int]:
+    """Validate sources, enforce size cap, optionally split oversized files.
+
+    Returns `(entries_with_paths, 0)` on success or `([], exit_code)` on error.
+    """
+    try:
+        limit = file_max_bytes()
+    except ValueError as e:
+        print(f"tell: {e}", file=sys.stderr)
+        return [], 1
+    if limit <= 0:
+        print(f"tell: file size limit must be positive (got {limit})", file=sys.stderr)
+        return [], 1
+
+    prepared: list[dict] = []
+    for entry in files:
         raw = (entry.get("path") or "").strip()
         if not raw:
             print("tell: attachment path required", file=sys.stderr)
-            return 1
+            return [], 1
         try:
             resolved = Path(raw).resolve()
         except (OSError, RuntimeError) as e:
             print(f"tell: attachment path invalid: {raw}: {e}", file=sys.stderr)
-            return 1
+            return [], 1
         if not resolved.is_file():
             print(f"tell: attachment not found: {resolved}", file=sys.stderr)
-            return 1
-    return 0
+            return [], 1
+        try:
+            size = resolved.stat().st_size
+        except OSError as e:
+            print(f"tell: cannot stat attachment {resolved}: {e}", file=sys.stderr)
+            return [], 1
+        if size <= limit:
+            prepared.append({"filename": resolved.name, "path": str(resolved)})
+            continue
+        if not split:
+            print(
+                f"tell: attachment {resolved.name!r} is {_format_bytes(size)} "
+                f"(limit {_format_bytes(limit)} via {TELL_FILE_MAX_ENV} / max_file_bytes); "
+                f"pass --split to send as parts",
+                file=sys.stderr,
+            )
+            return [], 1
+        try:
+            parts = _split_path_into_parts(resolved, limit, work_dir)
+        except OSError as e:
+            print(f"tell: failed to split {resolved}: {e}", file=sys.stderr)
+            return [], 1
+        print(
+            f"tell: splitting {resolved.name!r} ({_format_bytes(size)}) into "
+            f"{len(parts)} parts of up to {_format_bytes(limit)}",
+            file=sys.stderr,
+        )
+        for part in parts:
+            prepared.append({"filename": part.name, "path": str(part)})
+    return prepared, 0
 
 
 def stage_outbox_attachments(
@@ -235,20 +365,35 @@ def join_args(args: list[str]) -> str:
 
 def parse_tell_argv(
     argv: list[str],
-) -> tuple[str | None, list[str], list[str], bool]:
-    """Return `(recipient, attachments, message_argv, check)`."""
+) -> tuple[str | None, list[str], list[str], bool, bool]:
+    """Return `(recipient, attachments, message_argv, check, split)`."""
     attachments: list[str] = []
     recipient: str | None = None
     message_argv: list[str] = []
     check = False
+    split = False
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg in ("--attach", "--file"):
+        if arg.startswith("--attach=") or arg.startswith("--file="):
+            path = arg.split("=", 1)[1]
+            if not path.strip():
+                raise TellUsageError("--attach requires a path")
+            attachments.append(path)
+        elif arg in ("--attach", "--file"):
             i += 1
-            if i >= len(argv):
+            if i >= len(argv) or _argv_looks_like_option(argv[i]):
                 raise TellUsageError("--attach requires a path")
             attachments.append(argv[i])
+            while (
+                i + 1 < len(argv)
+                and not _argv_looks_like_option(argv[i + 1])
+                and Path(argv[i + 1]).expanduser().is_file()
+            ):
+                i += 1
+                attachments.append(argv[i])
+        elif arg == "--split":
+            split = True
         elif arg == "--check":
             check = True
         elif arg in ("-h", "--help"):
@@ -258,7 +403,7 @@ def parse_tell_argv(
         else:
             message_argv.append(arg)
         i += 1
-    return recipient, attachments, message_argv, check
+    return recipient, attachments, message_argv, check, split
 
 
 def resolve_message_body(message_argv: list[str]) -> str | None:
@@ -313,11 +458,14 @@ class TellHelp(Exception):
     pass
 
 
-_USAGE = "usage: tell [--attach PATH] <name> [<message...>]"
+_USAGE = "usage: tell [--attach PATH ...] [--split] <name> [<message...>]"
 
 
 def _print_usage() -> None:
     print(_USAGE, file=sys.stderr)
+    print("       --attach/--file may repeat; multiple paths after one flag OK if they exist", file=sys.stderr)
+    print("       --split: chunk attachments over the size limit into .partNNNofMMM files", file=sys.stderr)
+    print(f"       size limit: {TELL_FILE_MAX_ENV} (bytes or 50m), else max_file_bytes / 50MiB", file=sys.stderr)
     print("       message may be `-` to read stdin; stdin is used when piped", file=sys.stderr)
 
 
@@ -401,7 +549,7 @@ def run_check(recipient: str | None) -> int:
 
 def tell_main(argv: list[str]) -> int:
     try:
-        recipient, attachments, message_argv, check = parse_tell_argv(argv)
+        recipient, attachments, message_argv, check, split = parse_tell_argv(argv)
     except TellHelp:
         _print_usage()
         return 0
@@ -411,8 +559,8 @@ def tell_main(argv: list[str]) -> int:
         return 2
 
     if check:
-        if attachments or message_argv:
-            print("tell: --check does not accept a message or attachments", file=sys.stderr)
+        if attachments or message_argv or split:
+            print("tell: --check does not accept a message, attachments, or --split", file=sys.stderr)
             return 2
         return run_check(recipient)
 
@@ -435,16 +583,24 @@ def tell_main(argv: list[str]) -> int:
         _report_outbox_unavailable()
         return 1
 
-    rc = _validate_attachment_sources(files)
-    if rc != 0:
-        return rc
-
     msg_id = new_ulid()
+    split_dir = outbox / f".{msg_id}.parts"
     try:
-        staged_files = stage_outbox_attachments(outbox, msg_id, files) if files else []
-    except OSError as e:
-        print(f"tell: attachment staging failed: {e}", file=sys.stderr)
-        return 1
+        prepared, prep_rc = _prepare_attachment_entries(
+            files, split=split, work_dir=split_dir
+        )
+        if prep_rc != 0:
+            return prep_rc
+        try:
+            staged_files = (
+                stage_outbox_attachments(outbox, msg_id, prepared) if prepared else []
+            )
+        except OSError as e:
+            print(f"tell: attachment staging failed: {e}", file=sys.stderr)
+            return 1
+    finally:
+        if split_dir.is_dir():
+            shutil.rmtree(split_dir, ignore_errors=True)
 
     sender = _optional_sender()
     to = recipient

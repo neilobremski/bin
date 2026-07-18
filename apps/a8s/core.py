@@ -52,6 +52,7 @@ SKILLS_DIR = SCRIPT_DIR / "skills"
 BIN_ROOT = SCRIPT_DIR.parent.parent
 DEFINITIONS_DIR = SCRIPT_DIR / "definitions"
 TELL_OUTBOX_DIR_ENV = "TELL_OUTBOX_DIR"
+TELL_FILE_MAX_ENV = "TELL_FILE_MAX"
 # Explicit path for `cmd_start`'s re-exec. After the modular split, `__file__`
 # resolved inside any module would point at that module — not the entry script.
 ENTRYPOINT = SCRIPT_DIR / "a8s.py"
