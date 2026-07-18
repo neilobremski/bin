@@ -82,21 +82,52 @@ def build_parser() -> argparse.ArgumentParser:
     ai_research = ai_sub.add_parser("research", help="Deep research via o4-mini-deep-research")
     ai_research.add_argument("prompt", nargs=argparse.REMAINDER)
     ai_speak = ai_sub.add_parser(
-        "speak", help="Synthesize speech from text locally with Kokoro"
+        "speak",
+        help="Read text aloud or save speech to a file",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Text-to-speech for arguments, a file, or stdin. On macOS the "
+            "default engine is the built-in say(1) voice; use --engine kokoro "
+            "for fully offline neural synthesis."
+        ),
+        epilog=(
+            "examples:\n"
+            "  n0b ai speak \"hello\"                 play on speakers\n"
+            "  echo \"ship it\" | n0b ai speak         pipe stdin\n"
+            "  n0b ai speak notes.md -o notes.m4a    save file (no playback)\n"
+            "  n0b ai speak -v Samantha \"hi\" --save sticky macOS voice\n"
+            "  n0b ai speak doc.md --engine kokoro -o out.wav  offline/file\n"
+            "  n0b ai speak --replace '\\ba8s\\b => A eight S' --save\n"
+            "\n"
+            "Without -o/--out, audio goes to speakers. With -o, only a file "
+            "is written (useful for tell --attach). Replacements and "
+            "pronunciations live in ~/.config/n0b/speak-*.txt; see "
+            "apps/n0b/docs/ai-speak.md."
+        ),
     )
     ai_speak.add_argument(
-        "text", nargs="?", help="Text/markdown file to read aloud (- or omit for stdin)"
+        "text",
+        nargs=argparse.REMAINDER,
+        help="Inline text, file path, - for stdin, or omit to read stdin",
     )
     ai_speak.add_argument(
-        "-o", "--out",
-        help="Output audio file: .wav, or .m4a via afconvert (default: <input>.wav)",
+        "-o",
+        "--out",
+        help="Write audio file (.m4a/.aiff with say; .wav/.m4a with kokoro)",
     )
     ai_speak.add_argument(
+        "-v",
         "--voice",
         help=(
-            "Kokoro voice id or path to a .pt pack; default reads "
-            "~/.config/n0b/speak-voice.txt, else af_heart"
+            "Voice name: macOS voice for say (e.g. Samantha), Kokoro id for "
+            "kokoro (e.g. af_nicole). Default reads ~/.config/n0b/speak-voice.txt"
         ),
+    )
+    ai_speak.add_argument(
+        "--engine",
+        choices=("auto", "say", "kokoro"),
+        default="auto",
+        help="TTS backend: auto prefers say on macOS, else kokoro (default: auto)",
     )
     ai_speak.add_argument(
         "--speed", type=float, default=1.0, help="Speech speed multiplier"
@@ -267,6 +298,7 @@ def dispatch(args: argparse.Namespace) -> int:
                 replaces=args.replaces,
                 pronounces=args.pronounces,
                 save=args.save,
+                engine=args.engine,
             )
         if args.ai_kind == "transcribe":
             return cmd_transcribe(

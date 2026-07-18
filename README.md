@@ -14,7 +14,6 @@ All bash scripts use `#!/usr/bin/env bash` instead of `#!/bin/bash`. This allows
 | `h` | Highlight text patterns in color by piping ([docs](docs/h.md)) |
 | `install.sh` | Add ~/bin directory to PATH |
 | `NMP.py` | [Neil's Manual Proxy](docs/NMP.md) |
-| `speak` | Cross-platform text-to-speech (macOS `say`, `spd-say`, `espeak`, WSL PowerShell) |
 
 ## Claude Code Skills
 

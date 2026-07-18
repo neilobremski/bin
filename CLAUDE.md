@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `~/bin/` is a personal utilities repo plus two substantive sub-projects.
 
-- **Top level** — small single-file CLIs (`tell`, `n0b`, `speak`, `h`, `NMP.py`, etc.).
+- **Top level** — small single-file CLIs (`tell`, `n0b`, `h`, `NMP.py`, etc.).
   `install.sh` adds the dir to `$PATH` and links docs/skills.
 - **`apps/n0b/`** — Kitchen-sink CLI namespace (`n0b json`, `n0b az`, `n0b ai`, …).
   Docs in [`apps/n0b/docs/`](apps/n0b/docs/); index at [`apps/n0b/README.md`](apps/n0b/README.md).
