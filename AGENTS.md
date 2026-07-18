@@ -94,10 +94,11 @@ in skill frontmatter.
 ## Top-level scripts: `tell`
 
 `~/bin/tell` is a **thin shim** to `a8s tell` (plus `tell.cmd` on Windows).
-Implementation lives in `apps/a8s/tell.py`. It walks up from CWD to find
-the first `.outbox/` directory and atomic-writes a JSON envelope there — no
-`~/.a8s` access required. When the registry is reachable and CWD is inside a
-registered agent, recipient validation, `from` stamping, and agent logging
+Implementation lives in `apps/a8s/tell.py`. Outbox resolution: `TELL_OUTBOX_DIR`
+when set (a8s injects it on wake); otherwise a unique configured outbox matched
+from CWD when `~/.a8s` is readable (desktop filedrop seats — see
+`apps/a8s/docs/filedrop.md`). When the registry is reachable and CWD is inside
+a registered agent, recipient validation, `from` stamping, and agent logging
 apply on top.
 
 The router (`mailbox.py:_process_pending`) force-overwrites `from` based on

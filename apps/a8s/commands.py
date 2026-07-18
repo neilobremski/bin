@@ -40,7 +40,7 @@ from core import (
     trash_dir,
     unique_path,
 )
-from definitions import _autodiscover_definition, default_definition_path
+from definitions import _autodiscover_definition, default_definition_path, resolve_definition_arg
 from daemon import (
     _clear_kill_request,
     _read_handler_pid,
@@ -174,7 +174,8 @@ def cmd_add(args: list[str]) -> int:
     auto-linked. Multiple or zero markers fall back to the bundled default.
 
     With `<definition>`, the JSON file is validated and set as the agent's
-    definition.
+    definition. A bare name (`filedrop`, `claude`, `filedrop.json`) resolves against
+    bundled `apps/a8s/definitions/`; any other path is used as-is.
 
     Errors on duplicate name (vs. agents or aliases) or non-directory path."""
     if len(args) < 2 or len(args) > 3:
@@ -212,9 +213,10 @@ def cmd_add(args: list[str]) -> int:
             return 1
 
     if definition_arg:
-        path = Path(definition_arg).expanduser().resolve()
-        if not path.is_file():
-            print(f"not a file: {path}", file=sys.stderr)
+        try:
+            path = resolve_definition_arg(definition_arg)
+        except FileNotFoundError:
+            print(f"not a file: {definition_arg}", file=sys.stderr)
             return 1
         try:
             with path.open("r", encoding="utf-8") as f:
@@ -305,7 +307,7 @@ def cmd_define(args: list[str]) -> int:
     """`a8s define <name>`           — show <name>'s effective definition + source.
     `a8s define <name> <path>`       — set <name>'s definition file path in the registry."""
     if not args:
-        print("usage: a8s define <name> [<path-to-definition.json>]", file=sys.stderr)
+        print("usage: a8s define <name> [<definition>]", file=sys.stderr)
         return 2
     name = args[0]
     reg = load_registry()
@@ -323,7 +325,7 @@ def cmd_define(args: list[str]) -> int:
         custom = info.get("definition")
         if not custom:
             print(f"{target_key}: no definition set", file=sys.stderr)
-            print(f"hint: a8s define {target_key} apps/a8s/definitions/<kind>.json", file=sys.stderr)
+            print(f"hint: a8s define {target_key} filedrop   # or path to *.json", file=sys.stderr)
             return 1
         source = Path(custom).expanduser()
         print(f"{target_key}: {source}")
@@ -336,11 +338,13 @@ def cmd_define(args: list[str]) -> int:
         return 0
 
     if len(args) > 2:
-        print("usage: a8s define <name> [<path-to-definition.json>]", file=sys.stderr)
+        print("usage: a8s define <name> [<definition>]", file=sys.stderr)
         return 2
-    path = Path(args[1]).expanduser().resolve()
-    if not path.is_file():
-        print(f"not a file: {path}", file=sys.stderr)
+    path = None
+    try:
+        path = resolve_definition_arg(args[1])
+    except FileNotFoundError:
+        print(f"not a file: {args[1]}", file=sys.stderr)
         return 1
     try:
         with path.open("r", encoding="utf-8") as f:
@@ -396,11 +400,11 @@ def _pid_uptime(name: str) -> str:
 
 def cmd_ls(args: list[str] | None = None) -> int:
     """`a8s ls` — list every registered node, running or not (docker/ollama
-    style). Columns: NAME, STATUS, KIND, ROOT, plus NAMESPACES when any prefix
-    is bound. `-q` prints just names, one per line, for scripting.
+    style). Columns: NAME, STATUS, DEFINITION, ROOT, plus NAMESPACES when any
+    prefix is bound. `-q` prints just names, one per line, for scripting.
 
-    STATUS is `running (pid N)` or `stopped`; KIND is the definition basename
-    (default fallback applies when the registry has no `definition` field)."""
+    STATUS is `running (pid N)` or `stopped`; DEFINITION is the definition
+    basename (default fallback when the registry has no `definition` field)."""
     args = args or []
     quiet = "-q" in args
     reg = load_registry()
@@ -425,15 +429,15 @@ def cmd_ls(args: list[str] | None = None) -> int:
         pid = _read_handler_pid(name)
         status = f"running (pid {pid})" if pid is not None else "stopped"
         defn = info.get("definition") or str(default_definition_path("default"))
-        kind = Path(defn).stem
+        definition = Path(defn).stem
         root = info.get("root", "?")
         ns = " ".join(sorted(bindings.get(name.lower(), [])))
-        rows.append((name, status, kind, root, ns))
+        rows.append((name, status, definition, root, ns))
 
     if any(row[4] for row in rows):
-        _print_table(["NAME", "STATUS", "KIND", "ROOT", "NAMESPACES"], rows)
+        _print_table(["NAME", "STATUS", "DEFINITION", "ROOT", "NAMESPACES"], rows)
     else:
-        _print_table(["NAME", "STATUS", "KIND", "ROOT"], [r[:4] for r in rows])
+        _print_table(["NAME", "STATUS", "DEFINITION", "ROOT"], [r[:4] for r in rows])
     return 0
 
 
@@ -1185,9 +1189,9 @@ def cmd_tell(args: list[str]) -> int:
 
 
 def cmd_tells(args: list[str]) -> int:
-    """`a8s tells [--timeout SEC]` — block until the next message lands in this
-    node's inbox, print each new envelope, and exit 0; exit 1 on timeout. The
-    receive-side complement of `tell`, resolved from the same `TELL_OUTBOX_DIR`."""
+    """`a8s tells [-f|--follow] [--timeout SEC]` — block until the next message
+    lands in this node's inbox, print each new envelope, and exit 0; exit 1 on
+    timeout. With `-f`, poll continuously until interrupted."""
     from tells import tells_main
 
     return tells_main(args)
@@ -1319,78 +1323,124 @@ def cmd_config(args: list[str]) -> int:
 # ---------- convo ----------
 
 def cmd_convo(args: list[str]) -> int:
-    """`a8s convo <name> [--limit N] [--heading-out T] [--heading-in T]` —
+    """`a8s convo <name> [--limit N] [-f|--follow] [--glow [theme]] [--heading-out T] [--heading-in T]` —
     markdown history of messages to or from an agent."""
+    import argparse
+
     from convo import (
         DEFAULT_HEADING_IN,
         DEFAULT_HEADING_OUT,
+        convo_help_epilog,
+        decode_template,
+        follow_conversation,
         format_conversation,
+        involves_agent,
+        load_entries,
+        open_glow_stdout,
+        print_entries,
     )
 
-    if not args:
-        print(
-            "usage: a8s convo <name> [--limit N] [--heading-out TEMPLATE] [--heading-in TEMPLATE]",
-            file=sys.stderr,
-        )
-        return 2
+    default_glow = os.environ.get("A8S_GLOW", "").strip() or None
+    parser = argparse.ArgumentParser(
+        prog="a8s convo",
+        description="Show markdown conversation history for an agent.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=convo_help_epilog(),
+    )
+    parser.add_argument("name", help="registered agent name")
+    parser.add_argument(
+        "-f",
+        "--follow",
+        action="store_true",
+        help="print backlog then tail ~/.a8s/conversations.jsonl for new rows",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        metavar="N",
+        help="number of recent messages to show (default: 10)",
+    )
+    parser.add_argument(
+        "--glow",
+        nargs="?",
+        const="auto",
+        default=default_glow,
+        metavar="THEME",
+        help="render via glow (theme: auto, dark, light, dracula, …; default from A8S_GLOW)",
+    )
+    parser.add_argument(
+        "--heading-out",
+        nargs="+",
+        metavar="LINE",
+        help="outbound heading template; multiple LINEs join with newlines",
+    )
+    parser.add_argument(
+        "--heading-in",
+        nargs="+",
+        metavar="LINE",
+        help="inbound heading template; multiple LINEs join with newlines",
+    )
+    try:
+        parsed = parser.parse_args(args)
+    except SystemExit as e:
+        return int(e.code if e.code is not None else 0)
 
-    name: str | None = None
-    limit = 10
-    heading_out = DEFAULT_HEADING_OUT
-    heading_in = DEFAULT_HEADING_IN
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == "--limit":
-            if i + 1 >= len(args):
-                print("--limit requires a number", file=sys.stderr)
-                return 2
-            try:
-                limit = int(args[i + 1])
-            except ValueError:
-                print("--limit requires a number", file=sys.stderr)
-                return 2
-            i += 2
-            continue
-        if a == "--heading-out":
-            if i + 1 >= len(args):
-                print("--heading-out requires a template", file=sys.stderr)
-                return 2
-            heading_out = args[i + 1]
-            i += 2
-            continue
-        if a == "--heading-in":
-            if i + 1 >= len(args):
-                print("--heading-in requires a template", file=sys.stderr)
-                return 2
-            heading_in = args[i + 1]
-            i += 2
-            continue
-        if a.startswith("-"):
-            print(f"unknown convo arg: {a!r}", file=sys.stderr)
-            return 2
-        if name is not None:
-            print(f"unexpected argument: {a!r}", file=sys.stderr)
-            return 2
-        name = a
-        i += 1
+    heading_out = (
+        decode_template("\n".join(parsed.heading_out))
+        if parsed.heading_out is not None
+        else DEFAULT_HEADING_OUT
+    )
+    heading_in = (
+        decode_template("\n".join(parsed.heading_in))
+        if parsed.heading_in is not None
+        else DEFAULT_HEADING_IN
+    )
+    glow_theme = parsed.glow
 
-    if name is None:
-        print(
-            "usage: a8s convo <name> [--limit N] [--heading-out TEMPLATE] [--heading-in TEMPLATE]",
-            file=sys.stderr,
-        )
-        return 2
-
-    match = resolve_recipient(name)
+    match = resolve_recipient(parsed.name)
     if match is None:
-        print(f"no agent named {name!r}", file=sys.stderr)
+        print(f"no agent named {parsed.name!r}", file=sys.stderr)
         return 1
     agent_name = match[0]
 
+    if parsed.follow:
+        try:
+            follow_conversation(
+                agent_name,
+                limit=parsed.limit,
+                heading_out=heading_out,
+                heading_in=heading_in,
+                glow_theme=glow_theme,
+            )
+        except KeyboardInterrupt:
+            pass
+        return 0
+
+    rows = [e for e in load_entries() if involves_agent(e, agent_name)]
+    rows = rows[-parsed.limit :]
+    if glow_theme is not None:
+        glow_stream = None
+        try:
+            glow_stream = open_glow_stdout(glow_theme)
+        except FileNotFoundError:
+            print("a8s convo: glow not found on PATH", file=sys.stderr)
+        try:
+            print_entries(
+                agent_name,
+                rows,
+                glow_stream=glow_stream,
+                heading_out=heading_out,
+                heading_in=heading_in,
+            )
+        finally:
+            if glow_stream is not None:
+                glow_stream.close()
+        return 0
+
     text = format_conversation(
         agent_name,
-        limit=limit,
+        limit=parsed.limit,
         heading_out=heading_out,
         heading_in=heading_in,
     )

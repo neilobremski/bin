@@ -36,6 +36,9 @@ def _merge_tell_env(
         target = outbox if outbox is not None else cwd / ".outbox"
         if outbox is not None or target.is_dir():
             extra[TELL_OUTBOX_DIR_ENV] = str(target.resolve() if outbox is None else target)
+        else:
+            # Don't let the host shell's TELL_OUTBOX_DIR leak into negative tests.
+            merged.pop(TELL_OUTBOX_DIR_ENV, None)
     merged.update(extra)
     return merged
 
@@ -590,3 +593,69 @@ class TestTellOutboxDirContract:
         assert outbox.is_dir()
         _name, msg = _read_outbox(outbox)
         assert msg["content"] == "from wake env"
+
+
+class TestTellRegistryOutboxDiscovery:
+    """When TELL_OUTBOX_DIR is unset, a unique configured filedrop may be inferred from CWD."""
+
+    def test_uses_unique_seat_from_cwd(self, fake_home, tmp_path):
+        from registry import save_registry
+
+        seat = tmp_path / "neil-macbook"
+        bob = tmp_path / "bob"
+        seat.mkdir()
+        bob.mkdir()
+        save_registry({"neil-macbook": {"root": str(seat)}, "bob": {"root": str(bob)}})
+        res = _run_raw(seat, "bob", "from seat root")
+        assert res.returncode == 0, res.stderr
+        _name, msg = _read_outbox(seat / ".outbox")
+        assert msg["content"] == "from seat root"
+        assert msg.get("from") == "neil-macbook"
+
+    def test_uses_seat_from_subdir(self, fake_home, tmp_path):
+        from registry import save_registry
+
+        seat = tmp_path / "neil-macbook"
+        bob = tmp_path / "bob"
+        nested = seat / "notes"
+        nested.mkdir(parents=True)
+        bob.mkdir()
+        save_registry({"neil-macbook": {"root": str(seat)}, "bob": {"root": str(bob)}})
+        res = _run_raw(nested, "bob", "from nested")
+        assert res.returncode == 0, res.stderr
+        _name, msg = _read_outbox(seat / ".outbox")
+        assert msg["content"] == "from nested"
+
+    def test_ambiguous_parent_refuses(self, fake_home, tmp_path):
+        from registry import save_registry
+
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        save_registry({"a": {"root": str(a)}, "b": {"root": str(b)}})
+        res = _run_raw(tmp_path, "bob", "nope")
+        assert res.returncode == 1
+        assert "multiple filedrops match" in res.stderr
+        assert "TELL_OUTBOX_DIR" in res.stderr
+
+    def test_env_wins_over_cwd_match(self, fake_home, tmp_path):
+        from registry import save_registry
+
+        seat = tmp_path / "seat"
+        bob = tmp_path / "bob"
+        other = tmp_path / "other-outbox"
+        seat.mkdir()
+        bob.mkdir()
+        other.mkdir()
+        save_registry({"seat": {"root": str(seat)}, "bob": {"root": str(bob)}})
+        res = _run_raw(
+            seat,
+            "bob",
+            "locked",
+            env={TELL_OUTBOX_DIR_ENV: str(other)},
+        )
+        assert res.returncode == 0, res.stderr
+        assert list((seat / ".outbox").glob("*.json")) == []
+        _name, msg = _read_outbox(other)
+        assert msg["content"] == "locked"

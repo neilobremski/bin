@@ -16,6 +16,7 @@ from definitions import (
     build_command,
     default_definition_path,
     load_definition,
+    resolve_definition_arg,
     resolve_files_dir,
     resolve_inbox_dir,
     resolve_outbox_dir,
@@ -252,6 +253,25 @@ class TestExpandArgv:
     def test_a8s_dir_substitution(self):
         from core import SCRIPT_DIR
         assert _expand_argv(["$A8S_DIR/x"], "", "", "") == [f"{SCRIPT_DIR}/x"]
+
+
+# ---------- resolve_definition_arg ----------
+
+class TestResolveDefinitionArg:
+    def test_bare_kind(self):
+        assert resolve_definition_arg("filedrop") == default_definition_path("filedrop").resolve()
+
+    def test_bare_kind_with_suffix(self):
+        assert resolve_definition_arg("filedrop.json") == default_definition_path("filedrop").resolve()
+
+    def test_explicit_file(self, tmp_path):
+        custom = tmp_path / "mine.json"
+        custom.write_text("{}")
+        assert resolve_definition_arg(str(custom)) == custom.resolve()
+
+    def test_unknown_bare_raises(self):
+        with pytest.raises(FileNotFoundError):
+            resolve_definition_arg("no-such-definition-kind")
 
 
 # ---------- _autodiscover_definition ----------

@@ -82,6 +82,34 @@ class TestCmdAddCanonicalization:
         assert rc == 2
 
 
+class TestCmdAddBundledDefinition:
+    def test_bare_kind_resolves_bundled(self, fake_home, agent_root, capsys):
+        from definitions import default_definition_path
+
+        rc = cmd_add(["neil-macbook", str(agent_root), "filedrop"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert str(default_definition_path("filedrop")) in out
+        assert load_registry()["neil-macbook"]["definition"] == str(default_definition_path("filedrop"))
+
+    def test_bare_kind_with_json_suffix(self, fake_home, agent_root):
+        from definitions import default_definition_path
+
+        assert cmd_add(["seat", str(agent_root), "filedrop.json"]) == 0
+        assert load_registry()["seat"]["definition"] == str(default_definition_path("filedrop"))
+
+    def test_unknown_bare_kind_rejected(self, fake_home, agent_root, capsys):
+        rc = cmd_add(["seat", str(agent_root), "not-a-real-def"])
+        assert rc == 1
+        assert "not a file: not-a-real-def" in capsys.readouterr().err
+
+    def test_explicit_path_still_works(self, fake_home, agent_root, tmp_path):
+        custom = tmp_path / "custom.json"
+        custom.write_text('{"proxy": "file"}')
+        assert cmd_add(["seat", str(agent_root), str(custom)]) == 0
+        assert load_registry()["seat"]["definition"] == str(custom.resolve())
+
+
 class TestCmdAddAliasCollision:
     def test_alias_then_agent_with_same_name_rejected(self, fake_home, tmp_path, agent_root, capsys):
         # First agent registered.

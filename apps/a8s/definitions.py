@@ -38,6 +38,34 @@ def default_definition_path(kind: str) -> Path:
     return DEFINITIONS_DIR / f"{kind}.json"
 
 
+def resolve_definition_arg(spec: str) -> Path:
+    """Resolve an `a8s add` / `a8s define` definition argument.
+
+    Prefers an existing filesystem path. A bare name (`filedrop` or `filedrop.json`)
+    that is not a local file resolves against bundled `definitions/`.
+    """
+    raw = Path(spec).expanduser()
+    if raw.is_file():
+        return raw.resolve()
+    try:
+        resolved = raw.resolve()
+        if resolved.is_file():
+            return resolved
+    except OSError:
+        pass
+
+    if len(raw.parts) == 1:
+        name = raw.name
+        candidates = [DEFINITIONS_DIR / name]
+        if not name.endswith(".json"):
+            candidates.append(DEFINITIONS_DIR / f"{name}.json")
+        for cand in candidates:
+            if cand.is_file():
+                return cand.resolve()
+
+    raise FileNotFoundError(spec)
+
+
 def is_file_proxy(definition: dict) -> bool:
     return definition.get("proxy") == "file"
 
