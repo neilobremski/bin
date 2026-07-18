@@ -2,10 +2,13 @@
 
 Receive-side complement of `tell`. The node is resolved from `TELL_OUTBOX_DIR`
 exactly as `tell` resolves the sender: the file-proxy inbox is `.inbox` beside
-the outbox. `tells` snapshots what is already there, then blocks up to
+the outbox. By default `tells` snapshots what is already there, then blocks up to
 `--timeout` seconds (default 5) for new envelopes to land, prints each
 (sender + body) to stdout, and exits 0. Nothing new within the timeout prints
 one line to stderr and exits 1.
+
+With `-f` / `--follow`, poll the inbox continuously and print each new message
+as it arrives until interrupted (Ctrl+C).
 
 Non-destructive: it observes new arrivals without consuming them, so it never
 races a competing reader for `.inbox` files and repeated runs each wait from
@@ -16,6 +19,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from tell import agent_root_from_outbox, find_outbox
@@ -33,20 +37,31 @@ class TellsHelp(Exception):
     pass
 
 
-_USAGE = "usage: tells [--timeout SEC]"
+_USAGE = "usage: tells [-f|--follow] [--timeout SEC]"
 
 
 def _print_usage() -> None:
     print(_USAGE, file=sys.stderr)
     print("       wait up to SEC (default 5) for the next inbound message", file=sys.stderr)
+    print("       -f runs until interrupted instead of timing out", file=sys.stderr)
 
 
-def parse_tells_argv(argv: list[str]) -> float:
-    """Return the timeout in seconds."""
-    timeout = DEFAULT_TIMEOUT_SEC
+@dataclass(frozen=True)
+class TellsOptions:
+    timeout: float | None
+    follow: bool = False
+
+
+def parse_tells_argv(argv: list[str]) -> TellsOptions:
+    timeout: float | None = DEFAULT_TIMEOUT_SEC
+    follow = False
     i = 0
     while i < len(argv):
         arg = argv[i]
+        if arg in ("-f", "--follow"):
+            follow = True
+            i += 1
+            continue
         if arg == "--timeout":
             i += 1
             if i >= len(argv):
@@ -62,7 +77,9 @@ def parse_tells_argv(argv: list[str]) -> float:
         else:
             raise TellsUsageError(f"unexpected argument: {arg!r}")
         i += 1
-    return timeout
+    if follow:
+        timeout = None
+    return TellsOptions(timeout=timeout, follow=follow)
 
 
 def inbox_from_env() -> Path | None:
@@ -91,9 +108,21 @@ def _print_message(msg: dict) -> None:
     print(f"{sender}: {msg.get('content', '')}")
 
 
+def _poll_new_messages(inbox: Path, seen: set[str]) -> int:
+    printed = 0
+    for name in sorted(_json_names(inbox) - seen):
+        msg = _read_envelope(inbox / name)
+        if msg is None:
+            continue
+        _print_message(msg)
+        seen.add(name)
+        printed += 1
+    return printed
+
+
 def tells_main(argv: list[str]) -> int:
     try:
-        timeout = parse_tells_argv(argv)
+        opts = parse_tells_argv(argv)
     except TellsHelp:
         _print_usage()
         return 0
@@ -108,25 +137,24 @@ def tells_main(argv: list[str]) -> int:
         return 1
 
     seen = _json_names(inbox)
-    deadline = time.monotonic() + timeout
+    if opts.follow:
+        try:
+            while True:
+                _poll_new_messages(inbox, seen)
+                time.sleep(POLL_INTERVAL_SEC)
+        except KeyboardInterrupt:
+            return 0
+
+    assert opts.timeout is not None
+    deadline = time.monotonic() + opts.timeout
     printed_any = False
     while True:
-        printed = 0
-        for name in sorted(_json_names(inbox) - seen):
-            msg = _read_envelope(inbox / name)
-            if msg is None:
-                continue
-            _print_message(msg)
-            seen.add(name)
-            printed += 1
+        printed = _poll_new_messages(inbox, seen)
         if printed:
             printed_any = True
         elif printed_any:
-            # A poll after arrivals found nothing new: the burst has drained.
-            # Returning on the first message instead would truncate a burst
-            # whose files are still landing when the poll fires.
             return 0
         if not printed_any and time.monotonic() >= deadline:
-            print(f"tells: no message within {timeout:g}s", file=sys.stderr)
+            print(f"tells: no message within {opts.timeout:g}s", file=sys.stderr)
             return 1
         time.sleep(POLL_INTERVAL_SEC)

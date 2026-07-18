@@ -16,6 +16,7 @@ _PKG_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG_DIR))
 
 import l9m
+import glow_stream
 
 
 # ---------- _version_key ----------
@@ -437,28 +438,28 @@ class TestResolveGlowStyle:
 
     def test_auto_uses_clitheme(self, monkeypatch):
         monkeypatch.setenv("CLITHEME", "light")
-        monkeypatch.setattr(l9m, "_query_terminal_background_luminance", lambda: None)
+        monkeypatch.setattr(glow_stream, "_query_terminal_background_luminance", lambda: None)
         assert l9m.resolve_glow_style("auto") == "light"
 
     def test_auto_uses_osc11_dark(self, monkeypatch):
         monkeypatch.delenv("CLITHEME", raising=False)
-        monkeypatch.setattr(l9m, "_query_terminal_background_luminance", lambda: 10000)
+        monkeypatch.setattr(glow_stream, "_query_terminal_background_luminance", lambda: 10000)
         assert l9m.resolve_glow_style("auto") == "dark"
 
     def test_auto_uses_osc11_light(self, monkeypatch):
         monkeypatch.delenv("CLITHEME", raising=False)
-        monkeypatch.setattr(l9m, "_query_terminal_background_luminance", lambda: 50000)
+        monkeypatch.setattr(glow_stream, "_query_terminal_background_luminance", lambda: 50000)
         assert l9m.resolve_glow_style("auto") == "light"
 
     def test_auto_falls_back_to_colorfgbg(self, monkeypatch):
         monkeypatch.delenv("CLITHEME", raising=False)
-        monkeypatch.setattr(l9m, "_query_terminal_background_luminance", lambda: None)
+        monkeypatch.setattr(glow_stream, "_query_terminal_background_luminance", lambda: None)
         monkeypatch.setenv("COLORFGBG", "15;0")
         assert l9m.resolve_glow_style("auto") == "dark"
 
     def test_parse_osc11_rgb(self):
         reply = b"\x1b]11;rgb:1e1e/1e1e/2e2e\x07"
-        assert l9m._parse_osc11_rgb(reply) == (0x1e1e, 0x1e1e, 0x2e2e)
+        assert glow_stream._parse_osc11_rgb(reply) == (0x1e1e, 0x1e1e, 0x2e2e)
 
 
 class TestGlowFlag:

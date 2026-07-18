@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from core import TELL_OUTBOX_DIR_ENV
-from tells import tells_main
+from tells import parse_tells_argv, tells_main
 
 TELLS = Path(__file__).resolve().parent.parent.parent.parent / "tells"
 
@@ -123,6 +123,52 @@ def test_tells_help_exits_0(capsys):
     err = capsys.readouterr().err
     assert rc == 0
     assert "usage: tells" in err
+    assert "--follow" in err
+
+
+def test_tells_follow_prints_waves(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    sleeps = {"n": 0}
+
+    def fake_sleep(_interval: float) -> None:
+        sleeps["n"] += 1
+        if sleeps["n"] == 1:
+            _drop_inbox(inbox, "BOB", "first", "01FOLLOW000000000000000A")
+            return
+        if sleeps["n"] == 2:
+            _drop_inbox(inbox, "CAROL", "second", "01FOLLOW000000000000000B")
+            raise KeyboardInterrupt
+
+    import tells as tells_mod
+
+    monkeypatch.setattr(tells_mod.time, "sleep", fake_sleep)
+    rc = tells_main(["-f"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "BOB: first" in out
+    assert "CAROL: second" in out
+
+
+def test_tells_follow_ignores_timeout(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+
+    def fake_sleep(_interval: float) -> None:
+        raise KeyboardInterrupt
+
+    import tells as tells_mod
+
+    monkeypatch.setattr(tells_mod.time, "sleep", fake_sleep)
+    rc = tells_main(["-f", "--timeout", "0.5"])
+    assert rc == 0
+    assert "no message within" not in capsys.readouterr().err
+
+
+def test_parse_tells_follow_clears_timeout():
+    opts = parse_tells_argv(["-f", "--timeout", "30"])
+    assert opts.follow is True
+    assert opts.timeout is None
 
 
 def test_tells_shim_times_out(tmp_path):

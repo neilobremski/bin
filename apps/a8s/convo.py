@@ -7,8 +7,6 @@ from `~/.a8s/settings.json` (default 1000).
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -21,18 +19,95 @@ from settings import get_int
 __all__ = [
     "DEFAULT_HEADING_IN",
     "DEFAULT_HEADING_OUT",
-    "emit_block",
+    "HEADING_PLACEHOLDERS",
+    "convo_help_epilog",
+    "decode_template",
+    "extract_heading_templates",
     "format_conversation",
     "format_entry",
     "follow_conversation",
     "involves_agent",
     "load_entries",
+    "open_glow_stdout",
     "print_entries",
     "record",
 ]
 
 DEFAULT_HEADING_OUT = "## from {from} to {to} at {timestamp}"
 DEFAULT_HEADING_IN = "### from {from} to {to} at {timestamp}"
+
+HEADING_PLACEHOLDERS = ("from", "to", "timestamp", "date")
+
+
+def decode_template(text: str) -> str:
+    return text.replace("\\n", "\n").replace("\\t", "\t")
+
+
+def _argv_looks_like_option(arg: str) -> bool:
+    return arg.startswith("-") and arg != "-"
+
+
+def extract_heading_templates(argv: list[str]) -> tuple[list[str], str | None, str | None]:
+    """Pull --heading-out/in (multi-token) out of argv before argparse."""
+    rest: list[str] = []
+    heading_out: str | None = None
+    heading_in: str | None = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--heading-out":
+            if i + 1 >= len(argv):
+                raise ValueError("--heading-out requires a template")
+            heading_out, i = _consume_template(argv, i + 1)
+            continue
+        if arg == "--heading-in":
+            if i + 1 >= len(argv):
+                raise ValueError("--heading-in requires a template")
+            heading_in, i = _consume_template(argv, i + 1)
+            continue
+        rest.append(arg)
+        i += 1
+    return rest, heading_out, heading_in
+
+
+def _consume_template(argv: list[str], start: int) -> tuple[str, int]:
+    parts: list[str] = []
+    i = start
+    while i < len(argv) and not _argv_looks_like_option(argv[i]):
+        parts.append(argv[i])
+        i += 1
+    if not parts:
+        raise ValueError("template requires at least one line")
+    return decode_template("\n".join(parts)), i
+
+
+def convo_help_epilog() -> str:
+    return f"""heading templates:
+  Outbound (--heading-out) and inbound (--heading-in) use Python str.format placeholders:
+    {{from}}       sender name
+    {{to}}         recipient or alias
+    {{timestamp}}  ISO UTC timestamp from the message
+    {{date}}       alias for {{timestamp}}
+
+  Defaults:
+    outbound: {DEFAULT_HEADING_OUT}
+    inbound:  {DEFAULT_HEADING_IN}
+
+  Multiline headings:
+    - Shell quotes preserve embedded newlines in one argument
+    - Multiple arguments after the flag join with newlines (one line each)
+    - Use \\n and \\t escapes inside a single argument
+
+  Message body and attachment lines are appended after the heading block.
+
+examples:
+  a8s convo neil-macbook -f --limit 10 --glow
+  a8s convo bob --heading-out '**{{from}}**' '→ {{to}}' --limit 5
+  a8s convo bob --heading-in "### {{from}}\\n_{{timestamp}}_"
+
+environment:
+  A8S_GLOW=<theme>    default glow theme (auto, dark, light, dracula, …); --glow overrides
+"""
 
 
 def _max_limit() -> int:
@@ -181,43 +256,33 @@ def format_entry(
     return block
 
 
-def emit_block(block: str, *, glow: bool = False) -> None:
-    """Print one message block; with glow, pipe this block alone to `glow -`."""
+def open_glow_stdout(theme: str = "auto"):
+    from glow_util import open_glow_stdout as _open
+
+    return _open(theme)
+
+
+def _write_block(block: str, glow_stream: object | None) -> None:
     if not block:
         return
-    if glow:
-        glow_bin = shutil.which("glow")
-        if glow_bin:
-            proc = subprocess.run(
-                [glow_bin, "-"],
-                input=block + "\n",
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if proc.returncode == 0 and proc.stdout:
-                sys.stdout.write(proc.stdout)
-                if not proc.stdout.endswith("\n"):
-                    sys.stdout.write("\n")
-                sys.stdout.flush()
-                return
+    if glow_stream is not None:
+        glow_stream.write(block + "\n\n")
+        return
     print(block, flush=True)
+    print(flush=True)
 
 
 def print_entries(
     agent: str,
     entries: list[dict[str, Any]],
     *,
-    glow: bool = False,
+    glow_stream: object | None = None,
     heading_out: str = DEFAULT_HEADING_OUT,
     heading_in: str = DEFAULT_HEADING_IN,
 ) -> None:
     for entry in entries:
         block = format_entry(agent, entry, heading_out=heading_out, heading_in=heading_in)
-        if not block:
-            continue
-        emit_block(block, glow=glow)
-        print(flush=True)
+        _write_block(block, glow_stream)
 
 
 def format_conversation(
@@ -263,51 +328,62 @@ def follow_conversation(
     heading_out: str = DEFAULT_HEADING_OUT,
     heading_in: str = DEFAULT_HEADING_IN,
     poll_interval: float = 1.0,
-    glow: bool = False,
+    glow_theme: str | None = None,
 ) -> None:
     """Print the last `limit` messages, then block printing new archive rows."""
+    glow_stream = None
+    if glow_theme is not None:
+        try:
+            glow_stream = open_glow_stdout(glow_theme)
+        except FileNotFoundError:
+            print("a8s convo: glow not found on PATH", file=sys.stderr)
+
     seen: set[str] = set()
-    rows = [e for e in load_entries() if involves_agent(e, agent)]
-    print_entries(
-        agent,
-        rows[-limit:],
-        glow=glow,
-        heading_out=heading_out,
-        heading_in=heading_in,
-    )
-    for entry in rows[-limit:]:
-        _remember_entry_id(seen, entry)
+    try:
+        rows = [e for e in load_entries() if involves_agent(e, agent)]
+        print_entries(
+            agent,
+            rows[-limit:],
+            glow_stream=glow_stream,
+            heading_out=heading_out,
+            heading_in=heading_in,
+        )
+        for entry in rows[-limit:]:
+            _remember_entry_id(seen, entry)
 
-    path = conversations_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.touch(exist_ok=True)
+        path = conversations_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
 
-    with path.open("r", encoding="utf-8") as handle:
-        handle.seek(0, 2)
-        while True:
-            line = handle.readline()
-            if line:
-                entry = _parse_convo_line(line)
-                if entry is None or not involves_agent(entry, agent):
+        with path.open("r", encoding="utf-8") as handle:
+            handle.seek(0, 2)
+            while True:
+                line = handle.readline()
+                if line:
+                    entry = _parse_convo_line(line)
+                    if entry is None or not involves_agent(entry, agent):
+                        continue
+                    msg_id = (entry.get("id") or "").strip()
+                    if msg_id and msg_id in seen:
+                        continue
+                    print_entries(
+                        agent,
+                        [entry],
+                        glow_stream=glow_stream,
+                        heading_out=heading_out,
+                        heading_in=heading_in,
+                    )
+                    _remember_entry_id(seen, entry)
                     continue
-                msg_id = (entry.get("id") or "").strip()
-                if msg_id and msg_id in seen:
-                    continue
-                print_entries(
-                    agent,
-                    [entry],
-                    glow=glow,
-                    heading_out=heading_out,
-                    heading_in=heading_in,
-                )
-                _remember_entry_id(seen, entry)
-                continue
 
-            try:
-                size = path.stat().st_size
-            except OSError:
-                size = 0
-            if handle.tell() > size:
-                handle.seek(0)
-            time.sleep(poll_interval)
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    size = 0
+                if handle.tell() > size:
+                    handle.seek(0)
+                time.sleep(poll_interval)
+    finally:
+        if glow_stream is not None:
+            glow_stream.close()
 

@@ -1185,9 +1185,9 @@ def cmd_tell(args: list[str]) -> int:
 
 
 def cmd_tells(args: list[str]) -> int:
-    """`a8s tells [--timeout SEC]` — block until the next message lands in this
-    node's inbox, print each new envelope, and exit 0; exit 1 on timeout. The
-    receive-side complement of `tell`, resolved from the same `TELL_OUTBOX_DIR`."""
+    """`a8s tells [-f|--follow] [--timeout SEC]` — block until the next message
+    lands in this node's inbox, print each new envelope, and exit 0; exit 1 on
+    timeout. With `-f`, poll continuously until interrupted."""
     from tells import tells_main
 
     return tells_main(args)
@@ -1319,119 +1319,124 @@ def cmd_config(args: list[str]) -> int:
 # ---------- convo ----------
 
 def cmd_convo(args: list[str]) -> int:
-    """`a8s convo <name> [--limit N] [-f|--follow] [--glow] [--heading-out T] [--heading-in T]` —
+    """`a8s convo <name> [--limit N] [-f|--follow] [--glow [theme]] [--heading-out T] [--heading-in T]` —
     markdown history of messages to or from an agent."""
+    import argparse
+
     from convo import (
         DEFAULT_HEADING_IN,
         DEFAULT_HEADING_OUT,
+        convo_help_epilog,
+        decode_template,
         follow_conversation,
         format_conversation,
         involves_agent,
         load_entries,
+        open_glow_stdout,
         print_entries,
     )
 
-    if not args:
-        print(
-            "usage: a8s convo <name> [--limit N] [-f|--follow] [--glow] "
-            "[--heading-out TEMPLATE] [--heading-in TEMPLATE]",
-            file=sys.stderr,
-        )
-        return 2
+    default_glow = os.environ.get("A8S_GLOW", "").strip() or None
+    parser = argparse.ArgumentParser(
+        prog="a8s convo",
+        description="Show markdown conversation history for an agent.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=convo_help_epilog(),
+    )
+    parser.add_argument("name", help="registered agent name")
+    parser.add_argument(
+        "-f",
+        "--follow",
+        action="store_true",
+        help="print backlog then tail ~/.a8s/conversations.jsonl for new rows",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        metavar="N",
+        help="number of recent messages to show (default: 10)",
+    )
+    parser.add_argument(
+        "--glow",
+        nargs="?",
+        const="auto",
+        default=default_glow,
+        metavar="THEME",
+        help="render via glow (theme: auto, dark, light, dracula, …; default from A8S_GLOW)",
+    )
+    parser.add_argument(
+        "--heading-out",
+        nargs="+",
+        metavar="LINE",
+        help="outbound heading template; multiple LINEs join with newlines",
+    )
+    parser.add_argument(
+        "--heading-in",
+        nargs="+",
+        metavar="LINE",
+        help="inbound heading template; multiple LINEs join with newlines",
+    )
+    try:
+        parsed = parser.parse_args(args)
+    except SystemExit as e:
+        return int(e.code if e.code is not None else 0)
 
-    name: str | None = None
-    limit = 10
-    follow = False
-    glow = False
-    heading_out = DEFAULT_HEADING_OUT
-    heading_in = DEFAULT_HEADING_IN
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a in ("-f", "--follow"):
-            follow = True
-            i += 1
-            continue
-        if a == "--glow":
-            glow = True
-            i += 1
-            continue
-        if a == "--limit":
-            if i + 1 >= len(args):
-                print("--limit requires a number", file=sys.stderr)
-                return 2
-            try:
-                limit = int(args[i + 1])
-            except ValueError:
-                print("--limit requires a number", file=sys.stderr)
-                return 2
-            i += 2
-            continue
-        if a == "--heading-out":
-            if i + 1 >= len(args):
-                print("--heading-out requires a template", file=sys.stderr)
-                return 2
-            heading_out = args[i + 1]
-            i += 2
-            continue
-        if a == "--heading-in":
-            if i + 1 >= len(args):
-                print("--heading-in requires a template", file=sys.stderr)
-                return 2
-            heading_in = args[i + 1]
-            i += 2
-            continue
-        if a.startswith("-"):
-            print(f"unknown convo arg: {a!r}", file=sys.stderr)
-            return 2
-        if name is not None:
-            print(f"unexpected argument: {a!r}", file=sys.stderr)
-            return 2
-        name = a
-        i += 1
+    heading_out = (
+        decode_template("\n".join(parsed.heading_out))
+        if parsed.heading_out is not None
+        else DEFAULT_HEADING_OUT
+    )
+    heading_in = (
+        decode_template("\n".join(parsed.heading_in))
+        if parsed.heading_in is not None
+        else DEFAULT_HEADING_IN
+    )
+    glow_theme = parsed.glow
 
-    if name is None:
-        print(
-            "usage: a8s convo <name> [--limit N] [-f|--follow] [--glow] "
-            "[--heading-out TEMPLATE] [--heading-in TEMPLATE]",
-            file=sys.stderr,
-        )
-        return 2
-
-    match = resolve_recipient(name)
+    match = resolve_recipient(parsed.name)
     if match is None:
-        print(f"no agent named {name!r}", file=sys.stderr)
+        print(f"no agent named {parsed.name!r}", file=sys.stderr)
         return 1
     agent_name = match[0]
 
-    if follow:
+    if parsed.follow:
         try:
             follow_conversation(
                 agent_name,
-                limit=limit,
+                limit=parsed.limit,
                 heading_out=heading_out,
                 heading_in=heading_in,
-                glow=glow,
+                glow_theme=glow_theme,
             )
         except KeyboardInterrupt:
             pass
         return 0
 
     rows = [e for e in load_entries() if involves_agent(e, agent_name)]
-    rows = rows[-limit:]
-    if glow:
-        print_entries(
-            agent_name,
-            rows,
-            glow=True,
-            heading_out=heading_out,
-            heading_in=heading_in,
-        )
+    rows = rows[-parsed.limit :]
+    if glow_theme is not None:
+        glow_stream = None
+        try:
+            glow_stream = open_glow_stdout(glow_theme)
+        except FileNotFoundError:
+            print("a8s convo: glow not found on PATH", file=sys.stderr)
+        try:
+            print_entries(
+                agent_name,
+                rows,
+                glow_stream=glow_stream,
+                heading_out=heading_out,
+                heading_in=heading_in,
+            )
+        finally:
+            if glow_stream is not None:
+                glow_stream.close()
         return 0
 
     text = format_conversation(
         agent_name,
-        limit=limit,
+        limit=parsed.limit,
         heading_out=heading_out,
         heading_in=heading_in,
     )

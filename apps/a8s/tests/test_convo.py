@@ -4,12 +4,15 @@ from __future__ import annotations
 import pytest
 
 from convo import (
-    emit_block,
+    decode_template,
+    extract_heading_templates,
     follow_conversation,
     format_conversation,
     format_entry,
     involves_agent,
     load_entries,
+    open_glow_stdout,
+    print_entries,
     record,
 )
 from core import conversations_path
@@ -217,26 +220,172 @@ class TestFormatConversation:
         assert "missing.pdf" == text.split("attachment: ")[-1].strip()
 
 
-class TestEmitBlock:
-    def test_glow_invokes_per_block(self, monkeypatch, capsys):
-        calls: list[str] = []
+class TestGlowOutput:
+    def test_print_entries_writes_through_glow_stream(self, capsys):
+        writes: list[str] = []
 
-        def fake_run(cmd, **kwargs):
-            calls.append(kwargs.get("input", ""))
-            class Result:
-                returncode = 0
-                stdout = "GLOWED\n"
+        class FakeGlow:
+            def write(self, text: str) -> int:
+                writes.append(text)
+                return len(text)
 
-            return Result()
+            def close(self) -> None:
+                writes.append("__close__")
 
-        monkeypatch.setattr("convo.shutil.which", lambda _name: "/usr/bin/glow")
-        monkeypatch.setattr("convo.subprocess.run", fake_run)
-        emit_block("# hello\n\nbody", glow=True)
-        assert calls == ["# hello\n\nbody\n"]
-        assert capsys.readouterr().out == "GLOWED\n"
+        print_entries(
+            "Bob",
+            [
+                {
+                    "id": "01JGLOW00000000000000000",
+                    "date": "2026-06-18T12:00:00.000000Z",
+                    "from": "Alice",
+                    "to": "Bob",
+                    "content": "hello",
+                }
+            ],
+            glow_stream=FakeGlow(),
+        )
+        assert len(writes) == 1
+        assert "hello" in writes[0]
+        assert capsys.readouterr().out == ""
+
+    def test_open_glow_stdout_uses_l9m_stream(self, monkeypatch):
+        opened: list[str] = []
+
+        class FakeGlow:
+            def close(self) -> None:
+                pass
+
+        def fake_open(theme: str = "auto"):
+            opened.append(theme)
+            return FakeGlow()
+
+        import glow_util
+
+        monkeypatch.setattr(glow_util, "open_glow_stdout", fake_open)
+        stream = open_glow_stdout("dracula")
+        assert opened == ["dracula"]
+        stream.close()
+
+    def test_cmd_convo_glow_theme_flag(self, fake_home, tmp_path, monkeypatch):
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root)}})
+        opened: list[str] = []
+
+        class FakeGlow:
+            def write(self, text: str) -> int:
+                return len(text)
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr("convo.open_glow_stdout", lambda theme: (opened.append(theme) or FakeGlow()))
+        assert cmd_convo(["bob", "--limit", "1", "--glow", "dracula"]) == 0
+        assert opened == ["dracula"]
+
+    def test_cmd_convo_glow_env(self, fake_home, tmp_path, monkeypatch):
+        from registry import save_registry
+
+        monkeypatch.setenv("A8S_GLOW", "tokyo-night")
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root)}})
+        opened: list[str] = []
+
+        class FakeGlow:
+            def write(self, text: str) -> int:
+                return len(text)
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr("convo.open_glow_stdout", lambda theme: (opened.append(theme) or FakeGlow()))
+        assert cmd_convo(["bob", "--limit", "1"]) == 0
+        assert opened == ["tokyo-night"]
+
+
+class TestHeadingTemplates:
+    def test_decode_template_escapes(self):
+        assert decode_template("a\\nb") == "a\nb"
+        assert decode_template("a\\tc") == "a\tc"
+
+    def test_extract_multiline_tokens(self):
+        argv, out, inn = extract_heading_templates(
+            ["bob", "--heading-out", "line1", "line2", "--limit", "3"]
+        )
+        assert argv == ["bob", "--limit", "3"]
+        assert out == "line1\nline2"
+        assert inn is None
+
+    def test_format_entry_multiline_heading(self, fake_home):
+        record(
+            {
+                "id": "01JML000000000000000000",
+                "date": "2026-06-18T14:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "body",
+            },
+            recipients=["Bob"],
+        )
+        text = format_conversation(
+            "Bob",
+            limit=1,
+            heading_in="from {from}\n_{timestamp}_",
+        )
+        assert "from Alice\n_2026-06-18T14:00:00.000000Z_" in text
+        assert "body" in text
 
 
 class TestCmdConvo:
+    def test_help(self, capsys):
+        assert cmd_convo(["--help"]) == 0
+        out = capsys.readouterr().out
+        assert "a8s convo" in out
+        assert "{from}" in out
+        assert "{timestamp}" in out
+        assert "Multiline" in out
+
+    def test_help_with_agent_name(self, capsys):
+        assert cmd_convo(["bob", "--help"]) == 0
+        assert "heading templates" in capsys.readouterr().out
+
+    def test_multiline_heading_flag(self, fake_home, tmp_path, capsys):
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root)}})
+        record(
+            {
+                "id": "01JMLCMD0000000000000000",
+                "date": "2026-06-18T14:00:00.000000Z",
+                "from": "Bob",
+                "to": "Alice",
+                "content": "sent",
+            },
+            recipients=["Alice"],
+        )
+        assert (
+            cmd_convo(
+                [
+                    "bob",
+                    "--heading-out",
+                    "**{from}**",
+                    "→ {to}",
+                    "--limit",
+                    "1",
+                ]
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        assert "**Bob**\n→ Alice" in out
+        assert "sent" in out
+
     def test_unknown_agent(self, fake_home, capsys):
         assert cmd_convo(["nope"]) == 1
         assert "no agent named" in capsys.readouterr().err
