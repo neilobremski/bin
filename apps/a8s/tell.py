@@ -1,8 +1,12 @@
 """tell — drop a JSON envelope in the outbox directory.
 
-Requires `TELL_OUTBOX_DIR` (set by a8s on agent wake). No filesystem
-discovery. `~/.a8s` reachable and CWD inside a registered agent validates the
-recipient (with remote fallback), stamps `from`, and logs to the agent log.
+Requires `TELL_OUTBOX_DIR` when set (a8s injects it on agent wake). If unset
+and `~/.a8s` is readable, `tell` may resolve a unique configured outbox from
+CWD — see `docs/filedrop.md`. `install-client` tell-only installs have
+no registry and always need the env var.
+
+`~/.a8s` reachable and CWD inside a registered agent validates the recipient
+(with remote fallback), stamps `from`, and logs to the agent log.
 
 Attachments: any path tell can read is copied into `.outbox/<msg_id>/` before
 the envelope is written. The JSON `files` array carries basename only (no
@@ -49,16 +53,98 @@ def _outbox_from_env() -> Path | None:
         return None
 
 
+def _cwd_matches_outbox(cwd: Path, agent_root: Path, outbox: Path) -> bool:
+    if cwd == outbox:
+        return True
+    try:
+        outbox.relative_to(cwd)
+        return True
+    except ValueError:
+        pass
+    try:
+        cwd.relative_to(agent_root)
+        return True
+    except ValueError:
+        pass
+    return False
+
+
+def _outboxes_matching_cwd(cwd: Path) -> list[tuple[str, Path]]:
+    """Configured (name, outbox) pairs whose seat matches `cwd`.
+
+    Only consulted when `TELL_OUTBOX_DIR` is unset and the registry is
+    readable. Matching: CWD is the outbox, CWD contains the outbox, or CWD
+    sits inside the agent's registered root.
+    """
+    from registry import participants_from_registry
+
+    matches: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    for p in participants_from_registry():
+        try:
+            root = p.root.resolve()
+            outbox = p.outbox_path().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if not _cwd_matches_outbox(cwd, root, outbox):
+            continue
+        if outbox in seen:
+            continue
+        seen.add(outbox)
+        matches.append((p.name, outbox))
+    return matches
+
+
+def _outbox_from_registry() -> Path | None:
+    """Unique CWD-matched configured outbox, or None if zero/ambiguous/unavailable."""
+    try:
+        cwd = Path.cwd().resolve()
+    except OSError:
+        return None
+    try:
+        matches = _outboxes_matching_cwd(cwd)
+    except OSError:
+        return None
+    if len(matches) != 1:
+        return None
+    _name, outbox = matches[0]
+    try:
+        outbox.mkdir(parents=True, exist_ok=True)
+        if _probe_outbox_writable(outbox) is not None:
+            return None
+        return outbox
+    except OSError:
+        return None
+
+
 def find_outbox() -> Path | None:
-    return _outbox_from_env()
+    found = _outbox_from_env()
+    if found is not None:
+        return found
+    if os.environ.get(TELL_OUTBOX_DIR_ENV, "").strip():
+        return None
+    return _outbox_from_registry()
 
 
 def _report_outbox_unavailable() -> None:
     print("tell: cannot send from this directory", file=sys.stderr)
-    if os.environ.get(TELL_OUTBOX_DIR_ENV, "").strip():
+    raw = os.environ.get(TELL_OUTBOX_DIR_ENV, "").strip()
+    if raw:
         print(f"tell: {TELL_OUTBOX_DIR_ENV} is set but outbox is unavailable", file=sys.stderr)
-    else:
-        print(f"tell: {TELL_OUTBOX_DIR_ENV} is not set", file=sys.stderr)
+        return
+    try:
+        matches = _outboxes_matching_cwd(Path.cwd().resolve())
+    except OSError:
+        matches = []
+    if len(matches) > 1:
+        names = ", ".join(name for name, _ in matches)
+        print(
+            f"tell: multiple filedrops match this directory ({names}); "
+            f"set {TELL_OUTBOX_DIR_ENV}",
+            file=sys.stderr,
+        )
+        return
+    print(f"tell: {TELL_OUTBOX_DIR_ENV} is not set", file=sys.stderr)
 
 
 def agent_root_from_outbox(outbox: Path) -> Path:

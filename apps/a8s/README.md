@@ -15,6 +15,15 @@ Modern agent tooling like Claude Code's subagents is great inside one process an
 
 The win at scale: a team of agents that share knowledge through ordinary conversation grows faster than a collection of silos, and you interact with all of them through one verb (`tell`).
 
+## Desktop filedrop
+
+Humans and desktop IDE sessions (Cursor, Claude Code, Codex) can run a
+**filedrop** node: `a8s start` keeps delivering into `.inbox`, and you watch
+with `tells -f` (inbound only). Deployed agents do not use this path — they
+only need the installable `tell` skill.
+
+→ **[Filedrop guide](docs/filedrop.md)** (`a8s add … filedrop`, `TELL_OUTBOX_DIR`, `tells -f`)
+
 ## Mental model
 
 ```mermaid
@@ -52,7 +61,7 @@ Three concepts:
 
 - **Registry** (`~/.a8s/a8s.json`) — the list of agents, aliases, and namespace prefixes. Agents have a name, a directory, and a *definition* (a JSON file describing how to wake them). Optional `safe_dirs` remains in the schema but is unused for attachment routing: tell stages files into `<root>/.files/` and envelopes reference filename only.
 - **Handlers** — a process that holds the attachment for one or more agents. Pid file at `~/.a8s/agents/<NAME>/pid`. One agent is handled by exactly one process at a time, but one process can handle many agents (typically by attaching to an alias).
-- **Mailboxes** — agents write to `<agent-root>/.outbox/`; routing copies into `~/.a8s/agents/<RECIPIENT>/inbox/`; the handler drains the inbox by waking the agent's CLI. Routing is process-agnostic — only waking requires the handler attachment.
+- **Mailboxes** — agents write to `<agent-root>/.outbox/`; routing copies into `~/.a8s/agents/<RECIPIENT>/inbox/` for CLI agents (wake from there). **Filedrop** nodes (`definitions/filedrop.json`) instead receive into `<root>/.inbox/` with no CLI wake — see [docs/filedrop.md](docs/filedrop.md).
 
 The router doesn't trust the sender. The `from` field is force-overwritten to the actual enclosing agent at routing time. An agent can't impersonate another by hand-writing JSON.
 
@@ -76,9 +85,9 @@ a8s start devs
 
 # See every registered node (running or not).
 a8s ls
-#   NAME     STATUS                KIND      ROOT
-#   CLAUDE   running (pid 12345)   claude    /Users/me/projects/code-review
-#   GEMINI   running (pid 12345)   gemini    /Users/me/projects/research
+#   NAME     STATUS                DEFINITION  ROOT
+#   CLAUDE   running (pid 12345)   claude      /Users/me/projects/code-review
+#   GEMINI   running (pid 12345)   agy         /Users/me/projects/research
 
 # See just the running node processes.
 a8s ps
@@ -86,8 +95,9 @@ a8s ps
 #   CLAUDE   12345   2h       /Users/me/projects/code-review
 #   GEMINI   12345   2h       /Users/me/projects/research
 
-# Send messages. Woken agents get `TELL_OUTBOX_DIR` from a8s; manual tell
-# requires `export TELL_OUTBOX_DIR=…/.outbox` (see docs/tell.md).
+# Send messages. Woken agents get `TELL_OUTBOX_DIR` from a8s. Manual / desktop
+# tell uses that env var, or a unique CWD-matched configured outbox
+# (see docs/filedrop.md / docs/tell.md).
 cd ~/projects/code-review
 tell GEMINI "look at lines 40-80 of foo.py"
 tell devs   "stand-up at 3pm"
@@ -108,11 +118,11 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 
 |                                |                                                                                                                                                                |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `a8s add <name> <dir> [<def>]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given.                                                                 |
+| `a8s add <name> <dir> [<def>]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given (path, or bare name like `human` / `claude` from bundled `definitions/`). |
 | `a8s remove <name>` / `a8s rm <name>` | Unregister an agent. Wipes `~/.a8s/agents/<NAME>/` and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running. |
 | `a8s define <name> [<path>]`   | Show or set the agent's definition file.                                                                                                                       |
 | `a8s discover <path>`          | Walk a path for marker files; print suggested `add`+`define` commands. Read-only.                                                                              |
-| `a8s ls [-q]`                  | List every registered node, running or not: NAME, STATUS (`running (pid N)` / `stopped`), KIND, ROOT, and bound namespaces. `-q` prints just names.             |
+| `a8s ls [-q]`                  | List every registered node, running or not: NAME, STATUS (`running (pid N)` / `stopped`), DEFINITION, ROOT, and bound namespaces. `-q` prints just names. |
 
 
 ### Aliases
@@ -188,10 +198,10 @@ any prefixes pointing at it.
 |                                                                             |                                                                                                                                                                                                                                                                                                                           |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s tell <name> <msg>`                                                     | Routed message via `_write_outbox` into the sender's configured outbox. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose root encloses CWD; router force-stamps `from` from outbox ownership.                                                                                           |
-| `tell <name> <msg>` (top-level shim, `[~/bin/tell](/Users/neilo/bin/tell)`) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Requires `TELL_OUTBOX_DIR` (a8s injects it on wake). Drops a JSON envelope — no `~/.a8s` access required. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: `[docs/tell.md](docs/tell.md)`.          |
-| `tells [--timeout SEC]` (top-level shim, `[~/bin/tells](/Users/neilo/bin/tells)`) | Receive-side complement of `tell` (`apps/a8s/tells.py`). Resolves the node from `TELL_OUTBOX_DIR`, then blocks up to `--timeout` (default 5s) for new envelopes in `.inbox`, prints each `sender: body`, and exits 0; exit 1 on timeout. Non-destructive; Windows: `tells.cmd`. |
+| `tell <name> <msg>` (top-level shim, `[~/bin/tell](/Users/neilo/bin/tell)`) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Outbox: `TELL_OUTBOX_DIR` if set, else a unique configured outbox matched from CWD when `~/.a8s` is readable (see [filedrop.md](docs/filedrop.md)). Drops a JSON envelope. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: `[docs/tell.md](docs/tell.md)`. |
+| `tells [-f] [--timeout SEC] [--glow [theme]]` (shim `[~/bin/tells](/Users/neilo/bin/tells)`) | Receive-side complement of `tell` (`apps/a8s/tells.py`). Same outbox resolution as `tell`; watches `.inbox` beside it. Default: wait up to 5s for a burst. `-f` / `--timeout 0`: follow until Ctrl+C. `--glow` / headings share convo's markdown formatting. Non-destructive. Prefer over `convo -f` for filedrop inbound-only loops. |
 | `a8s logs <name>... [--tail N] [-f]`                                        | Read per-agent log files; one agent in append order, multiple merge by ISO timestamp. `-f` follows.                                                                                                                                                                                                                       |
-| `a8s convo <name> [--limit N]`                                              | Markdown conversation history for an agent (messages to or from). Default `--limit 10`. Outbound headings use `##`, inbound use `###`. Archive: `~/.a8s/conversations.jsonl` (machine-wide; rotates at `convo_max_limit`, default 1000 — `a8s config`). |
+| `a8s convo <name> [--limit N] [-f] [--glow [theme]]`                        | Markdown history of messages to or from an agent. Default `--limit 10`. `-f` tails `~/.a8s/conversations.jsonl` (shows outbound too — use `tells -f` for filedrop inbound-only). Archive rotates at `convo_max_limit` (`a8s config`). |
 | `a8s trace <ULID>`                                                          | Show locally observed transaction boundaries for one envelope: routing, remote publication/resolution, inbox write, delivery receipt, and agent wake. |
 | `a8s drain <name>`                                                          | Move pending inbox JSON to trash without waking the agent.                                                                                                                                                                                                                                                                |
 
@@ -260,6 +270,8 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `copilot.json`  | GitHub Copilot CLI with `--allow-all-tools` (required for non-interactive `-p` mode) + `--continue`. Marker is `.github/copilot-instructions.md` (Copilot's native repo-instructions location).                                                    |
 | `cursor.json`   | Cursor Agent CLI (`agent`) with `-p --trust --force --approve-mcps --continue` for headless tool use. Marker is `CURSOR.md`.                                                                                                                       |
 | `opencode.json` | [OpenCode](https://opencode.ai/) — BYO model. `opencode run --continue --dangerously-skip-permissions`. Operator picks the provider/model in each agent's own `opencode.json` (e.g. `{"model": "ollama/gpt-oss:20b"}`), not in the a8s definition. |
+| `filedrop.json` | Filedrop seat — file-proxy delivery into `<root>/.inbox/`; no CLI wake. Watch with `tells -f`. See [docs/filedrop.md](docs/filedrop.md). Bare name: `a8s add <name> <dir> filedrop`.                                                              |
+| `claude-proxy.json` | Claude Code filedrop variant (same file-proxy shape).                                                                                                                                                                                           |
 | `default.json`  | Fallback — runs `dummy-cli` and prints "no real CLI configured"                                                                                                                                                                                    |
 
 
@@ -268,19 +280,19 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 `a8s discover <path>` and `a8s add <name> <dir>` (without an explicit definition) figure out which CLI an agent uses by scanning for one of these marker files at the agent's root, in order:
 
 
-| Marker                            | Kind     | Where the CLI itself looks                                                                                                                                                                         |
-| --------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CLAUDE.md`                       | claude   | [Claude Code memory](https://docs.claude.com/en/docs/claude-code/memory)                                                                                                                           |
-| `GEMINI.md`                       | agy      | [Antigravity (agy) context files](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/configuration.md)                                                                                 |
-| `CODEX.md`                        | codex    | [Codex CLI configuration](https://github.com/openai/codex)                                                                                                                                         |
-| `.github/copilot-instructions.md` | copilot  | [Copilot CLI repository custom instructions](https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions) — the same file Copilot itself auto-loads       |
-| `CURSOR.md`                       | cursor   | a8s marker for [Cursor Agent CLI](https://cursor.com/docs/cli/using) agents. Cursor also loads `AGENTS.md` and `.cursor/rules/`; use `CURSOR.md` when this directory is a Cursor CLI agent in a8s. |
-| `AGENTS.md` (fallback)            | opencode | [The agents.md standard](https://agents.md/) — tool-agnostic instructions stewarded by the [Agentic AI Foundation](https://agentic.foundation/) under the Linux Foundation                         |
+| Marker                            | Definition | Where the CLI itself looks                                                                                                                                                                         |
+| --------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE.md`                       | claude     | [Claude Code memory](https://docs.claude.com/en/docs/claude-code/memory)                                                                                                                           |
+| `GEMINI.md`                       | agy        | [Antigravity (agy) context files](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/configuration.md)                                                                                 |
+| `CODEX.md`                        | codex      | [Codex CLI configuration](https://github.com/openai/codex)                                                                                                                                         |
+| `.github/copilot-instructions.md` | copilot    | [Copilot CLI repository custom instructions](https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions) — the same file Copilot itself auto-loads       |
+| `CURSOR.md`                       | cursor     | a8s marker for [Cursor Agent CLI](https://cursor.com/docs/cli/using) agents. Cursor also loads `AGENTS.md` and `.cursor/rules/`; use `CURSOR.md` when this directory is a Cursor CLI agent in a8s. |
+| `AGENTS.md` (fallback)            | opencode   | [The agents.md standard](https://agents.md/) — tool-agnostic instructions stewarded by the [Agentic AI Foundation](https://agentic.foundation/) under the Linux Foundation                         |
 
 
-The first four are **kind-specific** locations — for the tools that have a distinct native instruction file, a8s uses that location directly. For Copilot we use its repo-instructions location (`.github/copilot-instructions.md`) rather than inventing a `COPILOT.md` — same file serves both a8s discovery and Copilot's own persona loading.
+The first five are **definition-specific** marker locations — for the tools that have a distinct native instruction file, a8s uses that location directly. For Copilot we use its repo-instructions location (`.github/copilot-instructions.md`) rather than inventing a `COPILOT.md` — same file serves both a8s discovery and Copilot's own persona loading.
 
-[AGENTS.md](https://agents.md/) is **tool-agnostic** and shared by 20+ tools (OpenAI Codex, Google Gemini CLI, GitHub Copilot, Cursor, Aider, Zed, Warp, JetBrains Junie, OpenCode, …). Because it can't disambiguate which CLI to invoke, a8s only resolves it as a marker when **no kind-specific marker is present** — and it falls through to **OpenCode**, which is BYO-model (the operator picks the provider in each agent's own `opencode.json`). A directory with `CLAUDE.md` + `AGENTS.md` resolves to `claude`; a directory with `CURSOR.md` + `AGENTS.md` resolves to `cursor`; a directory with only `AGENTS.md` resolves to `opencode`.
+[AGENTS.md](https://agents.md/) is **tool-agnostic** and shared by 20+ tools (OpenAI Codex, Google Gemini CLI, GitHub Copilot, Cursor, Aider, Zed, Warp, JetBrains Junie, OpenCode, …). Because it can't disambiguate which CLI to invoke, a8s only resolves it as a marker when **no definition-specific marker is present** — and it falls through to **OpenCode**, which is BYO-model (the operator picks the provider in each agent's own `opencode.json`). A directory with `CLAUDE.md` + `AGENTS.md` resolves to `claude`; a directory with `CURSOR.md` + `AGENTS.md` resolves to `cursor`; a directory with only `AGENTS.md` resolves to `opencode`.
 
 ### The single verb
 
@@ -309,7 +321,7 @@ Argv elements run through six substitutions:
 
 `$TIMESTAMP` and `$AGE` are empty for any message without a `date` field (defensive — every `_write_outbox` stamps one).
 
-Override per-agent with `a8s define <name> <path>` — point at any JSON. The file isn't moved or copied; the registry stores the path.
+Override per-agent with `a8s define <name> <definition>` — a filesystem path or a bare bundled name (`filedrop`, `claude`). The file isn't moved or copied; the registry stores the resolved path.
 
 ### max_wake_seconds (optional)
 
@@ -405,8 +417,8 @@ A file-proxy agent communicates through filesystem sync instead of a CLI invocat
 ### Setup
 
 ```bash
-# Create the definition
-cat > file-proxy.json << 'EOF'
+# Create a file-proxy definition (or use the bundled bare name `filedrop`)
+cat > my-filedrop.json << 'EOF'
 {"proxy": "file", "idle": {"timeout": 30}, "files_ttl_hours": 48}
 EOF
 
@@ -414,15 +426,16 @@ EOF
 # {"proxy": "file", "inbox_dir": "/mnt/sync/in", "outbox_dir": "mail/out", "files_dir": ".files", ...}
 
 # Register with a mounted root directory
-a8s add my-email /mnt/gdrive/my-email/ file-proxy.json
+a8s add my-email /mnt/gdrive/my-email/ my-filedrop.json
+# Or: a8s add neil-macbook ~/filedrops/neil-macbook filedrop
 ```
 
 ### How it works
 
-- **On message:** A8S moves inbox JSON files into the definition's `inbox_dir` (default `<root>/.inbox/`) instead of invoking a subprocess. The remote side polls that directory, processes, deletes.
-- **Outbox:** The remote side writes response envelopes to the definition's `outbox_dir` (default `<root>/.outbox/`). A8S ingests these on its normal routing pass (no change from regular agents).
-- **Files:** Tell copies attachments into `.outbox/<msg_id>/` before writing the envelope (filename only in JSON). Ingest moves the bundle with the JSON; routing delivers into `<files_dir>/<msg_id>/` on each recipient (default `files_dir` is `.files` under the agent root; absolute paths OK). Wake prompts use absolute `ATTACHED FILE: <path>` lines. A8S creates `files_dir` when waking CLI agents and cleans up files older than `files_ttl_hours` (default 48) on each idle cycle.
-- **Idle:** The `idle.timeout` controls how often A8S syncs (moves inbox files + runs TTL cleanup). No CLI is invoked.
+- **On message:** a8s moves inbox JSON files into the definition's `inbox_dir` (default `<root>/.inbox/`) instead of invoking a subprocess. The remote side polls that directory, processes, deletes.
+- **Outbox:** The remote side writes response envelopes to the definition's `outbox_dir` (default `<root>/.outbox/`). a8s ingests these on its normal routing pass (no change from regular agents).
+- **Files:** Tell copies attachments into `.outbox/<msg_id>/` before writing the envelope (filename only in JSON). Ingest moves the bundle with the JSON; routing delivers into `<files_dir>/<msg_id>/` on each recipient (default `files_dir` is `.files` under the agent root; absolute paths OK). Wake prompts use absolute `ATTACHED FILE: <path>` lines. a8s creates `files_dir` when waking CLI agents and cleans up files older than `files_ttl_hours` (default 48) on each idle cycle.
+- **Idle:** The `idle.timeout` controls how often a8s syncs (moves inbox files + runs TTL cleanup). No CLI is invoked.
 
 ### Filesystem layout (agent root)
 
@@ -435,6 +448,7 @@ a8s add my-email /mnt/gdrive/my-email/ file-proxy.json
 
 ### Use cases
 
+- Local human / desktop IDE filedrops (`tells -f` — see [filedrop.md](docs/filedrop.md))
 - Google Apps Script participants (GAS polls Drive natively)
 - Cross-machine agents without exposed ports
 - Any system that can read/write files but can't run MQTT or hold sockets
@@ -460,7 +474,7 @@ apps/a8s/
 ├── cli.py            COMMANDS table, dispatch, main
 ├── definitions/      built-in JSONs (claude/cursor/codex/default)
 ├── dummy-cli         fallback bash script
-├── skills/           tell + tells skills (installable into Claude / Cursor / Codex)
+├── skills/           tell skill only (installable into Claude / Cursor / Codex)
 └── tests/
     ├── agents/       per-tool fixture dirs (CLAUDE/GEMINI/CODEX/Llama)
     ├── fixtures/     mock-cli + mock.json for end-to-end tests
@@ -520,7 +534,7 @@ Per-agent `opencode.json` then just picks the model: `{"model": "ollama/gpt-oss:
 The most common causes:
 
 - **Codex without `stdin=DEVNULL`.** Codex CLI hangs reading stdin in headless mode. a8s already passes `stdin=subprocess.DEVNULL` for every wake (`daemon.run_with_prefix`), so this only bites if you're running the underlying CLI manually.
-- **Headless permission denial.** Gemini without `--yolo`, Claude without `--permission-mode dontAsk`, Copilot without `--allow-all-tools`, OpenCode without `--dangerously-skip-permissions`, Cursor without `-p --force` — all silently deny tool calls in non-interactive mode and the wake stalls. The bundled `definitions/<kind>.json` files include the required flag for each kind; only worry if you write a custom definition.
+- **Headless permission denial.** Gemini without `--yolo`, Claude without `--permission-mode dontAsk`, Copilot without `--allow-all-tools`, OpenCode without `--dangerously-skip-permissions`, Cursor without `-p --force` — all silently deny tool calls in non-interactive mode and the wake stalls. The bundled `definitions/<name>.json` files include the required flag for each CLI definition; only worry if you write a custom definition.
 - **Ollama model still loading.** A cold-start of a 20B model can take 10–30s before any output. `ps aux | grep ollama` should show a `runner` process consuming RAM proportional to the model size.
 
 ## Remote delivery receipts
@@ -559,9 +573,8 @@ last locally confirmed boundary.
 
 Pre-v1 — the surface still moves. Tracked threads:
 
-- **#63 transport extensions** — MQTT (paho-mqtt impl) is the first transport (`a8s remote add`); follow-up PRs add a pure-stdlib mini-MQTT fallback that auto-activates when paho-mqtt isn't installed (same `mqtt` config kind), an HTTPS long-poll transport for self-hosted rendezvous, and a peer-to-peer TCP transport. App-level envelope encryption (per-network PSK, AES-GCM) lands as an implementation detail of specific remote types when wanted.
+- **#63 transport extensions** — MQTT (paho-mqtt impl) is the first transport (`a8s remote <name> <broker> <topic>`); follow-up PRs add a pure-stdlib mini-MQTT fallback that auto-activates when paho-mqtt isn't installed (same `mqtt` config kind), an HTTPS long-poll transport for self-hosted rendezvous, and a peer-to-peer TCP transport. App-level envelope encryption (per-network PSK, AES-GCM) lands as an implementation detail of specific remote types when wanted.
 - **#62** — Cross-cluster file payloads. `FILE:` entries currently stay local-only across remotes; cross-cluster transfer needs a payload host (TempFile.org-style ephemeral storage with signed URLs and per-message symmetric keys) so the sender's bytes can move with the message envelope.
-- **#39** — GitHub Copilot CLI as a fourth tool kind. Trivial after the verb-scheme refactor: a `copilot.json` definition + an entry in `core.MARKER_FILES`.
 
 Beyond what's filed: human participants via SMS/email connectors; synchronous `tell --wait <id>` via message-id completion polling on `trash/`; web/local UI; shared knowledge stores between teams.
 

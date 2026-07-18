@@ -1,4 +1,0 @@
-{
-  "description": "Human seat: file-proxy delivery. Messages land as JSON files in <root>/.inbox instead of waking a CLI; watch with `a8s convo -f` or poll the directory.",
-  "proxy": "file"
-}

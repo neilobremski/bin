@@ -15,10 +15,17 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from core import TELL_OUTBOX_DIR_ENV
-from tells import parse_tells_argv, tells_main
+from tells import TellsUsageError, parse_tells_argv, tells_main
 
 TELLS = Path(__file__).resolve().parent.parent.parent.parent / "tells"
+
+
+@pytest.fixture(autouse=True)
+def _clear_glow_env(monkeypatch):
+    monkeypatch.delenv("A8S_GLOW", raising=False)
 
 
 def _setup_node(tmp_path: Path) -> tuple[Path, Path]:
@@ -52,7 +59,7 @@ def test_tells_prints_arriving_message(tmp_path, monkeypatch, capsys):
     outbox, inbox = _setup_node(tmp_path)
     monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
     t = _deliver_after(inbox, 0.2, [("BOB", "here is the answer", "01MSGARRIVE0000000000000")])
-    rc = tells_main(["--timeout", "5"])
+    rc = tells_main([])
     t.join()
     out = capsys.readouterr().out
     assert rc == 0
@@ -68,7 +75,7 @@ def test_tells_prints_burst(tmp_path, monkeypatch, capsys):
         ("BOB", "third", "01BURST00000000000000000C"),
     ]
     t = _deliver_after(inbox, 0.2, burst)
-    rc = tells_main(["--timeout", "5"])
+    rc = tells_main([])
     t.join()
     out = capsys.readouterr().out
     assert rc == 0
@@ -124,6 +131,8 @@ def test_tells_help_exits_0(capsys):
     assert rc == 0
     assert "usage: tells" in err
     assert "--follow" in err
+    assert "--glow" in err
+    assert "heading templates" in err
 
 
 def test_tells_follow_prints_waves(tmp_path, monkeypatch, capsys):
@@ -138,7 +147,8 @@ def test_tells_follow_prints_waves(tmp_path, monkeypatch, capsys):
             return
         if sleeps["n"] == 2:
             _drop_inbox(inbox, "CAROL", "second", "01FOLLOW000000000000000B")
-            raise KeyboardInterrupt
+            return
+        raise KeyboardInterrupt
 
     import tells as tells_mod
 
@@ -150,25 +160,131 @@ def test_tells_follow_prints_waves(tmp_path, monkeypatch, capsys):
     assert "CAROL: second" in out
 
 
-def test_tells_follow_ignores_timeout(tmp_path, monkeypatch, capsys):
+def test_tells_rejects_follow_with_positive_timeout(capsys):
+    rc = tells_main(["-f", "--timeout", "30"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "cannot use -f/--follow with a positive --timeout" in err
+
+
+def test_tells_timeout_zero_follows_like_flag(tmp_path, monkeypatch, capsys):
     outbox, inbox = _setup_node(tmp_path)
     monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    sleeps = {"n": 0}
 
     def fake_sleep(_interval: float) -> None:
+        sleeps["n"] += 1
+        if sleeps["n"] == 1:
+            _drop_inbox(inbox, "BOB", "via zero", "01TIMEOUT000000000000000")
+            return
         raise KeyboardInterrupt
 
     import tells as tells_mod
 
     monkeypatch.setattr(tells_mod.time, "sleep", fake_sleep)
-    rc = tells_main(["-f", "--timeout", "0.5"])
+    rc = tells_main(["--timeout", "0"])
+    out = capsys.readouterr().out
     assert rc == 0
-    assert "no message within" not in capsys.readouterr().err
+    assert "BOB: via zero" in out
 
 
-def test_parse_tells_follow_clears_timeout():
-    opts = parse_tells_argv(["-f", "--timeout", "30"])
-    assert opts.follow is True
-    assert opts.timeout is None
+def test_parse_tells_timeout_zero_is_follow_forever():
+    opts = parse_tells_argv(["--timeout", "0"])
+    assert opts.follow_forever is True
+
+
+def test_parse_tells_rejects_follow_with_positive_timeout():
+    with pytest.raises(TellsUsageError, match="cannot use -f/--follow with a positive --timeout"):
+        parse_tells_argv(["-f", "--timeout", "30"])
+
+
+def test_tells_timed_follow_prints_waves(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    sleeps = {"n": 0}
+    monotonic = {"t": 0.0}
+
+    def fake_sleep(_interval: float) -> None:
+        sleeps["n"] += 1
+        if sleeps["n"] == 1:
+            monotonic["t"] = 0.1
+            _drop_inbox(inbox, "BOB", "first", "01TIMED0000000000000000A")
+            return
+        if sleeps["n"] == 2:
+            monotonic["t"] = 0.2
+            _drop_inbox(inbox, "CAROL", "second", "01TIMED0000000000000000B")
+            return
+        monotonic["t"] = 6.0
+
+    import tells as tells_mod
+
+    monkeypatch.setattr(tells_mod.time, "sleep", fake_sleep)
+    monkeypatch.setattr(tells_mod.time, "monotonic", lambda: monotonic["t"])
+    rc = tells_main(["--timeout", "5"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "BOB: first" in out
+    assert "CAROL: second" in out
+
+
+def test_parse_tells_glow_and_heading_flags():
+    opts = parse_tells_argv(["--glow", "dracula", "--heading-in", "### {from}"])
+    assert opts.glow_theme == "dracula"
+    assert opts.heading_in == "### {from}"
+    assert opts.markdown is True
+
+
+def test_parse_tells_glow_without_theme():
+    opts = parse_tells_argv(["--glow"])
+    assert opts.glow_theme == "auto"
+    assert opts.markdown is True
+
+
+def test_parse_tells_glow_env(monkeypatch):
+    monkeypatch.setenv("A8S_GLOW", "tokyo-night")
+    opts = parse_tells_argv([])
+    assert opts.glow_theme == "tokyo-night"
+    assert opts.markdown is True
+
+
+def test_tells_markdown_heading_without_glow(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    monkeypatch.delenv("A8S_GLOW", raising=False)
+    t = _deliver_after(inbox, 0.2, [("BOB", "markdown body", "01MDHEAD00000000000000000")])
+    rc = tells_main(["--heading-in", "### from {from}"])
+    t.join()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "### from BOB" in out
+    assert "markdown body" in out
+    assert "BOB: markdown body" not in out
+
+
+def test_tells_glow_renders_through_stream(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    monkeypatch.delenv("A8S_GLOW", raising=False)
+    writes: list[str] = []
+
+    class FakeGlow:
+        def write(self, text: str) -> int:
+            writes.append(text)
+            return len(text)
+
+        def close(self) -> None:
+            writes.append("__close__")
+
+    monkeypatch.setattr("convo.open_glow_stdout", lambda theme: (writes.append(f"open:{theme}") or FakeGlow()))
+
+    t = _deliver_after(inbox, 0.2, [("BOB", "glow body", "01GLOWTELL000000000000000")])
+    rc = tells_main(["--glow", "dracula"])
+    t.join()
+    assert rc == 0
+    assert "open:dracula" in writes
+    assert any("glow body" in w for w in writes)
+    assert "__close__" in writes
+    assert capsys.readouterr().out == ""
 
 
 def test_tells_shim_times_out(tmp_path):

@@ -22,6 +22,7 @@ __all__ = [
     "HEADING_PLACEHOLDERS",
     "convo_help_epilog",
     "decode_template",
+    "entry_from_message",
     "extract_heading_templates",
     "format_conversation",
     "format_entry",
@@ -31,6 +32,7 @@ __all__ = [
     "open_glow_stdout",
     "print_entries",
     "record",
+    "write_block",
 ]
 
 DEFAULT_HEADING_OUT = "## from {from} to {to} at {timestamp}"
@@ -130,7 +132,8 @@ def involves_agent(entry: dict[str, Any], agent: str) -> bool:
     return any(_name_key(r) == key for r in recipients)
 
 
-def _entry_from_message(msg: dict[str, Any], *, recipients: list[str]) -> dict[str, Any]:
+def entry_from_message(msg: dict[str, Any], *, recipients: list[str] | None = None) -> dict[str, Any]:
+    """Normalize a tell/inbox envelope into a conversation archive entry."""
     files = msg.get("files") or []
     filenames = [
         (e.get("filename") or "").strip()
@@ -144,7 +147,7 @@ def _entry_from_message(msg: dict[str, Any], *, recipients: list[str]) -> dict[s
         "content": msg.get("content", ""),
         "files": filenames,
         "id": (msg.get("id") or "").strip(),
-        "recipients": list(recipients),
+        "recipients": list(recipients or []),
     }
 
 
@@ -181,7 +184,7 @@ def record(msg: dict[str, Any], *, recipients: list[str]) -> None:
     remote-only sends."""
     if not recipients:
         return
-    entry = _entry_from_message(msg, recipients=recipients)
+    entry = entry_from_message(msg, recipients=recipients)
     msg_id = entry.get("id") or ""
     try:
         rows = load_entries()
@@ -262,7 +265,7 @@ def open_glow_stdout(theme: str = "auto"):
     return _open(theme)
 
 
-def _write_block(block: str, glow_stream: object | None) -> None:
+def write_block(block: str, glow_stream: object | None) -> None:
     if not block:
         return
     if glow_stream is not None:
@@ -282,7 +285,7 @@ def print_entries(
 ) -> None:
     for entry in entries:
         block = format_entry(agent, entry, heading_out=heading_out, heading_in=heading_in)
-        _write_block(block, glow_stream)
+        write_block(block, glow_stream)
 
 
 def format_conversation(

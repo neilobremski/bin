@@ -40,7 +40,7 @@ from core import (
     trash_dir,
     unique_path,
 )
-from definitions import _autodiscover_definition, default_definition_path
+from definitions import _autodiscover_definition, default_definition_path, resolve_definition_arg
 from daemon import (
     _clear_kill_request,
     _read_handler_pid,
@@ -174,7 +174,8 @@ def cmd_add(args: list[str]) -> int:
     auto-linked. Multiple or zero markers fall back to the bundled default.
 
     With `<definition>`, the JSON file is validated and set as the agent's
-    definition.
+    definition. A bare name (`filedrop`, `claude`, `filedrop.json`) resolves against
+    bundled `apps/a8s/definitions/`; any other path is used as-is.
 
     Errors on duplicate name (vs. agents or aliases) or non-directory path."""
     if len(args) < 2 or len(args) > 3:
@@ -212,9 +213,10 @@ def cmd_add(args: list[str]) -> int:
             return 1
 
     if definition_arg:
-        path = Path(definition_arg).expanduser().resolve()
-        if not path.is_file():
-            print(f"not a file: {path}", file=sys.stderr)
+        try:
+            path = resolve_definition_arg(definition_arg)
+        except FileNotFoundError:
+            print(f"not a file: {definition_arg}", file=sys.stderr)
             return 1
         try:
             with path.open("r", encoding="utf-8") as f:
@@ -305,7 +307,7 @@ def cmd_define(args: list[str]) -> int:
     """`a8s define <name>`           — show <name>'s effective definition + source.
     `a8s define <name> <path>`       — set <name>'s definition file path in the registry."""
     if not args:
-        print("usage: a8s define <name> [<path-to-definition.json>]", file=sys.stderr)
+        print("usage: a8s define <name> [<definition>]", file=sys.stderr)
         return 2
     name = args[0]
     reg = load_registry()
@@ -323,7 +325,7 @@ def cmd_define(args: list[str]) -> int:
         custom = info.get("definition")
         if not custom:
             print(f"{target_key}: no definition set", file=sys.stderr)
-            print(f"hint: a8s define {target_key} apps/a8s/definitions/<kind>.json", file=sys.stderr)
+            print(f"hint: a8s define {target_key} filedrop   # or path to *.json", file=sys.stderr)
             return 1
         source = Path(custom).expanduser()
         print(f"{target_key}: {source}")
@@ -336,11 +338,13 @@ def cmd_define(args: list[str]) -> int:
         return 0
 
     if len(args) > 2:
-        print("usage: a8s define <name> [<path-to-definition.json>]", file=sys.stderr)
+        print("usage: a8s define <name> [<definition>]", file=sys.stderr)
         return 2
-    path = Path(args[1]).expanduser().resolve()
-    if not path.is_file():
-        print(f"not a file: {path}", file=sys.stderr)
+    path = None
+    try:
+        path = resolve_definition_arg(args[1])
+    except FileNotFoundError:
+        print(f"not a file: {args[1]}", file=sys.stderr)
         return 1
     try:
         with path.open("r", encoding="utf-8") as f:
@@ -396,11 +400,11 @@ def _pid_uptime(name: str) -> str:
 
 def cmd_ls(args: list[str] | None = None) -> int:
     """`a8s ls` — list every registered node, running or not (docker/ollama
-    style). Columns: NAME, STATUS, KIND, ROOT, plus NAMESPACES when any prefix
-    is bound. `-q` prints just names, one per line, for scripting.
+    style). Columns: NAME, STATUS, DEFINITION, ROOT, plus NAMESPACES when any
+    prefix is bound. `-q` prints just names, one per line, for scripting.
 
-    STATUS is `running (pid N)` or `stopped`; KIND is the definition basename
-    (default fallback applies when the registry has no `definition` field)."""
+    STATUS is `running (pid N)` or `stopped`; DEFINITION is the definition
+    basename (default fallback when the registry has no `definition` field)."""
     args = args or []
     quiet = "-q" in args
     reg = load_registry()
@@ -425,15 +429,15 @@ def cmd_ls(args: list[str] | None = None) -> int:
         pid = _read_handler_pid(name)
         status = f"running (pid {pid})" if pid is not None else "stopped"
         defn = info.get("definition") or str(default_definition_path("default"))
-        kind = Path(defn).stem
+        definition = Path(defn).stem
         root = info.get("root", "?")
         ns = " ".join(sorted(bindings.get(name.lower(), [])))
-        rows.append((name, status, kind, root, ns))
+        rows.append((name, status, definition, root, ns))
 
     if any(row[4] for row in rows):
-        _print_table(["NAME", "STATUS", "KIND", "ROOT", "NAMESPACES"], rows)
+        _print_table(["NAME", "STATUS", "DEFINITION", "ROOT", "NAMESPACES"], rows)
     else:
-        _print_table(["NAME", "STATUS", "KIND", "ROOT"], [r[:4] for r in rows])
+        _print_table(["NAME", "STATUS", "DEFINITION", "ROOT"], [r[:4] for r in rows])
     return 0
 
 
