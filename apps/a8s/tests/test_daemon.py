@@ -328,7 +328,9 @@ class TestTellOutboxEnv:
         assert captured["env"][TELL_OUTBOX_DIR_ENV] == str(external.resolve())
 
     def test_wake_env_matches_participant_outbox_path(self, tmp_path):
+        from core import TELL_FILE_MAX_ENV, TELL_OUTBOX_DIR_ENV
         from daemon import _tell_outbox_env
+        from settings import get_int
 
         agent_root = tmp_path / "agent"
         agent_root.mkdir()
@@ -336,6 +338,7 @@ class TestTellOutboxEnv:
         p = Participant("X", agent_root, outbox=external)
         assert _tell_outbox_env(p) == {
             TELL_OUTBOX_DIR_ENV: str(external.resolve()),
+            TELL_FILE_MAX_ENV: str(get_int("max_file_bytes")),
         }
 
 

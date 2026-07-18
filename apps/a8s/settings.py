@@ -58,7 +58,7 @@ KNOBS: tuple[Knob, ...] = (
         "machine",
         True,
         "A8S_MAX_FILE_BYTES",
-        "Attachment size cap at routing time (bytes)",
+        "Attachment size cap at routing time (bytes); a8s also injects TELL_FILE_MAX on wake for tell",
     ),
     Knob(
         "max_seen_ids",
