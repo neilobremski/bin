@@ -118,10 +118,11 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 
 |                                |                                                                                                                                                                |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `a8s add <name> <dir> [<def>]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given (path, or bare name from bundled `definitions/` or `a8s defs add`). |
+| `a8s add <name> <dir> [<def>] [--KEY=value …]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given (path, or bare name from bundled `definitions/` or `a8s defs add`). Trailing `--KEY=value` sets per-node a8s vars (case-insensitive; same as `a8s vars`). |
 | `a8s remove <name>` / `a8s rm <name>` | Unregister an agent. Wipes `~/.a8s/agents/<NAME>/` and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running. |
 | `a8s define <name> [<path>]`   | Show or set the agent's definition file (path or bare name).                                                                                              |
 | `a8s definitions` / `a8s defs` | Manage user-installed templates in `~/.a8s/definitions/` (`add` / `rm` / `ls`). Basename must not collide with a repo built-in; bare names then work with `add`/`define`. |
+| `a8s vars <name> [set\|unset …]` | Per-node a8s vars for `$KEY` in definition argv (not OS env). Used-but-unset fails wake. |
 | `a8s discover <path>`          | Walk a path for marker files; print suggested `add`+`define` commands. Read-only.                                                                              |
 | `a8s ls [-q]`                  | List every registered node, running or not: NAME, STATUS (`running (pid N)` / `stopped`), DEFINITION, ROOT, and bound namespaces. `-q` prints just names. |
 
@@ -187,7 +188,8 @@ any prefixes pointing at it.
 | `a8s start <name>` | Spawn a detached background process to handle the agent (or every member of an alias, in one process).                                                                                                                                                                              |
 | `a8s run <name>`   | Foreground attached loop. Aliases produce one process with interleaved output. Ctrl+C: graceful detach. 2nd Ctrl+C: kill the wake subprocess group.                                                                                                                                 |
 | `a8s step <name>`  | Attach, do one route+drain pass, release. Heavyweight: detaches the current handler if any.                                                                                                                                                                                         |
-| `a8s stop <name>`  | SIGTERM the handler. Aliases dedupe by PID — one signal per multi-agent handler. Graceful detach.                                                                                                                                                                                   |
+| `a8s stop <name> [--force]` | SIGTERM the handler, then **wait** until it has detached. Idle stops immediately; a busy wake finishes first (like first Ctrl+C). `--force` / `-f` sends a second SIGTERM to kill the in-flight wake (like second Ctrl+C), then waits. |
+| `a8s restart <name> [--force]` | `stop` (wait until detached) then `start`. `--force` is passed to stop. If not running, just starts. |
 | `a8s kill <name>`  | Per-agent force-detach: writes a kill-request, SIGUSR1s the holder. Holder kills the in-flight wake subprocess iff it's for that agent and releases the attachment; siblings keep running. Falls back to whole-process SIGTERM only if the holder doesn't honor the request in 10s. |
 | `a8s exit`         | SIGTERM every running handler.                                                                                                                                                                                                                                                      |
 | `a8s ps [-q]`      | List only running node processes: NAME, PID, UPTIME, ROOT. `-q` prints just names. Empty state hints at `a8s ls`.                                                                                                                                                                    |
@@ -271,6 +273,7 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `copilot.json`  | GitHub Copilot CLI with `--allow-all-tools` (required for non-interactive `-p` mode) + `--continue`. Marker is `.github/copilot-instructions.md` (Copilot's native repo-instructions location).                                                    |
 | `cursor.json`   | Cursor Agent CLI (`agent`) with `-p --trust --force --approve-mcps --continue` for headless tool use. Marker is `CURSOR.md`.                                                                                                                       |
 | `opencode.json` | [OpenCode](https://opencode.ai/) — BYO model. `opencode run --continue --dangerously-skip-permissions`. Operator picks the provider/model in each agent's own `opencode.json` (e.g. `{"model": "ollama/gpt-oss:20b"}`), not in the a8s definition. |
+| `ollama-opencode.json` | OpenCode via `ollama launch` — requires a8s var `MODEL`. Example: `a8s add bob ./ ollama-opencode --model=qwen3.6`. |
 | `filedrop.json` | Filedrop seat — file-proxy delivery into `<root>/.inbox/`; no CLI wake. Watch with `tells -f`. See [docs/filedrop.md](docs/filedrop.md). Bare name: `a8s add <name> <dir> filedrop`.                                                              |
 | `claude-proxy.json` | Claude Code filedrop variant (same file-proxy shape).                                                                                                                                                                                           |
 | `default.json`  | Fallback — runs `dummy-cli` and prints "no real CLI configured"                                                                                                                                                                                    |
@@ -311,7 +314,7 @@ Strict opacity (issues #69, #70) still holds: a routed message looks identical w
 }
 ```
 
-Argv elements run through six substitutions:
+Argv elements run through built-in substitutions plus any per-node **a8s vars**:
 
 - `$SENDER` → sender's canonical name (always non-empty — every message has a force-stamped agent `from`).
 - `$RECIPIENT` → what the sender wrote in `to` (alias name for fanned messages, agent name for direct ones).
@@ -319,8 +322,19 @@ Argv elements run through six substitutions:
 - `$TIMESTAMP` → ISO 8601 UTC timestamp the message was queued (e.g. `2026-04-28T14:30:00.123456Z`). Useful when you want a stable machine-readable time.
 - `$AGE` → human-readable age relative to now (e.g. `5 minutes ago`). Computed at wake time, so a long backlog gets accurate values per message. Pick this OR `$TIMESTAMP` per definition based on which the LLM will read more naturally.
 - `$A8S_DIR` → `apps/a8s/` itself, so definitions can point at bundled scripts (`default.json` uses this for `dummy-cli`).
+- `$DEFINITION_PATH` → resolved path of this agent's definition file.
+- `$KEY` → any key from `a8s vars <name> set KEY value` (registry `vars` map). **Not** OS environment — no correlation with process env. If the definition references `$KEY` and that var is unset, wake fails closed.
 
 `$TIMESTAMP` and `$AGE` are empty for any message without a `date` field (defensive — every `_write_outbox` stamps one).
+
+```bash
+a8s add bob ./ ollama-opencode --model=qwen3.6
+a8s vars bob set MODEL qwen3.6   # same effect after the fact; keys case-insensitive
+a8s vars bob
+a8s vars bob unset model
+```
+
+A shared definition can then use `"--model", "$MODEL"`; each node supplies its own value.
 
 Override per-agent with `a8s define <name> <definition>` — a filesystem path or a bare name (`filedrop`, `claude`, or a user template from `a8s defs add`). The file isn't moved or copied into the agent root; the registry stores the resolved path.
 

@@ -33,3 +33,19 @@ def test_defs_is_alias_for_definitions(monkeypatch):
     assert cli.dispatch("defs", ["ls"], interval=1.0) == 3
     assert cli.dispatch("definitions", ["add", "x.json"], interval=1.0) == 3
     assert calls == [["ls"], ["add", "x.json"]]
+
+
+def test_vars_dispatches(monkeypatch):
+    assert "vars" in cli.KNOWN_COMMANDS
+    calls = []
+    monkeypatch.setattr(cli, "cmd_vars", lambda args: calls.append(args) or 0)
+    assert cli.dispatch("vars", ["bob", "set", "MODEL", "x"], interval=1.0) == 0
+    assert calls == [["bob", "set", "MODEL", "x"]]
+
+
+def test_restart_dispatches(monkeypatch):
+    assert "restart" in cli.KNOWN_COMMANDS
+    calls = []
+    monkeypatch.setattr(cli, "cmd_restart", lambda args: calls.append(args) or 0)
+    assert cli.dispatch("restart", ["qwen", "--force"], interval=1.0) == 0
+    assert calls == [["qwen", "--force"]]

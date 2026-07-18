@@ -48,6 +48,7 @@ from definitions import (
     definition_stem,
     list_definition_entries,
     resolve_definition_arg,
+    validate_var_name,
 )
 from daemon import (
     _clear_kill_request,
@@ -170,7 +171,7 @@ def _install_skills_into(base: Path) -> int:
 # ---------- registry management commands ----------
 
 def cmd_add(args: list[str]) -> int:
-    """`a8s add <name> <dir> [<definition>]` — register a new agent.
+    """`a8s add <name> <dir> [<definition>] [--KEY=value ...]` — register a node.
 
     The name is canonicalized (lowercase, alphanumeric) at registration so
     `a8s add CLAUDE` and `a8s add claude` collapse to the same agent — closes
@@ -182,16 +183,40 @@ def cmd_add(args: list[str]) -> int:
     auto-linked. Multiple or zero markers fall back to the bundled default.
 
     With `<definition>`, the JSON file is validated and set as the agent's
-    definition. A bare name (`filedrop`, `claude`, `filedrop.json`) resolves
+    definition. A bare name (`filedrop`, `claude`, `ollama-opencode`) resolves
     against bundled `apps/a8s/definitions/`, then user-installed
     ``~/.a8s/definitions/`` (`a8s defs add`); any other path is used as-is.
 
+    Trailing ``--KEY=value`` flags set per-node a8s vars (same as
+    ``a8s vars <name> set KEY value``). Keys are case-insensitive.
+
     Errors on duplicate name (vs. agents or aliases) or non-directory path."""
-    if len(args) < 2 or len(args) > 3:
-        print("usage: a8s add <name> <dir> [<definition>]", file=sys.stderr)
+    if len(args) < 2:
+        print(
+            "usage: a8s add <name> <dir> [<definition>] [--KEY=value ...]",
+            file=sys.stderr,
+        )
         return 2
     raw_name, dir_str = args[0], args[1]
-    definition_arg = args[2] if len(args) == 3 else None
+    rest = args[2:]
+    definition_arg: str | None = None
+    var_tokens: list[str] = []
+    for tok in rest:
+        if tok.startswith("--"):
+            var_tokens.append(tok)
+        elif definition_arg is None and not var_tokens:
+            definition_arg = tok
+        else:
+            print(
+                "usage: a8s add <name> <dir> [<definition>] [--KEY=value ...]",
+                file=sys.stderr,
+            )
+            return 2
+    try:
+        initial_vars = _parse_add_var_flags(var_tokens)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     try:
         name = canonical_name(raw_name)
     except ValueError as e:
@@ -238,11 +263,33 @@ def cmd_add(args: list[str]) -> int:
     else:
         definition_path, note = _autodiscover_definition(root)
 
-    reg[name] = {"root": str(root), "definition": definition_path}
+    entry: dict = {"root": str(root), "definition": definition_path}
+    if initial_vars:
+        entry["vars"] = dict(sorted(initial_vars.items()))
+    reg[name] = entry
     save_registry(reg)
     print(f"added {name} -> {root}")
     print(f"definition: {definition_path}  ({note})")
+    for k, v in sorted(initial_vars.items()):
+        print(f"var: {k}={v}")
     return 0
+
+
+def _parse_add_var_flags(tokens: list[str]) -> dict[str, str]:
+    """Parse ``--KEY=value`` tokens into a canonical (uppercase) vars map."""
+    out: dict[str, str] = {}
+    for tok in tokens:
+        if not tok.startswith("--") or len(tok) < 3:
+            raise ValueError(f"expected --KEY=value, got: {tok!r}")
+        body = tok[2:]
+        if "=" not in body:
+            raise ValueError(f"expected --KEY=value, got: {tok!r}")
+        raw_key, _, value = body.partition("=")
+        if not raw_key:
+            raise ValueError(f"expected --KEY=value, got: {tok!r}")
+        key = validate_var_name(raw_key)
+        out[key] = value
+    return out
 
 
 def cmd_remove(args: list[str]) -> int:
@@ -479,6 +526,120 @@ def _cmd_definitions_remove(name: str) -> int:
         return 1
     dest.unlink()
     print(f"removed definition {stem}")
+    return 0
+
+
+def _vars_usage() -> int:
+    print(
+        "usage: a8s vars <name>                 # list a8s vars for a node\n"
+        "       a8s vars <name> set <KEY> <val> # set (not OS environment)\n"
+        "       a8s vars <name> unset <KEY>     # remove\n"
+        "\n"
+        "Per-node placeholders for definition argv ($KEY). Names are\n"
+        "case-insensitive (stored uppercase). Built-in names ($SENDER,\n"
+        "$MESSAGE, …) are reserved. Used-but-unset is a wake error.",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def cmd_vars(args: list[str]) -> int:
+    """`a8s vars` — per-node a8s variables for definition interpolation.
+
+    Stored on the agent in the registry (`vars` map). Expanded as `$KEY` in
+    invoke argv; never read from or written to the process environment.
+    """
+    if len(args) < 1:
+        return _vars_usage()
+    match = resolve_recipient(args[0])
+    if match is None:
+        print(f"no agent named {args[0]!r}", file=sys.stderr)
+        return 1
+    agent_key, info = match
+    if len(args) == 1:
+        return _cmd_vars_list(agent_key, info)
+    sub = args[1]
+    if sub == "set":
+        if len(args) != 4:
+            return _vars_usage()
+        return _cmd_vars_set(agent_key, info, args[2], args[3])
+    if sub == "unset":
+        if len(args) != 3:
+            return _vars_usage()
+        return _cmd_vars_unset(agent_key, info, args[2])
+    return _vars_usage()
+
+
+def _cmd_vars_list(agent_key: str, info: dict) -> int:
+    raw = info.get("vars")
+    vars_map = raw if isinstance(raw, dict) else {}
+    items: dict[str, str] = {}
+    for k, v in vars_map.items():
+        if isinstance(k, str) and isinstance(v, str):
+            items[k.upper()] = v
+    if not items:
+        print(f"{agent_key}: (no vars)")
+        return 0
+    width = max(len(k) for k in items)
+    for k in sorted(items):
+        print(f"{k.ljust(width)}  {items[k]}")
+    return 0
+
+
+def _cmd_vars_set(agent_key: str, info: dict, key: str, value: str) -> int:
+    try:
+        key = validate_var_name(key)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    reg = load_registry()
+    entry = reg.get(agent_key)
+    if entry is None:
+        print(f"no agent named {agent_key!r}", file=sys.stderr)
+        return 1
+    vars_map = entry.get("vars")
+    if not isinstance(vars_map, dict):
+        vars_map = {}
+        entry["vars"] = vars_map
+    overwriting = False
+    for existing in list(vars_map):
+        if isinstance(existing, str) and existing.upper() == key:
+            del vars_map[existing]
+            overwriting = True
+    vars_map[key] = value
+    save_registry(reg)
+    verb = "updated" if overwriting else "set"
+    print(f"{agent_key}: {verb} {key}={value}")
+    return 0
+
+
+def _cmd_vars_unset(agent_key: str, info: dict, key: str) -> int:
+    try:
+        key = validate_var_name(key)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    reg = load_registry()
+    entry = reg.get(agent_key)
+    if entry is None:
+        print(f"no agent named {agent_key!r}", file=sys.stderr)
+        return 1
+    vars_map = entry.get("vars")
+    if not isinstance(vars_map, dict):
+        print(f"{agent_key}: no var named {key!r}", file=sys.stderr)
+        return 1
+    found = False
+    for existing in list(vars_map):
+        if isinstance(existing, str) and existing.upper() == key:
+            del vars_map[existing]
+            found = True
+    if not found:
+        print(f"{agent_key}: no var named {key!r}", file=sys.stderr)
+        return 1
+    if not vars_map:
+        entry.pop("vars", None)
+    save_registry(reg)
+    print(f"{agent_key}: unset {key}")
     return 0
 
 
@@ -1164,15 +1325,62 @@ def cmd_step(args: list[str], interval: float) -> int:
     return attached_loop(members, interval, single_pass=True)
 
 
+STOP_WAIT_S = 600.0
+STOP_FORCE_WAIT_S = 30.0
+STOP_POLL_S = 0.1
+
+
+def _split_force_flag(args: list[str]) -> tuple[list[str], bool]:
+    force = False
+    rest: list[str] = []
+    for a in args:
+        if a in ("--force", "-f"):
+            force = True
+        else:
+            rest.append(a)
+    return rest, force
+
+
+def _handlers_still_holding(members: list[str], signaled_pids: set[int]) -> bool:
+    """True while any member is still attached to one of the signaled PIDs,
+    or any of those PIDs is still alive (shutting down after release)."""
+    for name in members:
+        pid = _read_handler_pid(name)
+        if pid is not None and pid in signaled_pids and _pid_alive(pid):
+            return True
+    return any(_pid_alive(pid) for pid in signaled_pids)
+
+
+def _wait_handlers_stopped(
+    members: list[str],
+    signaled_pids: set[int],
+    timeout: float,
+) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not _handlers_still_holding(members, signaled_pids):
+            return True
+        time.sleep(STOP_POLL_S)
+    return not _handlers_still_holding(members, signaled_pids)
+
+
 def cmd_stop(args: list[str]) -> int:
-    """`a8s stop <name>` — SIGTERM the handler(s). One handler may serve
-    multiple members of an alias; we dedupe by PID so we signal each unique
-    handler exactly once. Detaches the WHOLE handler (collateral on any other
-    members it was handling)."""
-    if len(args) != 1:
-        print("usage: a8s stop <name>", file=sys.stderr)
+    """`a8s stop <name> [--force]` — SIGTERM the handler(s), then wait until
+    they have actually detached.
+
+    Like Ctrl+C on `a8s run`: the first signal asks for a graceful detach
+    after the current wake. Idle nodes stop immediately; a busy wake finishes
+    first. ``--force`` / ``-f`` sends a second SIGTERM so the daemon kills the
+    in-flight wake subprocess group (same as a second Ctrl+C), then waits.
+
+    One handler may serve multiple alias members; we dedupe by PID so each
+    unique handler is signaled once. Detaches the WHOLE handler.
+    """
+    rest, force = _split_force_flag(args)
+    if len(rest) != 1:
+        print("usage: a8s stop <name> [--force]", file=sys.stderr)
         return 2
-    members = _expand_to_agents(args[0])
+    members = _expand_to_agents(rest[0])
     if members is None:
         return 1
     seen_pids: dict[int, str] = {}
@@ -1194,9 +1402,56 @@ def cmd_stop(args: list[str]) -> int:
             print(f"{label}: sent SIGTERM to PID {pid}")
         except OSError as e:
             print(f"{label}: could not signal PID {pid}: {e}", file=sys.stderr)
+    if force:
+        time.sleep(0.05)
+        for pid, label in seen_pids.items():
+            try:
+                os.kill(pid, signal.SIGTERM)
+                print(f"{label}: sent second SIGTERM (force) to PID {pid}")
+            except ProcessLookupError:
+                pass
+            except OSError as e:
+                print(f"{label}: could not signal PID {pid}: {e}", file=sys.stderr)
+    wait_s = STOP_FORCE_WAIT_S if force else STOP_WAIT_S
+    print(f"waiting up to {wait_s:g}s for stop…")
+    if not _wait_handlers_stopped(members, set(seen_pids), wait_s):
+        print(
+            f"still running after {wait_s:g}s"
+            + ("" if force else " — try `a8s stop --force` or `a8s kill`"),
+            file=sys.stderr,
+        )
+        return 1
+    for n in members:
+        if n not in not_running:
+            print(f"{n}: stopped")
     for n in not_running:
         print(f"{n}: not running")
     return 0
+
+
+def cmd_restart(args: list[str]) -> int:
+    """`a8s restart <name> [--force]` — stop (wait until detached) then start.
+
+    If the node is not running, skip straight to start. ``--force`` is passed
+    through to stop so an in-flight wake is interrupted.
+    """
+    rest, force = _split_force_flag(args)
+    if len(rest) != 1:
+        print("usage: a8s restart <name> [--force]", file=sys.stderr)
+        return 2
+    name = rest[0]
+    members = _expand_to_agents(name)
+    if members is None:
+        return 1
+    any_running = any(_read_handler_pid(n) is not None for n in members)
+    if any_running:
+        stop_args = [name]
+        if force:
+            stop_args.append("--force")
+        rc = cmd_stop(stop_args)
+        if rc != 0:
+            return rc
+    return cmd_start([name])
 
 
 KILL_TIMEOUT_S = 10.0
