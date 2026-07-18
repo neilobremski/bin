@@ -323,6 +323,15 @@ def settings_path() -> Path:
     return _a8s_dir() / "settings.json"
 
 
+def user_definitions_dir() -> Path:
+    """User-installed definition templates under ``~/.a8s/definitions/``.
+
+    Bare names for ``a8s add`` / ``a8s define`` resolve here after the
+    repo-bundled ``DEFINITIONS_DIR``. Install with ``a8s defs add``.
+    """
+    return _a8s_dir() / "definitions"
+
+
 def conversations_path() -> Path:
     """`~/.a8s/conversations.jsonl` — routed message archive for `a8s convo`."""
     return _a8s_dir() / "conversations.jsonl"

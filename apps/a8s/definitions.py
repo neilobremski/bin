@@ -28,6 +28,7 @@ from core import (
     resolve_files_path,
     resolve_inbox_path,
     resolve_outbox_path,
+    user_definitions_dir,
 )
 from registry import load_registry
 
@@ -38,11 +39,42 @@ def default_definition_path(kind: str) -> Path:
     return DEFINITIONS_DIR / f"{kind}.json"
 
 
+def definition_stem(raw: str) -> str:
+    """Basename without ``.json`` — the short name used for bare resolution."""
+    name = Path(raw).name
+    if name.endswith(".json"):
+        name = name[:-5]
+    return name
+
+
+def builtin_definition_stems() -> set[str]:
+    return {p.stem for p in DEFINITIONS_DIR.glob("*.json") if p.is_file()}
+
+
+def list_definition_entries() -> list[tuple[str, str, Path]]:
+    """All known templates as ``(name, source, path)``, sorted by name.
+
+    ``source`` is ``builtin`` (repo) or ``user`` (``~/.a8s/definitions``).
+    Builtin wins when both exist for the same stem.
+    """
+    entries: dict[str, tuple[str, str, Path]] = {}
+    user_dir = user_definitions_dir()
+    if user_dir.is_dir():
+        for p in sorted(user_dir.glob("*.json")):
+            if p.is_file():
+                entries[p.stem] = (p.stem, "user", p.resolve())
+    for p in sorted(DEFINITIONS_DIR.glob("*.json")):
+        if p.is_file():
+            entries[p.stem] = (p.stem, "builtin", p.resolve())
+    return [entries[k] for k in sorted(entries)]
+
+
 def resolve_definition_arg(spec: str) -> Path:
     """Resolve an `a8s add` / `a8s define` definition argument.
 
     Prefers an existing filesystem path. A bare name (`filedrop` or `filedrop.json`)
-    that is not a local file resolves against bundled `definitions/`.
+    that is not a local file resolves against bundled `definitions/`, then
+    user-installed ``~/.a8s/definitions/``.
     """
     raw = Path(spec).expanduser()
     if raw.is_file():
@@ -56,12 +88,13 @@ def resolve_definition_arg(spec: str) -> Path:
 
     if len(raw.parts) == 1:
         name = raw.name
-        candidates = [DEFINITIONS_DIR / name]
-        if not name.endswith(".json"):
-            candidates.append(DEFINITIONS_DIR / f"{name}.json")
-        for cand in candidates:
-            if cand.is_file():
-                return cand.resolve()
+        for base in (DEFINITIONS_DIR, user_definitions_dir()):
+            candidates = [base / name]
+            if not name.endswith(".json"):
+                candidates.append(base / f"{name}.json")
+            for cand in candidates:
+                if cand.is_file():
+                    return cand.resolve()
 
     raise FileNotFoundError(spec)
 

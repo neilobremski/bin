@@ -13,6 +13,7 @@ import pytest
 from commands import (
     cmd_add,
     cmd_alias,
+    cmd_definitions,
     cmd_kill,
     cmd_logs,
     cmd_ls,
@@ -29,10 +30,11 @@ from commands import (
     cmd_unremote,
     cmd_unstorage,
 )
-from core import Participant, TELL_OUTBOX_DIR_ENV, agent_dir, agent_log_path, files_dir, kill_request_path, outbox_bundle_dir, outbox_dir, pid_path
+from core import Participant, TELL_OUTBOX_DIR_ENV, agent_dir, agent_log_path, files_dir, kill_request_path, outbox_bundle_dir, outbox_dir, pid_path, user_definitions_dir
 from mailbox import ensure_mailboxes
 from network import load_network_config, save_network_config
 from registry import load_aliases, load_namespaces, load_registry, save_namespaces, save_registry
+from definitions import resolve_definition_arg
 
 
 @pytest.fixture
@@ -601,6 +603,62 @@ class TestCmdPs:
         rc = cmd_ps(["-q"])
         assert rc == 0
         assert capsys.readouterr().out == ""
+
+
+class TestCmdDefinitions:
+    def test_list_includes_builtins(self, fake_home, capsys):
+        rc = cmd_definitions([])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "NAME" in out and "SOURCE" in out and "PATH" in out
+        assert "builtin" in out
+        assert "filedrop" in out
+
+    def test_add_then_resolve_and_rm(self, fake_home, tmp_path, capsys):
+        src = tmp_path / "my-custom-definition.json"
+        src.write_text('{"invoke": ["echo", "hi"]}')
+        rc = cmd_definitions(["add", str(src)])
+        assert rc == 0
+        dest = user_definitions_dir() / "my-custom-definition.json"
+        assert dest.is_file()
+        assert resolve_definition_arg("my-custom-definition") == dest.resolve()
+        capsys.readouterr()
+        rc = cmd_definitions(["ls"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "my-custom-definition" in out
+        assert "user" in out
+        rc = cmd_definitions(["rm", "my-custom-definition"])
+        assert rc == 0
+        assert not dest.exists()
+
+    def test_add_rejects_builtin_name(self, fake_home, tmp_path, capsys):
+        src = tmp_path / "filedrop.json"
+        src.write_text('{"invoke": ["echo"]}')
+        rc = cmd_definitions(["add", str(src)])
+        assert rc == 1
+        assert "conflicts with a repo built-in" in capsys.readouterr().err
+        assert not (user_definitions_dir() / "filedrop.json").exists()
+
+    def test_rm_rejects_builtin(self, fake_home, capsys):
+        rc = cmd_definitions(["remove", "claude"])
+        assert rc == 1
+        assert "cannot remove built-in" in capsys.readouterr().err
+
+    def test_add_rejects_invalid_json(self, fake_home, tmp_path, capsys):
+        src = tmp_path / "broken.json"
+        src.write_text("{not json")
+        rc = cmd_definitions(["add", str(src)])
+        assert rc == 1
+        assert "not valid JSON" in capsys.readouterr().err
+
+    def test_add_then_bare_add_agent(self, fake_home, tmp_path, agent_root):
+        src = tmp_path / "my-custom-definition.json"
+        src.write_text('{"invoke": ["echo"]}')
+        assert cmd_definitions(["add", str(src)]) == 0
+        assert cmd_add(["alice", str(agent_root), "my-custom-definition"]) == 0
+        reg = load_registry()
+        assert Path(reg["alice"]["definition"]).name == "my-custom-definition.json"
 
 
 class TestCmdRemote:
