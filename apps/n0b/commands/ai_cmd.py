@@ -46,6 +46,66 @@ def _script_path(model: str) -> Path | None:
     return path if path.is_file() else None
 
 
+def resolve_image_ref(
+    refs: list[str],
+) -> tuple[str | None, str | None, str | None]:
+    if not refs:
+        return None, None, None
+    path = Path(refs[0]).expanduser()
+    if not path.is_file():
+        return None, None, f"n0b ai image: no such reference file: {refs[0]}"
+    note = None
+    if len(refs) > 1:
+        note = (
+            f"n0b ai image: using first --ref only ({path}); "
+            "Z-Image-Turbo supports one reference image"
+        )
+    return str(path), note, None
+
+
+def build_image_argv(
+    prompt: list[str],
+    refs: list[str],
+    strength: float,
+    out: str | None,
+) -> list[str]:
+    rest = list(prompt)
+    if rest[:1] == ["--"]:
+        rest = rest[1:]
+    ref, note, err = resolve_image_ref(refs)
+    if err:
+        raise ValueError(err)
+    if refs and not 0.0 <= strength <= 1.0:
+        raise ValueError("n0b ai image: --strength must be between 0.0 and 1.0")
+    if strength != 0.6 and ref is None:
+        raise ValueError("n0b ai image: --strength requires --ref")
+    argv: list[str] = []
+    if ref is not None:
+        argv.extend(["--ref", ref, "--strength", str(strength)])
+    if out:
+        argv.extend(["-o", out])
+    argv.extend(rest)
+    return argv, note
+
+
+def cmd_image(
+    model: str | None,
+    prompt: list[str],
+    refs: list[str],
+    strength: float,
+    out: str | None,
+) -> int:
+    try:
+        argv, note = build_image_argv(prompt, refs, strength, out)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        msg = str(exc)
+        return 1 if "no such reference" in msg else 2
+    if note:
+        print(note, file=sys.stderr)
+    return cmd_ai("image", model, argv)
+
+
 def cmd_research(args: list[str]) -> int:
     if not args:
         print("Usage: n0b ai research <prompt...>", file=sys.stderr)

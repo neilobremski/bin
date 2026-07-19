@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from commands.ai_cmd import cmd_ai, cmd_research, cmd_speak, cmd_transcribe
+from commands.ai_cmd import cmd_ai, cmd_research, cmd_image, cmd_speak, cmd_transcribe
 from commands.az_cmd import cmd_tail
 from commands.gpu_cmd import cmd_cuda, cmd_mb_free, cmd_mlx, cmd_mps
 from commands.json_cmd import cmd_json
@@ -204,8 +204,50 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Append the given --hint/--replace values to their global files",
     )
+    ai_image = ai_sub.add_parser(
+        "image",
+        help="Generate images locally with Z-Image-Turbo",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Text-to-image with Z-Image-Turbo. Pass --ref to transform a reference "
+            "image with a prompt (img2img); only the first --ref is used."
+        ),
+        epilog=(
+            "examples:\n"
+            "  n0b ai image \"a red fox in snow\"\n"
+            "  n0b ai image photo.jpg \"oil painting\" --ref photo.jpg\n"
+            "  n0b ai image \"cinematic portrait\" --ref face.png --strength 0.35 -o out.png\n"
+            "\n"
+            "First run: n0b ai image --install"
+        ),
+    )
+    ai_image.add_argument(
+        "--model", help="Backend override (default: z-image)"
+    )
+    ai_image.add_argument(
+        "--ref",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Reference image for img2img; repeatable but only the first is used",
+    )
+    ai_image.add_argument(
+        "--strength",
+        type=float,
+        default=0.6,
+        help="How much to transform --ref (0.0=preserve, 1.0=ignore; default: 0.6)",
+    )
+    ai_image.add_argument(
+        "-o",
+        "--out",
+        help="Output PNG path (default: z-image-<timestamp>.png)",
+    )
+    ai_image.add_argument(
+        "prompt",
+        nargs=argparse.REMAINDER,
+        help="Prompt text, or omit with --install",
+    )
     for kind, help_text in (
-        ("image", "Generate images (default model: z-image)"),
         ("video", "Generate videos — LTX-Video 1/2, MLX on Apple Silicon (default: auto)"),
         ("audio", "Generate audio (default model: audioldm)"),
     ):
@@ -308,6 +350,14 @@ def dispatch(args: argparse.Namespace) -> int:
                 args.model,
                 save=args.save,
                 replaces=args.replaces,
+            )
+        if args.ai_kind == "image":
+            return cmd_image(
+                args.model,
+                args.prompt,
+                args.ref,
+                args.strength,
+                args.out,
             )
         rest = args.args
         if rest[:1] == ["--"]:

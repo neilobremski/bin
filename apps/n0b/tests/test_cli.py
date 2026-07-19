@@ -16,12 +16,15 @@ from commands.ai_cmd import (  # noqa: E402
     apply_pronunciations,
     apply_replacements,
     apply_speak_replacements,
+    build_image_argv,
     cmd_ai,
+    cmd_image,
     cmd_speak,
     cmd_transcribe,
     load_speak_text,
     merged_hints,
     read_replacements,
+    resolve_image_ref,
     resolve_speak_engine,
     resolve_speak_voice,
     save_hints,
@@ -162,6 +165,44 @@ def test_ai_video_ltx2_passes_flag():
         assert argv[0] == "bash"
         assert argv[2] == "--ltx2"
         assert argv[3] == "hello"
+
+
+def test_resolve_image_ref_warns_on_multiple(tmp_path):
+    a = tmp_path / "a.png"
+    b = tmp_path / "b.png"
+    a.write_bytes(b"\x89PNG\r\n")
+    b.write_bytes(b"\x89PNG\r\n")
+    ref, note, err = resolve_image_ref([str(a), str(b)])
+    assert err is None
+    assert ref == str(a)
+    assert note is not None and "first" in note
+
+
+def test_build_image_argv_includes_ref_and_strength(tmp_path):
+    ref = tmp_path / "photo.png"
+    ref.write_bytes(b"\x89PNG\r\n")
+    argv, note = build_image_argv(["oil painting"], [str(ref)], 0.35, "out.png")
+    assert argv == ["--ref", str(ref), "--strength", "0.35", "-o", "out.png", "oil painting"]
+    assert note is None
+
+
+def test_cmd_image_forwards_ref(tmp_path):
+    ref = tmp_path / "photo.png"
+    ref.write_bytes(b"\x89PNG\r\n")
+    with patch("commands.ai_cmd.subprocess.run") as run:
+        run.return_value.returncode = 0
+        rc = cmd_image(None, ["make it painterly"], [str(ref)], 0.4, None)
+    assert rc == 0
+    argv = run.call_args[0][0]
+    assert argv[2:6] == ["--ref", str(ref), "--strength", "0.4"]
+    assert argv[6] == "make it painterly"
+
+
+def test_image_help_shows_ref():
+    proc = run_n0b("ai", "image", "--help")
+    assert proc.returncode == 0
+    assert "--ref" in proc.stdout
+    assert "--strength" in proc.stdout
 
 
 def test_merged_hints_file_then_flags(tmp_path):

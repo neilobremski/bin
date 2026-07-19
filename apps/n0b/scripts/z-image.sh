@@ -67,7 +67,7 @@ do_install() {
   
   # Install other dependencies
   echo "Installing additional dependencies..."
-  pip install transformers accelerate loguru
+  pip install transformers accelerate loguru pillow
   
   echo ""
   echo "=== Installation Complete ==="
@@ -99,6 +99,8 @@ OUTPUT_FILE=""
 PROMPT=""
 WIDTH=""
 HEIGHT=""
+REF_FILE=""
+STRENGTH="0.6"
 EXTRA_ARGS=()
 
 # Parse arguments
@@ -145,6 +147,28 @@ for i in "${!ARGS[@]}"; do
   elif [ "$arg" = "--16:9" ]; then
     WIDTH="1920"
     HEIGHT="1088"
+  # Handle --ref reference image
+  elif [ "$arg" = "--ref" ]; then
+    if [ -n "$next_arg" ]; then
+      if [ -n "$REF_FILE" ]; then
+        echo "Warning: Z-Image-Turbo supports one reference image; ignoring extra --ref" >&2
+      else
+        REF_FILE="$next_arg"
+      fi
+      SKIP_NEXT=true
+    else
+      echo "Error: --ref requires a file path"
+      exit 1
+    fi
+  # Handle --strength
+  elif [ "$arg" = "--strength" ]; then
+    if [ -n "$next_arg" ]; then
+      STRENGTH="$next_arg"
+      SKIP_NEXT=true
+    else
+      echo "Error: --strength requires a value"
+      exit 1
+    fi
   # Check if it starts with a dash (option to pass through)
   elif [[ "$arg" =~ ^-.+ ]]; then
     EXTRA_ARGS+=("$arg")
@@ -157,6 +181,16 @@ for i in "${!ARGS[@]}"; do
     fi
   fi
 done
+
+if [ -n "$REF_FILE" ] && [ ! -f "$REF_FILE" ]; then
+  echo "Error: reference image not found: $REF_FILE"
+  exit 1
+fi
+
+if [ "$STRENGTH" != "0.6" ] && [ -z "$REF_FILE" ]; then
+  echo "Error: --strength requires --ref"
+  exit 1
+fi
 
 # Generate default output filename if not specified
 if [ -z "$OUTPUT_FILE" ]; then
@@ -179,62 +213,93 @@ cat > "$TEMP_SCRIPT" << 'EOFPYTHON'
 import os
 import sys
 import warnings
+
 import torch
 
 warnings.filterwarnings("ignore")
 
-# Add Z-Image src to path
-sys.path.insert(0, os.path.join(os.environ['ZIMAGE_DIR'], 'src'))
-
-from utils import AttentionBackend, ensure_model_weights, load_from_local_dir, set_attention_backend
-from zimage import generate
-
-def main():
-  prompt = os.environ.get('PROMPT', '')
-  output_file = os.environ.get('OUTPUT_FILE', 'output.png')
-  
-  if not prompt:
-    print("Error: No prompt provided")
-    sys.exit(1)
-  
-  model_path = ensure_model_weights(os.path.join(os.environ['ZIMAGE_DIR'], "ckpts/Z-Image-Turbo"), verify=False)
-  dtype = torch.bfloat16
-  compile = False
-  
-  # Get dimensions from environment or use defaults
-  width = int(os.environ.get('WIDTH') or '1024')
-  height = int(os.environ.get('HEIGHT') or '1024')
-  num_inference_steps = 8
-  guidance_scale = 0.0
-  seed = None
-  attn_backend = os.environ.get("ZIMAGE_ATTENTION", "_native_flash")
-  
-  # Device selection
+def device_for() -> str:
   if torch.cuda.is_available():
-    device = "cuda"
-  elif torch.backends.mps.is_available():
-    device = "mps"
-  else:
-    device = "cpu"
-  
-  # Load models
-  components = load_from_local_dir(model_path, device=device, dtype=dtype, compile=compile)
-  set_attention_backend(attn_backend)
-  
-  # Generate image
-  generator = torch.Generator(device).manual_seed(seed) if seed is not None else None
+    return "cuda"
+  if torch.backends.mps.is_available():
+    return "mps"
+  return "cpu"
+
+
+def model_repo() -> str:
+  local = os.path.join(os.environ["ZIMAGE_DIR"], "ckpts/Z-Image-Turbo")
+  if os.path.isdir(local):
+    return local
+  return "Tongyi-MAI/Z-Image-Turbo"
+
+
+def run_img2img(prompt, output_file, ref_file, width, height, strength):
+  from diffusers import ZImageImg2ImgPipeline
+  from PIL import Image
+
+  dtype = torch.bfloat16
+  device = device_for()
+  pipe = ZImageImg2ImgPipeline.from_pretrained(model_repo(), torch_dtype=dtype)
+  pipe.to(device)
+
+  init_image = Image.open(ref_file).convert("RGB").resize((width, height))
+  generator = None
+  image = pipe(
+    prompt,
+    image=init_image,
+    strength=float(strength),
+    height=height,
+    width=width,
+    num_inference_steps=8,
+    guidance_scale=0.0,
+    generator=generator,
+  ).images[0]
+  image.save(output_file)
+  print(f"\nImage saved to: {output_file}")
+
+
+def run_text2img(prompt, output_file, width, height):
+  sys.path.insert(0, os.path.join(os.environ["ZIMAGE_DIR"], "src"))
+  from utils import ensure_model_weights, load_from_local_dir, set_attention_backend
+  from zimage import generate
+
+  model_path = ensure_model_weights(
+    os.path.join(os.environ["ZIMAGE_DIR"], "ckpts/Z-Image-Turbo"), verify=False
+  )
+  dtype = torch.bfloat16
+  device = device_for()
+  components = load_from_local_dir(model_path, device=device, dtype=dtype, compile=False)
+  set_attention_backend(os.environ.get("ZIMAGE_ATTENTION", "_native_flash"))
   images = generate(
     prompt=prompt,
     **components,
     height=height,
     width=width,
-    num_inference_steps=num_inference_steps,
-    guidance_scale=guidance_scale,
-    generator=generator,
+    num_inference_steps=8,
+    guidance_scale=0.0,
+    generator=None,
   )
-  
   images[0].save(output_file)
   print(f"\nImage saved to: {output_file}")
+
+
+def main():
+  prompt = os.environ.get("PROMPT", "")
+  output_file = os.environ.get("OUTPUT_FILE", "output.png")
+  ref_file = os.environ.get("REF_FILE", "")
+  strength = os.environ.get("STRENGTH", "0.6")
+  width = int(os.environ.get("WIDTH") or "1024")
+  height = int(os.environ.get("HEIGHT") or "1024")
+
+  if not prompt:
+    print("Error: No prompt provided")
+    sys.exit(1)
+
+  if ref_file:
+    print(f"img2img: ref={ref_file} strength={strength}", file=sys.stderr)
+    run_img2img(prompt, output_file, ref_file, width, height, strength)
+  else:
+    run_text2img(prompt, output_file, width, height)
 
 if __name__ == "__main__":
   main()
@@ -246,6 +311,8 @@ export PROMPT
 export OUTPUT_FILE
 export WIDTH
 export HEIGHT
+export REF_FILE
+export STRENGTH
 
 # Run the Python script
 python "$TEMP_SCRIPT"
