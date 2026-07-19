@@ -1454,6 +1454,89 @@ def cmd_restart(args: list[str]) -> int:
     return cmd_start([name])
 
 
+def _running_nodes_by_pid() -> dict[int, list[str]]:
+    """Map handler PID → agent names currently attached to that process."""
+    reg = load_registry()
+    by_pid: dict[int, list[str]] = {}
+    for name in sorted(reg, key=str.lower):
+        pid = _read_handler_pid(name)
+        if pid is None:
+            continue
+        by_pid.setdefault(pid, []).append(name)
+    return by_pid
+
+
+def _update_restart_targets(by_pid: dict[int, list[str]]) -> list[str]:
+    """One restart target per live handler.
+
+    Prefer an alias whose resolved members exactly match the agents sharing a
+    PID (so ``a8s start devs`` comes back as one process). Otherwise restart
+    each agent name on its own.
+    """
+    aliases = load_aliases()
+    targets: list[str] = []
+    claimed: set[str] = set()
+    for _pid, names in sorted(by_pid.items(), key=lambda kv: kv[1][0].lower()):
+        name_set = {n.lower() for n in names}
+        if name_set & claimed:
+            continue
+        alias_hit: str | None = None
+        for alias in sorted(aliases, key=str.lower):
+            try:
+                _, members = resolve_name(alias)
+            except (KeyError, ValueError):
+                continue
+            if {m.lower() for m in members} == name_set:
+                alias_hit = alias
+                break
+        if alias_hit is not None:
+            targets.append(alias_hit)
+            claimed |= name_set
+        else:
+            for n in names:
+                if n.lower() not in claimed:
+                    targets.append(n)
+                    claimed.add(n.lower())
+    return targets
+
+
+def cmd_update(args: list[str]) -> int:
+    """`a8s update [--force]` — restart every running node (refresh handlers).
+
+    v1: no code pull — stop+start so background handlers re-exec the current
+    on-disk ``a8s`` entrypoint. Use after ``git pull``. Later iterations may
+    fetch standalone releases.
+
+    Groups agents that share a handler PID: if they match an alias exactly,
+    that alias is restarted as one process; otherwise each agent is restarted.
+    ``--force`` / ``-f`` is passed through to stop.
+    """
+    rest, force = _split_force_flag(args)
+    if rest:
+        print("usage: a8s update [--force]", file=sys.stderr)
+        return 2
+    by_pid = _running_nodes_by_pid()
+    if not by_pid:
+        print("no nodes running")
+        return 0
+    targets = _update_restart_targets(by_pid)
+    n_agents = sum(len(v) for v in by_pid.values())
+    print(f"updating {n_agents} node(s) via {len(targets)} restart(s)…")
+    rc = 0
+    for target in targets:
+        restart_args = [target]
+        if force:
+            restart_args.append("--force")
+        print(f"--- {target} ---")
+        r = cmd_restart(restart_args)
+        if r != 0:
+            print(f"update: {target} failed (rc={r})", file=sys.stderr)
+            rc = r
+    if rc == 0:
+        print("update complete")
+    return rc
+
+
 KILL_TIMEOUT_S = 10.0
 KILL_POLL_S = 0.1
 

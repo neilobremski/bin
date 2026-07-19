@@ -40,6 +40,7 @@ from commands import (
     cmd_unnamespace,
     cmd_unremote,
     cmd_unstorage,
+    cmd_update,
     cmd_vars,
 )
 
@@ -65,6 +66,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("step",     "<name>",                    "Run an agent for one pass and exit."),
     ("stop",     "<name> [--force]",          "Stop a node; wait until detached (finish current wake unless --force)."),
     ("restart",  "<name> [--force]",          "Stop (wait) then start a node."),
+    ("update",   "[--force]",                 "Restart all running nodes (refresh handlers after git pull)."),
     ("kill",     "<name>",                    "Force-stop a running agent."),
     ("exit",     "",                          "Stop every running agent."),
     ("ps",       "[-q]",                      "List running node processes."),
@@ -136,6 +138,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_stop(args)
     if cmd == "restart":
         return cmd_restart(args)
+    if cmd == "update":
+        return cmd_update(args)
     if cmd == "kill":
         return cmd_kill(args)
     if cmd == "exit":
