@@ -74,7 +74,6 @@ use `base` when speed matters more than proper nouns.
 
 ## First run
 
-Bootstraps a dedicated venv at `~/.cache/n0b/whisper-venv` (torch is heavy —
-this keeps it out of the repo venv) and downloads the model to
-`~/.cache/whisper/`. One-time cost of a few GB; subsequent runs are offline.
-Requires `ffmpeg` on PATH.
+Bootstraps `<bin>/.venv` on first use from `requirements/ai*.txt` (shared repo
+venv; torch installs once) and downloads the model to `~/.cache/whisper/`.
+One-time cost of a few GB; subsequent runs are offline. Requires `ffmpeg` on PATH.

@@ -12,24 +12,33 @@ import pytest
 N0B_PY = Path(__file__).resolve().parents[1] / "n0b.py"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from commands.ai_cmd import (  # noqa: E402
+from commands.ai_common import merged_hints, parse_replacement, read_pair_file, save_hints
+from commands.ai_image_cmd import build_image_argv, resolve_image_ref, cmd_image
+from commands.ai_speak_cmd import (
     apply_pronunciations,
-    apply_replacements,
     apply_speak_replacements,
-    cmd_ai,
     cmd_speak,
-    cmd_transcribe,
     load_speak_text,
-    merged_hints,
-    read_replacements,
     resolve_speak_engine,
     resolve_speak_voice,
-    save_hints,
-    save_replacements,
     save_sticky_voice,
     speakable,
+    SPEAK_REPLACEMENTS_FILE,
+    SPEAK_PRONUNCIATIONS_FILE,
+    SPEAK_VOICE_FILE,
 )
+from commands.ai_transcribe_cmd import (
+    apply_replacements,
+    cmd_transcribe,
+    read_replacements,
+    save_replacements,
+    HINTS_FILE,
+    REPLACEMENTS_FILE,
+)
+from commands.ai_audio_cmd import cmd_audio  # noqa: E402
+from commands.ai_video_cmd import cmd_video, parse_video_args  # noqa: E402
 from commands.secrets_cmd import cmd_set, resolve  # noqa: E402
+from cli import parse_audio_argv, parse_image_argv  # noqa: E402
 
 
 def run_n0b(*args: str) -> subprocess.CompletedProcess[str]:
@@ -153,15 +162,145 @@ def test_ai_research_requires_prompt():
     assert "Usage: n0b ai research" in proc.stderr
 
 
-def test_ai_video_ltx2_passes_flag():
-    with patch("commands.ai_cmd.subprocess.run") as run:
+def test_video_ltx2_parse_flag():
+    req = parse_video_args(["--ltx2", "hello"])
+    assert req.ltx_version == 2
+    assert req.prompt == "hello"
+
+
+def test_video_install_only():
+    with patch("commands.ai_video_cmd.install_ltx2", return_value=0) as install:
+        rc = cmd_video(None, ["--install"])
+    assert rc == 0
+    install.assert_called_once()
+
+
+def test_audio_requires_prompt():
+    rc = cmd_audio(None, [])
+    assert rc == 2
+
+
+def test_resolve_image_ref_warns_on_multiple(tmp_path):
+    a = tmp_path / "a.png"
+    b = tmp_path / "b.png"
+    a.write_bytes(b"\x89PNG\r\n")
+    b.write_bytes(b"\x89PNG\r\n")
+    ref, note, err = resolve_image_ref([str(a), str(b)])
+    assert err is None
+    assert ref == str(a)
+    assert note is not None and "first" in note
+
+
+def test_build_image_argv_includes_ref_and_strength(tmp_path):
+    ref = tmp_path / "photo.png"
+    ref.write_bytes(b"\x89PNG\r\n")
+    argv, note = build_image_argv(["oil painting"], [str(ref)], 0.35, "out.png")
+    assert argv == ["--ref", str(ref), "--strength", "0.35", "-o", "out.png", "oil painting"]
+    assert note is None
+
+
+def test_cmd_image_forwards_ref(tmp_path):
+    ref = tmp_path / "photo.png"
+    ref.write_bytes(b"\x89PNG\r\n")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    with patch("commands.ai_image_cmd.ensure_image", return_value=fake_python), patch(
+        "commands.ai_image_cmd.subprocess.run"
+    ) as run:
         run.return_value.returncode = 0
-        rc = cmd_ai("video", "ltx-2", ["hello"])
-        assert rc == 0
-        argv = run.call_args[0][0]
-        assert argv[0] == "bash"
-        assert argv[2] == "--ltx2"
-        assert argv[3] == "hello"
+        rc = cmd_image(None, ["make it painterly"], [str(ref)], 0.4, None)
+    assert rc == 0
+    argv = run.call_args[0][0]
+    assert argv[0] == str(fake_python)
+    assert argv[1] == "-c"
+    assert argv[3] == "make it painterly"
+    assert argv[5] == str(ref)
+    assert argv[6] == "0.4"
+
+
+def test_cmd_image_install_only(tmp_path):
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    with patch("commands.ai_image_cmd.ensure_image", return_value=fake_python) as setup:
+        rc = cmd_image(None, [], [], 0.6, None, install=True)
+    assert rc == 0
+    setup.assert_called_once()
+
+
+def test_cmd_image_uninstall(tmp_path):
+    venv = tmp_path / ".venv"
+    venv.mkdir()
+    with patch("venv_util.BIN_VENV", venv), patch("venv_util.LEGACY_VENVS", ()), patch(
+        "venv_util.ZIMAGE_LEGACY_REPO", tmp_path / "legacy"
+    ):
+        rc = cmd_image(None, [], [], 0.6, None, uninstall=True)
+    assert rc == 0
+    assert not venv.exists()
+
+
+def test_cmd_image_auto_setup_on_prompt(tmp_path):
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    with patch("commands.ai_image_cmd.ensure_image", return_value=fake_python) as setup, patch(
+        "commands.ai_image_cmd.subprocess.run"
+    ) as run:
+        run.return_value.returncode = 0
+        rc = cmd_image(None, ["a fox"], [], 0.6, None)
+    assert rc == 0
+    setup.assert_called_once()
+
+
+def test_image_help_shows_ref():
+    proc = run_n0b("ai", "image", "--help")
+    assert proc.returncode == 0
+    assert "--ref" in proc.stdout
+    assert "--strength" in proc.stdout
+    assert "--install" in proc.stdout
+    assert "--uninstall" in proc.stdout
+
+
+def test_parse_image_argv_flags_after_prompt(tmp_path):
+    ref = tmp_path / "photo.png"
+    a = parse_image_argv(
+        ["oil painting", "--ref", str(ref), "--strength", "0.35", "-o", "out.png"]
+    )
+    assert a.prompt == ["oil painting"]
+    assert a.ref == [str(ref)]
+    assert a.strength == 0.35
+    assert a.out == "out.png"
+
+
+def test_parse_audio_argv_flags_after_prompt():
+    a = parse_audio_argv(["rain on tin", "-o", "/tmp/out.wav"])
+    assert a.prompt == ["rain on tin"]
+    assert a.out == "/tmp/out.wav"
+
+
+def test_parse_audio_argv_install():
+    a = parse_audio_argv(["--install"])
+    assert a.install is True
+    assert a.prompt == []
+
+
+def test_audio_install_flag(tmp_path):
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    with patch("commands.ai_audio_cmd.ensure_audio", return_value=fake_python) as setup:
+        rc = cmd_audio(None, ["--install"])
+    assert rc == 0
+    setup.assert_called_once_with("audioldm")
+
+
+def test_cmd_audio_install_via_cli(tmp_path):
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    from cli import main
+
+    with patch("commands.ai_audio_cmd.ensure_audio", return_value=fake_python) as setup:
+        rc = main(["ai", "audio", "--install"])
+    assert rc == 0
+    setup.assert_called_once_with("audioldm")
 
 
 def test_merged_hints_file_then_flags(tmp_path):
@@ -206,7 +345,7 @@ def test_save_hints_no_trailing_newline(tmp_path):
 
 def test_transcribe_save_only(tmp_path):
     hints_file = tmp_path / "hints.txt"
-    with patch("commands.ai_cmd.HINTS_FILE", hints_file):
+    with patch("commands.ai_transcribe_cmd.HINTS_FILE", hints_file):
         rc = cmd_transcribe(None, ["Pay-i"], None, "turbo", save=True)
     assert rc == 0
     assert hints_file.read_text() == "Pay-i\n"
@@ -260,10 +399,10 @@ def test_transcribe_applies_replacements(tmp_path, capsys):
     repl = tmp_path / "transcribe-replacements.txt"
     repl.write_text("Jerry => Gerry\n")
     with (
-        patch("commands.ai_cmd._whisper_python", return_value=fake_python),
-        patch("commands.ai_cmd.HINTS_FILE", tmp_path / "missing.txt"),
-        patch("commands.ai_cmd.REPLACEMENTS_FILE", repl),
-        patch("commands.ai_cmd.subprocess.run") as run,
+        patch("commands.ai_transcribe_cmd.ensure_whisper", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", repl),
+        patch("commands.ai_transcribe_cmd.subprocess.run") as run,
     ):
         run.return_value.returncode = 0
         run.return_value.stdout = "Jerry said hi.\n"
@@ -279,10 +418,10 @@ def test_transcribe_invokes_whisper_venv(tmp_path):
     audio.write_bytes(b"RIFF")
     fake_python = tmp_path / "venv" / "bin" / "python3"
     with (
-        patch("commands.ai_cmd._whisper_python", return_value=fake_python),
-        patch("commands.ai_cmd.HINTS_FILE", tmp_path / "missing.txt"),
-        patch("commands.ai_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
-        patch("commands.ai_cmd.subprocess.run") as run,
+        patch("commands.ai_transcribe_cmd.ensure_whisper", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
+        patch("commands.ai_transcribe_cmd.subprocess.run") as run,
     ):
         run.return_value.returncode = 0
         run.return_value.stdout = "hello\n"
@@ -330,14 +469,14 @@ def test_apply_pronunciations_wraps_ipa():
 def test_resolve_speak_voice_sticky(tmp_path, monkeypatch):
     voice_file = tmp_path / "speak-voice.txt"
     voice_file.write_text("af_nicole\n")
-    with patch("commands.ai_cmd.SPEAK_VOICE_FILE", voice_file):
+    with patch("commands.ai_speak_cmd.SPEAK_VOICE_FILE", voice_file):
         assert resolve_speak_voice(None, "kokoro") == ("af_nicole", str(voice_file))
         assert resolve_speak_voice("af_bella", "kokoro") == ("af_bella", "cli")
 
 
 def test_resolve_speak_voice_builtin_default(tmp_path):
     missing = tmp_path / "missing.txt"
-    with patch("commands.ai_cmd.SPEAK_VOICE_FILE", missing):
+    with patch("commands.ai_speak_cmd.SPEAK_VOICE_FILE", missing):
         assert resolve_speak_voice(None, "kokoro") == ("af_heart", "built-in default")
         assert resolve_speak_voice(None, "say") == (None, "system default")
 
@@ -350,21 +489,21 @@ def test_load_speak_text_inline_and_file(tmp_path):
 
 
 def test_resolve_speak_engine_prefers_say():
-    with patch("commands.ai_cmd.shutil.which", return_value="/usr/bin/say"):
+    with patch("commands.ai_speak_cmd.shutil.which", return_value="/usr/bin/say"):
         assert resolve_speak_engine(None) == "say"
         assert resolve_speak_engine("kokoro") == "kokoro"
 
 
 def test_save_sticky_voice(tmp_path):
     voice_file = tmp_path / "speak-voice.txt"
-    with patch("commands.ai_cmd.SPEAK_VOICE_FILE", voice_file):
+    with patch("commands.ai_speak_cmd.SPEAK_VOICE_FILE", voice_file):
         assert save_sticky_voice("af_bella", voice_file) == 0
     assert voice_file.read_text() == "af_bella\n"
 
 
 def test_speak_save_voice_only(tmp_path):
     voice_file = tmp_path / "speak-voice.txt"
-    with patch("commands.ai_cmd.SPEAK_VOICE_FILE", voice_file):
+    with patch("commands.ai_speak_cmd.SPEAK_VOICE_FILE", voice_file):
         rc = cmd_speak(None, None, "af_nicole", 1.0, save=True)
     assert rc == 0
     assert voice_file.read_text() == "af_nicole\n"
@@ -373,8 +512,8 @@ def test_speak_save_voice_only(tmp_path):
 def test_speak_save_replacements_only(tmp_path):
     repl = tmp_path / "speak-replacements.txt"
     with (
-        patch("commands.ai_cmd.SPEAK_REPLACEMENTS_FILE", repl),
-        patch("commands.ai_cmd.SPEAK_PRONUNCIATIONS_FILE", tmp_path / "p.txt"),
+        patch("commands.ai_speak_cmd.SPEAK_REPLACEMENTS_FILE", repl),
+        patch("commands.ai_speak_cmd.SPEAK_PRONUNCIATIONS_FILE", tmp_path / "p.txt"),
     ):
         rc = cmd_speak(
             None, None, None, 1.0, save=True, replaces=["\\ba8s\\b => A eight S"]
@@ -391,11 +530,11 @@ def test_speak_applies_teachings_before_kokoro(tmp_path, capsys):
     fake_python = tmp_path / "venv" / "bin" / "python3"
     captured: dict[str, str] = {}
     with (
-        patch("commands.ai_cmd._kokoro_python", return_value=fake_python),
-        patch("commands.ai_cmd.SPEAK_REPLACEMENTS_FILE", repl),
-        patch("commands.ai_cmd.SPEAK_PRONUNCIATIONS_FILE", tmp_path / "missing.txt"),
-        patch("commands.ai_cmd.SPEAK_VOICE_FILE", tmp_path / "missing-voice.txt"),
-        patch("commands.ai_cmd.subprocess.run") as run,
+        patch("commands.ai_speak_cmd.ensure_kokoro", return_value=fake_python),
+        patch("commands.ai_speak_cmd.SPEAK_REPLACEMENTS_FILE", repl),
+        patch("commands.ai_speak_cmd.SPEAK_PRONUNCIATIONS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_speak_cmd.SPEAK_VOICE_FILE", tmp_path / "missing-voice.txt"),
+        patch("commands.ai_transcribe_cmd.subprocess.run") as run,
     ):
         def capture_run(cmd, **kwargs):
             captured["text"] = Path(cmd[3]).read_text(encoding="utf-8")
@@ -413,8 +552,8 @@ def test_speak_applies_teachings_before_kokoro(tmp_path, capsys):
 
 
 def test_speak_say_play_inline(tmp_path):
-    with patch("commands.ai_cmd.resolve_speak_engine", return_value="say"), \
-            patch("commands.ai_cmd.subprocess.run") as run:
+    with patch("commands.ai_speak_cmd.resolve_speak_engine", return_value="say"), \
+            patch("commands.ai_speak_cmd.subprocess.run") as run:
         run.return_value.returncode = 0
         rc = cmd_speak(["hello"], None, None, 1.0, engine="say")
     assert rc == 0

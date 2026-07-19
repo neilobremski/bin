@@ -1,0 +1,9 @@
+spacy<4
+kokoro
+soundfile
+phonemizer
+openai-whisper
+git+https://github.com/huggingface/diffusers
+transformers
+accelerate
+pillow
