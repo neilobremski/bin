@@ -19,6 +19,19 @@ from pathlib import Path
 prompt, out_path, extra = sys.argv[1:4]
 extra_args = extra.split("\\0") if extra else []
 
+import torch
+
+if not torch.cuda.is_available():
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    _orig_tensor_cuda = torch.Tensor.cuda
+    _orig_module_cuda = torch.nn.Module.cuda
+
+    def _to_device(self, _device=None):
+        return self.to(device)
+
+    torch.Tensor.cuda = _to_device
+    torch.nn.Module.cuda = _to_device
+
 from audioldm import text_to_audio, build_model
 
 model = build_model(model_name="audioldm-s-full")
@@ -30,10 +43,22 @@ waveform = text_to_audio(
     duration=10.0,
 )
 import scipy.io.wavfile as wavfile
+import numpy as np
+
+sample = waveform[0]
+if hasattr(sample, "detach"):
+    sample = sample.detach().cpu().numpy()
+else:
+    sample = np.asarray(sample)
+if sample.ndim == 2 and sample.shape[0] <= sample.shape[1]:
+    sample = sample.T
+audio = np.squeeze(sample).astype(np.float32)
+audio = np.clip(audio, -1.0, 1.0)
+audio_int = (audio * 32767).astype(np.int16)
 
 out = Path(out_path)
 out.parent.mkdir(parents=True, exist_ok=True)
-wavfile.write(str(out), 16000, waveform[0])
+wavfile.write(str(out), 16000, audio_int)
 print(out)
 """
 
@@ -120,7 +145,7 @@ def cmd_audio(model: str | None, argv: list[str]) -> int:
         return ai_venv_uninstall()
     if req.install:
         try:
-            ensure_audio()
+            ensure_audio(req.model)
         except subprocess.CalledProcessError as exc:
             print(f"n0b ai audio: setup failed: {exc}", file=sys.stderr)
             return 1
@@ -129,7 +154,7 @@ def cmd_audio(model: str | None, argv: list[str]) -> int:
         print("n0b ai audio: prompt required", file=sys.stderr)
         return 2
     try:
-        python = ensure_audio()
+        python = ensure_audio(req.model)
     except subprocess.CalledProcessError as exc:
         print(f"n0b ai audio: setup failed: {exc}", file=sys.stderr)
         return 1

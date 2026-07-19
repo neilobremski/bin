@@ -38,6 +38,7 @@ from commands.ai_transcribe_cmd import (
 from commands.ai_audio_cmd import cmd_audio  # noqa: E402
 from commands.ai_video_cmd import cmd_video, parse_video_args  # noqa: E402
 from commands.secrets_cmd import cmd_set, resolve  # noqa: E402
+from cli import parse_audio_argv, parse_image_argv  # noqa: E402
 
 
 def run_n0b(*args: str) -> subprocess.CompletedProcess[str]:
@@ -259,6 +260,47 @@ def test_image_help_shows_ref():
     assert "--strength" in proc.stdout
     assert "--install" in proc.stdout
     assert "--uninstall" in proc.stdout
+
+
+def test_parse_image_argv_flags_after_prompt(tmp_path):
+    ref = tmp_path / "photo.png"
+    a = parse_image_argv(
+        ["oil painting", "--ref", str(ref), "--strength", "0.35", "-o", "out.png"]
+    )
+    assert a.prompt == ["oil painting"]
+    assert a.ref == [str(ref)]
+    assert a.strength == 0.35
+    assert a.out == "out.png"
+
+
+def test_parse_audio_argv_flags_after_prompt():
+    a = parse_audio_argv(["rain on tin", "-o", "/tmp/out.wav"])
+    assert a.prompt == ["rain on tin"]
+    assert a.out == "/tmp/out.wav"
+
+
+def test_parse_audio_argv_install():
+    a = parse_audio_argv(["--install"])
+    assert a.install is True
+    assert a.prompt == []
+
+
+def test_audio_install_flag(tmp_path):
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    with patch("commands.ai_audio_cmd.ensure_audio", return_value=fake_python) as setup:
+        rc = cmd_audio(None, ["--install"])
+    assert rc == 0
+    setup.assert_called_once_with("audioldm")
+
+
+def test_cmd_audio_install_via_cli(tmp_path):
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    from cli import main
+
+    with patch("commands.ai_audio_cmd.ensure_audio", return_value=fake_python) as setup:
+        rc = main(["ai", "audio", "--install"])
+    assert rc == 0
+    setup.assert_called_once_with("audioldm")
 
 
 def test_merged_hints_file_then_flags(tmp_path):

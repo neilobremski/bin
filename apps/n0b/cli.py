@@ -20,6 +20,81 @@ from commands.secrets_cmd import cmd_get, cmd_set
 from commands.video_cmd import cmd_last_frame
 
 
+def _add_image_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--model", help="Backend override (default: z-image)")
+    p.add_argument(
+        "--install",
+        action="store_true",
+        help="Create venv and install PyTorch/diffusers without generating",
+    )
+    p.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Remove <bin>/.venv and legacy per-command venvs/repos",
+    )
+    p.add_argument("--width", type=int, help="Output width in pixels (default: 1024)")
+    p.add_argument("--height", type=int, help="Output height in pixels (default: 1024)")
+    p.add_argument(
+        "--16:9",
+        dest="aspect_16_9",
+        action="store_true",
+        help="Use 1920x1088 (16:9, divisible by 16)",
+    )
+    p.add_argument(
+        "--ref",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Reference image for img2img; repeatable but only the first is used",
+    )
+    p.add_argument(
+        "--strength",
+        type=float,
+        default=0.6,
+        help="How much to transform --ref (0.0=preserve, 1.0=ignore; default: 0.6)",
+    )
+    p.add_argument(
+        "-o",
+        "--out",
+        help="Output PNG path (default: z-image-<timestamp>.png)",
+    )
+    p.add_argument("prompt", nargs="*", default=[], help="Prompt text")
+
+
+def _add_audio_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--model", help="Backend override (audioldm or bark)")
+    p.add_argument(
+        "--install",
+        action="store_true",
+        help="Install audio deps into <bin>/.venv without generating",
+    )
+    p.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Remove <bin>/.venv and legacy caches",
+    )
+    p.add_argument("-o", "--out", help="Output WAV path")
+    p.add_argument("prompt", nargs="*", default=[], help="Prompt text")
+
+
+def _parse_intermixed(p: argparse.ArgumentParser, argv: list[str]) -> argparse.Namespace:
+    if argv[:1] == ["--"]:
+        argv = argv[1:]
+    return p.parse_intermixed_args(argv)
+
+
+def parse_image_argv(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="n0b ai image", add_help=False)
+    _add_image_args(p)
+    return _parse_intermixed(p, argv)
+
+
+def parse_audio_argv(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="n0b ai audio", add_help=False)
+    _add_audio_args(p)
+    return _parse_intermixed(p, argv)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="n0b",
@@ -227,67 +302,24 @@ def build_parser() -> argparse.ArgumentParser:
             "Use --install to prep ahead of time; --uninstall to remove."
         ),
     )
-    ai_image.add_argument(
-        "--model", help="Backend override (default: z-image)"
+    _add_image_args(ai_image)
+    ai_audio = ai_sub.add_parser(
+        "audio",
+        help="Generate audio (default model: audioldm)",
     )
-    ai_image.add_argument(
-        "--install",
-        action="store_true",
-        help="Create venv and install PyTorch/diffusers without generating",
+    _add_audio_args(ai_audio)
+    ai_video = ai_sub.add_parser(
+        "video",
+        help="Generate videos — LTX-Video 1/2, MLX on Apple Silicon (default: auto)",
     )
-    ai_image.add_argument(
-        "--uninstall",
-        action="store_true",
-        help="Remove <bin>/.venv and legacy per-command venvs/repos",
+    ai_video.add_argument(
+        "--model",
+        help=(
+            "Backend override (video: ltx-video auto, ltx-2, ltx-1; "
+            "image: z-image; audio: audioldm, bark)"
+        ),
     )
-    ai_image.add_argument(
-        "--width", type=int, help="Output width in pixels (default: 1024)"
-    )
-    ai_image.add_argument(
-        "--height", type=int, help="Output height in pixels (default: 1024)"
-    )
-    ai_image.add_argument(
-        "--16:9",
-        dest="aspect_16_9",
-        action="store_true",
-        help="Use 1920x1088 (16:9, divisible by 16)",
-    )
-    ai_image.add_argument(
-        "--ref",
-        action="append",
-        default=[],
-        metavar="PATH",
-        help="Reference image for img2img; repeatable but only the first is used",
-    )
-    ai_image.add_argument(
-        "--strength",
-        type=float,
-        default=0.6,
-        help="How much to transform --ref (0.0=preserve, 1.0=ignore; default: 0.6)",
-    )
-    ai_image.add_argument(
-        "-o",
-        "--out",
-        help="Output PNG path (default: z-image-<timestamp>.png)",
-    )
-    ai_image.add_argument(
-        "prompt",
-        nargs=argparse.REMAINDER,
-        help="Prompt text",
-    )
-    for kind, help_text in (
-        ("video", "Generate videos — LTX-Video 1/2, MLX on Apple Silicon (default: auto)"),
-        ("audio", "Generate audio (default model: audioldm)"),
-    ):
-        p = ai_sub.add_parser(kind, help=help_text)
-        p.add_argument(
-            "--model",
-            help=(
-                "Backend override (video: ltx-video auto, ltx-2, ltx-1; "
-                "image: z-image; audio: audioldm, bark)"
-            ),
-        )
-        p.add_argument("args", nargs=argparse.REMAINDER)
+    ai_video.add_argument("args", nargs=argparse.REMAINDER)
 
     video_p = sub.add_parser("video", help="Video file utilities")
     video_sub = video_p.add_subparsers(dest="video_cmd", required=True)
@@ -398,9 +430,13 @@ def dispatch(args: argparse.Namespace) -> int:
                 rest = rest[1:]
             return cmd_video(args.model, rest)
         if args.ai_kind == "audio":
-            rest = args.args
-            if rest[:1] == ["--"]:
-                rest = rest[1:]
+            if args.install:
+                return cmd_audio(args.model, ["--install"])
+            if args.uninstall:
+                return cmd_audio(args.model, ["--uninstall"])
+            rest = list(args.prompt)
+            if args.out:
+                rest.extend(["-o", args.out])
             return cmd_audio(args.model, rest)
     if group == "video":
         if args.video_cmd == "last-frame":
@@ -412,6 +448,32 @@ def dispatch(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if len(argv) >= 2 and argv[0] == "ai" and "-h" not in argv and "--help" not in argv:
+        if argv[1] == "image":
+            a = parse_image_argv(argv[2:])
+            return cmd_image(
+                a.model,
+                a.prompt,
+                a.ref,
+                a.strength,
+                a.out,
+                width=a.width,
+                height=a.height,
+                aspect_16_9=a.aspect_16_9,
+                install=a.install,
+                uninstall=a.uninstall,
+            )
+        if argv[1] == "audio":
+            a = parse_audio_argv(argv[2:])
+            if a.install:
+                return cmd_audio(a.model, ["--install"])
+            if a.uninstall:
+                return cmd_audio(a.model, ["--uninstall"])
+            rest = list(a.prompt)
+            if a.out:
+                rest.extend(["-o", a.out])
+            return cmd_audio(a.model, rest)
     parser = build_parser()
     args = parser.parse_args(argv)
     return dispatch(args)

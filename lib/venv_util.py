@@ -130,8 +130,11 @@ def ensure_r4t() -> Path:
     return ensure_group("r4t", probe="import textual")
 
 
-def ensure_audio() -> Path:
-    return ensure_group("audio", probe="import scipy.io.wavfile")
+def ensure_audio(model: str = "audioldm") -> Path:
+    model = (model or "audioldm").lower()
+    if model in ("bark", "suno-bark"):
+        return ensure_group("audio", probe="import bark")
+    return ensure_group("audio", probe="import audioldm")
 
 
 def install_all() -> Path:
