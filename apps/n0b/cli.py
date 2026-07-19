@@ -4,8 +4,11 @@ from __future__ import annotations
 import argparse
 import sys
 
-from commands.ai_cmd import cmd_research, cmd_image, cmd_speak, cmd_transcribe
-from commands.audio_cmd import cmd_audio
+from commands.ai_audio_cmd import cmd_audio
+from commands.ai_image_cmd import cmd_image
+from commands.ai_research_cmd import cmd_research
+from commands.ai_speak_cmd import cmd_speak
+from commands.ai_transcribe_cmd import cmd_transcribe
 from commands.ai_video_cmd import cmd_video
 from commands.az_cmd import cmd_tail
 from commands.gpu_cmd import cmd_cuda, cmd_mb_free, cmd_mlx, cmd_mps

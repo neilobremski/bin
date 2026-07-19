@@ -58,7 +58,7 @@ Detailed docs live in [`docs/`](docs/):
 apps/n0b/
 ├── n0b.py          entry point
 ├── cli.py          argparse dispatch
-├── commands/       per-group implementations
+├── commands/       per-group implementations (ai_*_cmd.py, video_cmd.py, …)
 ├── docs/           user + skill-installable docs (this index links them)
 └── tests/
 ```
