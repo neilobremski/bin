@@ -45,11 +45,12 @@ Detailed docs live in [`docs/`](docs/):
 
 | Subcommand | Default backend | Override |
 |------------|-----------------|----------|
-| `n0b ai image` | Z-Image-Turbo (`z-image.sh`) | `--ref`, `--strength`, `-o` |
+| `n0b ai image` | Z-Image-Turbo (`<bin>/.venv`) | `--ref`, `--strength`, `-o`, `--install`, `--uninstall` |
 | `n0b ai video` | LTX-Video 1, LTX-2 (PyTorch), MLX-Video (Apple Silicon) | `--model ltx-2`, `--model ltx-1`, or `-2`/`-1` flags |
-| `n0b ai audio` | AudioLDM (`audioldm.sh`) | `--model bark` for Suno Bark |
-| `n0b ai speak` | macOS `say` (auto), Kokoro offline | `--engine`, `--voice`, `-o` |
-| `n0b ai transcribe` | Whisper `turbo` (local, no API key) | `--model tiny|base|small|medium|large` |
+| `n0b ai video` | LTX-Video 1/2, MLX on Apple Silicon | `--install`, `--install-ltx1`, `-1`, `-2` |
+| `n0b ai audio` | AudioLDM / Bark (`<bin>/.venv`) | `--model bark`, `-o`, `--install` |
+| `n0b ai speak` | macOS `say` (auto), Kokoro offline (`<bin>/.venv`) | `--engine`, `--voice`, `-o` |
+| `n0b ai transcribe` | Whisper `turbo` (local, `<bin>/.venv`) | `--model tiny|base|small|medium|large` |
 
 ## Layout
 
@@ -58,7 +59,6 @@ apps/n0b/
 ├── n0b.py          entry point
 ├── cli.py          argparse dispatch
 ├── commands/       per-group implementations
-├── scripts/        AI wrapper bash scripts
 ├── docs/           user + skill-installable docs (this index links them)
 └── tests/
 ```

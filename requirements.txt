@@ -1,0 +1,9 @@
+# Canonical dependency set for ~/bin. Apps install subsets on first use via lib/venv_util.py.
+# Full manual install (CPU torch): pip install -r requirements.txt
+-r requirements/ai-torch-cpu.txt
+-r requirements/ai.txt
+-r requirements/dev.txt
+-r requirements/b3t.txt
+-r requirements/a8s-test.txt
+-r requirements/r4t.txt
+-r requirements/audio.txt

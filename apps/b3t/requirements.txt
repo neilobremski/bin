@@ -1,2 +1,2 @@
-openpyxl
-requests
+# Canonical deps: requirements/b3t.txt
+-r ../../requirements/b3t.txt

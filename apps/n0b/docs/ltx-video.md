@@ -35,9 +35,7 @@ n0b ai video --help
 
 ---
 
-Wrapper script for generating videos using LTX-Video with intelligent argument parsing and automatic GPU acceleration.
-
-## Usage
+Implementation is native Python (`commands/ai_video_cmd.py`); no bash wrapper.
 
 ```bash
 n0b ai video [options] [prompt text...] [output.mp4]

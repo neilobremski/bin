@@ -14,7 +14,8 @@ n0b ai image "a red fox in fresh snow"
 n0b ai image photo.jpg "oil painting, warm light" --ref photo.jpg
 n0b ai image "cinematic portrait" --ref face.png --strength 0.35 -o out.png
 
-n0b ai image --install    # one-time: clone repo, venv, weights
+n0b ai image --install      # optional: prep venv ahead of time (PyTorch is large)
+n0b ai image --uninstall    # remove <bin>/.venv
 ```
 
 ## Reference images (`--ref`)
@@ -37,7 +38,10 @@ current directory.
 
 ## Setup
 
-First run of `n0b ai image --install` clones `~/repos/Z-Image`, creates a venv,
-installs diffusers + PyTorch (CUDA/MPS/CPU), and downloads weights (~6B params).
+First use auto-installs from `requirements/ai*.txt` into `<bin>/.venv` at the
+repo root — shared with `n0b ai speak`, `n0b ai transcribe`, and other apps.
+PyTorch and other heavy deps install once. Uses MPS on Apple Silicon or CUDA
+when available.
 
-Uses MPS on Apple Silicon when available.
+`--install` runs setup without generating. `--uninstall` removes the shared
+venv and legacy per-command caches.

@@ -1,49 +1,16 @@
 """AI generation wrappers (image, video, audio), transcription, and deep research."""
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
-from paths import BIN_ROOT, SCRIPTS_DIR
+from ai_venv import AI_VENV, ensure_image, ensure_kokoro, ensure_whisper, uninstall as ai_venv_uninstall
 from research import run_research
-
-_DEFAULT_MODEL = {
-    "image": "z-image",
-    "video": "ltx-video",
-    "audio": "audioldm",
-}
-
-_SCRIPT_NAMES = {
-    "z-image": "z-image.sh",
-    "ltx-video": "ltx-video.sh",
-    "ltx-1": "ltx-video.sh",
-    "ltx1": "ltx-video.sh",
-    "ltx-2": "ltx-video.sh",
-    "ltx2": "ltx-video.sh",
-    "audioldm": "audioldm.sh",
-    "bark": "suno-bark.sh",
-    "suno-bark": "suno-bark.sh",
-}
-
-_VIDEO_MODEL_FLAGS: dict[str, list[str]] = {
-    "ltx-2": ["--ltx2"],
-    "ltx2": ["--ltx2"],
-    "ltx-1": ["--ltx1"],
-    "ltx1": ["--ltx1"],
-}
-
-
-def _script_path(model: str) -> Path | None:
-    script_name = _SCRIPT_NAMES.get(model)
-    if not script_name:
-        return None
-    path = SCRIPTS_DIR / script_name
-    return path if path.is_file() else None
 
 
 def resolve_image_ref(
@@ -68,7 +35,7 @@ def build_image_argv(
     refs: list[str],
     strength: float,
     out: str | None,
-) -> list[str]:
+) -> tuple[list[str], str | None]:
     rest = list(prompt)
     if rest[:1] == ["--"]:
         rest = rest[1:]
@@ -88,22 +55,142 @@ def build_image_argv(
     return argv, note
 
 
+ZIMAGE_MODEL = "Tongyi-MAI/Z-Image-Turbo"
+
+_ZIMAGE_SNIPPET = """\
+import sys
+import warnings
+
+import torch
+
+warnings.filterwarnings("ignore")
+
+prompt, out_path, ref_path, strength, width, height = sys.argv[1:7]
+width, height = int(width), int(height)
+
+if torch.cuda.is_available():
+    device = "cuda"
+elif torch.backends.mps.is_available():
+    device = "mps"
+else:
+    device = "cpu"
+dtype = torch.bfloat16
+
+if ref_path:
+    from diffusers import ZImageImg2ImgPipeline
+    from PIL import Image
+
+    print(f"img2img: ref={ref_path} strength={strength}", file=sys.stderr)
+    pipe = ZImageImg2ImgPipeline.from_pretrained(%r, torch_dtype=dtype)
+    pipe.to(device)
+    init = Image.open(ref_path).convert("RGB").resize((width, height))
+    image = pipe(
+        prompt,
+        image=init,
+        strength=float(strength),
+        height=height,
+        width=width,
+        num_inference_steps=8,
+        guidance_scale=0.0,
+    ).images[0]
+else:
+    from diffusers import ZImagePipeline
+
+    print("loading Z-Image-Turbo...", file=sys.stderr)
+    pipe = ZImagePipeline.from_pretrained(%r, torch_dtype=dtype)
+    pipe.to(device)
+    image = pipe(
+        prompt,
+        height=height,
+        width=width,
+        num_inference_steps=9,
+        guidance_scale=0.0,
+    ).images[0]
+
+image.save(out_path)
+print(out_path)
+""" % (ZIMAGE_MODEL, ZIMAGE_MODEL)
+
+
+def zimage_uninstall() -> int:
+    return ai_venv_uninstall()
+
+
 def cmd_image(
     model: str | None,
     prompt: list[str],
     refs: list[str],
     strength: float,
     out: str | None,
+    width: int | None = None,
+    height: int | None = None,
+    aspect_16_9: bool = False,
+    install: bool = False,
+    uninstall: bool = False,
 ) -> int:
+    if uninstall:
+        return zimage_uninstall()
+    if model and model != "z-image":
+        print(
+            f"n0b ai image: unknown model {model!r} (known: z-image)",
+            file=sys.stderr,
+        )
+        return 1
+    parts = list(prompt)
+    if parts[:1] == ["--"]:
+        parts = parts[1:]
+    if install and not parts and not refs:
+        try:
+            ensure_image()
+        except subprocess.CalledProcessError as exc:
+            print(f"n0b ai image: setup failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"ready: {AI_VENV}", file=sys.stderr)
+        return 0
+    if not parts:
+        print("n0b ai image: prompt required", file=sys.stderr)
+        return 2
     try:
-        argv, note = build_image_argv(prompt, refs, strength, out)
+        _, note = build_image_argv(parts, refs, strength, out)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         msg = str(exc)
         return 1 if "no such reference" in msg else 2
     if note:
         print(note, file=sys.stderr)
-    return cmd_ai("image", model, argv)
+    ref_path, _, err = resolve_image_ref(refs)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    prompt_text = " ".join(parts)
+    if aspect_16_9:
+        gen_width, gen_height = 1920, 1088
+    else:
+        gen_width, gen_height = width or 1024, height or 1024
+    out_path = (
+        Path(out).expanduser()
+        if out
+        else Path(f"z-image-{datetime.now():%Y-%m-%d-%H-%M-%S}.png")
+    )
+    try:
+        python = ensure_image()
+    except subprocess.CalledProcessError as exc:
+        print(f"n0b ai image: setup failed: {exc}", file=sys.stderr)
+        return 1
+    proc = subprocess.run(
+        [
+            str(python),
+            "-c",
+            _ZIMAGE_SNIPPET,
+            prompt_text,
+            str(out_path),
+            ref_path or "",
+            str(strength),
+            str(gen_width),
+            str(gen_height),
+        ],
+    )
+    return proc.returncode if proc.returncode is not None else 0
 
 
 def cmd_research(args: list[str]) -> int:
@@ -113,7 +200,6 @@ def cmd_research(args: list[str]) -> int:
     return run_research(args)
 
 
-WHISPER_VENV = Path.home() / ".cache" / "n0b" / "whisper-venv"
 HINTS_FILE = Path.home() / ".config" / "n0b" / "transcribe-hints.txt"
 REPLACEMENTS_FILE = Path.home() / ".config" / "n0b" / "transcribe-replacements.txt"
 SPEAK_REPLACEMENTS_FILE = Path.home() / ".config" / "n0b" / "speak-replacements.txt"
@@ -307,7 +393,7 @@ def _speak_kokoro(
             )
             return 2
     try:
-        python = _kokoro_python()
+        python = ensure_kokoro()
     except subprocess.CalledProcessError as exc:
         print(f"n0b ai speak: Kokoro setup failed: {exc}", file=sys.stderr)
         return 1
@@ -341,49 +427,6 @@ def _speak_kokoro(
             wav_path.unlink(missing_ok=True)
     print(out_path)
     return 0
-
-
-KOKORO_VENV = Path.home() / ".cache" / "n0b" / "kokoro-venv"
-
-
-def _kokoro_base_python() -> str:
-    # kokoro -> misaki[en] -> spacy, which trails new CPython releases;
-    # prefer an interpreter old enough to have wheels.
-    for name in ("python3.13", "python3.12", "python3.11"):
-        if shutil.which(name):
-            return name
-    return sys.executable
-
-
-def _kokoro_python() -> Path:
-    python = KOKORO_VENV / "bin" / "python3"
-    if python.is_file():
-        probe = subprocess.run(
-            [str(python), "-c", "import kokoro, soundfile"], capture_output=True
-        )
-        if probe.returncode == 0:
-            return python
-    else:
-        print(f"Setting up Kokoro venv at {KOKORO_VENV} (one-time)...", file=sys.stderr)
-        KOKORO_VENV.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            [_kokoro_base_python(), "-m", "venv", str(KOKORO_VENV)],
-            check=True, stdout=sys.stderr,
-        )
-    subprocess.run(
-        [str(python), "-m", "pip", "install", "--upgrade", "pip"],
-        check=True, stdout=sys.stderr,
-    )
-    # spacy 4.x ships sdist-only for this platform and its build chain is
-    # broken; the <4 pin keeps pip on the 3.8 wheels misaki actually needs.
-    # phonemizer enables misaki's espeak fallback for names and other
-    # out-of-dictionary words (the library itself comes from espeak-ng).
-    subprocess.run(
-        [str(python), "-m", "pip", "install", "spacy<4", "kokoro", "soundfile",
-         "phonemizer"],
-        check=True, stdout=sys.stderr,
-    )
-    return python
 
 
 def read_sticky_voice(voice_file: Path | None = None) -> str | None:
@@ -709,27 +752,6 @@ def save_hints(cli_hints: list[str], hints_file: Path) -> int:
     return 0
 
 
-def _whisper_python() -> Path:
-    python = WHISPER_VENV / "bin" / "python3"
-    if python.is_file():
-        return python
-    print(f"Setting up Whisper venv at {WHISPER_VENV} (one-time)...", file=sys.stderr)
-    WHISPER_VENV.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [sys.executable, "-m", "venv", str(WHISPER_VENV)],
-        check=True, stdout=sys.stderr,
-    )
-    subprocess.run(
-        [str(python), "-m", "pip", "install", "--upgrade", "pip"],
-        check=True, stdout=sys.stderr,
-    )
-    subprocess.run(
-        [str(python), "-m", "pip", "install", "openai-whisper"],
-        check=True, stdout=sys.stderr,
-    )
-    return python
-
-
 def cmd_transcribe(
     audio: str | None,
     hints: list[str],
@@ -786,7 +808,7 @@ def cmd_transcribe(
     if pairs:
         print(f"replacements: {len(pairs)} pattern(s) loaded", file=sys.stderr)
     try:
-        python = _whisper_python()
+        python = ensure_whisper()
     except subprocess.CalledProcessError as exc:
         print(f"n0b ai transcribe: Whisper setup failed: {exc}", file=sys.stderr)
         return 1
@@ -803,21 +825,3 @@ def cmd_transcribe(
         print(f"replacements applied: {note}", file=sys.stderr)
     print(text)
     return 0
-
-
-def cmd_ai(kind: str, model: str | None, args: list[str]) -> int:
-    extra: list[str] = []
-    chosen = model or _DEFAULT_MODEL[kind]
-    if kind == "video":
-        extra = _VIDEO_MODEL_FLAGS.get(chosen, [])
-        if chosen in _VIDEO_MODEL_FLAGS or chosen in ("ltx-video", "ltx-2", "ltx2", "ltx-1", "ltx1"):
-            chosen = "ltx-video"
-    script = _script_path(chosen)
-    if script is None:
-        known = ", ".join(sorted(set(_SCRIPT_NAMES)))
-        print(f"Unknown model {model or chosen!r} for {kind}. Known: {known}", file=sys.stderr)
-        return 1
-    env = os.environ.copy()
-    env["N0B_BIN"] = str(BIN_ROOT)
-    rc = subprocess.run(["bash", str(script), *extra, *args], env=env).returncode
-    return rc if rc is not None else 1

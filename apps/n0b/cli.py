@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import sys
 
-from commands.ai_cmd import cmd_ai, cmd_research, cmd_image, cmd_speak, cmd_transcribe
+from commands.ai_cmd import cmd_research, cmd_image, cmd_speak, cmd_transcribe
+from commands.audio_cmd import cmd_audio
+from commands.ai_video_cmd import cmd_video
 from commands.az_cmd import cmd_tail
 from commands.gpu_cmd import cmd_cuda, cmd_mb_free, cmd_mlx, cmd_mps
 from commands.json_cmd import cmd_json
@@ -218,11 +220,34 @@ def build_parser() -> argparse.ArgumentParser:
             "  n0b ai image photo.jpg \"oil painting\" --ref photo.jpg\n"
             "  n0b ai image \"cinematic portrait\" --ref face.png --strength 0.35 -o out.png\n"
             "\n"
-            "First run: n0b ai image --install"
+            "First run auto-installs deps into <bin>/.venv (shared repo venv). "
+            "Use --install to prep ahead of time; --uninstall to remove."
         ),
     )
     ai_image.add_argument(
         "--model", help="Backend override (default: z-image)"
+    )
+    ai_image.add_argument(
+        "--install",
+        action="store_true",
+        help="Create venv and install PyTorch/diffusers without generating",
+    )
+    ai_image.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Remove <bin>/.venv and legacy per-command venvs/repos",
+    )
+    ai_image.add_argument(
+        "--width", type=int, help="Output width in pixels (default: 1024)"
+    )
+    ai_image.add_argument(
+        "--height", type=int, help="Output height in pixels (default: 1024)"
+    )
+    ai_image.add_argument(
+        "--16:9",
+        dest="aspect_16_9",
+        action="store_true",
+        help="Use 1920x1088 (16:9, divisible by 16)",
     )
     ai_image.add_argument(
         "--ref",
@@ -245,7 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
     ai_image.add_argument(
         "prompt",
         nargs=argparse.REMAINDER,
-        help="Prompt text, or omit with --install",
+        help="Prompt text",
     )
     for kind, help_text in (
         ("video", "Generate videos — LTX-Video 1/2, MLX on Apple Silicon (default: auto)"),
@@ -358,11 +383,22 @@ def dispatch(args: argparse.Namespace) -> int:
                 args.ref,
                 args.strength,
                 args.out,
+                width=args.width,
+                height=args.height,
+                aspect_16_9=args.aspect_16_9,
+                install=args.install,
+                uninstall=args.uninstall,
             )
-        rest = args.args
-        if rest[:1] == ["--"]:
-            rest = rest[1:]
-        return cmd_ai(args.ai_kind, args.model, rest)
+        if args.ai_kind == "video":
+            rest = args.args
+            if rest[:1] == ["--"]:
+                rest = rest[1:]
+            return cmd_video(args.model, rest)
+        if args.ai_kind == "audio":
+            rest = args.args
+            if rest[:1] == ["--"]:
+                rest = rest[1:]
+            return cmd_audio(args.model, rest)
     if group == "video":
         if args.video_cmd == "last-frame":
             return cmd_last_frame(args.video, args.output)

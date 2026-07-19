@@ -19,9 +19,13 @@ This file provides guidance when working with code in this repository.
   SQLite FTS5 + optional ollama embeddings. Zero non-stdlib deps for core.
   See [`apps/k7e/README.md`](apps/k7e/README.md) for usage and architecture.
 - **`docs/`** — markdown for each top-level command + symlinks for skill install.
-- **`venv/`** — local Python virtualenv (gitignored). Pytest is installed there.
-  Run `python3 -m pytest ...` from anywhere; it picks up `venv` automatically
-  via the wrapper at `bin/python3`.
+- **`requirements/`** — consolidated pip deps for the shared repo venv (see
+  `requirements/README.md`). Per-app `requirements.txt` files point here.
+- **`.venv/`** — shared local Python virtualenv at the repo root (gitignored).
+  `lib/venv_util.py` bootstraps it on first use; `n0b ai` and other apps share
+  it so PyTorch and friends install once. Run `python3 -m pytest ...` with
+  `.venv/bin/python3` after `pip install -r requirements/dev.txt`, or use the
+  legacy `venv/` until migrated.
 
 ## Conventions
 

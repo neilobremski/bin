@@ -1,4 +1,2 @@
-# Test-only dependencies for a8s. The runtime itself depends on pure stdlib;
-# these are only needed to exercise the optional remote transports against a
-# real broker. Install with: `pip install -r apps/a8s/tests/requirements.txt`.
-paho-mqtt>=2.0
+# Canonical deps: requirements/a8s-test.txt
+-r ../../requirements/a8s-test.txt
