@@ -132,17 +132,20 @@ class RoomStore:
         sender: str,
         content: str,
         kind: str = "post",
+        files: list[dict] | None = None,
     ) -> dict:
         slug = normalize_slug(slug)
         msg_id = new_ulid()
         now = utc_now()
-        payload = {
+        payload: dict = {
             "id": msg_id,
             "date": now,
             "from": normalize_agent(sender),
             "kind": kind,
             "content": content,
         }
+        if files:
+            payload["files"] = list(files)
         msg_dir = self.messages_dir(slug)
         msg_dir.mkdir(parents=True, exist_ok=True)
         path = msg_dir / f"{msg_id}.json"

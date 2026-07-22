@@ -14,10 +14,10 @@ def store(tmp_path):
 
 @pytest.fixture
 def tells():
-    sent: list[tuple[str, str]] = []
+    sent: list[tuple[str, str, list]] = []
 
-    def capture(agent: str, body: str) -> None:
-        sent.append((agent, body))
+    def capture(agent: str, body: str, attachments=None) -> None:
+        sent.append((agent, body, list(attachments or [])))
 
     return sent, capture
 
@@ -55,9 +55,12 @@ class TestPost:
         messages = store.list_messages("war")
         assert len(messages) == 1
         assert messages[0]["content"] == "hello everyone"
-        alice_msgs = [b for a, b in sent if a == "ALICE"]
+        alice_msgs = [b for a, b, _ in sent if a == "ALICE"]
         assert not alice_msgs
-        assert not any(a == "ALICE" and "hello everyone" in b and "posted in" in b for a, b in sent)
+        assert not any(
+            a == "ALICE" and "hello everyone" in b and "posted in" in b
+            for a, b, _ in sent
+        )
 
     def test_hash_prefix_room_same_as_plain(self, store, tells):
         sent, tell_fn = tells
@@ -99,7 +102,7 @@ class TestPost:
         messages = store.list_messages("everyone")
         assert len(messages) == 1
         assert messages[0]["content"] == "hello"
-        assert not [b for a, b in sent if a == "ALICE"]
+        assert not [b for a, b, _ in sent if a == "ALICE"]
 
     def test_irc_style_matches_slash_post(self, store, tells):
         sent, tell_fn = tells
@@ -132,7 +135,7 @@ class TestPost:
             message="/post war update",
             tell_fn=tell_fn,
         )
-        bob_msgs = [b for a, b in sent if a == "BOB"]
+        bob_msgs = [b for a, b, _ in sent if a == "BOB"]
         assert len(bob_msgs) == 1
         assert "ALICE posted in #war" in bob_msgs[0]
         assert "update" in bob_msgs[0]
@@ -153,7 +156,7 @@ class TestPost:
                 message=msg,
                 tell_fn=tell_fn,
             )
-        bob_msgs = [b for a, b in sent if a == "BOB"]
+        bob_msgs = [b for a, b, _ in sent if a == "BOB"]
         assert len(bob_msgs) == 2
         assert "Post a message:" in bob_msgs[0]
         assert "Post a message:" not in bob_msgs[1]
@@ -174,7 +177,7 @@ class TestPost:
         messages = store.list_messages("everyone")
         assert len(messages) == 1
         assert messages[0]["content"] == "@pat I'm testing out chat rooms."
-        pat_msgs = [b for a, b in sent if a.lower() == "pat"]
+        pat_msgs = [b for a, b, _ in sent if a.lower() == "pat"]
         assert len(pat_msgs) == 1
         assert "@pat I'm testing out chat rooms." in pat_msgs[0]
         assert "posted in #everyone" in pat_msgs[0]
@@ -193,8 +196,8 @@ class TestPost:
         members = {m.upper() for m in store.member_names(meta)}
         assert members >= {"ALICE", "BOB", "CAROL"}
         assert store.list_messages("war")[0]["content"] == "@bob @carol hello team"
-        assert len([b for a, b in sent if a.upper() == "BOB"]) == 1
-        assert len([b for a, b in sent if a.upper() == "CAROL"]) == 1
+        assert len([b for a, b, _ in sent if a.upper() == "BOB"]) == 1
+        assert len([b for a, b, _ in sent if a.upper() == "CAROL"]) == 1
 
     def test_at_mention_only_at_message_start(self, store, tells):
         sent, tell_fn = tells
@@ -208,7 +211,7 @@ class TestPost:
         meta = store.load_meta("war")
         assert "BOB" not in {m.upper() for m in store.member_names(meta)}
         assert store.list_messages("war")[0]["content"] == "ping @bob later"
-        assert not [b for a, b in sent if a == "BOB"]
+        assert not [b for a, b, _ in sent if a == "BOB"]
 
 
 class TestInvite:
@@ -225,10 +228,10 @@ class TestInvite:
         meta = store.load_meta("war")
         members = {m.upper() for m in store.member_names(meta)}
         assert members == {"BOB", "CAROL"}
-        bob_invite = [b for a, b in sent if a == "BOB"][0]
+        bob_invite = [b for a, b, _ in sent if a == "BOB"][0]
         assert "invited" in bob_invite
         assert "Post a message: tell HALL #war" in bob_invite
-        assert any(a == "BOB" and "invited" in b for a, b in sent)
+        assert any(a == "BOB" and "invited" in b for a, b, _ in sent)
         system = [m for m in store.list_messages("war") if m["kind"] == "system"]
         assert system
         assert "BOB" in system[0]["content"] and "CAROL" in system[0]["content"]
@@ -250,7 +253,7 @@ class TestRemove:
         meta = store.load_meta("war")
         members = {m.upper() for m in store.member_names(meta)}
         assert members == {"ALICE", "CAROL"}
-        bob_msgs = [b for a, b in sent if a.upper() == "BOB"]
+        bob_msgs = [b for a, b, _ in sent if a.upper() == "BOB"]
         assert len(bob_msgs) == 1
         assert "removed you from #war" in bob_msgs[0]
         system = [m for m in store.list_messages("war") if m["kind"] == "system"]
@@ -286,7 +289,7 @@ class TestRemove:
         )
         meta = store.load_meta("war")
         assert "ALICE" in store.member_names(meta)
-        ack = [b for a, b in sent if a == "ALICE"][-1]
+        ack = [b for a, b, _ in sent if a == "ALICE"][-1]
         assert "use /leave" in ack
 
     def test_kick_alias(self, store, tells):
@@ -318,7 +321,7 @@ class TestView:
             message="/view war",
             tell_fn=tell_fn,
         )
-        ack = [b for a, b in sent if a == "ALICE"][-1]
+        ack = [b for a, b, _ in sent if a == "ALICE"][-1]
         assert "## from ALICE to #war at" in ack
         assert "hello" in ack
         assert "### from BOB to #war at" in ack
@@ -341,7 +344,7 @@ class TestView:
             message="/list",
             tell_fn=tell_fn,
         )
-        ack = [b for a, b in sent if a == "ALICE"][-1]
+        ack = [b for a, b, _ in sent if a == "ALICE"][-1]
         assert "#war: ALICE, BOB" in ack
         assert "#peace: CAROL" in ack
 
@@ -358,8 +361,9 @@ class TestErrors:
         )
         assert rc == 1
         assert len(sent) == 1
-        agent, body = sent[0]
+        agent, body, atts = sent[0]
         assert agent == "ALICE"
+        assert atts == []
         assert body.startswith("Error: send #<room> <message> or a /command")
         assert "h4l" not in body.lower()
         assert 'tell CHATROOM "#<room> <message>"' in body
@@ -375,7 +379,7 @@ class TestErrors:
             tell_fn=tell_fn,
         )
         assert rc == 0
-        ack = [b for a, b in sent if a == "ALICE"][-1]
+        ack = [b for a, b, _ in sent if a == "ALICE"][-1]
         assert "Post (IRC style):" in ack
         assert 'tell CHATROOM "#<room> <message>"' in ack
         assert 'tell CHATROOM "/help"' in ack
@@ -408,7 +412,166 @@ class TestErrors:
             tell_fn=tell_fn,
         )
         assert rc == 0
-        assert any("left #war" in b for a, b in sent if a == "ALICE")
+        assert any("left #war" in b for a, b, _ in sent if a == "ALICE")
+
+
+class TestAttachmentProxy:
+    def test_strips_attached_file_lines_from_stored_content(self, store, tells, tmp_path):
+        sent, tell_fn = tells
+        payload = tmp_path / "report.pdf"
+        payload.write_bytes(b"%PDF")
+        meta = store.ensure_room("war")
+        meta, _ = store.add_member(meta, "ALICE")
+        meta, _ = store.add_member(meta, "BOB")
+        store.save_meta("war", meta)
+
+        message = f"#war see this\nATTACHED FILE: {payload.resolve()}"
+        rc = dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message=message,
+            tell_fn=tell_fn,
+        )
+        assert rc == 0
+        messages = store.list_messages("war")
+        assert len(messages) == 1
+        assert messages[0]["content"] == "see this"
+        assert messages[0]["files"] == [{"filename": "report.pdf"}]
+        assert "ATTACHED FILE:" not in messages[0]["content"]
+
+    def test_fanout_reattaches_to_other_members(self, store, tells, tmp_path):
+        sent, tell_fn = tells
+        payload = tmp_path / "notes.txt"
+        payload.write_text("secret", encoding="utf-8")
+        meta = store.ensure_room("war")
+        meta, _ = store.add_member(meta, "ALICE")
+        meta, _ = store.add_member(meta, "BOB")
+        meta, _ = store.add_member(meta, "CAROL")
+        store.save_meta("war", meta)
+
+        rc = dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message=f"/post war shared\nATTACHED FILE: {payload.resolve()}",
+            tell_fn=tell_fn,
+        )
+        assert rc == 0
+        bob = [(a, b, atts) for a, b, atts in sent if a == "BOB"]
+        carol = [(a, b, atts) for a, b, atts in sent if a == "CAROL"]
+        assert len(bob) == 1
+        assert len(carol) == 1
+        assert bob[0][2] == [payload.resolve()]
+        assert carol[0][2] == [payload.resolve()]
+        assert "shared" in bob[0][1]
+        assert not any(a == "ALICE" for a, _, _ in sent)
+
+    def test_multiple_attachments(self, store, tells, tmp_path):
+        sent, tell_fn = tells
+        a = tmp_path / "a.bin"
+        b = tmp_path / "b.bin"
+        a.write_bytes(b"a")
+        b.write_bytes(b"b")
+        meta = store.ensure_room("war")
+        meta, _ = store.add_member(meta, "ALICE")
+        meta, _ = store.add_member(meta, "BOB")
+        store.save_meta("war", meta)
+
+        rc = dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message=(
+                f"#war two files\n"
+                f"ATTACHED FILE: {a.resolve()}\n"
+                f"ATTACHED FILE: {b.resolve()}"
+            ),
+            tell_fn=tell_fn,
+        )
+        assert rc == 0
+        bob_atts = [atts for agent, _, atts in sent if agent == "BOB"][0]
+        assert bob_atts == [a.resolve(), b.resolve()]
+        assert store.list_messages("war")[0]["files"] == [
+            {"filename": "a.bin"},
+            {"filename": "b.bin"},
+        ]
+
+    def test_attachment_only_post_allowed(self, store, tells, tmp_path):
+        sent, tell_fn = tells
+        payload = tmp_path / "solo.png"
+        payload.write_bytes(b"PNG")
+        meta = store.ensure_room("war")
+        meta, _ = store.add_member(meta, "ALICE")
+        meta, _ = store.add_member(meta, "BOB")
+        store.save_meta("war", meta)
+
+        rc = dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message=f"#war\nATTACHED FILE: {payload.resolve()}",
+            tell_fn=tell_fn,
+        )
+        assert rc == 0
+        msg = store.list_messages("war")[0]
+        assert msg["content"] == ""
+        assert msg["files"] == [{"filename": "solo.png"}]
+        bob_atts = [atts for agent, _, atts in sent if agent == "BOB"][0]
+        assert bob_atts == [payload.resolve()]
+
+    def test_missing_attachment_skipped(self, store, tells, tmp_path, capsys):
+        sent, tell_fn = tells
+        missing = tmp_path / "gone.txt"
+        meta = store.ensure_room("war")
+        meta, _ = store.add_member(meta, "ALICE")
+        meta, _ = store.add_member(meta, "BOB")
+        store.save_meta("war", meta)
+
+        rc = dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message=f"#war still here\nATTACHED FILE: {missing.resolve()}",
+            tell_fn=tell_fn,
+        )
+        assert rc == 0
+        msg = store.list_messages("war")[0]
+        assert msg["content"] == "still here"
+        assert "files" not in msg
+        bob = [(b, atts) for a, b, atts in sent if a == "BOB"]
+        assert len(bob) == 1
+        assert bob[0][1] == []
+        assert "skipping missing attachment" in capsys.readouterr().err
+
+    def test_default_tell_passes_attach_flags(self, tmp_path, monkeypatch):
+        from notify import default_tell
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, check=False):
+            calls.append(list(cmd))
+
+            class R:
+                returncode = 0
+
+            return R()
+
+        monkeypatch.setattr("notify.subprocess.run", fake_run)
+        payload = tmp_path / "x.txt"
+        payload.write_text("x", encoding="utf-8")
+        default_tell("BOB", "hello", [payload])
+        assert calls == [["tell", "--attach", str(payload), "BOB", "hello"]]
+
+    def test_simulate_shows_attach(self, tmp_path, capsys):
+        from notify import simulate_tell
+
+        payload = tmp_path / "y.txt"
+        payload.write_text("y", encoding="utf-8")
+        simulate_tell("BOB", "hi\nthere", [payload])
+        err = capsys.readouterr().err
+        assert f"h4l> tell --attach {payload} BOB:" in err
+        assert "h4l>   hi" in err
 
 
 class TestSimulateTell:

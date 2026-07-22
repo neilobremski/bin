@@ -6,6 +6,20 @@ HEADING_OUT = "## from {from} to {to} at {timestamp}"
 HEADING_IN = "### from {from} to {to} at {timestamp}"
 
 
+def _attachment_lines(entry: dict) -> list[str]:
+    files = entry.get("files") or []
+    if not isinstance(files, list):
+        return []
+    lines: list[str] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        name = (item.get("filename") or "").strip()
+        if name:
+            lines.append(f"- attachment: {name}")
+    return lines
+
+
 def _format_heading(template: str, entry: dict, room: str) -> str:
     ts = (entry.get("date") or "").strip()
     return template.format(
@@ -104,9 +118,14 @@ def format_room_view(
             room,
         )
         content = entry.get("content", "")
+        file_lines = _attachment_lines(entry)
         block = heading
+        body_parts: list[str] = []
         if content:
-            block = f"{heading}\n\n{content}"
+            body_parts.append(content)
+        body_parts.extend(file_lines)
+        if body_parts:
+            block = f"{heading}\n\n" + "\n".join(body_parts)
         parts.append(block)
 
     if node:
