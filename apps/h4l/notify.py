@@ -3,32 +3,53 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from collections.abc import Callable
-from typing import TYPE_CHECKING, TypeAlias
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from rooms import RoomStore
 
-TellFn: TypeAlias = Callable[[str, str], None]
+
+class TellFn(Protocol):
+    def __call__(
+        self,
+        agent: str,
+        body: str,
+        attachments: list[Path] | None = None,
+    ) -> None: ...
 
 MAX_NOTIFY_CHARS = 1000
 SIMULATE_ENV = "H4L_SIMULATE_TELL"
 
 
-def default_tell(agent: str, body: str) -> None:
-    subprocess.run(
-        ["tell", agent, body],
-        check=False,
-    )
+def default_tell(
+    agent: str,
+    body: str,
+    attachments: list[Path] | None = None,
+) -> None:
+    cmd = ["tell"]
+    for path in attachments or []:
+        cmd.extend(["--attach", str(path)])
+    cmd.extend([agent, body])
+    subprocess.run(cmd, check=False)
 
 
-def simulate_tell(agent: str, body: str) -> None:
-    print(f"h4l> tell {agent}:", file=sys.stderr)
+def simulate_tell(
+    agent: str,
+    body: str,
+    attachments: list[Path] | None = None,
+) -> None:
+    attach_bits = "".join(f" --attach {path}" for path in (attachments or []))
+    print(f"h4l> tell{attach_bits} {agent}:", file=sys.stderr)
     for line in body.splitlines():
         print(f"h4l>   {line}", file=sys.stderr)
 
 
-def noop_tell(_agent: str, _body: str) -> None:
+def noop_tell(
+    _agent: str,
+    _body: str,
+    _attachments: list[Path] | None = None,
+) -> None:
     return None
 
 
@@ -69,6 +90,7 @@ def usage_help(node: str) -> str:
         f'tell {node} "/help"',
         "",
         "Also: /post, /leave, /members, /kick; # prefix optional on room names.",
+        "Attachments: tell --attach PATH ... reaches room members via hall proxy.",
     ]
     return "\n".join(lines)
 
@@ -104,9 +126,11 @@ def notify_members(
     headline: str,
     body: str,
     skip: set[str] | None = None,
+    attachments: list[Path] | None = None,
 ) -> None:
     omitted = {m.lower() for m in (skip or set())}
     text = truncate(body)
+    paths = list(attachments or [])
     meta = store.load_meta(slug)
     dirty = False
     for member in members:
@@ -115,7 +139,7 @@ def notify_members(
         suffix, meta, changed = _onboard_suffix(store, meta, member, node, room)
         dirty = dirty or changed
         message = f"{headline}\n\n{text}{suffix}"
-        tell_fn(member, message)
+        tell_fn(member, message, paths if paths else None)
     if dirty:
         store.save_meta(slug, meta)
 

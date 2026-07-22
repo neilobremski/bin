@@ -56,6 +56,20 @@ class TestFormatRoomView:
         assert "Newer:" not in text
         assert "MSG" not in text
 
+    def test_shows_attachment_basenames(self):
+        messages = [
+            {
+                "id": "MSG001",
+                "date": "2026-01-01T12:00:00.000000Z",
+                "from": "ALICE",
+                "content": "see attached",
+                "files": [{"filename": "report.pdf"}],
+            }
+        ]
+        text = format_room_view("war", messages, "BOB", node="HALL")
+        assert "see attached" in text
+        assert "- attachment: report.pdf" in text
+
     def test_default_limit_is_ten(self):
         messages = _room_messages(12)
         text = format_room_view("war", messages, "ALICE", node="HALL")

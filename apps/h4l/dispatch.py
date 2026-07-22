@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from attachments import split_attached_files
 from format import format_room_view, parse_view_args
 from notify import TellFn, ack, error, notify_agent, notify_members, usage_help
+from rooms import RoomStore, normalize_agent, normalize_slug
 
 _CMD_ALIASES = {
     "part": "leave",
     "names": "members",
     "kick": "remove",
 }
-from rooms import RoomStore, normalize_agent, normalize_slug
 
 
 def _join_names(names: list[str]) -> str:
@@ -53,9 +56,12 @@ def dispatch_slash(
     tell_fn: TellFn,
 ) -> int:
     sender = normalize_agent(sender)
-    body = message.strip()
+    body, attachments = split_attached_files(message.strip())
+    body = body.strip()
     if body.startswith("#"):
-        return _dispatch_hash_post(store, sender, node, body, tell_fn)
+        return _dispatch_hash_post(
+            store, sender, node, body, tell_fn, attachments=attachments
+        )
     if not body.startswith("/"):
         error(
             tell_fn,
@@ -82,7 +88,9 @@ def dispatch_slash(
 
     try:
         if cmd == "post":
-            return _cmd_post(store, sender, node, args, tell_fn)
+            return _cmd_post(
+                store, sender, node, args, tell_fn, attachments=attachments
+            )
         if cmd == "join":
             return _cmd_join(store, sender, node, args, tell_fn)
         if cmd == "leave":
@@ -139,9 +147,11 @@ def _dispatch_hash_post(
     node: str,
     body: str,
     tell_fn: TellFn,
+    *,
+    attachments: list[Path] | None = None,
 ) -> int:
     tokens = body.split()
-    if len(tokens) < 2:
+    if not tokens:
         error(
             tell_fn,
             sender,
@@ -158,7 +168,7 @@ def _dispatch_hash_post(
     message_tokens = tokens[1:]
     mentions = _leading_mention_agents(message_tokens)
     content = " ".join(message_tokens).strip()
-    if not content:
+    if not content and not attachments:
         error(
             tell_fn,
             sender,
@@ -167,7 +177,16 @@ def _dispatch_hash_post(
             hint="#<room> [@agent...] <message>",
         )
         return 1
-    return _do_post(store, sender, node, slug, content, tell_fn, mentions=mentions)
+    return _do_post(
+        store,
+        sender,
+        node,
+        slug,
+        content,
+        tell_fn,
+        mentions=mentions,
+        attachments=attachments,
+    )
 
 
 def _cmd_post(
@@ -176,8 +195,10 @@ def _cmd_post(
     node: str,
     args: list[str],
     tell_fn: TellFn,
+    *,
+    attachments: list[Path] | None = None,
 ) -> int:
-    if len(args) < 2:
+    if not args:
         error(
             tell_fn,
             sender,
@@ -190,7 +211,7 @@ def _cmd_post(
     message_tokens = args[1:]
     mentions = _leading_mention_agents(message_tokens)
     content = " ".join(message_tokens).strip()
-    if not content:
+    if not content and not attachments:
         error(
             tell_fn,
             sender,
@@ -199,7 +220,16 @@ def _cmd_post(
             hint="#<room> [@agent...] <message>",
         )
         return 1
-    return _do_post(store, sender, node, slug, content, tell_fn, mentions=mentions)
+    return _do_post(
+        store,
+        sender,
+        node,
+        slug,
+        content,
+        tell_fn,
+        mentions=mentions,
+        attachments=attachments,
+    )
 
 
 def _do_post(
@@ -211,6 +241,7 @@ def _do_post(
     tell_fn: TellFn,
     *,
     mentions: list[str] | None = None,
+    attachments: list[Path] | None = None,
 ) -> int:
     meta = store.ensure_room(slug)
     if not store.has_member(meta, sender):
@@ -222,7 +253,14 @@ def _do_post(
     meta = store.touch_activity(slug, meta)
     store.save_meta(slug, meta)
 
-    store.append_message(slug, sender=sender, content=content, kind="post")
+    paths = list(attachments or [])
+    store.append_message(
+        slug,
+        sender=sender,
+        content=content,
+        kind="post",
+        files=[{"filename": p.name} for p in paths],
+    )
     members = store.member_names(meta)
     notify_members(
         tell_fn=tell_fn,
@@ -235,6 +273,7 @@ def _do_post(
         headline=f"{sender} posted in #{slug}:",
         body=content,
         skip={sender},
+        attachments=paths,
     )
     return 0
 
