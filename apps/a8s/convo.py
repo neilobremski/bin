@@ -181,7 +181,11 @@ def record(msg: dict[str, Any], *, recipients: list[str]) -> None:
     """Append one logical message when delivery completes (local inbox, remote
     receive, or outbound remote publish). `recipients` lists local deliverees
     for routed/RECEIVED_REMOTE rows, or the logical `to` name for outbound
-    remote-only sends."""
+    remote-only sends.
+
+    Under the cap this appends one jsonl line (so `a8s convo -f` can tail).
+    Over the cap it rewrites the file with the newest ``convo_max_limit`` rows.
+    """
     if not recipients:
         return
     entry = entry_from_message(msg, recipients=recipients)
@@ -191,11 +195,14 @@ def record(msg: dict[str, Any], *, recipients: list[str]) -> None:
         if msg_id and any(r.get("id") == msg_id for r in rows):
             return
         rows.append(entry)
-        cap = _max_limit()
-        if len(rows) > cap:
-            rows = rows[-cap:]
         path = conversations_path()
         path.parent.mkdir(parents=True, exist_ok=True)
+        cap = _max_limit()
+        if len(rows) <= cap:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            return
+        rows = rows[-cap:]
         with path.open("w", encoding="utf-8") as f:
             for row in rows:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -307,10 +314,17 @@ def format_conversation(
     return "\n\n".join(parts)
 
 
-def _remember_entry_id(seen: set[str], entry: dict[str, Any]) -> None:
+def _entry_follow_key(entry: dict[str, Any]) -> str:
+    """Stable dedupe key for follow: prefer message id, else content fingerprint."""
     msg_id = (entry.get("id") or "").strip()
     if msg_id:
-        seen.add(msg_id)
+        return f"id:{msg_id}"
+    return "fp:{0}|{1}|{2}|{3}".format(
+        (entry.get("date") or "").strip(),
+        (entry.get("from") or "").strip(),
+        (entry.get("to") or "").strip(),
+        entry.get("content", ""),
+    )
 
 
 def _parse_convo_line(line: str) -> dict[str, Any] | None:
@@ -324,6 +338,17 @@ def _parse_convo_line(line: str) -> dict[str, Any] | None:
     return row if isinstance(row, dict) else None
 
 
+def _open_convo_tail(path: Path):
+    """Open archive for follow, positioned at EOF. Returns (handle, inode)."""
+    handle = path.open("r", encoding="utf-8")
+    handle.seek(0, 2)
+    try:
+        ino = path.stat().st_ino
+    except OSError:
+        ino = None
+    return handle, ino
+
+
 def follow_conversation(
     agent: str,
     *,
@@ -333,7 +358,12 @@ def follow_conversation(
     poll_interval: float = 1.0,
     glow_theme: str | None = None,
 ) -> None:
-    """Print the last `limit` messages, then block printing new archive rows."""
+    """Print the last `limit` messages, then block printing new archive rows.
+
+    ``record`` appends under the cap; when the archive rotates (rewrite) or is
+    replaced, this reopens/seeks carefully and dedupes with a full seed of
+    already-known entry keys so history is not flooded back to the terminal.
+    """
     glow_stream = None
     if glow_theme is not None:
         try:
@@ -341,7 +371,7 @@ def follow_conversation(
         except FileNotFoundError:
             print("a8s convo: glow not found on PATH", file=sys.stderr)
 
-    seen: set[str] = set()
+    handle = None
     try:
         rows = [e for e in load_entries() if involves_agent(e, agent)]
         print_entries(
@@ -351,42 +381,64 @@ def follow_conversation(
             heading_out=heading_out,
             heading_in=heading_in,
         )
-        for entry in rows[-limit:]:
-            _remember_entry_id(seen, entry)
+        # Seed with every known row for this agent — not only the printed
+        # window — so a truncate/rewrite cannot replay older history.
+        seen = {_entry_follow_key(e) for e in rows if _entry_follow_key(e)}
 
         path = conversations_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch(exist_ok=True)
 
-        with path.open("r", encoding="utf-8") as handle:
-            handle.seek(0, 2)
-            while True:
-                line = handle.readline()
-                if line:
-                    entry = _parse_convo_line(line)
-                    if entry is None or not involves_agent(entry, agent):
-                        continue
-                    msg_id = (entry.get("id") or "").strip()
-                    if msg_id and msg_id in seen:
-                        continue
-                    print_entries(
-                        agent,
-                        [entry],
-                        glow_stream=glow_stream,
-                        heading_out=heading_out,
-                        heading_in=heading_in,
-                    )
-                    _remember_entry_id(seen, entry)
+        handle, ino = _open_convo_tail(path)
+        while True:
+            line = handle.readline()
+            if line:
+                entry = _parse_convo_line(line)
+                if entry is None or not involves_agent(entry, agent):
                     continue
+                key = _entry_follow_key(entry)
+                if key in seen:
+                    continue
+                print_entries(
+                    agent,
+                    [entry],
+                    glow_stream=glow_stream,
+                    heading_out=heading_out,
+                    heading_in=heading_in,
+                )
+                seen.add(key)
+                continue
 
-                try:
-                    size = path.stat().st_size
-                except OSError:
-                    size = 0
-                if handle.tell() > size:
-                    handle.seek(0)
+            try:
+                st = path.stat()
+            except OSError:
                 time.sleep(poll_interval)
+                continue
+
+            rotated = False
+            if ino is not None and st.st_ino != ino:
+                rotated = True
+            elif handle.tell() > st.st_size:
+                rotated = True
+
+            if rotated:
+                handle.close()
+                handle = path.open("r", encoding="utf-8")
+                try:
+                    ino = path.stat().st_ino
+                except OSError:
+                    ino = None
+                # Rescan from the start with dedupe so a rewrite that includes
+                # a brand-new trailing row is still picked up; known keys skip.
+                continue
+
+            time.sleep(poll_interval)
     finally:
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
         if glow_stream is not None:
             glow_stream.close()
 
