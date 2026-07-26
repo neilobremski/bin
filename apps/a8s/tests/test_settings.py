@@ -11,39 +11,39 @@ from commands import cmd_config
 
 class TestSettingsResolution:
     def test_default_when_file_and_env_missing(self, fake_home):
-        assert sm.get_int("convo_max_limit") == 1000
+        assert sm.get_int("convo_max_rows") == 50_000
         assert sm.get_float("loop_interval") == 1.0
         assert sm.get_int("max_file_bytes") == 50 * 1024 * 1024
         assert sm.get_int("max_seen_ids") == 10000
 
     def test_settings_file_takes_precedence_over_env(self, fake_home, monkeypatch):
-        monkeypatch.setenv("A8S_CONVO_MAX_LIMIT", "50")
-        sm.set_setting("convo_max_limit", 200)
-        assert sm.get_int("convo_max_limit") == 200
+        monkeypatch.setenv("A8S_CONVO_MAX_ROWS", "50")
+        sm.set_setting("convo_max_rows", 200)
+        assert sm.get_int("convo_max_rows") == 200
 
     def test_env_used_when_key_absent_from_file(self, fake_home, monkeypatch):
         monkeypatch.setenv("A8S_LOOP_INTERVAL", "2.5")
         assert sm.get_float("loop_interval") == 2.5
 
     def test_unset_falls_back_to_env_then_default(self, fake_home, monkeypatch):
-        sm.set_setting("convo_max_limit", 200)
-        sm.unset_setting("convo_max_limit")
-        monkeypatch.setenv("A8S_CONVO_MAX_LIMIT", "75")
-        assert sm.get_int("convo_max_limit") == 75
-        monkeypatch.delenv("A8S_CONVO_MAX_LIMIT", raising=False)
-        assert sm.get_int("convo_max_limit") == 1000
+        sm.set_setting("convo_max_rows", 200)
+        sm.unset_setting("convo_max_rows")
+        monkeypatch.setenv("A8S_CONVO_MAX_ROWS", "75")
+        assert sm.get_int("convo_max_rows") == 75
+        monkeypatch.delenv("A8S_CONVO_MAX_ROWS", raising=False)
+        assert sm.get_int("convo_max_rows") == 50_000
 
     def test_set_rejects_non_positive(self, fake_home):
         with pytest.raises(ValueError, match="positive"):
-            sm.set_setting("convo_max_limit", 0)
+            sm.set_setting("convo_max_rows", 0)
         with pytest.raises(ValueError, match="positive"):
             sm.set_setting("loop_interval", 0)
 
     def test_persists_to_settings_json(self, fake_home):
-        sm.set_setting("convo_max_limit", 1500)
+        sm.set_setting("convo_max_rows", 1500)
         sm.set_setting("loop_interval", 0.5)
         raw = json.loads(sm.settings_path().read_text())
-        assert raw == {"convo_max_limit": 1500, "loop_interval": 0.5}
+        assert raw == {"convo_max_rows": 1500, "loop_interval": 0.5}
 
     def test_cannot_set_read_only_knob(self, fake_home):
         with pytest.raises(KeyError):
@@ -71,7 +71,7 @@ class TestCmdConfig:
     def test_list_shows_catalog(self, fake_home, capsys):
         assert cmd_config([]) == 0
         out = capsys.readouterr().out
-        assert "convo_max_limit: 1000" in out
+        assert "convo_max_rows: 50000" in out
         assert "definition.invoke" in out
         assert "registry.agents" in out
         assert "network.remotes" in out
@@ -79,13 +79,13 @@ class TestCmdConfig:
         assert "remote.backoff_schedule" in out
 
     def test_get_set_unset_writable(self, fake_home, capsys):
-        assert cmd_config(["set", "convo_max_limit", "2500"]) == 0
-        assert "convo_max_limit=2500" in capsys.readouterr().out
+        assert cmd_config(["set", "convo_max_rows", "2500"]) == 0
+        assert "convo_max_rows=2500" in capsys.readouterr().out
         capsys.readouterr()
-        assert cmd_config(["get", "convo_max_limit"]) == 0
+        assert cmd_config(["get", "convo_max_rows"]) == 0
         assert capsys.readouterr().out.strip() == "2500"
-        assert cmd_config(["unset", "convo_max_limit"]) == 0
-        assert "effective 1000" in capsys.readouterr().out
+        assert cmd_config(["unset", "convo_max_rows"]) == 0
+        assert "effective 50000" in capsys.readouterr().out
 
     def test_get_read_only_knob(self, fake_home, capsys):
         assert cmd_config(["get", "definition.batch.limit"]) == 0

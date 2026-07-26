@@ -37,9 +37,10 @@ Read `README.md` first for concept and usage.
   machine-wide keys; `a8s config` (no args) catalogs every knob including
   definition, registry, and network fields. Env vars apply only when a key
   is absent from the file. `A8S_HOME` relocates the whole state dir.
-- **`conversations.jsonl` is machine-wide.** One routed row per logical message
-  (alias fan-out is one row). Rotates at `convo_max_limit` (default 1000).
-  Queried by `a8s convo <agent>` — not per-agent storage.
+- **`conversations.sqlite3` is machine-wide.** One routed row per logical
+  message (alias fan-out is one row). Inserts do not prune. `a8s update`
+  retains `convo_max_rows` (default 50000) during housekeeping. Queried by
+  `a8s convo <agent>` — not per-agent storage; `--limit` only controls display.
 
 ## Per-tool quirks
 

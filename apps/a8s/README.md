@@ -190,7 +190,7 @@ any prefixes pointing at it.
 | `a8s step <name>`  | Attach, do one route+drain pass, release. Heavyweight: detaches the current handler if any.                                                                                                                                                                                         |
 | `a8s stop <name> [--force]` | SIGTERM the handler, then **wait** until it has detached. Idle stops immediately; a busy wake finishes first (like first Ctrl+C). `--force` / `-f` sends a second SIGTERM to kill the in-flight wake (like second Ctrl+C), then waits. |
 | `a8s restart <name> [--force]` | `stop` (wait until detached) then `start`. `--force` is passed to stop. If not running, just starts. |
-| `a8s update [--force]` | Restart every running node so handlers re-exec current on-disk a8s (handy after `git pull`). Alias co-handlers that match an alias are restarted as one process. No code fetch yet — that comes with standalone releases. |
+| `a8s update [--force]` | Run conversation housekeeping, then restart every running node so handlers re-exec current on-disk a8s (handy after `git pull`). Alias co-handlers that match an alias are restarted as one process. No code fetch yet — that comes with standalone releases. |
 | `a8s kill <name>`  | Per-agent force-detach: writes a kill-request, SIGUSR1s the holder. Holder kills the in-flight wake subprocess iff it's for that agent and releases the attachment; siblings keep running. Falls back to whole-process SIGTERM only if the holder doesn't honor the request in 10s. |
 | `a8s exit`         | SIGTERM every running handler.                                                                                                                                                                                                                                                      |
 | `a8s ps [-q]`      | List only running node processes: NAME, PID, UPTIME, ROOT. `-q` prints just names. Empty state hints at `a8s ls`.                                                                                                                                                                    |
@@ -205,7 +205,7 @@ any prefixes pointing at it.
 | `tell <name> <msg>` (top-level shim, `[~/bin/tell](/Users/neilo/bin/tell)`) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Outbox: `TELL_OUTBOX_DIR` if set, else a unique configured outbox matched from CWD when `~/.a8s` is readable (see [filedrop.md](docs/filedrop.md)). Drops a JSON envelope. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: `[docs/tell.md](docs/tell.md)`. |
 | `tells [-f] [--timeout SEC] [--glow [theme]]` (shim `[~/bin/tells](/Users/neilo/bin/tells)`) | Receive-side complement of `tell` (`apps/a8s/tells.py`). Same outbox resolution as `tell`; watches `.inbox` beside it. Default: wait up to 5s for a burst. `-f` / `--timeout 0`: follow until Ctrl+C. `--glow` / headings share convo's markdown formatting. Non-destructive. Prefer over `convo -f` for filedrop inbound-only loops. |
 | `a8s logs <name>... [--tail N] [-f]`                                        | Read per-agent log files; one agent in append order, multiple merge by ISO timestamp. `-f` follows.                                                                                                                                                                                                                       |
-| `a8s convo <name> [--limit N] [-f] [--glow [theme]]`                        | Markdown history of messages to or from an agent. Default `--limit 10`. `-f` tails `~/.a8s/conversations.jsonl` (shows outbound too — use `tells -f` for filedrop inbound-only). Archive rotates at `convo_max_limit` (`a8s config`). |
+| `a8s convo <name> [--limit N] [-f] [--glow [theme]]`                        | Markdown history of messages to or from an agent. Default `--limit 10`; this controls display only. `-f` follows sequence-numbered rows in `conversations.sqlite3` (shows outbound too — use `tells -f` for filedrop inbound-only). `a8s update` retains `convo_max_rows` rows (default 50000). |
 | `a8s trace <ULID>`                                                          | Show locally observed transaction boundaries for one envelope: routing, remote publication/resolution, inbox write, delivery receipt, and agent wake. |
 | `a8s drain <name>`                                                          | Move pending inbox JSON to trash without waking the agent.                                                                                                                                                                                                                                                                |
 
@@ -220,7 +220,7 @@ any prefixes pointing at it.
 | `a8s config set <key> <value>` | Persist to `~/.a8s/settings.json`. |
 | `a8s config unset <key>` | Remove key from settings.json; fall back to env then default. |
 
-Env vars apply only when a key is absent from `settings.json` (e.g. `A8S_CONVO_MAX_LIMIT`, `A8S_LOOP_INTERVAL`). `a8s config` with no arguments lists every knob — machine-wide, per-agent definition, registry, network, env, and constants — even read-only ones.
+Env vars apply only when a key is absent from `settings.json` (e.g. `A8S_CONVO_MAX_ROWS`, `A8S_LOOP_INTERVAL`). `a8s config` with no arguments lists every knob — machine-wide, per-agent definition, registry, network, env, and constants — even read-only ones.
 
 
 ### Skills
@@ -398,7 +398,7 @@ The state root resolves as follows when `A8S_HOME` is unset: use `~/.config/a8s`
 ├── network.json              remotes / services (non-secret)
 ├── secrets.json              remote secrets (`pass` / `password`; mode 0600)
 ├── seen-ids                  cluster-wide ULID ring for receive-side dedup
-├── conversations.jsonl       routed message archive for `a8s convo` (see convo_max_limit)
+├── conversations.sqlite3     routed message archive (`a8s update` retains convo_max_rows)
 ├── log.txt                   process-scoped supervisor log
 └── agents/
     └── <NAME>/
