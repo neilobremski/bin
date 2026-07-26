@@ -7,6 +7,7 @@ from `~/.a8s/settings.json` (default 1000).
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -201,11 +202,20 @@ def record(msg: dict[str, Any], *, recipients: list[str]) -> None:
         if len(rows) <= cap:
             with path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
             return
+        # Atomic replace so followers see an inode change (in-place truncate+"w"
+        # keeps the inode; a reader parked at the old EOF then misses new rows
+        # when the rewritten file is the same size or larger).
         rows = rows[-cap:]
-        with path.open("w", encoding="utf-8") as f:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
             for row in rows:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
     except OSError:
         pass
 
@@ -277,6 +287,12 @@ def write_block(block: str, glow_stream: object | None) -> None:
         return
     if glow_stream is not None:
         glow_stream.write(block + "\n\n")
+        # Each convo entry is complete markdown. Force a final flush so an
+        # unclosed fence (common in agent replies) cannot hold the message
+        # in GlowStream's buffer until Ctrl+C.
+        finalize = getattr(glow_stream, "finalize", None)
+        if callable(finalize):
+            finalize()
         return
     print(block, flush=True)
     print(flush=True)
@@ -327,28 +343,6 @@ def _entry_follow_key(entry: dict[str, Any]) -> str:
     )
 
 
-def _parse_convo_line(line: str) -> dict[str, Any] | None:
-    line = line.strip()
-    if not line:
-        return None
-    try:
-        row = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-    return row if isinstance(row, dict) else None
-
-
-def _open_convo_tail(path: Path):
-    """Open archive for follow, positioned at EOF. Returns (handle, inode)."""
-    handle = path.open("r", encoding="utf-8")
-    handle.seek(0, 2)
-    try:
-        ino = path.stat().st_ino
-    except OSError:
-        ino = None
-    return handle, ino
-
-
 def follow_conversation(
     agent: str,
     *,
@@ -360,9 +354,10 @@ def follow_conversation(
 ) -> None:
     """Print the last `limit` messages, then block printing new archive rows.
 
-    ``record`` appends under the cap; when the archive rotates (rewrite) or is
-    replaced, this reopens/seeks carefully and dedupes with a full seed of
-    already-known entry keys so history is not flooded back to the terminal.
+    Re-reads the archive each poll and emits unseen rows. Offset/EOF tailing is
+    unsafe at the rotation cap: in-place rewrite keeps the inode and a reader
+    parked at the old EOF misses same-or-larger rewrites (typical for inbound
+    replies right after an outbound record).
     """
     glow_stream = None
     if glow_theme is not None:
@@ -371,7 +366,6 @@ def follow_conversation(
         except FileNotFoundError:
             print("a8s convo: glow not found on PATH", file=sys.stderr)
 
-    handle = None
     try:
         rows = [e for e in load_entries() if involves_agent(e, agent)]
         print_entries(
@@ -385,19 +379,13 @@ def follow_conversation(
         # window — so a truncate/rewrite cannot replay older history.
         seen = {_entry_follow_key(e) for e in rows if _entry_follow_key(e)}
 
-        path = conversations_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.touch(exist_ok=True)
-
-        handle, ino = _open_convo_tail(path)
         while True:
-            line = handle.readline()
-            if line:
-                entry = _parse_convo_line(line)
-                if entry is None or not involves_agent(entry, agent):
+            time.sleep(poll_interval)
+            for entry in load_entries():
+                if not involves_agent(entry, agent):
                     continue
                 key = _entry_follow_key(entry)
-                if key in seen:
+                if not key or key in seen:
                     continue
                 print_entries(
                     agent,
@@ -407,38 +395,7 @@ def follow_conversation(
                     heading_in=heading_in,
                 )
                 seen.add(key)
-                continue
-
-            try:
-                st = path.stat()
-            except OSError:
-                time.sleep(poll_interval)
-                continue
-
-            rotated = False
-            if ino is not None and st.st_ino != ino:
-                rotated = True
-            elif handle.tell() > st.st_size:
-                rotated = True
-
-            if rotated:
-                handle.close()
-                handle = path.open("r", encoding="utf-8")
-                try:
-                    ino = path.stat().st_ino
-                except OSError:
-                    ino = None
-                # Rescan from the start with dedupe so a rewrite that includes
-                # a brand-new trailing row is still picked up; known keys skip.
-                continue
-
-            time.sleep(poll_interval)
     finally:
-        if handle is not None:
-            try:
-                handle.close()
-            except OSError:
-                pass
         if glow_stream is not None:
             glow_stream.close()
 

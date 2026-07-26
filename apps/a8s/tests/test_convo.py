@@ -14,6 +14,7 @@ from convo import (
     open_glow_stdout,
     print_entries,
     record,
+    write_block,
 )
 from core import conversations_path
 from commands import cmd_convo
@@ -229,6 +230,9 @@ class TestGlowOutput:
                 writes.append(text)
                 return len(text)
 
+            def finalize(self) -> None:
+                pass
+
             def close(self) -> None:
                 writes.append("__close__")
 
@@ -279,6 +283,9 @@ class TestGlowOutput:
             def write(self, text: str) -> int:
                 return len(text)
 
+            def finalize(self) -> None:
+                pass
+
             def close(self) -> None:
                 pass
 
@@ -299,12 +306,39 @@ class TestGlowOutput:
             def write(self, text: str) -> int:
                 return len(text)
 
+            def finalize(self) -> None:
+                pass
+
             def close(self) -> None:
                 pass
 
         monkeypatch.setattr("convo.open_glow_stdout", lambda theme: (opened.append(theme) or FakeGlow()))
         assert cmd_convo(["bob", "--limit", "1"]) == 0
         assert opened == ["tokyo-night"]
+
+    def test_write_block_finalizes_glow_for_fenced_markdown(self):
+        """Agent replies often include ``` fences; without finalize, GlowStream
+        holds the entry until the stream closes (looks like silent inbound)."""
+        class CapturingGlow:
+            def __init__(self):
+                self.writes: list[str] = []
+                self.finalized = 0
+
+            def write(self, text: str) -> int:
+                self.writes.append(text)
+                return len(text)
+
+            def finalize(self) -> None:
+                self.finalized += 1
+
+            def close(self) -> None:
+                pass
+
+        glow = CapturingGlow()
+        body = "### from remote to bob\n\nHere:\n\n```\ncode\n"
+        write_block(body, glow)
+        assert glow.finalized == 1
+        assert any("```" in w for w in glow.writes)
 
 
 class TestHeadingTemplates:
@@ -618,3 +652,98 @@ class TestFollowConversation:
         rows = load_entries()
         assert [r["content"] for r in rows] == ["beta", "gamma", "delta"]
         assert conversations_path().is_file()
+
+    def test_record_rotation_replaces_inode(self, fake_home, monkeypatch):
+        from core import conversations_path
+
+        monkeypatch.setattr("convo._max_limit", lambda: 2)
+        record(
+            {"id": "01A", "from": "A", "to": "B", "content": "one", "date": "2026-01-01T00:00:00Z"},
+            recipients=["B"],
+        )
+        record(
+            {"id": "01B", "from": "A", "to": "B", "content": "two", "date": "2026-01-01T00:01:00Z"},
+            recipients=["B"],
+        )
+        path = conversations_path()
+        ino_before = path.stat().st_ino
+        record(
+            {
+                "id": "01C",
+                "from": "A",
+                "to": "B",
+                "content": "three-longer-so-file-grows",
+                "date": "2026-01-01T00:02:00Z",
+            },
+            recipients=["B"],
+        )
+        assert path.stat().st_ino != ino_before
+        assert [r["content"] for r in load_entries()] == ["two", "three-longer-so-file-grows"]
+
+    def test_follow_sees_inbound_after_larger_rewrite(
+        self, fake_home, tmp_path, capsys, monkeypatch
+    ):
+        """At cap, outbound+inbound each rewrite. In-place "w" with a same-or-larger
+        file leaves an EOF reader blind; polling load_entries must still show reply."""
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root)}})
+        monkeypatch.setattr("convo._max_limit", lambda: 2)
+
+        record(
+            {
+                "id": "01OUT0000000000000000001",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Bob",
+                "to": "chatroom",
+                "content": "/list",
+            },
+            recipients=["chatroom"],
+        )
+        record(
+            {
+                "id": "01IN00000000000000000001",
+                "date": "2026-06-18T10:00:01.000000Z",
+                "from": "chatroom",
+                "to": "Bob",
+                "content": "no chat rooms",
+            },
+            recipients=["Bob"],
+        )
+
+        sleeps = {"n": 0}
+
+        def fake_sleep(_interval: float) -> None:
+            sleeps["n"] += 1
+            if sleeps["n"] == 1:
+                record(
+                    {
+                        "id": "01OUT0000000000000000002",
+                        "date": "2026-06-18T11:00:00.000000Z",
+                        "from": "Bob",
+                        "to": "chatroom",
+                        "content": "/list again with more bytes",
+                    },
+                    recipients=["chatroom"],
+                )
+                record(
+                    {
+                        "id": "01IN00000000000000000002",
+                        "date": "2026-06-18T11:00:01.000000Z",
+                        "from": "chatroom",
+                        "to": "Bob",
+                        "content": "still no chat rooms — longer reply body here",
+                    },
+                    recipients=["Bob"],
+                )
+                return
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("convo.time.sleep", fake_sleep)
+        with pytest.raises(KeyboardInterrupt):
+            follow_conversation("Bob", limit=2, poll_interval=0.01)
+        out = capsys.readouterr().out
+        assert out.count("/list again with more bytes") == 1
+        assert out.count("still no chat rooms — longer reply body here") == 1
