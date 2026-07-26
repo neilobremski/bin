@@ -62,14 +62,39 @@ ENTRYPOINT = SCRIPT_DIR / "a8s.py"
 PRINT_LOCK: threading.Lock | None = None
 
 
-# ---------- ~/.a8s/ paths ----------
+# ---------- a8s state paths ----------
+
+def resolve_a8s_home() -> Path:
+    """State-root directory (registry, mailboxes, network, secrets).
+
+    Resolution order:
+      1. ``A8S_HOME`` if set (tests, sandboxes, explicit relocate)
+      2. ``~/.config/a8s`` if that directory already exists
+      3. ``~/.a8s`` if that directory already exists (legacy)
+      4. ``~/.config/a8s`` (default for new installs)
+
+    Does not create the directory — callers that write should mkdir.
+    """
+    override = os.environ.get("A8S_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    config = Path.home() / ".config" / "a8s"
+    legacy = Path.home() / ".a8s"
+    if config.is_dir():
+        return config
+    if legacy.is_dir():
+        return legacy
+    return config
+
 
 def _a8s_dir() -> Path:
-    """State directory for the registry, mailboxes, and process logs. Defaults
-    to `$HOME/.a8s` and can be overridden by setting `A8S_HOME` — useful for
-    sandboxed test runs that must not touch the real configuration."""
-    override = os.environ.get("A8S_HOME")
-    base = Path(override) if override else Path.home() / ".a8s"
+    """State directory for the registry, mailboxes, and process logs.
+
+    See ``resolve_a8s_home`` for path selection. Creates the directory on
+    first use. Overridden wholesale via ``A8S_HOME`` (not ``A8S_DIR`` —
+    that token is reserved for the install path in definition argv).
+    """
+    base = resolve_a8s_home()
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -313,9 +338,13 @@ def registry_path() -> Path:
 
 
 def network_config_path() -> Path:
-    """`~/.a8s/network.json` — the list of configured remotes. Absent file
-    means "no remotes configured" — a8s is local-only."""
+    """Configured remotes / services (non-secret). Absent → local-only."""
     return _a8s_dir() / "network.json"
+
+
+def secrets_config_path() -> Path:
+    """Secret overlay for remotes/services (mode 0600). Merged at load time."""
+    return _a8s_dir() / "secrets.json"
 
 
 def settings_path() -> Path:

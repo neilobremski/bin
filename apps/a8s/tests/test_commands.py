@@ -1011,6 +1011,8 @@ class TestCmdRemote:
         assert spec["user"] == "alice"
 
     def test_set_passes_arbitrary_options_to_spec(self, fake_home):
+        from network import load_secrets_config
+
         rc = cmd_remote([
             "hub", "mqtts://x", "t",
             "--user", "alice", "--pass", "secret",
@@ -1018,10 +1020,11 @@ class TestCmdRemote:
         ])
         assert rc == 0
         spec = load_network_config()["remotes"]["hub"]
-        # Stored under the user-typed key — no translation here.
+        # Non-secrets stay in network.json; pass goes to secrets.json.
         assert spec["user"] == "alice"
-        assert spec["pass"] == "secret"
+        assert "pass" not in spec
         assert spec["keepalive"] == "120"
+        assert load_secrets_config()["remotes"]["hub"]["pass"] == "secret"
 
     def test_set_rejects_dangling_option(self, fake_home, capsys):
         rc = cmd_remote(["hub", "mqtt://x", "t", "--user"])
@@ -1050,6 +1053,38 @@ class TestCmdRemote:
         out = capsys.readouterr().out
         assert "TOPSECRET" not in out
         assert "--pass=***" in out
+
+    def test_pass_stored_in_secrets_not_network(self, fake_home):
+        from core import secrets_config_path
+        from network import load_secrets_config
+
+        cmd_remote(["hub", "mqtts://x", "t", "--user", "alice", "--pass", "TOPSECRET"])
+        net = load_network_config()["remotes"]["hub"]
+        assert "pass" not in net
+        assert net["user"] == "alice"
+        secrets = load_secrets_config()["remotes"]["hub"]
+        assert secrets["pass"] == "TOPSECRET"
+        mode = secrets_config_path().stat().st_mode & 0o777
+        assert mode == 0o600
+
+    def test_pass_optional_and_preserved_on_rewrite(self, fake_home):
+        from network import load_secrets_config
+
+        cmd_remote(["hub", "mqtt://x", "t", "--pass", "KEEPME"])
+        cmd_remote(["hub", "mqtt://y", "t2", "--user", "bob"])
+        net = load_network_config()["remotes"]["hub"]
+        assert net["broker"] == "mqtt://y"
+        assert net["user"] == "bob"
+        assert "pass" not in net
+        assert load_secrets_config()["remotes"]["hub"]["pass"] == "KEEPME"
+
+    def test_unremote_clears_secrets(self, fake_home):
+        from network import load_secrets_config
+
+        cmd_remote(["hub", "mqtt://x", "t", "--pass", "X"])
+        cmd_unremote(["hub"])
+        assert "hub" not in load_network_config()["remotes"]
+        assert "hub" not in load_secrets_config()["remotes"]
 
 
 class TestCmdUnremote:

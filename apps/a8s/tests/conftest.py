@@ -31,6 +31,8 @@ def fake_home(tmp_path, monkeypatch):
     monkeypatch.delenv("USERPROFILE", raising=False)
     # Don't let a globally-set A8S_HOME leak into tests.
     monkeypatch.delenv("A8S_HOME", raising=False)
+    # Prefer legacy ~/.a8s when present so existing path assertions stay stable.
+    (tmp_path / ".a8s").mkdir(parents=True, exist_ok=True)
 
     import core
     # Make sure no prior test left a Lock attached.

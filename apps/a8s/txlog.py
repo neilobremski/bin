@@ -9,7 +9,6 @@ receive -> recipient wake.
 """
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -44,9 +43,9 @@ HEADER = "\t".join(_COLUMNS)
 
 
 def _txlog_path() -> Path:
-    override = os.environ.get("A8S_HOME")
-    base = Path(override) if override else Path.home() / ".a8s"
-    return base / "transactions.tsv"
+    from core import resolve_a8s_home
+
+    return resolve_a8s_home() / "transactions.tsv"
 
 
 def _ts() -> str:

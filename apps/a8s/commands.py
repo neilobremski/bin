@@ -58,9 +58,13 @@ from daemon import (
 )
 from network import (
     configured_remote_ids,
+    delete_remote_secrets,
     detect_service_kind,
     load_network_config,
+    merge_remote_secrets,
+    put_remote_secrets,
     save_network_config,
+    split_secret_keys,
 )
 from registry import (
     _scan_for_markers,
@@ -2122,8 +2126,9 @@ def _remote_usage() -> int:
         "       a8s unremote <name>                                # remove\n"
         "\n"
         "Any --<opt> <value> pair past the broker and topic is passed verbatim\n"
-        "to the transport (e.g. --user / --pass for mqtt). Unknown options are\n"
-        "rejected by the transport at load time.",
+        "to the transport (e.g. --user / --pass for mqtt). --pass/--password are\n"
+        "stored in secrets.json (not network.json). Unknown options are rejected\n"
+        "by the transport at load time.",
         file=sys.stderr,
     )
     return 2
@@ -2145,7 +2150,11 @@ def _format_remote_summary(spec: dict) -> str:
 
 
 def cmd_remote(args: list[str]) -> int:
-    """`a8s remote` — manage cross-cluster remotes declared in `~/.a8s/network.json`.
+    """`a8s remote` — manage cross-cluster remotes.
+
+    Non-secret fields live in ``network.json``; ``pass`` / ``password`` go to
+    ``secrets.json`` (mode 0600). One ``a8s remote … --pass …`` call writes
+    both — ``--pass`` is optional.
 
     Forms (mirror `a8s alias`):
       a8s remote                                          list all
@@ -2170,7 +2179,9 @@ def _cmd_remote_list() -> int:
         return 0
     name_w = max(len(n) for n in remotes)
     for name, spec in remotes.items():
-        print(f"  {name.ljust(name_w)}  {_format_remote_summary(spec)}")
+        if not isinstance(spec, dict):
+            continue
+        print(f"  {name.ljust(name_w)}  {_format_remote_summary(merge_remote_secrets(name, spec))}")
     return 0
 
 
@@ -2179,7 +2190,11 @@ def _cmd_remote_show(name: str) -> int:
     if name not in cfg["remotes"]:
         print(f"no remote named {name!r}", file=sys.stderr)
         return 1
-    print(f"{name}: {_format_remote_summary(cfg['remotes'][name])}")
+    spec = cfg["remotes"][name]
+    if not isinstance(spec, dict):
+        print(f"remote {name!r} config is not an object", file=sys.stderr)
+        return 1
+    print(f"{name}: {_format_remote_summary(merge_remote_secrets(name, spec))}")
     return 0
 
 
@@ -2206,11 +2221,14 @@ def _cmd_remote_set(name: str, broker: str, topic: str, opt_tokens: list[str]) -
         i += 1
     cfg = load_network_config()
     overwriting = name in cfg["remotes"]
-    spec: dict = {"transport": "mqtt", "broker": broker, "topic": topic, **extras}
-    cfg["remotes"][name] = spec
+    public, secrets = split_secret_keys(
+        {"transport": "mqtt", "broker": broker, "topic": topic, **extras}
+    )
+    cfg["remotes"][name] = public
     save_network_config(cfg)
+    put_remote_secrets(name, secrets)
     verb = "updated" if overwriting else "added"
-    print(f"{verb} remote {name} ({_format_remote_summary(spec)})")
+    print(f"{verb} remote {name} ({_format_remote_summary(merge_remote_secrets(name, public))})")
     return 0
 
 
@@ -2227,6 +2245,7 @@ def cmd_unremote(args: list[str]) -> int:
         return 1
     del cfg["remotes"][name]
     save_network_config(cfg)
+    delete_remote_secrets(name)
     print(f"removed remote {name}")
     return 0
 

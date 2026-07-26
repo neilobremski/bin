@@ -75,6 +75,30 @@ class TestA8sHomeOverride:
     def test_default_under_home(self, fake_home):
         assert _a8s_dir() == fake_home / ".a8s"
 
+    def test_prefers_config_a8s_when_present(self, fake_home, monkeypatch):
+        from core import resolve_a8s_home
+
+        config = fake_home / ".config" / "a8s"
+        config.mkdir(parents=True)
+        assert resolve_a8s_home() == config
+
+    def test_uses_legacy_when_only_dot_a8s(self, fake_home):
+        from core import resolve_a8s_home
+
+        assert (fake_home / ".a8s").is_dir()
+        assert not (fake_home / ".config" / "a8s").exists()
+        assert resolve_a8s_home() == fake_home / ".a8s"
+
+    def test_new_install_defaults_to_config_a8s(self, tmp_path, monkeypatch):
+        from core import resolve_a8s_home
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("A8S_HOME", raising=False)
+        monkeypatch.delenv("USERPROFILE", raising=False)
+        assert resolve_a8s_home() == tmp_path / ".config" / "a8s"
+        assert _a8s_dir() == tmp_path / ".config" / "a8s"
+        assert (tmp_path / ".config" / "a8s").is_dir()
+
     def test_env_var_overrides(self, fake_home, tmp_path, monkeypatch):
         sandbox = tmp_path / "sandbox-a8s"
         monkeypatch.setenv("A8S_HOME", str(sandbox))

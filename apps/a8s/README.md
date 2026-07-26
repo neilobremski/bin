@@ -239,7 +239,7 @@ Env vars apply only when a key is absent from `settings.json` (e.g. `A8S_CONVO_M
 | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s remote`                                                   | List configured remotes (transport, broker, topic, opts; passwords masked).                                                                                                                                                                                                                                                                                                                                                            |
 | `a8s remote <name>`                                            | Show one remote's spec.                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `a8s remote <name> <broker-url> <topic> [--<opt> <value> ...]` | Register or overwrite a remote. Broker URL is `mqtt://host[:1883]` or `mqtts://host[:8883]`. Persistent session + QoS 1 are wired automatically so an offline cluster catches up on reconnect. Any `--<opt> <value>` past the broker and topic is forwarded verbatim to the transport — common ones are `--user U --pass P`, `--client_id ID`, `--keepalive N`. The transport rejects unknown options at load time so typos fail loud. |
+| `a8s remote <name> <broker-url> <topic> [--<opt> <value> ...]` | Register or overwrite a remote. Broker URL is `mqtt://host[:1883]` or `mqtts://host[:8883]`. Persistent session + QoS 1 are wired automatically so an offline cluster catches up on reconnect. Non-secret opts land in `network.json`; `--pass` / `--password` go to `secrets.json` (0600) in the same command — `--pass` is optional. Unknown options are rejected by the transport at load time so typos fail loud. |
 | `a8s unremote <name>`                                          | Forget a remote. Running daemons keep using the prior config until restart.                                                                                                                                                                                                                                                                                                                                                            |
 
 
@@ -389,13 +389,14 @@ The default definitions follow the opacity rule — `$SENDER tells $RECIPIENT: $
 
 ## State on disk
 
-The state root is `$HOME/.a8s` by default; set `A8S_HOME` to relocate it. This is the only relocation knob — everything below is relative to whichever path `A8S_HOME` points at (or the default). Useful for sandboxed end-to-end tests that mustn't touch the operator's real configuration.
+The state root resolves as follows when `A8S_HOME` is unset: use `~/.config/a8s` if it exists, else `~/.a8s` if it exists (legacy), else create/use `~/.config/a8s`. Set `A8S_HOME` to relocate the whole tree (tests, sandboxes). Everything below is relative to that root.
 
 ```
-~/.a8s/                       (or wherever A8S_HOME points)
+~/.config/a8s/                (or ~/.a8s legacy, or wherever A8S_HOME points)
 ├── a8s.json                  registry: { agents: {...}, aliases: {...}, namespaces: {...} }
 ├── settings.json             operator settings (`a8s config`; env fills gaps)
-├── network.json              configured remotes (absent → local-only)
+├── network.json              remotes / services (non-secret)
+├── secrets.json              remote secrets (`pass` / `password`; mode 0600)
 ├── seen-ids                  cluster-wide ULID ring for receive-side dedup
 ├── conversations.jsonl       routed message archive for `a8s convo` (see convo_max_limit)
 ├── log.txt                   process-scoped supervisor log
@@ -415,7 +416,7 @@ The state root is `$HOME/.a8s` by default; set `A8S_HOME` to relocate it. This i
 
 <agent-root>/
 └── .outbox/                  agent writes here; a8s renames out — never
-                              read-modify-writes — to ~/.a8s/agents/<NAME>/pending/
+                              read-modify-writes — to <a8s-home>/agents/<NAME>/pending/
 ```
 
 The outbox lives in the agent's own dir because some sandboxes (codex `--full-auto`) only let the agent write inside its workspace. Inbox/trash/pending live under `~/.a8s/` where the agent can't see them — and per the agent-directory invariant, a8s never sidecars or rewrites in `.outbox/`. New outbox files are atomically renamed to `pending/` on every routing pass; everything from there (sidecars, retries, trash, remote publishes) happens in `~/.a8s/`.
