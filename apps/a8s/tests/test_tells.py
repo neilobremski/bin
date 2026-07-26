@@ -105,6 +105,7 @@ def test_tells_timeout_exits_1(tmp_path, monkeypatch, capsys):
 
 def test_tells_without_outbox_env_fails(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv(TELL_OUTBOX_DIR_ENV, raising=False)
+    monkeypatch.setenv("A8S_HOME", str(tmp_path / "empty-a8s-home"))
     rc = tells_main([])
     err = capsys.readouterr().err
     assert rc == 1

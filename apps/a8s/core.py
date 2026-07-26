@@ -362,8 +362,8 @@ def user_definitions_dir() -> Path:
 
 
 def conversations_path() -> Path:
-    """`~/.a8s/conversations.jsonl` — routed message archive for `a8s convo`."""
-    return _a8s_dir() / "conversations.jsonl"
+    """Conversation archive under the resolved a8s state root."""
+    return _a8s_dir() / "conversations.sqlite3"
 
 
 def seen_ids_path() -> Path:

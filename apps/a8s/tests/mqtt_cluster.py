@@ -171,7 +171,7 @@ def wait_convo(
             if predicate(rows):
                 return rows
             time.sleep(0.05)
-    raise AssertionError(f"conversations.jsonl condition not met within {timeout}s")
+    raise AssertionError(f"conversations.sqlite3 condition not met within {timeout}s")
 
 
 def wait_agent_log(

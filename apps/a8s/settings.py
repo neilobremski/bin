@@ -37,12 +37,12 @@ class Knob:
 KNOBS: tuple[Knob, ...] = (
     # --- machine-wide (settings.json) ---
     Knob(
-        "convo_max_limit",
-        1000,
+        "convo_max_rows",
+        50_000,
         "machine",
         True,
-        "A8S_CONVO_MAX_LIMIT",
-        "Max rows in ~/.a8s/conversations.jsonl before rotation",
+        "A8S_CONVO_MAX_ROWS",
+        "Rows retained in conversations.sqlite3 when a8s update runs housekeeping",
     ),
     Knob(
         "loop_interval",
@@ -169,7 +169,7 @@ def save_settings_file(data: dict[str, Any]) -> None:
 
 
 def _coerce(key: str, raw: str) -> Any:
-    if key in ("convo_max_limit", "max_file_bytes", "max_seen_ids"):
+    if key in ("convo_max_rows", "max_file_bytes", "max_seen_ids"):
         return int(raw)
     if key == "loop_interval":
         return float(raw)
@@ -177,10 +177,10 @@ def _coerce(key: str, raw: str) -> Any:
 
 
 def _validate(key: str, value: Any) -> Any:
-    if key == "convo_max_limit":
+    if key == "convo_max_rows":
         n = int(value)
         if n < 1:
-            raise ValueError("convo_max_limit must be a positive integer")
+            raise ValueError("convo_max_rows must be a positive integer")
         return n
     if key == "max_file_bytes":
         n = int(value)
@@ -291,4 +291,3 @@ def list_catalog() -> list[tuple[str, list[Knob]]]:
     for knob in KNOBS:
         by_group[knob.group].append(knob)
     return [( _GROUP_LABELS[g], by_group[g]) for g in _GROUP_ORDER if by_group[g]]
-

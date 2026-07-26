@@ -13,6 +13,7 @@ from convo import (
     load_entries,
     open_glow_stdout,
     print_entries,
+    prune_conversations,
     record,
     write_block,
 )
@@ -73,8 +74,27 @@ class TestRecord:
         record(msg, recipients=["B"])
         assert len(load_entries()) == 1
 
-    def test_rotates_to_max_limit(self, fake_home, monkeypatch):
-        monkeypatch.setenv("A8S_CONVO_MAX_LIMIT", "3")
+    def test_concurrent_writers_do_not_lose_rows(self, fake_home):
+        from concurrent.futures import ThreadPoolExecutor
+
+        def write(i: int) -> None:
+            record(
+                {
+                    "id": f"01JCONCURRENT{i:012d}",
+                    "from": "A",
+                    "to": "B",
+                    "content": str(i),
+                },
+                recipients=["B"],
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(write, range(40)))
+        assert {row["content"] for row in load_entries()} == {
+            str(i) for i in range(40)
+        }
+
+    def test_housekeeping_prunes_to_max_rows(self, fake_home):
         for i in range(5):
             record(
                 {
@@ -86,6 +106,8 @@ class TestRecord:
                 },
                 recipients=["B"],
             )
+        assert len(load_entries()) == 5
+        assert prune_conversations(3) == 2
         rows = load_entries()
         assert len(rows) == 3
         assert rows[0]["content"] == "m2"
@@ -424,6 +446,10 @@ class TestCmdConvo:
         assert cmd_convo(["nope"]) == 1
         assert "no agent named" in capsys.readouterr().err
 
+    def test_rejects_non_positive_limit(self, fake_home, capsys):
+        assert cmd_convo(["bob", "--limit", "0"]) == 2
+        assert "--limit must be a positive integer" in capsys.readouterr().err
+
     def test_follow_flag_parses(self, fake_home, tmp_path, monkeypatch):
         from registry import save_registry
 
@@ -467,13 +493,13 @@ class TestCmdConvo:
 
 class TestConversationsPath:
     def test_default_under_a8s_home(self, fake_home):
-        assert conversations_path() == fake_home / ".a8s" / "conversations.jsonl"
+        assert conversations_path() == fake_home / ".a8s" / "conversations.sqlite3"
 
     def test_respects_a8s_home(self, fake_home, monkeypatch, tmp_path):
         custom = tmp_path / "custom"
         monkeypatch.setenv("A8S_HOME", str(custom))
         custom.mkdir()
-        assert conversations_path() == custom / "conversations.jsonl"
+        assert conversations_path() == custom / "conversations.sqlite3"
 
 
 class TestRoutingIntegration:
@@ -532,8 +558,8 @@ class TestRoutingIntegration:
         assert text.index("question") < text.index("answer")
 
 
-def test_default_max_limit_is_1000():
-    assert DEFAULTS["convo_max_limit"] == 1000
+def test_default_max_rows_is_50000():
+    assert DEFAULTS["convo_max_rows"] == 50_000
 
 
 class TestFollowConversation:
@@ -579,60 +605,129 @@ class TestFollowConversation:
         assert "old" in out
         assert "fresh" in out
 
-    def test_record_appends_under_cap(self, fake_home, monkeypatch):
-        from core import conversations_path
+    def test_archive_is_sqlite(self, fake_home):
+        import sqlite3
 
-        monkeypatch.setattr("convo._max_limit", lambda: 100)
         record(
-            {"id": "01A", "from": "A", "to": "B", "content": "one", "date": "2026-01-01T00:00:00Z"},
+            {"id": "01A", "from": "A", "to": "B", "content": "one"},
             recipients=["B"],
         )
-        record(
-            {"id": "01B", "from": "A", "to": "B", "content": "two", "date": "2026-01-01T00:01:00Z"},
-            recipients=["B"],
-        )
-        text = conversations_path().read_text(encoding="utf-8")
-        assert text.count("\n") == 2
-        assert "one" in text and "two" in text
-
-    def test_follow_does_not_replay_history_on_rewrite(
-        self, fake_home, tmp_path, capsys, monkeypatch
-    ):
-        """Regression: every record used to truncate+rewrite; follow did seek(0)
-        with seen only holding --limit ids, flooding the terminal with old rows."""
-        from registry import save_registry
-        from core import conversations_path
-
-        root = tmp_path / "bob"
-        root.mkdir()
-        save_registry({"Bob": {"root": str(root)}})
-        monkeypatch.setattr("convo._max_limit", lambda: 3)
-
-        for i, content in enumerate(("alpha", "beta", "gamma"), start=1):
-            record(
-                {
-                    "id": f"01OLD{i:020d}",
-                    "date": f"2026-06-18T10:0{i}:00.000000Z",
-                    "from": "Alice",
-                    "to": "Bob",
-                    "content": content,
-                },
-                recipients=["Bob"],
+        with sqlite3.connect(conversations_path()) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+            assert (
+                conn.execute(
+                    "SELECT agent_key FROM message_agents ORDER BY agent_key"
+                ).fetchall()
+                == [("a",), ("b",)]
             )
 
+    def test_follow_surfaces_every_message_between_polls(
+        self, fake_home, capsys, monkeypatch
+    ):
+        record(
+            {"id": "01OLD", "from": "Alice", "to": "Bob", "content": "old"},
+            recipients=["Bob"],
+        )
         sleeps = {"n": 0}
 
         def fake_sleep(_interval: float) -> None:
             sleeps["n"] += 1
             if sleeps["n"] == 1:
-                # Over cap → rewrite. Must not dump alpha/beta/gamma again.
+                for i in range(4):
+                    record(
+                        {
+                            "id": f"01NEW{i}",
+                            "from": "Alice",
+                            "to": "Bob",
+                            "content": f"new-{i}",
+                        },
+                        recipients=["Bob"],
+                    )
+                return
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("convo.time.sleep", fake_sleep)
+        with pytest.raises(KeyboardInterrupt):
+            follow_conversation("Bob", limit=1, poll_interval=0.01)
+        out = capsys.readouterr().out
+        assert out.count("old") == 1
+        for i in range(4):
+            assert out.count(f"new-{i}") == 1
+
+    def test_housekeeping_does_not_change_follow_display_limit(
+        self, fake_home, capsys, monkeypatch
+    ):
+        for i in range(5):
+            record(
+                {"id": f"01{i}", "from": "Alice", "to": "Bob", "content": f"m{i}"},
+                recipients=["Bob"],
+            )
+        assert prune_conversations(3) == 2
+        monkeypatch.setattr(
+            "convo.time.sleep",
+            lambda _: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+        with pytest.raises(KeyboardInterrupt):
+            follow_conversation("Bob", limit=1, poll_interval=0.01)
+        out = capsys.readouterr().out
+        assert "m4" in out
+        assert "m2" not in out
+        assert "m3" not in out
+
+    def test_follow_warns_when_housekeeping_advances_past_cursor(
+        self, fake_home, capsys, monkeypatch
+    ):
+        record(
+            {"id": "01OLD", "from": "Alice", "to": "Bob", "content": "old"},
+            recipients=["Bob"],
+        )
+        sleeps = {"n": 0}
+
+        def fake_sleep(_interval: float) -> None:
+            sleeps["n"] += 1
+            if sleeps["n"] == 1:
+                for i in range(3):
+                    record(
+                        {
+                            "id": f"01GAP{i}",
+                            "from": "Alice",
+                            "to": "Bob",
+                            "content": f"gap-{i}",
+                        },
+                        recipients=["Bob"],
+                    )
+                prune_conversations(1)
+                return
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("convo.time.sleep", fake_sleep)
+        with pytest.raises(KeyboardInterrupt):
+            follow_conversation("Bob", limit=1, poll_interval=0.01)
+        captured = capsys.readouterr()
+        assert "messages may have been missed" in captured.err
+        assert "gap-2" in captured.out
+        assert "gap-0" not in captured.out
+
+    def test_follow_recovers_when_archive_sequence_resets(
+        self, fake_home, capsys, monkeypatch
+    ):
+        for i in range(3):
+            record(
+                {"id": f"01OLD{i}", "from": "Alice", "to": "Bob", "content": f"old-{i}"},
+                recipients=["Bob"],
+            )
+        sleeps = {"n": 0}
+
+        def fake_sleep(_interval: float) -> None:
+            sleeps["n"] += 1
+            if sleeps["n"] == 1:
+                conversations_path().unlink()
                 record(
                     {
-                        "id": "01NEW000000000000000001",
-                        "date": "2026-06-18T11:00:00.000000Z",
+                        "id": "01REPLACEMENT",
                         "from": "Alice",
                         "to": "Bob",
-                        "content": "delta",
+                        "content": "replacement-row",
                     },
                     recipients=["Bob"],
                 )
@@ -642,108 +737,7 @@ class TestFollowConversation:
         monkeypatch.setattr("convo.time.sleep", fake_sleep)
         with pytest.raises(KeyboardInterrupt):
             follow_conversation("Bob", limit=1, poll_interval=0.01)
-        out = capsys.readouterr().out
-        # Initial window printed gamma once; follow should add delta once.
-        assert out.count("gamma") == 1
-        assert out.count("delta") == 1
-        assert out.count("alpha") == 0
-        assert out.count("beta") == 0
-        # Rotated file still on disk with newest three.
-        rows = load_entries()
-        assert [r["content"] for r in rows] == ["beta", "gamma", "delta"]
-        assert conversations_path().is_file()
-
-    def test_record_rotation_replaces_inode(self, fake_home, monkeypatch):
-        from core import conversations_path
-
-        monkeypatch.setattr("convo._max_limit", lambda: 2)
-        record(
-            {"id": "01A", "from": "A", "to": "B", "content": "one", "date": "2026-01-01T00:00:00Z"},
-            recipients=["B"],
-        )
-        record(
-            {"id": "01B", "from": "A", "to": "B", "content": "two", "date": "2026-01-01T00:01:00Z"},
-            recipients=["B"],
-        )
-        path = conversations_path()
-        ino_before = path.stat().st_ino
-        record(
-            {
-                "id": "01C",
-                "from": "A",
-                "to": "B",
-                "content": "three-longer-so-file-grows",
-                "date": "2026-01-01T00:02:00Z",
-            },
-            recipients=["B"],
-        )
-        assert path.stat().st_ino != ino_before
-        assert [r["content"] for r in load_entries()] == ["two", "three-longer-so-file-grows"]
-
-    def test_follow_sees_inbound_after_larger_rewrite(
-        self, fake_home, tmp_path, capsys, monkeypatch
-    ):
-        """At cap, outbound+inbound each rewrite. In-place "w" with a same-or-larger
-        file leaves an EOF reader blind; polling load_entries must still show reply."""
-        from registry import save_registry
-
-        root = tmp_path / "bob"
-        root.mkdir()
-        save_registry({"Bob": {"root": str(root)}})
-        monkeypatch.setattr("convo._max_limit", lambda: 2)
-
-        record(
-            {
-                "id": "01OUT0000000000000000001",
-                "date": "2026-06-18T10:00:00.000000Z",
-                "from": "Bob",
-                "to": "chatroom",
-                "content": "/list",
-            },
-            recipients=["chatroom"],
-        )
-        record(
-            {
-                "id": "01IN00000000000000000001",
-                "date": "2026-06-18T10:00:01.000000Z",
-                "from": "chatroom",
-                "to": "Bob",
-                "content": "no chat rooms",
-            },
-            recipients=["Bob"],
-        )
-
-        sleeps = {"n": 0}
-
-        def fake_sleep(_interval: float) -> None:
-            sleeps["n"] += 1
-            if sleeps["n"] == 1:
-                record(
-                    {
-                        "id": "01OUT0000000000000000002",
-                        "date": "2026-06-18T11:00:00.000000Z",
-                        "from": "Bob",
-                        "to": "chatroom",
-                        "content": "/list again with more bytes",
-                    },
-                    recipients=["chatroom"],
-                )
-                record(
-                    {
-                        "id": "01IN00000000000000000002",
-                        "date": "2026-06-18T11:00:01.000000Z",
-                        "from": "chatroom",
-                        "to": "Bob",
-                        "content": "still no chat rooms — longer reply body here",
-                    },
-                    recipients=["Bob"],
-                )
-                return
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr("convo.time.sleep", fake_sleep)
-        with pytest.raises(KeyboardInterrupt):
-            follow_conversation("Bob", limit=2, poll_interval=0.01)
-        out = capsys.readouterr().out
-        assert out.count("/list again with more bytes") == 1
-        assert out.count("still no chat rooms — longer reply body here") == 1
+        captured = capsys.readouterr()
+        assert "conversation archive sequence reset from 3 to 1" in captured.err
+        assert captured.out.count("old-2") == 1
+        assert captured.out.count("replacement-row") == 1

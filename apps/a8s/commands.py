@@ -1505,7 +1505,7 @@ def _update_restart_targets(by_pid: dict[int, list[str]]) -> list[str]:
 
 
 def cmd_update(args: list[str]) -> int:
-    """`a8s update [--force]` — restart every running node (refresh handlers).
+    """`a8s update [--force]` — housekeep state and restart every running node.
 
     v1: no code pull — stop+start so background handlers re-exec the current
     on-disk ``a8s`` entrypoint. Use after ``git pull``. Later iterations may
@@ -1519,6 +1519,19 @@ def cmd_update(args: list[str]) -> int:
     if rest:
         print("usage: a8s update [--force]", file=sys.stderr)
         return 2
+    from convo import ConversationArchiveError, prune_conversations
+    from settings import get_int
+
+    try:
+        pruned = prune_conversations()
+    except ConversationArchiveError as e:
+        print(f"update: conversation housekeeping failed: {e}", file=sys.stderr)
+        return 1
+    max_rows = get_int("convo_max_rows")
+    print(
+        f"conversation housekeeping: retained up to {max_rows} row(s), "
+        f"pruned {pruned}"
+    )
     by_pid = _running_nodes_by_pid()
     if not by_pid:
         print("no nodes running")
@@ -1800,8 +1813,7 @@ def cmd_convo(args: list[str]) -> int:
         decode_template,
         follow_conversation,
         format_conversation,
-        involves_agent,
-        load_entries,
+        load_agent_entries,
         open_glow_stdout,
         print_entries,
     )
@@ -1818,7 +1830,7 @@ def cmd_convo(args: list[str]) -> int:
         "-f",
         "--follow",
         action="store_true",
-        help="print backlog then tail ~/.a8s/conversations.jsonl for new rows",
+        help="print backlog then follow new rows in conversations.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -1851,6 +1863,9 @@ def cmd_convo(args: list[str]) -> int:
         parsed = parser.parse_args(args)
     except SystemExit as e:
         return int(e.code if e.code is not None else 0)
+    if parsed.limit < 1:
+        print("a8s convo: --limit must be a positive integer", file=sys.stderr)
+        return 2
 
     heading_out = (
         decode_template("\n".join(parsed.heading_out))
@@ -1883,8 +1898,7 @@ def cmd_convo(args: list[str]) -> int:
             pass
         return 0
 
-    rows = [e for e in load_entries() if involves_agent(e, agent_name)]
-    rows = rows[-parsed.limit :]
+    rows = load_agent_entries(agent_name, limit=parsed.limit)
     if glow_theme is not None:
         glow_stream = None
         try:

@@ -690,7 +690,23 @@ class TestCmdStopAndRestart:
 class TestCmdUpdate:
     def test_no_nodes_running(self, fake_home, capsys):
         assert cmd_update([]) == 0
-        assert "no nodes running" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "conversation housekeeping" in out
+        assert "no nodes running" in out
+
+    def test_housekeeping_prunes_when_no_nodes_running(self, fake_home, capsys):
+        from convo import load_entries, record
+        from settings import set_setting
+
+        set_setting("convo_max_rows", 2)
+        for i in range(4):
+            record(
+                {"id": f"01UPDATE{i}", "from": "A", "to": "B", "content": str(i)},
+                recipients=["B"],
+            )
+        assert cmd_update([]) == 0
+        assert [row["content"] for row in load_entries()] == ["2", "3"]
+        assert "pruned 2" in capsys.readouterr().out
 
     def test_prefers_alias_for_shared_pid(self, fake_home, tmp_path):
         a = tmp_path / "a"; a.mkdir()
@@ -1473,4 +1489,3 @@ class TestCmdTrace:
         msg_id = new_ulid()
         assert cmd_trace([msg_id]) == 1
         assert f"no transaction events for {msg_id}" in capsys.readouterr().err
-

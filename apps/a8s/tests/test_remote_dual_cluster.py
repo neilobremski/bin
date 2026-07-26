@@ -1,5 +1,5 @@
 """Two-cluster MQTT integration — sender and recipient on opposite A8S_HOME
-trees with real mosquitto, exercising publish/receive, conversations.jsonl,
+trees with real mosquitto, exercising publish/receive, conversations.sqlite3,
 and `a8s convo` end to end."""
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class TestDualClusterRemote:
     def test_bidirectional_delivery_convo_and_cmd(self, tmp_path, mqtt_broker, capsys):
         """Two handlers on separate A8S_HOME dirs share one broker topic.
         Messages published from each side arrive at the other; both
-        conversations.jsonl archives and `a8s convo` show inbound/outbound."""
+        conversations.sqlite3 archives and `a8s convo` show inbound/outbound."""
         topic = _unique_topic("dual")
         alice_a8s = tmp_path / "alice_a8s"
         bob_a8s = tmp_path / "bob_a8s"

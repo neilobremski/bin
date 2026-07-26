@@ -1,20 +1,21 @@
-"""Conversation archive — append-only jsonl of routed messages for `a8s convo`.
+"""SQLite conversation archive for routed messages shown by `a8s convo`.
 
 One record per logical message (alias fan-out stores the alias in `to` and
-lists local deliverees in `recipients`). Rotates to `convo_max_limit` entries
-from `~/.a8s/settings.json` (default 1000).
+lists local deliverees in `recipients`). Inserts never prune history.
+`a8s update` retains the newest `convo_max_rows` entries during housekeeping.
 """
 from __future__ import annotations
 
 import json
-import os
+import sqlite3
 import sys
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from core import conversations_path, inbound_bundle_dir
+from core import conversations_path, inbound_bundle_dir, out
 from settings import get_int
 
 __all__ = [
@@ -29,9 +30,11 @@ __all__ = [
     "format_entry",
     "follow_conversation",
     "involves_agent",
+    "load_agent_entries",
     "load_entries",
     "open_glow_stdout",
     "print_entries",
+    "prune_conversations",
     "record",
     "write_block",
 ]
@@ -113,12 +116,60 @@ environment:
 """
 
 
-def _max_limit() -> int:
-    return get_int("convo_max_limit")
-
-
 def _name_key(name: str) -> str:
     return (name or "").strip().lower()
+
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS messages (
+    seq INTEGER PRIMARY KEY,
+    message_id TEXT,
+    entry_json TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS messages_message_id
+    ON messages(message_id)
+    WHERE message_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS message_agents (
+    seq INTEGER NOT NULL REFERENCES messages(seq) ON DELETE CASCADE,
+    agent_key TEXT NOT NULL,
+    PRIMARY KEY (seq, agent_key)
+);
+CREATE INDEX IF NOT EXISTS message_agents_agent_seq
+    ON message_agents(agent_key, seq);
+"""
+
+
+class ConversationArchiveError(RuntimeError):
+    pass
+
+
+def _connect() -> sqlite3.Connection:
+    path = conversations_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=5.0)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.executescript(_SCHEMA)
+    except sqlite3.Error:
+        conn.close()
+        raise
+    return conn
+
+
+def _entry_agents(entry: dict[str, Any]) -> set[str]:
+    names = [entry.get("from", ""), entry.get("to", "")]
+    names.extend(entry.get("recipients") or [])
+    return {key for name in names if (key := _name_key(str(name)))}
+
+
+def _decode_entry(raw: str) -> dict[str, Any] | None:
+    try:
+        entry = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return entry if isinstance(entry, dict) else None
 
 
 def involves_agent(entry: dict[str, Any], agent: str) -> bool:
@@ -160,64 +211,125 @@ def load_entries() -> list[dict[str, Any]]:
     path = conversations_path()
     if not path.is_file():
         return []
-    out: list[dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
     try:
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(row, dict):
-                    out.append(row)
-    except OSError:
+        with closing(_connect()) as conn:
+            rows = conn.execute(
+                "SELECT entry_json FROM messages ORDER BY seq"
+            ).fetchall()
+        for (raw,) in rows:
+            entry = _decode_entry(raw)
+            if entry is not None:
+                entries.append(entry)
+    except (OSError, sqlite3.Error):
         return []
-    return out
+    return entries
+
+
+def _rows_to_entries(rows: list[tuple[int, str]]) -> list[tuple[int, dict[str, Any]]]:
+    entries: list[tuple[int, dict[str, Any]]] = []
+    for seq, raw in rows:
+        entry = _decode_entry(raw)
+        if entry is not None:
+            entries.append((int(seq), entry))
+    return entries
+
+
+def _latest_agent_entries(
+    conn: sqlite3.Connection,
+    agent: str,
+    limit: int,
+    *,
+    through_seq: int | None = None,
+) -> list[tuple[int, dict[str, Any]]]:
+    if limit < 1:
+        return []
+    params: list[Any] = [_name_key(agent)]
+    through = ""
+    if through_seq is not None:
+        through = "AND m.seq <= ?"
+        params.append(through_seq)
+    params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT m.seq, m.entry_json
+        FROM messages AS m
+        JOIN message_agents AS a ON a.seq = m.seq
+        WHERE a.agent_key = ? {through}
+        ORDER BY m.seq DESC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    rows.reverse()
+    return _rows_to_entries(rows)
+
+
+def load_agent_entries(agent: str, *, limit: int) -> list[dict[str, Any]]:
+    if limit < 1 or not conversations_path().is_file():
+        return []
+    try:
+        with closing(_connect()) as conn:
+            return [entry for _, entry in _latest_agent_entries(conn, agent, limit)]
+    except (OSError, sqlite3.Error):
+        return []
 
 
 def record(msg: dict[str, Any], *, recipients: list[str]) -> None:
     """Append one logical message when delivery completes (local inbox, remote
     receive, or outbound remote publish). `recipients` lists local deliverees
     for routed/RECEIVED_REMOTE rows, or the logical `to` name for outbound
-    remote-only sends.
-
-    Under the cap this appends one jsonl line (so `a8s convo -f` can tail).
-    Over the cap it rewrites the file with the newest ``convo_max_limit`` rows.
+    remote-only sends. Retention is applied by `a8s update`, never here.
     """
     if not recipients:
         return
     entry = entry_from_message(msg, recipients=recipients)
-    msg_id = entry.get("id") or ""
+    msg_id = entry.get("id") or None
     try:
-        rows = load_entries()
-        if msg_id and any(r.get("id") == msg_id for r in rows):
-            return
-        rows.append(entry)
-        path = conversations_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        cap = _max_limit()
-        if len(rows) <= cap:
-            with path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-            return
-        # Atomic replace so followers see an inode change (in-place truncate+"w"
-        # keeps the inode; a reader parked at the old EOF then misses new rows
-        # when the rewritten file is the same size or larger).
-        rows = rows[-cap:]
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            for row in rows:
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except OSError:
-        pass
+        with closing(_connect()) as conn, conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO messages(message_id, entry_json) VALUES (?, ?)",
+                (msg_id, json.dumps(entry, ensure_ascii=False)),
+            )
+            if cursor.rowcount == 0:
+                return
+            seq = int(cursor.lastrowid)
+            conn.executemany(
+                "INSERT INTO message_agents(seq, agent_key) VALUES (?, ?)",
+                [(seq, key) for key in sorted(_entry_agents(entry))],
+            )
+    except (OSError, sqlite3.Error) as e:
+        label = msg_id or "without-id"
+        out(f"WARN conversation archive failed id={label}: {e}")
+
+
+def prune_conversations(max_rows: int | None = None) -> int:
+    """Retain the newest configured number of rows and return rows removed."""
+    keep = max_rows if max_rows is not None else get_int("convo_max_rows")
+    if keep < 1:
+        raise ValueError("max_rows must be positive")
+    try:
+        with closing(_connect()) as conn:
+            with conn:
+                before = int(
+                    conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+                )
+                removed = 0
+                if before > keep:
+                    cutoff = conn.execute(
+                        "SELECT seq FROM messages ORDER BY seq DESC LIMIT 1 OFFSET ?",
+                        (keep - 1,),
+                    ).fetchone()
+                    if cutoff is not None:
+                        conn.execute(
+                            "DELETE FROM messages WHERE seq < ?", (int(cutoff[0]),)
+                        )
+                        removed = before - keep
+            conn.execute("PRAGMA optimize")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return removed
+    except (OSError, sqlite3.Error) as e:
+        raise ConversationArchiveError(str(e)) from e
 
 
 def _format_heading(template: str, entry: dict[str, Any]) -> str:
@@ -321,26 +433,12 @@ def format_conversation(
     """Return markdown for the last `limit` messages involving `agent`."""
     if limit < 1:
         return ""
-    rows = [e for e in load_entries() if involves_agent(e, agent)]
-    rows = rows[-limit:]
+    rows = load_agent_entries(agent, limit=limit)
     parts = [
         format_entry(agent, entry, heading_out=heading_out, heading_in=heading_in)
         for entry in rows
     ]
     return "\n\n".join(parts)
-
-
-def _entry_follow_key(entry: dict[str, Any]) -> str:
-    """Stable dedupe key for follow: prefer message id, else content fingerprint."""
-    msg_id = (entry.get("id") or "").strip()
-    if msg_id:
-        return f"id:{msg_id}"
-    return "fp:{0}|{1}|{2}|{3}".format(
-        (entry.get("date") or "").strip(),
-        (entry.get("from") or "").strip(),
-        (entry.get("to") or "").strip(),
-        entry.get("content", ""),
-    )
 
 
 def follow_conversation(
@@ -352,13 +450,7 @@ def follow_conversation(
     poll_interval: float = 1.0,
     glow_theme: str | None = None,
 ) -> None:
-    """Print the last `limit` messages, then block printing new archive rows.
-
-    Re-reads the archive each poll and emits unseen rows. Offset/EOF tailing is
-    unsafe at the rotation cap: in-place rewrite keeps the inode and a reader
-    parked at the old EOF misses same-or-larger rewrites (typical for inbound
-    replies right after an outbound record).
-    """
+    """Print the last `limit` messages, then emit rows after a sequence cursor."""
     glow_stream = None
     if glow_theme is not None:
         try:
@@ -367,26 +459,58 @@ def follow_conversation(
             print("a8s convo: glow not found on PATH", file=sys.stderr)
 
     try:
-        rows = [e for e in load_entries() if involves_agent(e, agent)]
+        with closing(_connect()) as conn:
+            conn.execute("BEGIN")
+            cursor = int(
+                conn.execute("SELECT COALESCE(MAX(seq), 0) FROM messages").fetchone()[0]
+            )
+            rows = _latest_agent_entries(conn, agent, limit, through_seq=cursor)
+            conn.commit()
         print_entries(
             agent,
-            rows[-limit:],
+            [entry for _, entry in rows],
             glow_stream=glow_stream,
             heading_out=heading_out,
             heading_in=heading_in,
         )
-        # Seed with every known row for this agent — not only the printed
-        # window — so a truncate/rewrite cannot replay older history.
-        seen = {_entry_follow_key(e) for e in rows if _entry_follow_key(e)}
 
         while True:
             time.sleep(poll_interval)
-            for entry in load_entries():
-                if not involves_agent(entry, agent):
-                    continue
-                key = _entry_follow_key(entry)
-                if not key or key in seen:
-                    continue
+            with closing(_connect()) as conn:
+                conn.execute("BEGIN")
+                bounds = conn.execute(
+                    "SELECT MIN(seq), COALESCE(MAX(seq), 0) FROM messages"
+                ).fetchone()
+                minimum = int(bounds[0]) if bounds[0] is not None else None
+                high_water = int(bounds[1])
+                reset = bool(cursor and high_water < cursor)
+                query_cursor = 0 if reset else cursor
+                rows = conn.execute(
+                    """
+                    SELECT m.seq, m.entry_json
+                    FROM messages AS m
+                    JOIN message_agents AS a ON a.seq = m.seq
+                    WHERE a.agent_key = ? AND m.seq > ? AND m.seq <= ?
+                    ORDER BY m.seq
+                    """,
+                    (_name_key(agent), query_cursor, high_water),
+                ).fetchall()
+                conn.commit()
+            if reset:
+                print(
+                    "a8s convo: conversation archive sequence reset "
+                    f"from {cursor} to {high_water}; following from the beginning",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif minimum is not None and cursor and minimum > cursor + 1:
+                print(
+                    "a8s convo: conversation housekeeping advanced past "
+                    f"{minimum - cursor - 1} row(s); messages may have been missed",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            for _, entry in _rows_to_entries(rows):
                 print_entries(
                     agent,
                     [entry],
@@ -394,8 +518,7 @@ def follow_conversation(
                     heading_out=heading_out,
                     heading_in=heading_in,
                 )
-                seen.add(key)
+            cursor = high_water
     finally:
         if glow_stream is not None:
             glow_stream.close()
-
