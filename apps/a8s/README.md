@@ -222,6 +222,8 @@ any prefixes pointing at it.
 
 Env vars apply only when a key is absent from `settings.json` (e.g. `A8S_CONVO_MAX_ROWS`, `A8S_LOOP_INTERVAL`). `a8s config` with no arguments lists every knob — machine-wide, per-agent definition, registry, network, env, and constants — even read-only ones.
 
+Pre-v1 rename: `convo_max_limit` / `A8S_CONVO_MAX_LIMIT` were replaced by `convo_max_rows` / `A8S_CONVO_MAX_ROWS`. Existing values under the old names are ignored.
+
 
 ### Skills
 

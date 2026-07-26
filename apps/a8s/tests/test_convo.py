@@ -707,3 +707,37 @@ class TestFollowConversation:
         assert "messages may have been missed" in captured.err
         assert "gap-2" in captured.out
         assert "gap-0" not in captured.out
+
+    def test_follow_recovers_when_archive_sequence_resets(
+        self, fake_home, capsys, monkeypatch
+    ):
+        for i in range(3):
+            record(
+                {"id": f"01OLD{i}", "from": "Alice", "to": "Bob", "content": f"old-{i}"},
+                recipients=["Bob"],
+            )
+        sleeps = {"n": 0}
+
+        def fake_sleep(_interval: float) -> None:
+            sleeps["n"] += 1
+            if sleeps["n"] == 1:
+                conversations_path().unlink()
+                record(
+                    {
+                        "id": "01REPLACEMENT",
+                        "from": "Alice",
+                        "to": "Bob",
+                        "content": "replacement-row",
+                    },
+                    recipients=["Bob"],
+                )
+                return
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("convo.time.sleep", fake_sleep)
+        with pytest.raises(KeyboardInterrupt):
+            follow_conversation("Bob", limit=1, poll_interval=0.01)
+        captured = capsys.readouterr()
+        assert "conversation archive sequence reset from 3 to 1" in captured.err
+        assert captured.out.count("old-2") == 1
+        assert captured.out.count("replacement-row") == 1

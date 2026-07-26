@@ -483,6 +483,8 @@ def follow_conversation(
                 ).fetchone()
                 minimum = int(bounds[0]) if bounds[0] is not None else None
                 high_water = int(bounds[1])
+                reset = bool(cursor and high_water < cursor)
+                query_cursor = 0 if reset else cursor
                 rows = conn.execute(
                     """
                     SELECT m.seq, m.entry_json
@@ -491,10 +493,17 @@ def follow_conversation(
                     WHERE a.agent_key = ? AND m.seq > ? AND m.seq <= ?
                     ORDER BY m.seq
                     """,
-                    (_name_key(agent), cursor, high_water),
+                    (_name_key(agent), query_cursor, high_water),
                 ).fetchall()
                 conn.commit()
-            if minimum is not None and cursor and minimum > cursor + 1:
+            if reset:
+                print(
+                    "a8s convo: conversation archive sequence reset "
+                    f"from {cursor} to {high_water}; following from the beginning",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif minimum is not None and cursor and minimum > cursor + 1:
                 print(
                     "a8s convo: conversation housekeeping advanced past "
                     f"{minimum - cursor - 1} row(s); messages may have been missed",

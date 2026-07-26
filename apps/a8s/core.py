@@ -362,7 +362,7 @@ def user_definitions_dir() -> Path:
 
 
 def conversations_path() -> Path:
-    """`~/.a8s/conversations.sqlite3` — routed message archive for `a8s convo`."""
+    """Conversation archive under the resolved a8s state root."""
     return _a8s_dir() / "conversations.sqlite3"
 
 
