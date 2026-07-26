@@ -272,6 +272,9 @@ def test_tells_glow_renders_through_stream(tmp_path, monkeypatch, capsys):
             writes.append(text)
             return len(text)
 
+        def finalize(self) -> None:
+            pass
+
         def close(self) -> None:
             writes.append("__close__")
 

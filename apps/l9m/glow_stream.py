@@ -195,6 +195,11 @@ class GlowStream:
 
     def finalize(self) -> None:
         self._flush_safe(final=True)
+        # Drop rendered prefix so long-lived streams (a8s convo -f) do not grow
+        # without bound after each forced per-entry finalize.
+        if self._rendered:
+            self._buffer = self._buffer[self._rendered :]
+            self._rendered = 0
 
     def _flush_safe(self, final: bool = False) -> None:
         while True:
