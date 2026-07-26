@@ -98,6 +98,27 @@ class TestNetworkConfig:
         ids = configured_remote_ids()
         assert ids == ["a", "z", "m"]
 
+    def test_secrets_overlay_merged_at_load(self, fake_home, monkeypatch):
+        from network import put_remote_secrets, merge_remote_secrets
+
+        save_network_config({
+            "remotes": {
+                "hub": {
+                    "transport": "mqtt",
+                    "broker": "mqtt://localhost:1883",
+                    "topic": "t",
+                    "user": "alice",
+                }
+            }
+        })
+        put_remote_secrets("hub", {"pass": "s3cret"})
+        merged = merge_remote_secrets("hub", load_network_config()["remotes"]["hub"])
+        assert merged["user"] == "alice"
+        assert merged["pass"] == "s3cret"
+        # Legacy inline pass still works until rewritten.
+        inline = {"transport": "mqtt", "broker": "mqtt://x", "topic": "t", "pass": "old"}
+        assert merge_remote_secrets("missing", inline)["pass"] == "old"
+
 
 class TestLoadRemotes:
     def test_unknown_transport_skipped(self, fake_home):

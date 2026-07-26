@@ -90,7 +90,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("network.remotes.<name>", None, "network", False, note="Cross-machine MQTT transport config"),
     Knob("network.services.<name>", None, "network", False, note="Shared file storage for cross-cluster attachments"),
     # --- runtime environment ---
-    Knob("A8S_HOME", None, "env", False, note="Relocate entire ~/.a8s state tree (tests, sandboxes)"),
+    Knob("A8S_HOME", None, "env", False, note="Relocate entire a8s state tree (default: ~/.config/a8s, or legacy ~/.a8s if present)"),
     Knob("TELL_OUTBOX_DIR", None, "env", False, note="Tell write path; a8s sets on wake from definition.outbox_dir"),
     # --- code constants (not in settings.json) ---
     Knob(

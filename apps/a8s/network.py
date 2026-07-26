@@ -38,6 +38,7 @@ from core import (
     network_config_path,
     out,
     out_agent,
+    secrets_config_path,
     seen_ids_path,
 )
 from delivery_receipt import (
@@ -89,7 +90,12 @@ def _remote_drop_diagnostic(
     )
 
 
-# ---------- network.json ----------
+# ---------- network.json + secrets.json ----------
+
+# Keys that belong in secrets.json, never network.json. Transport-agnostic
+# (mqtt user/pass today; any future transport can reuse the same names).
+SECRET_SPEC_KEYS = frozenset({"pass", "password"})
+
 
 def load_network_config() -> dict:
     p = network_config_path()
@@ -99,7 +105,7 @@ def load_network_config() -> dict:
         with p.open("r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
-        out(f"WARN: ~/.a8s/network.json malformed ({e}); treating as empty")
+        out(f"WARN: network.json malformed ({e}); treating as empty")
         return {"remotes": {}, "services": {}}
     if not isinstance(data, dict):
         return {"remotes": {}, "services": {}}
@@ -117,6 +123,92 @@ def save_network_config(cfg: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+
+
+def load_secrets_config() -> dict:
+    p = secrets_config_path()
+    if not p.is_file():
+        return {"remotes": {}, "services": {}}
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        out(f"WARN: secrets.json malformed ({e}); treating as empty")
+        return {"remotes": {}, "services": {}}
+    if not isinstance(data, dict):
+        return {"remotes": {}, "services": {}}
+    data.setdefault("remotes", {})
+    if not isinstance(data["remotes"], dict):
+        data["remotes"] = {}
+    data.setdefault("services", {})
+    if not isinstance(data["services"], dict):
+        data["services"] = {}
+    return data
+
+
+def save_secrets_config(cfg: dict) -> None:
+    """Atomic write of secrets.json with mode 0600."""
+    p = secrets_config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(cfg, indent=2) + "\n"
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(payload)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, p)
+    try:
+        p.chmod(0o600)
+    except OSError:
+        pass
+
+
+def split_secret_keys(spec: dict) -> tuple[dict, dict]:
+    """Split a remote/service spec into (public, secrets) dicts."""
+    public: dict = {}
+    secrets: dict = {}
+    for key, value in spec.items():
+        if key in SECRET_SPEC_KEYS:
+            secrets[key] = value
+        else:
+            public[key] = value
+    return public, secrets
+
+
+def merge_remote_secrets(name: str, spec: dict) -> dict:
+    """Overlay secrets.json (and any legacy inline secrets) onto a remote spec.
+
+    secrets.json wins for secret keys. Inline values still in network.json
+    remain effective until the next `a8s remote` rewrite strips them.
+    """
+    merged = dict(spec)
+    stored = (load_secrets_config().get("remotes") or {}).get(name)
+    if isinstance(stored, dict):
+        for key, value in stored.items():
+            if key in SECRET_SPEC_KEYS:
+                merged[key] = value
+    return merged
+
+
+def put_remote_secrets(name: str, secrets: dict) -> None:
+    """Merge ``secrets`` into secrets.json for remote ``name`` (no-op if empty)."""
+    if not secrets:
+        return
+    cfg = load_secrets_config()
+    prev = cfg["remotes"].get(name)
+    merged = dict(prev) if isinstance(prev, dict) else {}
+    merged.update(secrets)
+    cfg["remotes"][name] = merged
+    save_secrets_config(cfg)
+
+
+def delete_remote_secrets(name: str) -> None:
+    cfg = load_secrets_config()
+    if name not in cfg["remotes"]:
+        return
+    del cfg["remotes"][name]
+    save_secrets_config(cfg)
 
 
 # Top-level keys in a network.json entry that are not transport options
@@ -145,9 +237,12 @@ def _build_transport(name: str, spec: dict) -> Transport:
 
 
 def load_remotes() -> list[Transport]:
-    """Return Transport instances for every entry in `~/.a8s/network.json`.
-    Failures (bad config, missing transport module) are logged and skipped —
-    never block a8s startup."""
+    """Return Transport instances for every configured remote.
+
+    Merges ``secrets.json`` secret keys into each network.json spec before
+    building the transport. Failures are logged and skipped — never block
+    a8s startup.
+    """
     cfg = load_network_config()
     out_list: list[Transport] = []
     for name, spec in cfg["remotes"].items():
@@ -155,7 +250,7 @@ def load_remotes() -> list[Transport]:
             out(f"WARN: remote {name!r} config is not an object; skipping")
             continue
         try:
-            out_list.append(_build_transport(name, spec))
+            out_list.append(_build_transport(name, merge_remote_secrets(name, spec)))
         except Exception as e:
             out(f"WARN: remote {name!r} skipped: {e}")
     return out_list
