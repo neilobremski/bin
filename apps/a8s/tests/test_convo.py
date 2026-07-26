@@ -544,3 +544,77 @@ class TestFollowConversation:
         out = capsys.readouterr().out
         assert "old" in out
         assert "fresh" in out
+
+    def test_record_appends_under_cap(self, fake_home, monkeypatch):
+        from core import conversations_path
+
+        monkeypatch.setattr("convo._max_limit", lambda: 100)
+        record(
+            {"id": "01A", "from": "A", "to": "B", "content": "one", "date": "2026-01-01T00:00:00Z"},
+            recipients=["B"],
+        )
+        record(
+            {"id": "01B", "from": "A", "to": "B", "content": "two", "date": "2026-01-01T00:01:00Z"},
+            recipients=["B"],
+        )
+        text = conversations_path().read_text(encoding="utf-8")
+        assert text.count("\n") == 2
+        assert "one" in text and "two" in text
+
+    def test_follow_does_not_replay_history_on_rewrite(
+        self, fake_home, tmp_path, capsys, monkeypatch
+    ):
+        """Regression: every record used to truncate+rewrite; follow did seek(0)
+        with seen only holding --limit ids, flooding the terminal with old rows."""
+        from registry import save_registry
+        from core import conversations_path
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root)}})
+        monkeypatch.setattr("convo._max_limit", lambda: 3)
+
+        for i, content in enumerate(("alpha", "beta", "gamma"), start=1):
+            record(
+                {
+                    "id": f"01OLD{i:020d}",
+                    "date": f"2026-06-18T10:0{i}:00.000000Z",
+                    "from": "Alice",
+                    "to": "Bob",
+                    "content": content,
+                },
+                recipients=["Bob"],
+            )
+
+        sleeps = {"n": 0}
+
+        def fake_sleep(_interval: float) -> None:
+            sleeps["n"] += 1
+            if sleeps["n"] == 1:
+                # Over cap → rewrite. Must not dump alpha/beta/gamma again.
+                record(
+                    {
+                        "id": "01NEW000000000000000001",
+                        "date": "2026-06-18T11:00:00.000000Z",
+                        "from": "Alice",
+                        "to": "Bob",
+                        "content": "delta",
+                    },
+                    recipients=["Bob"],
+                )
+                return
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("convo.time.sleep", fake_sleep)
+        with pytest.raises(KeyboardInterrupt):
+            follow_conversation("Bob", limit=1, poll_interval=0.01)
+        out = capsys.readouterr().out
+        # Initial window printed gamma once; follow should add delta once.
+        assert out.count("gamma") == 1
+        assert out.count("delta") == 1
+        assert out.count("alpha") == 0
+        assert out.count("beta") == 0
+        # Rotated file still on disk with newest three.
+        rows = load_entries()
+        assert [r["content"] for r in rows] == ["beta", "gamma", "delta"]
+        assert conversations_path().is_file()
