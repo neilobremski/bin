@@ -22,7 +22,7 @@ Detailed docs live in [`docs/`](docs/):
 |-----|---------|---------|
 | [json.md](docs/json.md) | `n0b json` | Pretty-print JSON via stdlib `json.tool` |
 | [ltx-video.md](docs/ltx-video.md) | `n0b ai video` | LTX-Video generation, models, setup guide |
-| [research.md](docs/research.md) | `n0b ai research` | OpenAI o4-mini-deep-research |
+| [research.md](docs/research.md) | `n0b ai research` | OpenAI deep research (`gpt-5.6-sol`) |
 | [secrets.md](docs/secrets.md) | `n0b secrets` | Get/set secrets — env, `~/lib`, Keychain, dotenv |
 | [ai-speak.md](docs/ai-speak.md) | `n0b ai speak` | Text-to-speech — macOS `say` or offline Kokoro |
 | [z-image.md](docs/z-image.md) | `n0b ai image` | Z-Image-Turbo text-to-image and `--ref` img2img |

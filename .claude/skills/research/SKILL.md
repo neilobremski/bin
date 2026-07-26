@@ -1,6 +1,6 @@
 ---
 name: research
-description: "Deep research via n0b ai research (o4-mini-deep-research). Requires OPENAI_API_KEY."
+description: "Deep research via n0b ai research (gpt-5.6-sol). Requires OPENAI_API_KEY."
 disable-model-invocation: false
 allowed-tools: Bash(n0b ai research *)
 argument-hint: "prompt text"
@@ -15,4 +15,4 @@ Canonical documentation: [`apps/n0b/docs/research.md`](../../apps/n0b/docs/resea
 n0b ai research "Your research prompt here"
 ```
 
-Implementation: `apps/n0b/research.py` (stdlib only). Cache: `.files/research/<hash>.json`.
+Implementation: `apps/n0b/research.py` (stdlib only; model `gpt-5.6-sol`). Cache: `.files/research/<hash>.json`.
