@@ -1,12 +1,15 @@
 ---
 name: "n0b-research"
-description: "Deep research via n0b ai research (o4-mini-deep-research). Requires OPENAI_API_KEY."
+description: "Deep research via n0b ai research (gpt-5.6-sol). Requires OPENAI_API_KEY."
 allowed-tools: Bash(n0b ai research *)
 ---
 
 # n0b ai research
 
-CLI for OpenAI's Deep Research API (`o4-mini-deep-research`) — multi-step, agentic research with source transparency.
+CLI for OpenAI deep research via the Responses API (`gpt-5.6-sol`, with
+`web_search_preview`) — multi-step, agentic research with source transparency.
+(`o4-mini-deep-research` shut down 2026-07-23; OpenAI's replacement is
+`gpt-5.6-sol`.)
 
 ## Usage
 
@@ -29,3 +32,4 @@ All arguments after `research` are concatenated into a single prompt.
 
 - **CLI:** `n0b ai research`
 - **Code:** `apps/n0b/research.py` (stdlib only)
+- **Model:** `gpt-5.6-sol`

@@ -1,4 +1,8 @@
-"""OpenAI o4-mini-deep-research (stdlib only)."""
+"""OpenAI deep research via the Responses API (stdlib only).
+
+Uses ``gpt-5.6-sol`` (OpenAI's replacement after ``o4-mini-deep-research``
+shut down 2026-07-23).
+"""
 from __future__ import annotations
 
 import hashlib
@@ -10,6 +14,8 @@ import urllib.request
 
 from commands.secrets_cmd import resolve
 from paths import BIN_ROOT
+
+RESEARCH_MODEL = "gpt-5.6-sol"
 
 
 def _get_hash(prompt: str) -> str:
@@ -24,7 +30,7 @@ def _call_openai(api_key: str, prompt: str) -> dict:
         "Content-Type": "application/json",
     }
     data = {
-        "model": "o4-mini-deep-research",
+        "model": RESEARCH_MODEL,
         "input": prompt,
         "tools": [{"type": "web_search_preview"}],
         "background": True,

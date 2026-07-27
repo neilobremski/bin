@@ -159,7 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ai_p = sub.add_parser("ai", help="AI generation and research")
     ai_sub = ai_p.add_subparsers(dest="ai_kind", required=True)
-    ai_research = ai_sub.add_parser("research", help="Deep research via o4-mini-deep-research")
+    ai_research = ai_sub.add_parser("research", help="Deep research via gpt-5.6-sol")
     ai_research.add_argument("prompt", nargs=argparse.REMAINDER)
     ai_speak = ai_sub.add_parser(
         "speak",
