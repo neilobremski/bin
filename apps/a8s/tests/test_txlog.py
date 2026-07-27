@@ -82,13 +82,32 @@ class TestLogFieldFormat:
         fields = data_line.split("\t")
         assert len(fields) == 8
 
-    def test_detail_truncated_at_200(self, fake_home):
-        long_detail = "x" * 500
+    def test_detail_truncated_at_default_max(self, fake_home):
+        from settings import DEFAULTS
+
+        limit = DEFAULTS["txlog_detail_max"]
+        long_detail = "x" * (limit + 100)
         log("ROUTED", msg_id="01ABC", sender="A", recipient="B", detail=long_detail)
         lines = _txlog_path().read_text().splitlines()
         data_line = lines[1]
         detail_field = data_line.split("\t")[7]
-        assert len(detail_field) == 200
+        assert len(detail_field) == limit
+
+    def test_detail_max_env_override(self, fake_home, monkeypatch):
+        monkeypatch.setenv("A8S_TXLOG_DETAIL_MAX", "50")
+        long_detail = "y" * 200
+        log("ROUTED", msg_id="01ABC", sender="A", recipient="B", detail=long_detail)
+        lines = _txlog_path().read_text().splitlines()
+        detail_field = lines[1].split("\t")[7]
+        assert len(detail_field) == 50
+
+    def test_detail_max_zero_unlimited(self, fake_home, monkeypatch):
+        monkeypatch.setenv("A8S_TXLOG_DETAIL_MAX", "0")
+        long_detail = "z" * 5000
+        log("ROUTED", msg_id="01ABC", sender="A", recipient="B", detail=long_detail)
+        lines = _txlog_path().read_text().splitlines()
+        detail_field = lines[1].split("\t")[7]
+        assert detail_field == long_detail
 
     def test_tabs_in_sender_dont_break_tsv(self, fake_home):
         log("ROUTED", msg_id="01ABC", sender="A\tX", recipient="B\tY")
