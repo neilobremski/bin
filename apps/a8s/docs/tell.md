@@ -75,7 +75,7 @@ Does not affect `sender_from_cwd()`; the router still force-stamps `from` from o
 
 ## `tells` (receive side)
 
-`tells [-f] [--timeout SEC] [--glow [THEME]] [--heading-out|in …]` (`apps/a8s/tells.py`)
+`tells [-f] [--timeout SEC] [--body-max N] [--glow [THEME]] [--heading-out|in …]` (`apps/a8s/tells.py`)
 is the receive-side complement of `tell`. It resolves the node the same way
 `tell` does — the file-proxy inbox is `.inbox` beside the outbox
 (`<outbox-parent>/.inbox`).
@@ -83,9 +83,12 @@ is the receive-side complement of `tell`. It resolves the node the same way
 1. Snapshot the `.json` envelopes already in `.inbox`.
 2. Poll (0.1s) up to `--timeout` seconds (default 5) for new envelopes; `-f` /
    `--timeout 0` follows until Ctrl+C.
-3. Print each new envelope as `sender: body` by default. With `--glow` and/or
-   `--heading-out` / `--heading-in`, print the same markdown as `a8s convo`
-   (shared `format_entry` / GlowStream). Timeout prints one stderr line and exits 1.
+3. Print each new envelope as `sender: body` by default. Bodies longer than
+   `--body-max` / `TELLS_BODY_MAX` (default **16000** chars; `0` = unlimited)
+   are clipped and followed by a `python3 -c …` command that prints the full
+   `content` from that inbox JSON. With `--glow` and/or `--heading-out` /
+   `--heading-in`, print the same markdown as `a8s convo` (shared
+   `format_entry` / GlowStream). Timeout prints one stderr line and exits 1.
 
 Non-destructive: it observes new arrivals without consuming them, so it never competes to remove `.inbox` files and each run waits from its own baseline. Partial writes (mid-delivery on a cross-mount move) are tolerated — an unreadable file is skipped and retried on the next poll. It only reports messages that land after it starts; anything already waiting is ignored.
 
