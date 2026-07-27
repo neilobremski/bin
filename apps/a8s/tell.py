@@ -176,6 +176,14 @@ def _argv_looks_like_option(arg: str) -> bool:
     return arg.startswith("-") and arg != "-"
 
 
+def _argv_is_existing_file(arg: str) -> bool:
+    """True if arg names a regular file. OSError (e.g. ENAMETOOLONG) → False."""
+    try:
+        return Path(arg).expanduser().is_file()
+    except OSError:
+        return False
+
+
 def parse_byte_size(raw: str) -> int:
     """Parse a positive byte size: plain int, or with k/kb/m/mb/g/gb suffix."""
     text = raw.strip().lower().replace("_", "")
@@ -388,7 +396,7 @@ def parse_tell_argv(
             while (
                 i + 1 < len(argv)
                 and not _argv_looks_like_option(argv[i + 1])
-                and Path(argv[i + 1]).expanduser().is_file()
+                and _argv_is_existing_file(argv[i + 1])
             ):
                 i += 1
                 attachments.append(argv[i])

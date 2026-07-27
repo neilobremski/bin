@@ -333,6 +333,34 @@ def test_tell_attach_multiple_paths_after_one_flag(tmp_path):
     _assert_staged_files(tmp_path / ".outbox", msg, ["a.txt", "b.txt"])
 
 
+def test_tell_attach_then_long_prompt_does_not_crash(tmp_path):
+    """After --attach, tell probes the next argv as a file. Prompts longer than
+    NAME_MAX raise ENAMETOOLONG on some Pythons; that must be message text."""
+    (tmp_path / ".outbox").mkdir()
+    (tmp_path / "a.txt").write_text("a")
+    long_prompt = ("research " + ("detail " * 400)).rstrip()
+    assert len(long_prompt) > 255
+    res = _run(tmp_path, "gerry", "--attach", "./a.txt", long_prompt)
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    assert msg["content"] == long_prompt
+    _assert_staged_files(tmp_path / ".outbox", msg, ["a.txt"])
+
+
+def test_parse_tell_argv_long_token_after_attach_is_message():
+    from tell import parse_tell_argv
+
+    long_prompt = "x" * 300
+    recipient, attachments, message_argv, check, split = parse_tell_argv(
+        ["bob", "--attach", "./nope-missing.txt", long_prompt]
+    )
+    assert recipient == "bob"
+    assert attachments == ["./nope-missing.txt"]
+    assert message_argv == [long_prompt]
+    assert check is False
+    assert split is False
+
+
 def test_tell_rejects_oversized_attachment_without_split(tmp_path, monkeypatch):
     from core import TELL_FILE_MAX_ENV
 
