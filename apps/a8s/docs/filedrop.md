@@ -8,7 +8,7 @@ Deployed agents only need the installable [`tell` skill](../skills/tell/SKILL.md
 They never see this doc: a8s sets `TELL_OUTBOX_DIR` on wake.
 
 **Filedrop agents (IDE seats):** point them at
-[`docs/a8s-filedrop.md`](../../../docs/a8s-filedrop.md) — session playbook
+[`playbooks/a8s-filedrop-agent.md`](../../../playbooks/a8s-filedrop-agent.md) — session playbook
 (signals not contracts; own root only; no infra edits).
 
 To find this guide later: search the repo for **filedrop**.
@@ -81,7 +81,7 @@ For a filedrop loop you want inbound only.
 
 ## Related
 
-- Agent session playbook: [`docs/a8s-filedrop.md`](../../../docs/a8s-filedrop.md)
+- Agent session playbook: [`playbooks/a8s-filedrop-agent.md`](../../../playbooks/a8s-filedrop-agent.md)
 - File-proxy mechanics: [README — File proxy](../README.md#file-proxy)
 - Tell internals: [tell.md](tell.md)
 - Operator skill (send-only, for deployed agents): [`skills/tell/SKILL.md`](../skills/tell/SKILL.md)

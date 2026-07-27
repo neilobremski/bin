@@ -1,5 +1,5 @@
 ---
-name: "a8s-filedrop"
+name: "a8s-filedrop-agent"
 description: "Operate as a filedrop seat on an A8S network: send/receive mail, do not touch infrastructure."
 ---
 
@@ -15,7 +15,7 @@ Typical prompt:
 ```text
 You are '<name>' in my A8S communication network.
 Your outbox is <root>/.outbox
-Read: https://github.com/neilobremski/bin/blob/main/docs/a8s-filedrop.md
+Read: https://github.com/neilobremski/bin/blob/main/playbooks/a8s-filedrop-agent.md
 ```
 
 ## Faith: signals, not contracts

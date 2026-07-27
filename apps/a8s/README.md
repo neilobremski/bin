@@ -23,7 +23,7 @@ with `tells -f` (inbound only). Deployed agents do not use this path — they
 only need the installable `tell` skill.
 
 → **[Filedrop setup](docs/filedrop.md)** (`a8s add … filedrop`, handler)
-→ **[Agent playbook](../../docs/a8s-filedrop.md)** (IDE seats: send/receive norms)
+→ **[Agent playbook](../../playbooks/a8s-filedrop-agent.md)** (IDE seats: send/receive norms)
 
 ## Mental model
 
