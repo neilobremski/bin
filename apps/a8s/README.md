@@ -22,7 +22,8 @@ Humans and desktop IDE sessions (Cursor, Claude Code, Codex) can run a
 with `tells -f` (inbound only). Deployed agents do not use this path — they
 only need the installable `tell` skill.
 
-→ **[Filedrop guide](docs/filedrop.md)** (`a8s add … filedrop`, `TELL_OUTBOX_DIR`, `tells -f`)
+→ **[Filedrop setup](docs/filedrop.md)** (`a8s add … filedrop`, handler)
+→ **[Agent playbook](../../docs/a8s-filedrop.md)** (IDE seats: send/receive norms)
 
 ## Mental model
 
