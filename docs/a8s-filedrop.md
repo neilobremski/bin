@@ -124,6 +124,9 @@ tell --attach /abs/path/detail.md <recipient> "Headline. Ask: <one line>."
 - Short body: headlines + the ask. Detail in `--attach` / `--file` (repeatable).
 - If content is long enough to need a file, **attach it** — do not pipe a long
   body via `tell … -`.
+- **Shell metacharacters:** bash expands `$…` and backticks inside double quotes.
+  Quote carefully (prefer single quotes), escape, or pipe a short body on stdin
+  (`printf '%s\n' '…' | tell <recipient> -`) so the shell never sees the text.
 - Prefer absolute paths (or a short variable). Avoid `cd … && tell …` compounds
   when your host's command classifier is strict.
 - Delivery may take **minutes**. Arm the monitor and continue other work.
