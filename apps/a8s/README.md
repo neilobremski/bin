@@ -22,7 +22,8 @@ Humans and desktop IDE sessions (Cursor, Claude Code, Codex) can run a
 with `tells -f` (inbound only). Deployed agents do not use this path — they
 only need the installable `tell` skill.
 
-→ **[Filedrop guide](docs/filedrop.md)** (`a8s add … filedrop`, `TELL_OUTBOX_DIR`, `tells -f`)
+→ **[Filedrop setup](docs/filedrop.md)** (`a8s add … filedrop`, handler)
+→ **[Agent playbook](../../playbooks/a8s-filedrop-agent.md)** (IDE seats: send/receive norms)
 
 ## Mental model
 
@@ -203,7 +204,7 @@ any prefixes pointing at it.
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s tell <name> <msg>`                                                     | Routed message via `_write_outbox` into the sender's configured outbox. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose root encloses CWD; router force-stamps `from` from outbox ownership.                                                                                           |
 | `tell <name> <msg>` (top-level shim, `[~/bin/tell](/Users/neilo/bin/tell)`) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Outbox: `TELL_OUTBOX_DIR` if set, else a unique configured outbox matched from CWD when `~/.a8s` is readable (see [filedrop.md](docs/filedrop.md)). Drops a JSON envelope. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: `[docs/tell.md](docs/tell.md)`. |
-| `tells [-f] [--timeout SEC] [--glow [theme]]` (shim `[~/bin/tells](/Users/neilo/bin/tells)`) | Receive-side complement of `tell` (`apps/a8s/tells.py`). Same outbox resolution as `tell`; watches `.inbox` beside it. Default: wait up to 5s for a burst. `-f` / `--timeout 0`: follow until Ctrl+C. `--glow` / headings share convo's markdown formatting. Non-destructive. Prefer over `convo -f` for filedrop inbound-only loops. |
+| `tells [-f] [--timeout SEC] [--body-max N] [--glow [theme]]` (shim `[~/bin/tells](/Users/neilo/bin/tells)`) | Receive-side complement of `tell` (`apps/a8s/tells.py`). Same outbox resolution as `tell`; watches `.inbox` beside it. Default: wait up to 5s for a burst. `-f` / `--timeout 0`: follow until Ctrl+C. Bodies over `--body-max` / `TELLS_BODY_MAX` (default 16000; `0` = unlimited) print a `python3 -c` recovery command for the inbox JSON. `--glow` / headings share convo's markdown formatting. Non-destructive. Prefer over `convo -f` for filedrop inbound-only loops. |
 | `a8s logs <name>... [--tail N] [-f]`                                        | Read per-agent log files; one agent in append order, multiple merge by ISO timestamp. `-f` follows.                                                                                                                                                                                                                       |
 | `a8s convo <name> [--limit N] [-f] [--glow [theme]]`                        | Markdown history of messages to or from an agent. Default `--limit 10`; this controls display only. `-f` follows sequence-numbered rows in `conversations.sqlite3` (shows outbound too — use `tells -f` for filedrop inbound-only). `a8s update` retains `convo_max_rows` rows (default 50000). |
 | `a8s trace <ULID>`                                                          | Show locally observed transaction boundaries for one envelope: routing, remote publication/resolution, inbox write, delivery receipt, and agent wake. |

@@ -68,10 +68,19 @@ def log(
     remote: str = "",
     detail: str = "",
 ) -> None:
-    """Append one transaction line. Never raises — OSError is swallowed."""
+    """Append one transaction line. Never raises — errors are swallowed."""
     try:
+        try:
+            from settings import DEFAULTS, get_setting
+
+            raw = get_setting("txlog_detail_max")
+            detail_max = int(raw)
+            if detail_max < 0:
+                detail_max = int(DEFAULTS["txlog_detail_max"])
+        except Exception:
+            detail_max = 2000
         files_str = ",".join(files) if files else ""
-        detail_truncated = detail[:200]
+        detail_out = detail if detail_max <= 0 else detail[:detail_max]
         fields = [
             _ts(),
             event,
@@ -80,7 +89,7 @@ def log(
             recipient,
             files_str,
             remote,
-            detail_truncated,
+            detail_out,
         ]
         line = "\t".join(_sanitize(f) for f in fields) + "\n"
         path = _txlog_path()

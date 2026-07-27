@@ -34,6 +34,11 @@ from tell import agent_root_from_outbox, find_outbox
 DEFAULT_TIMEOUT_SEC = 5.0
 POLL_INTERVAL_SEC = 0.1
 INBOX_DIRNAME = ".inbox"
+# Display cap so host monitors (which often clip mid-body with a bare
+# "(truncated)") see our recovery footer. 0 = unlimited. Override with
+# TELLS_BODY_MAX or --body-max.
+DEFAULT_BODY_MAX_CHARS = 16_000
+TELLS_BODY_MAX_ENV = "TELLS_BODY_MAX"
 
 
 class TellsUsageError(Exception):
@@ -45,7 +50,7 @@ class TellsHelp(Exception):
 
 
 _USAGE = (
-    "usage: tells [-f|--follow] [--timeout SEC] [--glow [THEME]] "
+    "usage: tells [-f|--follow] [--timeout SEC] [--body-max N] [--glow [THEME]] "
     "[--heading-out LINE ...] [--heading-in LINE ...]"
 )
 
@@ -57,6 +62,11 @@ def _print_usage() -> None:
     print("       default: wait up to 5s for the next message burst, then exit", file=sys.stderr)
     print("       --timeout SEC: follow the inbox for SEC seconds (0 = until Ctrl+C)", file=sys.stderr)
     print("       -f: same as --timeout 0 (cannot combine with positive --timeout)", file=sys.stderr)
+    print(
+        f"       --body-max N: truncate printed body at N chars "
+        f"(default {DEFAULT_BODY_MAX_CHARS}; 0 = unlimited; env {TELLS_BODY_MAX_ENV})",
+        file=sys.stderr,
+    )
     print("       --glow [THEME]: render markdown via glow (default theme from A8S_GLOW)", file=sys.stderr)
     print(convo_help_epilog(), file=sys.stderr)
 
@@ -70,6 +80,7 @@ class TellsOptions:
     timeout: float
     follow: bool = False
     timeout_explicit: bool = False
+    body_max: int = DEFAULT_BODY_MAX_CHARS
     glow_theme: str | None = None
     heading_out: str | None = None
     heading_in: str | None = None
@@ -87,6 +98,36 @@ class TellsOptions:
         )
 
 
+def resolve_body_max(raw: str | None = None) -> int:
+    """Parse body-max chars. Empty → default; 0 → unlimited."""
+    text = (raw if raw is not None else os.environ.get(TELLS_BODY_MAX_ENV, "")).strip()
+    if not text:
+        return DEFAULT_BODY_MAX_CHARS
+    try:
+        n = int(text, 10)
+    except ValueError as e:
+        raise TellsUsageError(f"--body-max: {e}") from e
+    if n < 0:
+        raise TellsUsageError("--body-max must be zero or positive")
+    return n
+
+
+def format_displayed_content(content: str, envelope_path: Path, body_max: int) -> str:
+    """Return content for stdout; append a full-message recovery command when clipped."""
+    text = content or ""
+    if body_max <= 0 or len(text) <= body_max:
+        return text
+    path = str(envelope_path.resolve())
+    cmd = (
+        "python3 -c \"import json; "
+        f"print(json.load(open({path!r}))['content'])\""
+    )
+    return (
+        f"{text[:body_max]}\n"
+        f"… (truncated at {body_max} chars; full message:\n{cmd})"
+    )
+
+
 def parse_tells_argv(argv: list[str]) -> TellsOptions:
     from convo import extract_heading_templates
 
@@ -98,6 +139,7 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
     timeout = DEFAULT_TIMEOUT_SEC
     follow = False
     timeout_explicit = False
+    body_max = resolve_body_max()
     default_glow = os.environ.get("A8S_GLOW", "").strip() or None
     glow_theme = default_glow
     i = 0
@@ -118,6 +160,11 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
             if timeout < 0:
                 raise TellsUsageError("--timeout must be zero or positive")
             timeout_explicit = True
+        elif arg == "--body-max":
+            i += 1
+            if i >= len(rest):
+                raise TellsUsageError("--body-max requires a character count")
+            body_max = resolve_body_max(rest[i])
         elif arg == "--glow":
             if i + 1 < len(rest) and not _argv_looks_like_option(rest[i + 1]):
                 i += 1
@@ -133,6 +180,7 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
         timeout=timeout,
         follow=follow,
         timeout_explicit=timeout_explicit,
+        body_max=body_max,
         glow_theme=glow_theme,
         heading_out=heading_out,
         heading_in=heading_in,
@@ -179,14 +227,17 @@ def _read_envelope(path: Path) -> dict | None:
     return msg if isinstance(msg, dict) else None
 
 
-def _print_plain(msg: dict) -> None:
+def _print_plain(msg: dict, envelope_path: Path, body_max: int) -> None:
     sender = msg.get("from") or "?"
-    print(f"{sender}: {msg.get('content', '')}")
+    body = format_displayed_content(msg.get("content", ""), envelope_path, body_max)
+    print(f"{sender}: {body}", flush=True)
 
 
 def _print_markdown(
     msg: dict,
     *,
+    envelope_path: Path,
+    body_max: int,
     agent: str,
     glow_stream: object | None,
     heading_out: str,
@@ -195,6 +246,9 @@ def _print_markdown(
     from convo import entry_from_message, print_entries
 
     entry = entry_from_message(msg, recipients=[agent])
+    entry["content"] = format_displayed_content(
+        entry.get("content", ""), envelope_path, body_max
+    )
     print_entries(
         agent,
         [entry],
@@ -209,6 +263,7 @@ def _poll_new_messages(
     seen: set[str],
     *,
     agent: str,
+    body_max: int,
     markdown: bool,
     glow_stream: object | None,
     heading_out: str,
@@ -216,20 +271,23 @@ def _poll_new_messages(
 ) -> int:
     printed = 0
     for name in sorted(_json_names(inbox) - seen):
-        msg = _read_envelope(inbox / name)
+        path = inbox / name
+        msg = _read_envelope(path)
         if msg is None:
             continue
         if markdown:
             local = agent or (msg.get("to") or "").strip() or "me"
             _print_markdown(
                 msg,
+                envelope_path=path,
+                body_max=body_max,
                 agent=local,
                 glow_stream=glow_stream,
                 heading_out=heading_out,
                 heading_in=heading_in,
             )
         else:
-            _print_plain(msg)
+            _print_plain(msg, path, body_max)
         seen.add(name)
         printed += 1
     return printed
@@ -266,6 +324,7 @@ def tells_main(argv: list[str]) -> int:
 
     poll_kwargs = {
         "agent": agent or "",
+        "body_max": opts.body_max,
         "markdown": opts.markdown,
         "glow_stream": glow_stream,
         "heading_out": heading_out,

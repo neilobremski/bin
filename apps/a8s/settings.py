@@ -68,6 +68,14 @@ KNOBS: tuple[Knob, ...] = (
         "A8S_MAX_SEEN_IDS",
         "Cluster-wide receive dedup ring size (~/.a8s/seen-ids)",
     ),
+    Knob(
+        "txlog_detail_max",
+        2000,
+        "machine",
+        True,
+        "A8S_TXLOG_DETAIL_MAX",
+        "Max chars stored in transactions.tsv detail column (0 = unlimited; still a preview, not full bodies)",
+    ),
     # --- per-agent definition (a8s define) ---
     Knob("definition.invoke", None, "definition", False, note="Required argv template for message wakes"),
     Knob("definition.outbox_dir", ".outbox", "definition", False, note="Tell outbox under agent root (absolute OK); a8s injects TELL_OUTBOX_DIR on wake"),
@@ -169,7 +177,7 @@ def save_settings_file(data: dict[str, Any]) -> None:
 
 
 def _coerce(key: str, raw: str) -> Any:
-    if key in ("convo_max_rows", "max_file_bytes", "max_seen_ids"):
+    if key in ("convo_max_rows", "max_file_bytes", "max_seen_ids", "txlog_detail_max"):
         return int(raw)
     if key == "loop_interval":
         return float(raw)
@@ -191,6 +199,11 @@ def _validate(key: str, value: Any) -> Any:
         n = int(value)
         if n < 1:
             raise ValueError("max_seen_ids must be a positive integer")
+        return n
+    if key == "txlog_detail_max":
+        n = int(value)
+        if n < 0:
+            raise ValueError("txlog_detail_max must be zero or positive")
         return n
     if key == "loop_interval":
         f = float(value)

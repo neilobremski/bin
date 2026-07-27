@@ -133,7 +133,74 @@ def test_tells_help_exits_0(capsys):
     assert "usage: tells" in err
     assert "--follow" in err
     assert "--glow" in err
+    assert "--body-max" in err
     assert "heading templates" in err
+
+
+def test_format_displayed_content_appends_recovery_command(tmp_path):
+    from tells import format_displayed_content
+
+    path = tmp_path / "01MSG.json"
+    path.write_text("{}", encoding="utf-8")
+    body = "abcdefghij"
+    out = format_displayed_content(body, path, body_max=4)
+    assert out.startswith("abcd\n")
+    assert "truncated at 4 chars" in out
+    assert "full message:" in out
+    assert "python3 -c" in out
+    assert str(path.resolve()) in out
+    assert "['content']" in out
+
+
+def test_format_displayed_content_unlimited_when_zero(tmp_path):
+    from tells import format_displayed_content
+
+    path = tmp_path / "01MSG.json"
+    body = "x" * 100
+    assert format_displayed_content(body, path, body_max=0) == body
+
+
+def test_tells_truncates_long_body_with_recovery_command(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    long_body = "HEAD" + ("x" * 200) + "TAIL"
+    msg_id = "01LONGBODY000000000000000"
+    t = _deliver_after(inbox, 0.2, [("BOB", long_body, msg_id)])
+    rc = tells_main(["--body-max", "20"])
+    t.join()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "BOB: HEAD" in out
+    assert "xxxxx" in out
+    assert "TAIL" not in out
+    assert "truncated at 20 chars" in out
+    assert f"{msg_id}.json" in out
+    assert "python3 -c" in out
+
+
+def test_tells_body_max_zero_prints_full_body(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    long_body = "y" * 500
+    t = _deliver_after(inbox, 0.2, [("BOB", long_body, "01FULLBODY000000000000000")])
+    rc = tells_main(["--body-max", "0"])
+    t.join()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert long_body in out
+    assert "truncated" not in out
+
+
+def test_parse_tells_body_max_and_env(monkeypatch):
+    from tells import DEFAULT_BODY_MAX_CHARS, TELLS_BODY_MAX_ENV
+
+    monkeypatch.delenv(TELLS_BODY_MAX_ENV, raising=False)
+    assert parse_tells_argv([]).body_max == DEFAULT_BODY_MAX_CHARS
+    monkeypatch.setenv(TELLS_BODY_MAX_ENV, "500")
+    assert parse_tells_argv([]).body_max == 500
+    assert parse_tells_argv(["--body-max", "0"]).body_max == 0
+    with pytest.raises(TellsUsageError, match="body-max"):
+        parse_tells_argv(["--body-max", "-1"])
 
 
 def test_tells_follow_prints_waves(tmp_path, monkeypatch, capsys):
