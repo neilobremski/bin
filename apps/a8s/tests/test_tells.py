@@ -370,3 +370,57 @@ def test_tells_shim_times_out(tmp_path):
     )
     assert res.returncode == 1
     assert "no message within" in res.stderr
+
+
+def test_tells_follow_sees_delivery_after_inbox_created(tmp_path, monkeypatch, capsys):
+    """``tells -f`` before the handler has created ``.inbox`` must still print."""
+    root = tmp_path / "node"
+    outbox = root / ".outbox"
+    outbox.mkdir(parents=True)
+    # Deliberately no .inbox yet — mimics starting tells before ``a8s start``.
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    sleeps = {"n": 0}
+
+    def fake_sleep(_interval: float) -> None:
+        sleeps["n"] += 1
+        if sleeps["n"] == 1:
+            inbox = root / ".inbox"
+            # Handler may replace/recreate; tells already mkdir'd an empty dir.
+            inbox.mkdir(parents=True, exist_ok=True)
+            _drop_inbox(inbox, "BOB", "after-start", "01LATEINBOX00000000000000")
+            return
+        raise KeyboardInterrupt
+
+    import tells as tells_mod
+
+    monkeypatch.setattr(tells_mod.time, "sleep", fake_sleep)
+    rc = tells_main(["-f"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "BOB: after-start" in out
+
+
+def test_tells_follow_prints_overwrite_of_seen_filename(tmp_path, monkeypatch, capsys):
+    """Proxy overwrite of an existing ULID must not stay invisible to follow."""
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    _drop_inbox(inbox, "OLD", "stale", "01SAME0000000000000000000")
+    sleeps = {"n": 0}
+    real_sleep = time.sleep
+
+    def fake_sleep(_interval: float) -> None:
+        sleeps["n"] += 1
+        if sleeps["n"] == 1:
+            real_sleep(0.01)  # advance mtime; must not use patched time.sleep
+            _drop_inbox(inbox, "BOB", "fresh-delivery", "01SAME0000000000000000000")
+            return
+        raise KeyboardInterrupt
+
+    import tells as tells_mod
+
+    monkeypatch.setattr(tells_mod.time, "sleep", fake_sleep)
+    rc = tells_main(["-f"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "BOB: fresh-delivery" in out
+    assert "stale" not in out
