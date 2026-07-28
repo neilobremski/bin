@@ -18,7 +18,10 @@ the default when those options are omitted.
 
 Non-destructive: it observes new arrivals without consuming them, so it never
 races a competing reader for `.inbox` files and repeated runs each wait from
-their own baseline.
+their own baseline. Existing filenames are keyed by mtime/size so a handler
+that overwrites a prior ULID (common when ``tells -f`` starts before ``a8s
+start``) still surfaces the new envelope. Stdout is line-buffered and flushed
+so background watches show output promptly.
 """
 from __future__ import annotations
 
@@ -194,6 +197,16 @@ def inbox_from_env() -> Path | None:
     outbox = find_outbox()
     if outbox is None:
         return None
+    agent = _agent_name_for_outbox(outbox)
+    if agent is not None:
+        try:
+            from registry import find_participant, participants_from_registry
+
+            participant = find_participant(participants_from_registry(), agent)
+            if participant is not None:
+                return participant.inbox_path()
+        except OSError:
+            pass
     return agent_root_from_outbox(outbox) / INBOX_DIRNAME
 
 
@@ -213,10 +226,29 @@ def _agent_name_for_outbox(outbox: Path) -> str | None:
     return None
 
 
-def _json_names(inbox: Path) -> set[str]:
+def _inbox_fingerprints(inbox: Path) -> dict[str, tuple[int, int]]:
+    """Map ``name -> (mtime_ns, size)`` for ``*.json`` envelopes.
+
+    Fingerprints (not bare names) so a proxy overwrite of an existing ULID
+    file is treated as new — important when ``tells -f`` starts before the
+    handler and a prior ``.inbox`` entry is replaced on first delivery.
+    """
     if not inbox.is_dir():
-        return set()
-    return {p.name for p in inbox.iterdir() if p.is_file() and p.name.endswith(".json")}
+        return {}
+    found: dict[str, tuple[int, int]] = {}
+    try:
+        entries = list(inbox.iterdir())
+    except OSError:
+        return {}
+    for path in entries:
+        if not (path.is_file() and path.name.endswith(".json")):
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        found[path.name] = (st.st_mtime_ns, st.st_size)
+    return found
 
 
 def _read_envelope(path: Path) -> dict | None:
@@ -260,7 +292,7 @@ def _print_markdown(
 
 def _poll_new_messages(
     inbox: Path,
-    seen: set[str],
+    seen: dict[str, tuple[int, int]],
     *,
     agent: str,
     body_max: int,
@@ -270,10 +302,15 @@ def _poll_new_messages(
     heading_in: str,
 ) -> int:
     printed = 0
-    for name in sorted(_json_names(inbox) - seen):
+    current = _inbox_fingerprints(inbox)
+    for name in sorted(current):
+        fingerprint = current[name]
+        if seen.get(name) == fingerprint:
+            continue
         path = inbox / name
         msg = _read_envelope(path)
         if msg is None:
+            # Incomplete rename / mid-write — retry next poll without locking seen.
             continue
         if markdown:
             local = agent or (msg.get("to") or "").strip() or "me"
@@ -288,9 +325,21 @@ def _poll_new_messages(
             )
         else:
             _print_plain(msg, path, body_max)
-        seen.add(name)
+        seen[name] = fingerprint
         printed += 1
+    # Drop fingerprints for names that disappeared so a later recreate is fresh.
+    for name in list(seen):
+        if name not in current:
+            del seen[name]
     return printed
+
+
+def _configure_stdout() -> None:
+    """Prefer line buffering so background ``tells -f`` shows output promptly."""
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    except (AttributeError, OSError, ValueError):
+        pass
 
 
 def tells_main(argv: list[str]) -> int:
@@ -305,6 +354,8 @@ def tells_main(argv: list[str]) -> int:
         return 2
 
     from convo import DEFAULT_HEADING_IN, DEFAULT_HEADING_OUT, open_glow_stdout
+
+    _configure_stdout()
 
     inbox = inbox_from_env()
     if inbox is None:
@@ -332,7 +383,13 @@ def tells_main(argv: list[str]) -> int:
     }
 
     try:
-        seen = _json_names(inbox)
+        # Ensure the watch target exists so a handler that starts later can
+        # drop into the same directory this process is already polling.
+        try:
+            inbox.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        seen = _inbox_fingerprints(inbox)
         if opts.follow_forever:
             try:
                 while True:
