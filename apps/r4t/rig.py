@@ -33,7 +33,11 @@ plan always declares a refill rate.
 `preset` — the harness preset the rig was created from (`r4t rig add`/`swap`
 record it). It defaults the text knobs (`history_max_bytes` /
 `history_body_max` / `prompt_body_max`) by the preset's text tier (TEXT_TIERS);
-explicit values always win, and a rig with no preset gets the small tier.
+explicit values always win, and a rig with no preset gets the small tier. It
+also carries the preset's `continue_argv` — the tokens that make the CLI resume
+its own conversation instead of starting from a cold prompt. A rig with no
+preset, or one whose preset has no `continue_argv`, cannot continue; a roster
+member asking for it fails closed (see `RigConfig.rig_for`).
 
 OS-level isolation (`run_as` / `container`) is NOT a rig key — it is a
 per-org decision (rigs are machine-global and shared across orgs, so one Unix
@@ -51,7 +55,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from roster import Member
+from roster import Member, Roster
 from state import atomic_write_json, r4t_home
 
 PROMPT_PLACEHOLDER = "{prompt}"
@@ -66,6 +70,13 @@ RESERVED_CONFIG_KEYS = frozenset({
     "quiet_task_seconds",
 })
 
+# `continue_argv` is present only where the CLI's own `--help` was read and the
+# flag verified against the installed binary; a preset without it does not
+# support continuing, which is a fine state. `no_prior_conversation` is the
+# regex (matched case-insensitively against a failed turn's output) that says
+# the CLI refused to launch because there is no conversation in this directory
+# yet — only cursor does that; claude, copilot, opencode and agy quietly found
+# one and exit 0, so they need no pattern.
 HARNESS_PRESETS: dict[str, dict] = {
     "claude": {
         "text_tier": "big",
@@ -82,8 +93,11 @@ HARNESS_PRESETS: dict[str, dict] = {
             "{prompt}",
         ],
         "model_argv": ["--model", "{model}"],
+        "continue_argv": ["--continue"],
     },
     "codex": {
+        # No continue_argv: codex resumes via the `codex exec resume` SUBCOMMAND,
+        # which cannot be expressed as tokens appended to an existing argv.
         "text_tier": "big",
         "description": "OpenAI Codex CLI — matches apps/a8s/definitions/codex.json",
         "a8s_definition": "codex.json",
@@ -112,6 +126,8 @@ HARNESS_PRESETS: dict[str, dict] = {
             "{prompt}",
         ],
         "model_argv": ["--model", "{model}"],
+        "continue_argv": ["--continue"],
+        "no_prior_conversation": r"no previous chats found",
     },
     "opencode": {
         "text_tier": "moderate",
@@ -130,6 +146,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         ],
         "model_argv": ["-m", "{model}"],
         "model_anchor": "run",
+        "continue_argv": ["--continue"],
     },
     "opencode-ollama": {
         "text_tier": "small",
@@ -258,6 +275,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         ],
         "model_argv": ["--model", "{model}"],
         "model_resolver": "agy-live",
+        "continue_argv": ["--continue"],
     },
     "copilot": {
         "text_tier": "moderate",
@@ -270,6 +288,7 @@ HARNESS_PRESETS: dict[str, dict] = {
             "-p",
             "{prompt}",
         ],
+        "continue_argv": ["--continue"],
     },
 }
 
@@ -347,7 +366,37 @@ class Rig:
     prompt_body_max: int = DEFAULT_PROMPT_BODY_MAX
     model: str | None = None
     model_resolver: str | None = None
+    preset: str | None = None
     error: str | None = None
+
+    @property
+    def continue_argv(self) -> list[str]:
+        """Tokens that make this rig's CLI resume the conversation it already
+        has in the turn directory. Empty when the preset (or its absence) gives
+        no verified way to continue."""
+        return list(HARNESS_PRESETS.get(self.preset or "", {}).get("continue_argv", ()))
+
+    @property
+    def supports_continue(self) -> bool:
+        return bool(self.continue_argv)
+
+    @property
+    def cli(self) -> str:
+        """The CLI binary this rig drives — what a conversation is keyed on,
+        together with the directory. `ollama launch <tool>` drives <tool>."""
+        argv = next(iter(self.pool()), [])
+        if not argv:
+            return ""
+        binary = Path(argv[0]).name
+        if binary == "ollama" and argv[1:2] == ["launch"] and len(argv) > 2:
+            return argv[2]
+        return binary
+
+    def had_no_prior_conversation(self, output: str) -> bool:
+        """True when a failed turn's output is the CLI saying it had no
+        conversation here to continue — the one failure worth retrying cold."""
+        pattern = HARNESS_PRESETS.get(self.preset or "", {}).get("no_prior_conversation")
+        return bool(pattern) and re.search(pattern, output, re.IGNORECASE) is not None
 
     def pool(self) -> list[list[str]]:
         """`invoke` is one argv (list of str) or a pool (list of argvs) —
@@ -361,10 +410,15 @@ class Rig:
     def pool_size(self) -> int:
         return len(self.pool())
 
-    def argv(self, prompt: str, index: int = 0) -> list[str]:
+    def argv(
+        self, prompt: str, index: int = 0, *, continue_conversation: bool = False
+    ) -> list[str]:
         pool = self.pool()
         chosen = pool[index % len(pool)]
-        return [a.replace(PROMPT_PLACEHOLDER, prompt) for a in chosen]
+        argv = [a.replace(PROMPT_PLACEHOLDER, prompt) for a in chosen]
+        if continue_conversation:
+            argv += self.continue_argv
+        return argv
 
 
 @dataclass
@@ -405,6 +459,15 @@ class RigConfig:
             )
         if rig.error:
             return None, f"rig {rig_name!r} is invalid: {rig.error}", pinned
+        if member.continue_conversation and not rig.supports_continue:
+            return (
+                None,
+                f"{member.name} has Continue: on but rig {rig_name!r} does not "
+                f"support it (preset {rig.preset or 'none'}; presets that "
+                f"continue: {', '.join(continue_presets())}) — "
+                f"try: r4t rig swap {rig_name} <preset>",
+                pinned,
+            )
         return rig, None, pinned
 
 
@@ -414,6 +477,43 @@ def default_config_path() -> Path:
 
 def preset_names() -> list[str]:
     return sorted(HARNESS_PRESETS)
+
+
+def continue_presets() -> list[str]:
+    """Presets whose CLI can resume its own conversation."""
+    return [n for n in preset_names() if HARNESS_PRESETS[n].get("continue_argv")]
+
+
+def continue_collisions(roster: Roster, config: RigConfig) -> list[str]:
+    """Warn (never block) where `Continue: on` will cross wires with a teammate.
+
+    A CLI keys its conversation on the directory it runs from, so two members
+    driving the SAME CLI from the same directory land in one conversation —
+    reading each other's turns and overwriting each other's tail. The other
+    member does not have to be continuing to clobber it; it only has to run the
+    same CLI there. Today every member works in the one team workplace, so the
+    CLI alone identifies the conversation; a per-member workdir would widen the
+    key to (directory, CLI)."""
+    seats: list[tuple[Member, Rig]] = []
+    for m in roster.members:
+        if m.is_human or m.errors:
+            continue
+        rig, _err, _pinned = config.rig_for(m)
+        if rig is not None:
+            seats.append((m, rig))
+    out: list[str] = []
+    for member, rig in seats:
+        if not member.continue_conversation:
+            continue
+        others = [o.name for o, r in seats if o is not member and r.cli == rig.cli]
+        if others:
+            out.append(
+                f"{member.name}: Continue: on, but {', '.join(others)} also run "
+                f"{rig.cli!r} in the same directory — one CLI keeps one "
+                f"conversation per directory, so their turns will land in "
+                f"{member.name}'s (try: move one of them to a rig on another CLI)"
+            )
+    return out
 
 
 def format_preset_invoke(preset: str) -> str:
@@ -911,6 +1011,7 @@ def _parse_rig(name: str, raw: object) -> Rig:
         rig.error = err
         return rig
     rig.invoke = invoke
+    rig.preset = _entry_preset(raw)
 
     resolver = raw.get("model_resolver")
     if resolver is not None:
@@ -946,7 +1047,7 @@ def _parse_rig(name: str, raw: object) -> Rig:
     # — a 0.6B local member and an agy seat should not share a history budget.
     # Explicit values in rigs.json win; a rig with no `preset` (custom CLI)
     # gets the conservative small tier.
-    defaults = text_defaults(raw.get("preset") if isinstance(raw.get("preset"), str) else None)
+    defaults = text_defaults(rig.preset)
     for knob in ("history_max_bytes", "history_body_max", "prompt_body_max"):
         value, err = _positive_number(raw.get(knob), defaults[knob])
         if err:

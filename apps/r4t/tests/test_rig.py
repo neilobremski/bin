@@ -20,6 +20,8 @@ from rig import (
     RigError,
     add_preset_rig,
     build_preset_invoke,
+    continue_collisions,
+    continue_presets,
     default_config_payload,
     format_preset_invoke,
     fuzzy_match_model,
@@ -33,7 +35,7 @@ from rig import (
     swap_preset_rig,
     unset_rig_value,
 )
-from roster import Member
+from roster import Member, parse_roster
 from r4t import main as r4t_main
 
 
@@ -265,6 +267,135 @@ class TestArgv:
             write_config(tmp_path, {"t": {"invoke": ["run", "prompt={prompt}"]}})
         )
         assert config.rigs["t"].argv("X") == ["run", "prompt=X"]
+
+
+class TestContinue:
+    def test_only_verified_presets_declare_continue(self):
+        # Each of these was verified against the installed CLI's own --help.
+        # codex is absent on purpose: it resumes with the `codex exec resume`
+        # subcommand, which no appended argv can express.
+        assert continue_presets() == [
+            "agy", "claude", "copilot", "cursor", "opencode",
+        ]
+
+    def test_continue_tokens_are_appended_to_the_argv(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "t": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
+        }))
+        rig = config.rigs["t"]
+        assert rig.supports_continue
+        assert rig.argv("hi") == ["claude", "-p", "hi"]
+        assert rig.argv("hi", continue_conversation=True) == [
+            "claude", "-p", "hi", "--continue",
+        ]
+
+    def test_rig_without_preset_cannot_continue(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {"t": {"invoke": ["run", "{prompt}"]}}))
+        rig = config.rigs["t"]
+        assert rig.supports_continue is False
+        assert rig.argv("hi", continue_conversation=True) == ["run", "hi"]
+
+    def test_added_preset_rig_carries_its_preset(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "solo", "cursor")
+        rig = load_rig_config(path).rigs["solo"]
+        assert rig.preset == "cursor"
+        assert rig.argv("hi", continue_conversation=True)[-1] == "--continue"
+
+    def test_no_prior_conversation_pattern_is_per_preset(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "c": {"preset": "cursor", "invoke": ["agent", "-p", "{prompt}"]},
+            "k": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
+        }))
+        assert config.rigs["c"].had_no_prior_conversation("No previous chats found.")
+        assert config.rigs["c"].had_no_prior_conversation("no PREVIOUS chats found")
+        assert not config.rigs["c"].had_no_prior_conversation("some other failure")
+        # claude founds a conversation silently, so it declares no pattern.
+        assert not config.rigs["k"].had_no_prior_conversation("No previous chats found.")
+
+    def test_cli_key_sees_through_ollama_launch(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "direct": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
+            "local": {
+                "preset": "claude-ollama",
+                "invoke": ["ollama", "launch", "claude", "-y", "--", "-p", "{prompt}"],
+            },
+            "bare": {"preset": "ollama", "invoke": ["ollama", "run", "m", "{prompt}"]},
+            "custom": {"invoke": ["/opt/bin/agent", "{prompt}"]},
+        }))
+        assert config.rigs["direct"].cli == "claude"
+        assert config.rigs["local"].cli == "claude"
+        assert config.rigs["bare"].cli == "ollama"
+        assert config.rigs["custom"].cli == "agent"
+
+    def test_continue_on_unsupported_rig_fails_closed(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "t": {"preset": "codex", "invoke": ["codex", "exec", "{prompt}"]},
+        }))
+        asker = member(name="Ana", rig="t")
+        asker.continue_conversation = True
+        rig, err, _pinned = config.rig_for(asker)
+        assert rig is None
+        assert "Continue: on" in err
+        assert "claude" in err
+        assert "try: r4t rig swap t <preset>" in err
+
+    def test_continue_off_runs_on_any_rig(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "t": {"preset": "codex", "invoke": ["codex", "exec", "{prompt}"]},
+        }))
+        rig, err, _pinned = config.rig_for(member(name="Ana", rig="t"))
+        assert rig is not None and err is None
+
+
+COLLISION_CONFIG = {
+    "solo": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
+    "twin": {"preset": "claude", "invoke": ["claude", "--model", "x", "-p", "{prompt}"]},
+    "other": {"preset": "cursor", "invoke": ["agent", "-p", "{prompt}"]},
+}
+
+
+class TestContinueCollisions:
+    def collisions(self, tmp_path, roster_text):
+        config = load_rig_config(write_config(tmp_path, COLLISION_CONFIG))
+        roster = parse_roster(roster_text, Path("ROSTER.md"))
+        return continue_collisions(roster, config)
+
+    def test_no_warning_when_clis_differ(self, tmp_path):
+        assert self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** other\n"
+        )) == []
+
+    def test_no_warning_when_nobody_continues(self, tmp_path):
+        assert self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** solo\n"
+        )) == []
+
+    def test_warns_when_a_teammate_shares_the_cli(self, tmp_path):
+        # Bob does not continue — he still writes the conversation Ana resumes.
+        warnings = self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** solo\n"
+        ))
+        assert len(warnings) == 1
+        assert warnings[0].startswith("Ana: Continue: on")
+        assert "Bob" in warnings[0] and "'claude'" in warnings[0]
+
+    def test_warns_across_different_rigs_on_one_cli(self, tmp_path):
+        warnings = self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** twin\n"
+        ))
+        assert len(warnings) == 1 and "Bob" in warnings[0]
+
+    def test_humans_and_broken_members_never_collide(self, tmp_path):
+        assert self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Cid\n- **Status:** Human\n- **Address:** cid\n\n"
+            "### Dot\n- **Status:** AI\n"
+        )) == []
 
 
 class TestDefaultPayload:

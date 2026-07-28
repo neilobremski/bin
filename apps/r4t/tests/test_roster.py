@@ -12,6 +12,24 @@ from roster import (
     resolve_roster_path,
 )
 
+CONTINUE_TEXT = textwrap.dedent(
+    """\
+    ### Ana
+    - **Status:** AI
+    - **Rig:** r
+    - **Continue:** on
+
+    ### Bob
+    - **Status:** AI
+    - **Rig:** r
+
+    ### Cid
+    - **Status:** AI
+    - **Rig:** r
+    - **Continue:** off
+    """
+)
+
 
 def parse(text: str):
     return parse_roster(text, Path("ROSTER.md"))
@@ -70,6 +88,20 @@ class TestParsing:
     def test_cell_empty_when_absent(self, repo):
         phil = load_roster(repo / "ROSTER.md").find("phil")
         assert phil.cell == ""
+
+    def test_continue_on_is_read(self):
+        assert parse(CONTINUE_TEXT).find("ana").continue_conversation is True
+
+    def test_continue_defaults_off_when_absent(self):
+        assert parse(CONTINUE_TEXT).find("bob").continue_conversation is False
+
+    def test_continue_off_is_off(self):
+        assert parse(CONTINUE_TEXT).find("cid").continue_conversation is False
+
+    def test_continue_does_not_disturb_other_fields(self):
+        ana = parse(CONTINUE_TEXT).find("ana")
+        assert ana.rig == "r"
+        assert not ana.errors
 
     def test_lookup_is_case_insensitive(self, repo):
         roster = load_roster(repo / "ROSTER.md")

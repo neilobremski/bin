@@ -32,6 +32,7 @@ from rig import (
     HARNESS_PRESETS,
     add_preset_rig,
     build_preset_invoke,
+    continue_collisions,
     default_config_path,
     default_config_payload,
     format_preset_invoke,
@@ -970,6 +971,11 @@ def cmd_rig_presets(_args: argparse.Namespace) -> int:
         print(f"  {name:<{width}}  {entry['description']}")
         print(f"  {'':<{width}}  headless: {entry['headless']}")
         print(f"  {'':<{width}}  invoke: {format_preset_invoke(name)}")
+        if entry.get("continue_argv"):
+            print(
+                f"  {'':<{width}}  continue: {' '.join(entry['continue_argv'])} "
+                "(roster `- **Continue:** on`)"
+            )
     print()
     print("Add one: r4t rig add <rig-name> <preset>")
     print("Example: r4t rig add worker opencode")
@@ -1247,6 +1253,10 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
         )
         problems += 1
     warnings = 0
+    if config is not None:
+        for message in continue_collisions(roster, config):
+            print(f"warning: {message}")
+            warnings += 1
     for severity, message in roster.tree_problems():
         if severity == "error":
             print(message)
