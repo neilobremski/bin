@@ -29,7 +29,7 @@ right setting and still the wrong demo — you are not going to sit here
 watching a clock. The value takes bare seconds or an `s`/`m`/`h`/`d`
 suffix, so shrink the window further for one session:
 
-**Replace** `~/ark/solo/ROSTER.md` — in Wren's block, the `Flush:` line
+**Replace** `~/ark/silo/ROSTER.md` — in Wren's block, the `Flush:` line
 becomes:
 
 ```markdown
@@ -39,7 +39,7 @@ becomes:
 **Run**
 
 ```bash
-cd ~/ark/solo
+cd ~/ark/silo
 r4t roster check
 ```
 
@@ -47,7 +47,7 @@ You should see:
 
 ```
 You: note — Human without an Address (team cannot tell them)
-/home/you/ark/solo/ROSTER.md: OK (2 member(s), leader Wren)
+/home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
 One rule worth knowing before you rely on this line: `Flush:` only means
@@ -58,7 +58,7 @@ instead of blocking:
 ```
 warning: Wren: Flush: set but Continue: is off — flush retires a continuing
 conversation, so it is ignored here
-/home/you/ark/solo/ROSTER.md: OK (2 member(s), leader Wren, 1 warning(s))
+/home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren, 1 warning(s))
 ```
 
 Harmless, but it means the field is doing nothing. Yours says OK — keep
@@ -71,14 +71,14 @@ Give Wren a fact to hold, and prove he has it:
 **Run**
 
 ```bash
-r4t seat send --node solo "Hold this fact for later: the supply cache is at grid square K-19. Confirm."
-r4t seat inbox --node solo
+r4t seat send --node silo "Hold this fact for later: the supply cache is at grid square K-19. Confirm."
+r4t seat inbox --node silo
 ```
 
 You should see:
 
 ```
-── from solo:wren (2026-07-29T05:19:47.051352Z)
+── from silo:wren (2026-07-29T05:19:47.051352Z)
 Supply cache at grid square K-19 recorded. Confirming storage complete.
 ```
 
@@ -90,7 +90,7 @@ own; invoking it by hand lets you watch it work:
 **Run**
 
 ```bash
-r4t idle --node solo
+r4t idle --node silo
 ```
 
 You should see:
@@ -108,17 +108,17 @@ and on disk, which is where the next section takes you.
 **Run**
 
 ```bash
-r4t logs --node solo -n 6
+r4t logs --node silo -n 6
 ```
 
 You should see:
 
 ```
 r4t: FLUSH dump turn -> wren (conversation idle > 60s)
-turn: 1 message(s) -> Wren (threads 01ABC..., rig solo)
+turn: 1 message(s) -> Wren (threads 01ABC..., rig silo)
 done: Wren, exit 0 in 28.8s
-r4t: ECHO-REPLY wren (rig solo) 674 bytes of cleaned stdout staged as the reply to r4t:solo
-r4t: RELEASED solo:wren -> r4t:solo thread=01ABC... hop=1
+r4t: ECHO-REPLY wren (rig silo) 674 bytes of cleaned stdout staged as the reply to r4t:silo
+r4t: RELEASED silo:wren -> r4t:silo thread=01ABC... hop=1
 r4t: FLUSH retired wren's conversation — the next real message refounds it from state on disk
 ```
 
@@ -155,7 +155,7 @@ Session initialized. Stored codeword and supply cache location.
 Wren chose that structure himself — the dump prompt names the file, not the
 format. (Where the file lands depends on the harness: OpenCode anchors
 relative paths at the repo root, so on the free path it appears at
-`~/ark/solo/STATUS.md`; a harness that stays in Wren's `Workdir:` writes
+`~/ark/silo/STATUS.md`; a harness that stays in Wren's `Workdir:` writes
 `agents/wren/STATUS.md` instead. Either way it is inside the team repo,
 which matters at the commit point.)
 
@@ -164,14 +164,14 @@ The conversation is now retired. Ask for the fact back:
 **Run**
 
 ```bash
-r4t seat send --node solo "What was the codeword, and where is the supply cache?"
-r4t seat inbox --node solo
+r4t seat send --node silo "What was the codeword, and where is the supply cache?"
+r4t seat inbox --node silo
 ```
 
 You should see:
 
 ```
-── from solo:wren (2026-07-29T05:23:14.719675Z)
+── from silo:wren (2026-07-29T05:23:14.719675Z)
 The codeword was **TIDEPOOL** and the supply cache is located at **grid square K-19**.
 ```
 
@@ -194,17 +194,17 @@ with only ollama can read along, the machinery is identical):
 **Run**
 
 ```bash
-r4t rig swap solo cursor --model claude-fable-5-medium
-r4t seat send --node solo "New rig, same Wren? Tell me the codeword and the cache location."
-r4t seat inbox --node solo
+r4t rig swap silo cursor --model claude-fable-5-medium
+r4t seat send --node silo "New rig, same Wren? Tell me the codeword and the cache location."
+r4t seat inbox --node silo
 ```
 
 You should see:
 
 ```
-swapped rig 'solo' to cursor in /home/you/.config/r4t/rigs.json
+swapped rig 'silo' to cursor in /home/you/.config/r4t/rigs.json
   invoke: agent --model claude-fable-5-medium -p --trust --force --approve-mcps {prompt}
-── from solo:wren (2026-07-29T05:26:27.150992Z)
+── from silo:wren (2026-07-29T05:26:27.150992Z)
 Same Wren. Codeword: **TIDEPOOL**. Supply cache: **grid square K-19**. Both verified against STATUS.md.
 ```
 
@@ -213,20 +213,20 @@ And the log names what happened:
 **Run**
 
 ```bash
-r4t logs --node solo -n 8
+r4t logs --node silo -n 8
 ```
 
 You should see:
 
 ```
-r4t: QUEUED solo:you -> wren thread=01ABC... hop=0 "New rig, same Wren? Tell me the codeword and the cache location." (depth 1)
-r4t: CONTINUE-SWAP wren (rig solo) drives 'agent' but the conversation lives on 'opencode' — retired; this turn refounds from state on disk
-turn: 1 message(s) -> Wren (threads 01ABC..., rig solo)
+r4t: QUEUED silo:you -> wren thread=01ABC... hop=0 "New rig, same Wren? Tell me the codeword and the cache location." (depth 1)
+r4t: CONTINUE-SWAP wren (rig silo) drives 'agent' but the conversation lives on 'opencode' — retired; this turn refounds from state on disk
+turn: 1 message(s) -> Wren (threads 01ABC..., rig silo)
 done: Wren, exit 0 in 12.4s
-r4t: ECHO-REPLY wren (rig solo) 102 bytes of cleaned stdout staged as the reply to solo:you
-r4t: SEAT you <- solo:wren (parked)
-r4t: RELEASED-internal solo:wren -> solo:you thread=01ABC... hop=1
-r4t: ANSWERED thread=01ABC... solo:wren -> solo:you (originator answered, thread closed)
+r4t: ECHO-REPLY wren (rig silo) 102 bytes of cleaned stdout staged as the reply to silo:you
+r4t: SEAT you <- silo:wren (parked)
+r4t: RELEASED-internal silo:wren -> silo:you thread=01ABC... hop=1
+r4t: ANSWERED thread=01ABC... silo:wren -> silo:you (originator answered, thread closed)
 ```
 
 `CONTINUE-SWAP`: the conversation lived on `opencode`, the rig now drives
@@ -237,17 +237,17 @@ boundary on the strength of a markdown file. Swap back:
 **Run**
 
 ```bash
-r4t rig swap solo opencode-ollama --model qwen3.6
-r4t seat send --node solo "Back on the local rig. Codeword and cache location, one line."
-r4t seat inbox --node solo
+r4t rig swap silo opencode-ollama --model qwen3.6
+r4t seat send --node silo "Back on the local rig. Codeword and cache location, one line."
+r4t seat inbox --node silo
 ```
 
 You should see:
 
 ```
-swapped rig 'solo' to opencode-ollama in /home/you/.config/r4t/rigs.json
+swapped rig 'silo' to opencode-ollama in /home/you/.config/r4t/rigs.json
   invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir . {prompt}
-── from solo:wren (2026-07-29T05:27:48.329830Z)
+── from silo:wren (2026-07-29T05:27:48.329830Z)
 Codeword: TIDEPOOL — Cache: grid square K-19
 ```
 
@@ -259,7 +259,7 @@ conversation — only a real CLI change retires it.
 (If a send comes back with `queued — Wren is resting (member budget ...)`,
 you have simply outrun Wren's spend budget with all this demo traffic. The
 message is queued, not lost; wait the minutes it names and run
-`r4t clear --node solo`. Chapter 4 makes that machinery the main event.)
+`r4t clear --node silo`. Chapter 4 makes that machinery the main event.)
 
 ## 7. Break it
 
@@ -270,16 +270,16 @@ state file before sending the recall:
 **Run**
 
 ```bash
-r4t idle --node solo
+r4t idle --node silo
 rm STATUS.md
-r4t seat send --node solo "What was the codeword?"
-r4t seat inbox --node solo
+r4t seat send --node silo "What was the codeword?"
+r4t seat inbox --node silo
 ```
 
 You should see:
 
 ```
-── from solo:wren (2026-07-29T05:34:01.509705Z)
+── from silo:wren (2026-07-29T05:34:01.509705Z)
 Codeword: TIDEPOOL
 ```
 
@@ -314,7 +314,7 @@ run another sweep:
 **Run**
 
 ```bash
-r4t idle --node solo
+r4t idle --node silo
 ls STATUS.md
 head -8 STATUS.md
 ```
@@ -342,14 +342,14 @@ chapter has been circling:
 **Run**
 
 ```bash
-r4t seat send --node solo "Codeword and cache location, one line."
-r4t seat inbox --node solo
+r4t seat send --node silo "Codeword and cache location, one line."
+r4t seat inbox --node silo
 ```
 
 You should see:
 
 ```
-── from solo:wren (2026-07-29T05:38:30.929831Z)
+── from silo:wren (2026-07-29T05:38:30.929831Z)
 Codeword: TIDEPOOL — Cache: grid square K-19
 ```
 
@@ -360,7 +360,7 @@ regrown — and Wren still answers. The team is whole.
 
 Put the window back where it belongs:
 
-**Replace** `~/ark/solo/ROSTER.md` — Wren's `Flush:` line becomes:
+**Replace** `~/ark/silo/ROSTER.md` — Wren's `Flush:` line becomes:
 
 ```markdown
 - **Flush:** 15m
@@ -376,7 +376,7 @@ You should see:
 
 ```
 You: note — Human without an Address (team cannot tell them)
-/home/you/ark/solo/ROSTER.md: OK (2 member(s), leader Wren)
+/home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
 Choosing a window is cache economics, and two different clocks are
@@ -418,9 +418,9 @@ machine died right now:
 **Run**
 
 ```bash
-cd ~/ark/solo
+cd ~/ark/silo
 git add ROSTER.md STATUS.md
-git commit -q -m "solo: Wren's first memory dump"
+git commit -q -m "silo: Wren's first memory dump"
 ```
 
 Chapter 4 gives Wren something no amount of memory provides: a teammate.
