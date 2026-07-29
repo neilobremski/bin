@@ -76,12 +76,7 @@ RESERVED_CONFIG_KEYS = frozenset({
 # regex (matched case-insensitively against a failed turn's output) that says
 # the CLI refused to launch because there is no conversation in this directory
 # yet — only cursor does that; the others quietly found one and exit 0, so they
-# need no pattern. `continue_scope` says what the CLI's "most recent
-# conversation" is scoped to; absent means the directory it runs from, which is
-# every verified CLI but copilot.
-CONTINUE_SCOPE_DIRECTORY = "directory"
-CONTINUE_SCOPE_GLOBAL = "global"
-
+# need no pattern.
 HARNESS_PRESETS: dict[str, dict] = {
     "claude": {
         "text_tier": "big",
@@ -287,6 +282,10 @@ HARNESS_PRESETS: dict[str, dict] = {
         "continue_argv": ["--continue"],
     },
     "copilot": {
+        # No continue_argv: `copilot --continue` resumes the machine's most
+        # recent session whatever the directory, so members cannot be kept
+        # apart. Clean support means pinning `--resume=<session-id>` per
+        # member; that is issue #256, not this preset.
         "text_tier": "moderate",
         "description": "GitHub Copilot CLI — matches apps/a8s/definitions/copilot.json",
         "a8s_definition": "copilot.json",
@@ -297,11 +296,6 @@ HARNESS_PRESETS: dict[str, dict] = {
             "-p",
             "{prompt}",
         ],
-        "continue_argv": ["--continue"],
-        # Verified live: a --continue run in a virgin directory resumed a
-        # session planted in an unrelated one, same session id in both footers.
-        # copilot's "most recent session" is the machine's, not the cwd's.
-        "continue_scope": CONTINUE_SCOPE_GLOBAL,
     },
 }
 
@@ -392,17 +386,6 @@ class Rig:
     @property
     def supports_continue(self) -> bool:
         return bool(self.continue_argv)
-
-    @property
-    def continue_scope(self) -> str:
-        """What the CLI's "most recent conversation" is scoped to. Every
-        verified CLI but copilot keys it on the directory the turn runs from;
-        copilot resumes the machine's most recent session whatever the cwd, so
-        no working directory can ever separate two continuing copilot members —
-        not even members of different orgs on the same machine."""
-        return HARNESS_PRESETS.get(self.preset or "", {}).get(
-            "continue_scope", CONTINUE_SCOPE_DIRECTORY
-        )
 
     @property
     def cli(self) -> str:
@@ -517,10 +500,7 @@ def continue_collisions(roster: Roster, config: RigConfig) -> list[str]:
     member does not have to be continuing to clobber it; it only has to run the
     same CLI there. Today every member works in the one team workplace, so the
     CLI alone identifies the conversation; a per-member workdir would widen the
-    key to (directory, CLI) — but only for directory-scoped CLIs. A
-    global-scope CLI (copilot) ignores the directory, so no workdir will ever
-    separate two of its continuing members, and the reach is the whole machine
-    rather than the team."""
+    key to (directory, CLI)."""
     seats: list[tuple[Member, Rig]] = []
     for m in roster.members:
         if m.is_human or m.errors:
@@ -533,18 +513,7 @@ def continue_collisions(roster: Roster, config: RigConfig) -> list[str]:
         if not member.continue_conversation:
             continue
         others = [o.name for o, r in seats if o is not member and r.cli == rig.cli]
-        if not others:
-            continue
-        if rig.continue_scope == CONTINUE_SCOPE_GLOBAL:
-            out.append(
-                f"{member.name}: Continue: on, but {rig.cli!r} resumes the "
-                f"machine's most recent session whatever the directory — "
-                f"{', '.join(others)} will land in {member.name}'s conversation, "
-                f"and so will any other org running {rig.cli!r} on this machine; "
-                f"no workdir can separate them "
-                f"(try: move one of them to a rig on another CLI)"
-            )
-        else:
+        if others:
             out.append(
                 f"{member.name}: Continue: on, but {', '.join(others)} also run "
                 f"{rig.cli!r} in the same directory — one CLI keeps one "

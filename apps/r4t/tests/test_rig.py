@@ -271,11 +271,13 @@ class TestArgv:
 
 class TestContinue:
     def test_only_verified_presets_declare_continue(self):
-        # Each of these was verified against the installed CLI's own --help.
-        # codex is absent on purpose: it resumes with the `codex exec resume`
-        # subcommand, which no appended argv can express.
+        # Each of these was verified against the installed CLI's own --help and
+        # then live. Two are absent on purpose: codex resumes with the
+        # `codex exec resume` subcommand, which no appended argv can express,
+        # and copilot resumes the machine's most recent session whatever the
+        # directory, which no working directory can keep apart (#256).
         assert continue_presets() == [
-            "agy", "claude", "copilot", "cursor", "opencode", "opencode-ollama",
+            "agy", "claude", "cursor", "opencode", "opencode-ollama",
         ]
 
     def test_continue_tokens_are_appended_to_the_argv(self, tmp_path):
@@ -313,17 +315,15 @@ class TestContinue:
         # claude founds a conversation silently, so it declares no pattern.
         assert not config.rigs["k"].had_no_prior_conversation("No previous chats found.")
 
-    def test_continue_scope_defaults_to_the_directory(self, tmp_path):
-        # copilot resumes the machine's most recent session whatever the cwd
-        # (verified live); every other CLI keys on the directory it runs from.
+    def test_copilot_is_unsupported_until_sessions_are_pinned(self, tmp_path):
+        # Its --continue reaches the machine's most recent session whatever the
+        # directory, so no member can be kept apart from another (#256).
         config = load_rig_config(write_config(tmp_path, {
-            "wide": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]},
-            "here": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
-            "none": {"invoke": ["run", "{prompt}"]},
+            "t": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]},
         }))
-        assert config.rigs["wide"].continue_scope == "global"
-        assert config.rigs["here"].continue_scope == "directory"
-        assert config.rigs["none"].continue_scope == "directory"
+        rig = config.rigs["t"]
+        assert rig.supports_continue is False
+        assert rig.argv("hi", continue_conversation=True) == ["copilot", "-p", "hi"]
 
     def test_cli_key_sees_through_ollama_launch(self, tmp_path):
         config = load_rig_config(write_config(tmp_path, {
@@ -350,7 +350,6 @@ class TestContinue:
         assert config.rigs["local"].cli == config.rigs["cloud"].cli == "opencode"
         assert config.rigs["local"].supports_continue
         assert config.rigs["local"].argv("hi", continue_conversation=True)[-1] == "--continue"
-        assert config.rigs["local"].continue_scope == "directory"
 
     def test_continue_on_unsupported_rig_fails_closed(self, tmp_path):
         config = load_rig_config(write_config(tmp_path, {
@@ -376,7 +375,6 @@ COLLISION_CONFIG = {
     "solo": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
     "twin": {"preset": "claude", "invoke": ["claude", "--model", "x", "-p", "{prompt}"]},
     "other": {"preset": "cursor", "invoke": ["agent", "-p", "{prompt}"]},
-    "wide": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]},
     "cloud": {"preset": "opencode", "invoke": ["opencode", "run", "--dir", ".", "{prompt}"]},
     "launched": {
         "preset": "opencode-ollama",
@@ -419,31 +417,6 @@ class TestContinueCollisions:
             "### Bob\n- **Status:** AI\n- **Rig:** twin\n"
         ))
         assert len(warnings) == 1 and "Bob" in warnings[0]
-
-    def test_global_scope_warning_says_machine_wide(self, tmp_path):
-        warnings = self.collisions(tmp_path, (
-            "### Ana\n- **Status:** AI\n- **Rig:** wide\n- **Continue:** on\n\n"
-            "### Bob\n- **Status:** AI\n- **Rig:** wide\n"
-        ))
-        assert len(warnings) == 1
-        assert "machine's most recent session" in warnings[0]
-        assert "any other org" in warnings[0]
-        assert "no workdir can separate them" in warnings[0]
-
-    def test_directory_scope_warning_stays_directory_scoped(self, tmp_path):
-        warnings = self.collisions(tmp_path, (
-            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
-            "### Bob\n- **Status:** AI\n- **Rig:** solo\n"
-        ))
-        assert "per directory" in warnings[0]
-        assert "machine" not in warnings[0]
-
-    def test_global_scope_still_needs_a_same_cli_teammate(self, tmp_path):
-        # The lint sees one roster; a lone copilot member is all it can vouch for.
-        assert self.collisions(tmp_path, (
-            "### Ana\n- **Status:** AI\n- **Rig:** wide\n- **Continue:** on\n\n"
-            "### Bob\n- **Status:** AI\n- **Rig:** other\n"
-        )) == []
 
     def test_launcher_does_not_hide_a_shared_conversation(self, tmp_path):
         # One member reaches opencode through `ollama launch`, the other runs it

@@ -33,20 +33,17 @@ A member with `- **Continue:** on` in the roster runs its turns inside its
 CLI's own conversation instead of a cold prompt every wake: the agent keeps
 its recent work, and the provider cache prices the wake as a continuation.
 It needs a rig whose preset supports it — `claude`, `cursor`, `opencode`,
-`opencode-ollama`, `copilot`, `agy` (`r4t rig presets` marks them); anything
-else fails closed at `r4t roster check` and at dispatch. `codex` is absent
-because it resumes through the `codex exec resume` subcommand, which no
-appended flag can reach.
+`opencode-ollama`, `agy` (`r4t rig presets` marks them); anything else fails
+closed at `r4t roster check` and at dispatch. `codex` is unsupported because
+it resumes through the `codex exec resume` subcommand, which no appended flag
+can reach. `copilot` is unsupported because its `--continue` resumes the
+machine's most recent session whatever the directory, so members cannot be
+kept apart; supporting it cleanly means pinning a session id per member
+(issue #256).
 
 A CLI keeps ONE conversation per directory, so two members running the same
 CLI in the team workplace land in the same one. `r4t roster check` warns when
 that happens — it never blocks, but the fix is to put them on different CLIs.
-
-`copilot` is the exception: its `--continue` resumes the machine's most recent
-session whatever the directory, so two continuing copilot members share one
-conversation even from different directories — and so does any other org
-running copilot on the same machine. Give at most one member on a machine a
-continuing copilot rig.
 
 ## Picking a model (`--model`)
 
