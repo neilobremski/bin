@@ -2,6 +2,8 @@
 
 These are my common command-line utilities. Install by `source`'ing `install.sh` after cloning.
 
+New to the Ark Suite (a8s + r4t + k7e)? Start with **[The Ark Raising](guides/README.md)** — a chapter-by-chapter build-along that raises a crew of AI agents from nothing.
+
 ## Note on Shebangs
 
 All bash scripts use `#!/usr/bin/env bash` instead of `#!/bin/bash`. This allows the scripts to use a newer version of bash if installed (e.g., via Homebrew on macOS) rather than being forced to use the system's outdated bash 3.2.57.
