@@ -283,8 +283,7 @@ You should see:
 Codeword: TIDEPOOL
 ```
 
-The lobotomy failed. Honest result, worth understanding rather than
-celebrating.
+The lobotomy failed. Worth understanding rather than celebrating.
 
 ## 8. Diagnose
 
