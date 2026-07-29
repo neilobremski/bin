@@ -1564,9 +1564,9 @@ def _run_turn(
             f"failed turns, rig {rig.name}) — turns pause; one probe per "
             f"{config.breaker_cooldown_seconds:g}s until a turn succeeds",
         )
-    if exit_code == 127:
+    if exit_code == 127 and reply_target:
         _tell_error(
-            ctx, newest_sender,
+            ctx, reply_target,
             f"{member.name}'s harness (rig {rig.name}) failed to start: "
             f"{output.strip()}",
             thread=newest_thread, roster=roster,

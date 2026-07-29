@@ -1299,6 +1299,18 @@ class TestStdoutFallback:
         assert "r4t-internal senders" in text
         assert "STDOUT-REPLY" not in text
 
+    def test_spawn_failure_on_internal_batch_tells_no_ghost(
+        self, ctx, repo, r4t_home, tells
+    ):
+        sent, _capture = tells
+        enqueue_internal(ctx, "gerry")
+
+        def spawnfail(rig, prompt, cwd, *, env=None, variant=0):
+            return 127, "failed to spawn", 0.1, False
+
+        drain(ctx, run_fn=spawnfail)
+        assert sent == []
+
 
 def set_echo(config_path, rig_name="leader", **extra):
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
