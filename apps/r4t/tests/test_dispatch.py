@@ -7,6 +7,7 @@ import sys
 import textwrap
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -2025,3 +2026,118 @@ class TestDoorbellGate:
         handle_message(gated, "acme:gerry", "acme:neil", "hi")
         assert not sent
         assert "GATE" not in read_log()
+
+
+WORKDIR_ROSTER = textwrap.dedent(
+    """\
+    ### Gerry
+    - **Status:** AI
+    - **Rig:** leader
+    - **Leader:** yes
+
+    ### Bob
+    - **Status:** AI
+    - **Rig:** junior-dev
+    - **Workdir:** {workdir}
+    """
+)
+
+
+class TestWorkdir:
+    def make_ctx(self, tmp_path, rig_config, tells, workdir):
+        from dispatch import DispatchContext
+
+        root = tmp_path / "workdir-repo"
+        root.mkdir(exist_ok=True)
+        (root / "ROSTER.md").write_text(
+            WORKDIR_ROSTER.format(workdir=workdir), encoding="utf-8"
+        )
+        _sent, capture = tells
+        return DispatchContext(
+            root=root,
+            node=NODE,
+            roster_path=root / "ROSTER.md",
+            config_path=rig_config,
+            tell_fn=capture,
+        )
+
+    @staticmethod
+    def recording_run(turns):
+        def run(rig, prompt, cwd, *, env=None, variant=0):
+            turns.append((prompt, Path(cwd)))
+            return 0, "fake harness ran", 0.0, False
+
+        return run
+
+    def test_absent_workdir_runs_from_workplace(
+        self, r4t_home, tmp_path, rig_config, tells
+    ):
+        ctx = self.make_ctx(tmp_path, rig_config, tells, "agents/bob")
+        turns = []
+        assert run_one(ctx, "acme:bob", "acme:gerry", "hi", run_fn=self.recording_run(turns)) == 1
+        _prompt, cwd = turns[0]
+        assert cwd == ctx.root
+
+    def test_relative_workdir_resolves_against_workplace(
+        self, r4t_home, tmp_path, rig_config, tells
+    ):
+        ctx = self.make_ctx(tmp_path, rig_config, tells, "agents/bob")
+        turns = []
+        assert run_one(ctx, "acme:gerry", "acme:bob", "hi", run_fn=self.recording_run(turns)) == 1
+        _prompt, cwd = turns[0]
+        assert cwd == ctx.root / "agents" / "bob"
+        assert cwd.is_dir()
+
+    def test_absolute_workdir_outside_workplace(
+        self, r4t_home, tmp_path, rig_config, tells
+    ):
+        target = tmp_path / "elsewhere" / "bob-home"
+        ctx = self.make_ctx(tmp_path, rig_config, tells, str(target))
+        turns = []
+        assert run_one(ctx, "acme:gerry", "acme:bob", "hi", run_fn=self.recording_run(turns)) == 1
+        _prompt, cwd = turns[0]
+        assert cwd == target
+        assert cwd.is_dir()
+
+    def test_tilde_workdir_expands_to_home(
+        self, r4t_home, tmp_path, rig_config, tells, monkeypatch
+    ):
+        home = tmp_path / "fake-home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        ctx = self.make_ctx(tmp_path, rig_config, tells, "~/bob-space")
+        turns = []
+        assert run_one(ctx, "acme:gerry", "acme:bob", "hi", run_fn=self.recording_run(turns)) == 1
+        _prompt, cwd = turns[0]
+        assert cwd == home / "bob-space"
+        assert cwd.is_dir()
+
+    def test_preexisting_workdir_untouched(
+        self, r4t_home, tmp_path, rig_config, tells
+    ):
+        ctx = self.make_ctx(tmp_path, rig_config, tells, ".bob")
+        existing = ctx.root / ".bob"
+        existing.mkdir()
+        (existing / "notes.md").write_text("keep me", encoding="utf-8")
+        turns = []
+        assert run_one(ctx, "acme:gerry", "acme:bob", "hi", run_fn=self.recording_run(turns)) == 1
+        assert (existing / "notes.md").read_text(encoding="utf-8") == "keep me"
+
+    def test_prompt_addendum_when_workdir_differs(
+        self, r4t_home, tmp_path, rig_config, tells
+    ):
+        ctx = self.make_ctx(tmp_path, rig_config, tells, "agents/bob")
+        turns = []
+        run_one(ctx, "acme:gerry", "acme:bob", "hi", run_fn=self.recording_run(turns))
+        prompt, _cwd = turns[0]
+        assert str(ctx.root.resolve()) in prompt
+        assert "org workplace" in prompt
+
+    def test_no_addendum_without_workdir(
+        self, r4t_home, tmp_path, rig_config, tells
+    ):
+        ctx = self.make_ctx(tmp_path, rig_config, tells, "agents/bob")
+        turns = []
+        run_one(ctx, "acme:bob", "acme:gerry", "hi", run_fn=self.recording_run(turns))
+        prompt, _cwd = turns[0]
+        assert "org workplace" not in prompt

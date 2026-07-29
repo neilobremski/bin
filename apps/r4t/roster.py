@@ -21,6 +21,12 @@ Humans (`- **Status:** Human`) are never dispatched; an optional
 value is a SYMBOLIC rig name resolved against the out-of-repo rig
 config — never a command. Parsing is defensive: a malformed block disables
 that one member (Member.error set) without crashing dispatch.
+
+An optional `- **Workdir:** <path>` gives the member its own working
+directory for turns. Relative paths resolve against the org workplace
+(`agents/bob/`, `.bob/`); absolute and `~` paths are allowed and may live
+outside the repo entirely. Absent means the member runs from the workplace
+root, as before. The directory is created on demand at the start of a turn.
 """
 from __future__ import annotations
 
@@ -51,6 +57,7 @@ class Member:
     continue_conversation: bool = False
     cell: str = ""
     lead: str = ""
+    workdir: str = ""
     persona: str = ""
     errors: list[str] = field(default_factory=list)
 
@@ -226,6 +233,7 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
     m.continue_conversation = _is_true(fields.get("continue", ""))
     m.cell = fields.get("cell", "")
     m.lead = fields.get("lead", "")
+    m.workdir = fields.get("workdir", "")
 
     rig = fields.get("rig", "")
     if rig:

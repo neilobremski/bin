@@ -66,6 +66,10 @@ PROMPT_DEFAULTS: dict[str, str] = {
         "relative paths only."
     ),
     "mission_header": "## The mission (MISSION.md — outranks every other document)",
+    "workdir_note": (
+        "The team repo (org workplace) is at {workplace} — use that absolute "
+        "path to reach shared team files."
+    ),
     "work_batch": (
         "- This is one turn: you were woken with every message above at once. "
         "Read them together and act on the current state, not each message in "
@@ -446,6 +450,18 @@ def _mission_section(ctx: DispatchContext, roster: Roster, member: Member) -> li
     ]
 
 
+def resolve_workdir(ctx: DispatchContext, member: Member) -> Path:
+    """The directory a member's turn runs from: its `Workdir:` when set
+    (relative paths against the workplace; absolute and `~` paths as given),
+    else the workplace itself."""
+    if not member.workdir:
+        return ctx.workplace
+    p = Path(member.workdir).expanduser()
+    if p.is_absolute():
+        return p
+    return ctx.workplace / p
+
+
 def build_prompt(
     ctx: DispatchContext,
     roster: Roster,
@@ -473,13 +489,20 @@ def build_prompt(
         message_lines.append("")
         message_lines.append(body)
         message_lines.append("")
+    workdir = resolve_workdir(ctx, member)
+    workdir_lines: list[str] = []
+    if workdir.resolve() != ctx.workplace.resolve():
+        workdir_lines = [
+            ctx.prompt("workdir_note", workplace=ctx.workplace.resolve())
+        ]
     parts = [
         ctx.prompt(
             "intro",
             name=member.name,
             node=ctx.node,
-            workplace=ctx.workplace.resolve(),
+            workplace=workdir.resolve(),
         ),
+        *workdir_lines,
         "",
         *_mission_section(ctx, roster, member),
         "## Who you are (from the team roster)",
@@ -1198,8 +1221,10 @@ def _run_turn(
         + f")\n\n### Prompt\n\n{prompt}",
     )
 
+    workdir = resolve_workdir(ctx, member)
+    workdir.mkdir(parents=True, exist_ok=True)
     exit_code, output, duration, timed_out = run_fn(
-        rig, prompt, ctx.workplace, env=env, variant=variant
+        rig, prompt, workdir, env=env, variant=variant
     )
 
     # Some CLIs (cursor) refuse to launch at all when asked to continue a

@@ -145,6 +145,15 @@ class TestParsing:
         roster = parse("### A\n- **Status:** AI\n- **Rig:** Leader\n")
         assert roster.find("a").rig == "leader"
 
+    def test_workdir_captured(self):
+        roster = parse(
+            "### A\n- **Status:** AI\n- **Rig:** t\n- **Workdir:** agents/bob\n"
+        )
+        assert roster.find("a").workdir == "agents/bob"
+
+    def test_workdir_empty_when_absent(self, repo):
+        assert load_roster(repo / "ROSTER.md").find("phil").workdir == ""
+
     def test_mandate_accepted_as_role(self):
         roster = parse(
             "### A\n- **Status:** AI\n- **Rig:** t\n- **Mandate:** The Server\n"
