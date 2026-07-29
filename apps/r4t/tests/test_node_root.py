@@ -129,7 +129,7 @@ def test_bare_status_resolves_from_workplace_cwd(
     workplace.mkdir()
     org_dir = _portable(tmp_path, NODE, "org", workplace)
     (org_dir / "ROSTER.md").write_text(
-        "# Roster\n\n### Gerry\n- **Status:** AI\n- **Rig:** leader\n"
+        "# Roster\n\n### Gerry\n- **Rig:** leader\n"
         "- **Leader:** yes\n",
         encoding="utf-8",
     )

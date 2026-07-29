@@ -18,7 +18,6 @@ Rowan; there are no cells beneath him.
 ## Newsroom
 
 ### Rowan
-- **Status:** AI
 - **Rig:** specialist
 - **Leader:** yes
 - **Cell:** newsroom
@@ -35,7 +34,6 @@ briefback to Neil: restate the intent and end state in your own words and
 wait for his correction before any work resumes.
 
 ### Odile
-- **Status:** AI
 - **Rig:** specialist
 - **Cell:** newsroom
 - **Lead:** Rowan
@@ -47,7 +45,6 @@ book gets measured against; if a chapter doesn't sound right, ask Odile what
 she'd change before anyone else.
 
 ### Ivo
-- **Status:** AI
 - **Rig:** simple
 - **Cell:** newsroom
 - **Lead:** Rowan
@@ -59,7 +56,6 @@ good one. Takes line notes without flinching, from whoever on the desk gives
 them, and redrafts until it holds.
 
 ### Sten
-- **Status:** AI
 - **Rig:** simple
 - **Cell:** newsroom
 - **Lead:** Rowan
@@ -70,7 +66,6 @@ readable pace. Slower and more deliberate; best at the quiet chapters where
 not much happens but everything matters.
 
 ### Marek
-- **Status:** AI
 - **Rig:** simple
 - **Cell:** newsroom
 - **Lead:** Rowan
@@ -82,7 +77,6 @@ tension curves, not scenes. Takes it straight to whoever wrote the chapter,
 and to Rowan if it isn't fixed.
 
 ### Sorrel
-- **Status:** AI
 - **Rig:** specialist
 - **Cell:** newsroom
 - **Lead:** Rowan
@@ -94,7 +88,6 @@ what she finds straight to Rowan and to whichever drafter wrote the page.
 There is no cell between her and the desk.
 
 ### Bex
-- **Status:** AI
 - **Rig:** simple
 - **Cell:** newsroom
 - **Lead:** Rowan
@@ -106,7 +99,6 @@ plainly — "chapter six says the letter was burned; chapter nine quotes it" —
 straight to Rowan and to whoever wrote the pages in question.
 
 ### Tam
-- **Status:** AI
 - **Rig:** dumb
 - **Cell:** newsroom
 - **Lead:** Rowan
@@ -117,7 +109,6 @@ what state they're in, and the outline as it's revised. Answers with the
 note itself, nothing else.
 
 ### Priya
-- **Status:** AI
 - **Rig:** specialist
 - **Cell:** newsroom
 - **Lead:** Rowan
@@ -130,7 +121,6 @@ actually pays off what came before. A finding from her outranks a compliment
 from anyone who wrote the pages.
 
 ### Nessa
-- **Status:** AI
 - **Rig:** simple
 - **Cell:** newsroom
 - **Lead:** Rowan
@@ -145,7 +135,7 @@ the other missed is worth a second look either way.
 ## Human
 
 ### Neil
-- **Status:** Human
+- **Human:** yes
 - **Address:** PLACEHOLDER
 - **Role:** Owns the mission, blesses the milestones
 

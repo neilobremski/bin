@@ -16,16 +16,13 @@ from roster import (
 CONTINUE_TEXT = textwrap.dedent(
     """\
     ### Ana
-    - **Status:** AI
     - **Rig:** r
     - **Continue:** on
 
     ### Bob
-    - **Status:** AI
     - **Rig:** r
 
     ### Cid
-    - **Status:** AI
     - **Rig:** r
     - **Continue:** off
     """
@@ -39,30 +36,26 @@ def parse(text: str):
 TREE_TEXT = textwrap.dedent(
     """\
     ### Vic
-    - **Status:** AI
     - **Rig:** r
     - **Leader:** yes
     - **Cell:** lead
     - **Lead:** Ned
 
     ### Ned
-    - **Status:** Human
+    - **Human:** yes
     - **Address:** ned
 
     ### Ann
-    - **Status:** AI
     - **Rig:** r
     - **Cell:** design
     - **Lead:** Vic
 
     ### Bea
-    - **Status:** AI
     - **Rig:** r
     - **Cell:** design
     - **Lead:** Ann
 
     ### Cal
-    - **Status:** AI
     - **Rig:** r
     - **Cell:** build
     - **Lead:** Vic
@@ -75,7 +68,7 @@ class TestParsing:
         roster = load_roster(repo / "ROSTER.md")
         gerry = roster.find("gerry")
         assert gerry is not None
-        assert gerry.status == "AI"
+        assert gerry.is_human is False
         assert gerry.rig == "leader"
         assert gerry.role == "Technical Producer"
         assert gerry.leader
@@ -106,7 +99,7 @@ class TestParsing:
 
     def test_flush_bare_seconds(self):
         roster = parse(
-            "### A\n- **Status:** AI\n- **Rig:** r\n- **Continue:** on\n"
+            "### A\n- **Rig:** r\n- **Continue:** on\n"
             "- **Flush:** 90\n"
         )
         assert roster.find("a").flush_seconds == 90.0
@@ -117,7 +110,7 @@ class TestParsing:
     )
     def test_flush_suffixes(self, value, seconds):
         roster = parse(
-            f"### A\n- **Status:** AI\n- **Rig:** r\n- **Continue:** on\n"
+            f"### A\n- **Rig:** r\n- **Continue:** on\n"
             f"- **Flush:** {value}\n"
         )
         assert roster.find("a").flush_seconds == seconds
@@ -127,21 +120,21 @@ class TestParsing:
 
     def test_flush_malformed_disables_member(self):
         roster = parse(
-            "### A\n- **Status:** AI\n- **Rig:** r\n- **Continue:** on\n"
+            "### A\n- **Rig:** r\n- **Continue:** on\n"
             "- **Flush:** soon\n"
         )
         assert "Flush" in roster.find("a").error
 
     def test_flush_without_continue_warns(self):
         roster = parse(
-            "### A\n- **Status:** AI\n- **Rig:** r\n- **Flush:** 4h\n"
+            "### A\n- **Rig:** r\n- **Flush:** 4h\n"
         )
         warnings = flush_warnings(roster)
         assert len(warnings) == 1 and warnings[0].startswith("A: Flush")
 
     def test_flush_with_continue_does_not_warn(self):
         roster = parse(
-            "### A\n- **Status:** AI\n- **Rig:** r\n- **Continue:** on\n"
+            "### A\n- **Rig:** r\n- **Continue:** on\n"
             "- **Flush:** 4h\n"
         )
         assert flush_warnings(roster) == []
@@ -160,13 +153,13 @@ class TestParsing:
         assert roster.leader().name == "Gerry"
 
     def test_no_leader(self):
-        roster = parse("### Solo\n- **Status:** AI\n- **Rig:** t\n")
+        roster = parse("### Solo\n- **Rig:** t\n")
         assert roster.leader() is None
 
     def test_human_leader_not_dispatched_as_leader(self):
         roster = parse(
-            "### Boss\n- **Status:** Human\n- **Leader:** yes\n"
-            "### Dev\n- **Status:** AI\n- **Rig:** t\n"
+            "### Boss\n- **Human:** yes\n- **Leader:** yes\n"
+            "### Dev\n- **Rig:** t\n"
         )
         assert roster.leader() is None
 
@@ -177,20 +170,28 @@ class TestParsing:
         assert not neil.errors
 
     def test_human_needs_no_harness(self):
-        roster = parse("### Human\n- **Status:** Human\n")
+        roster = parse("### Human\n- **Human:** yes\n")
         assert not roster.find("human").errors
 
+    def test_unmarked_member_is_ai(self):
+        member = parse("### A\n- **Rig:** t\n").find("a")
+        assert member.is_human is False
+        assert not member.errors
+
+    def test_human_no_is_ai(self):
+        assert parse("### A\n- **Human:** no\n- **Rig:** t\n").find("a").is_human is False
+
     def test_backticked_rig(self):
-        roster = parse("### A\n- **Status:** AI\n- **Rig:** `rig-1`\n")
+        roster = parse("### A\n- **Rig:** `rig-1`\n")
         assert roster.find("a").rig == "rig-1"
 
     def test_rig_is_lowercased(self):
-        roster = parse("### A\n- **Status:** AI\n- **Rig:** Leader\n")
+        roster = parse("### A\n- **Rig:** Leader\n")
         assert roster.find("a").rig == "leader"
 
     def test_workdir_captured(self):
         roster = parse(
-            "### A\n- **Status:** AI\n- **Rig:** t\n- **Workdir:** agents/bob\n"
+            "### A\n- **Rig:** t\n- **Workdir:** agents/bob\n"
         )
         assert roster.find("a").workdir == "agents/bob"
 
@@ -199,48 +200,63 @@ class TestParsing:
 
     def test_mandate_accepted_as_role(self):
         roster = parse(
-            "### A\n- **Status:** AI\n- **Rig:** t\n- **Mandate:** The Server\n"
+            "### A\n- **Rig:** t\n- **Mandate:** The Server\n"
         )
         assert roster.find("a").role == "The Server"
 
     def test_blocks_end_at_next_heading(self):
         roster = parse(
-            "### A\n- **Status:** AI\n- **Rig:** t\npersona a\n"
+            "### A\n- **Rig:** t\npersona a\n"
             "## Section\nloose prose\n"
-            "### B\n- **Status:** AI\n- **Rig:** t\n"
+            "### B\n- **Rig:** t\n"
         )
         assert "loose prose" not in roster.find("a").persona
         assert roster.find("b") is not None
 
 
 class TestMalformed:
-    def test_bad_status_disables_member(self, repo):
+    def test_bad_rig_disables_member(self, repo):
         roster = load_roster(repo / "ROSTER.md")
         broken = roster.find("broken")
         assert broken.errors
-        assert "Status" in broken.error
+        assert "symbolic rig" in broken.error
+
+    def test_human_with_rig_disabled(self):
+        member = parse("### A\n- **Human:** yes\n- **Rig:** solo\n").find("a")
+        assert member.rig is None
+        assert "Human members carry no Rig" in member.error
+
+    def test_legacy_status_line_disables_member(self):
+        member = parse("### A\n- **Status:** Human\n").find("a")
+        assert member.error == (
+            "Status: is gone — mark the human seat with **Human:** yes; "
+            "AI members carry no marker; missing Rig line"
+        )
+
+    def test_legacy_status_value_is_never_parsed(self):
+        assert parse("### A\n- **Status:** Human\n").find("a").is_human is False
 
     def test_command_harness_disables_member(self):
         roster = parse(
-            "### A\n- **Status:** AI\n- **Rig:** `agent -p --yolo {prompt}`\n"
+            "### A\n- **Rig:** `agent -p --yolo {prompt}`\n"
         )
         member = roster.find("a")
         assert member.errors
         assert "symbolic rig" in member.error
 
     def test_ai_without_rig_disabled(self):
-        roster = parse("### A\n- **Status:** AI\n")
+        roster = parse("### A\n")
         assert "missing Rig" in roster.find("a").error
 
     def test_duplicate_names_disable_both(self):
         roster = parse(
-            "### A\n- **Status:** AI\n- **Rig:** t\n"
-            "### a\n- **Status:** AI\n- **Rig:** t\n"
+            "### A\n- **Rig:** t\n"
+            "### a\n- **Rig:** t\n"
         )
         assert all("duplicate" in m.error for m in roster.members)
 
     def test_malformed_block_never_raises(self):
-        roster = parse("### \n### A\n- **Status:**\n- garbage ** stuff\n")
+        roster = parse("### \n### A\n- **Human:**\n- garbage ** stuff\n")
         assert isinstance(roster.members, list)
 
 
@@ -270,13 +286,13 @@ class TestTree:
         assert r.find("vic").lead == "Ned"
 
     def test_lead_empty_when_absent(self):
-        assert parse("### A\n- **Status:** AI\n- **Rig:** r\n").find("a").lead == ""
+        assert parse("### A\n- **Rig:** r\n").find("a").lead == ""
 
     def test_declares_tree_only_with_lead_lines(self):
         assert parse(TREE_TEXT).declares_tree
         flat = parse(
-            "### A\n- **Status:** AI\n- **Rig:** r\n- **Leader:** yes\n- **Cell:** x\n"
-            "### B\n- **Status:** AI\n- **Rig:** r\n- **Cell:** x\n"
+            "### A\n- **Rig:** r\n- **Leader:** yes\n- **Cell:** x\n"
+            "### B\n- **Rig:** r\n- **Cell:** x\n"
         )
         assert not flat.declares_tree
 
@@ -303,39 +319,39 @@ class TestTree:
 
     def test_flat_roster_has_no_tree_problems(self):
         # Cell lines but no Lead lines anywhere: many members, still flat.
-        text = "### Top\n- **Status:** AI\n- **Rig:** r\n- **Leader:** yes\n"
+        text = "### Top\n- **Rig:** r\n- **Leader:** yes\n"
         for i in range(12):
-            text += f"### M{i}\n- **Status:** AI\n- **Rig:** r\n"
+            text += f"### M{i}\n- **Rig:** r\n"
         assert parse(text).tree_problems() == []
 
     def test_unknown_lead_is_error(self):
         r = parse(
-            "### Top\n- **Status:** AI\n- **Rig:** r\n- **Leader:** yes\n"
-            "### Kid\n- **Status:** AI\n- **Rig:** r\n- **Lead:** Ghost\n"
+            "### Top\n- **Rig:** r\n- **Leader:** yes\n"
+            "### Kid\n- **Rig:** r\n- **Lead:** Ghost\n"
         )
         assert any(s == "error" and "Ghost" in msg for s, msg in r.tree_problems())
 
     def test_cell_over_six_warns(self):
-        text = "### Top\n- **Status:** AI\n- **Rig:** r\n- **Leader:** yes\n- **Cell:** hq\n"
+        text = "### Top\n- **Rig:** r\n- **Leader:** yes\n- **Cell:** hq\n"
         for i in range(7):
-            text += f"### M{i}\n- **Status:** AI\n- **Rig:** r\n- **Cell:** c\n- **Lead:** Top\n"
+            text += f"### M{i}\n- **Rig:** r\n- **Cell:** c\n- **Lead:** Top\n"
         probs = parse(text).tree_problems()
         assert any(s == "warn" and "soft cap 6" in msg for s, msg in probs)
         assert not any(s == "error" for s, _ in probs)
 
     def test_cell_over_ten_errors(self):
-        text = "### Top\n- **Status:** AI\n- **Rig:** r\n- **Leader:** yes\n- **Cell:** hq\n"
+        text = "### Top\n- **Rig:** r\n- **Leader:** yes\n- **Cell:** hq\n"
         for i in range(11):
-            text += f"### M{i}\n- **Status:** AI\n- **Rig:** r\n- **Cell:** c\n- **Lead:** Top\n"
+            text += f"### M{i}\n- **Rig:** r\n- **Cell:** c\n- **Lead:** Top\n"
         assert any(
             s == "error" and "hard cap 10" in msg for s, msg in parse(text).tree_problems()
         )
 
     def test_depth_over_two_warns(self):
         r = parse(
-            "### L0\n- **Status:** AI\n- **Rig:** r\n- **Leader:** yes\n"
-            "### L1\n- **Status:** AI\n- **Rig:** r\n- **Lead:** L0\n"
-            "### L2\n- **Status:** AI\n- **Rig:** r\n- **Lead:** L1\n"
-            "### L3\n- **Status:** AI\n- **Rig:** r\n- **Lead:** L2\n"
+            "### L0\n- **Rig:** r\n- **Leader:** yes\n"
+            "### L1\n- **Rig:** r\n- **Lead:** L0\n"
+            "### L2\n- **Rig:** r\n- **Lead:** L1\n"
+            "### L3\n- **Rig:** r\n- **Lead:** L2\n"
         )
         assert any(s == "warn" and "depth" in msg for s, msg in r.tree_problems())

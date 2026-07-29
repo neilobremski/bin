@@ -210,12 +210,10 @@ ROSTER = textwrap.dedent(
     # Team
 
     ### Gerry
-    - **Status:** AI
     - **Rig:** leader
     - **Leader:** yes
 
     ### Phil
-    - **Status:** AI
     - **Rig:** junior-dev
     """
 )

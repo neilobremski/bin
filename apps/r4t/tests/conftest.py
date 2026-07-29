@@ -46,7 +46,6 @@ ROSTER_TEXT = textwrap.dedent(
     Preamble prose that is not a member block.
 
     ### Gerry
-    - **Status:** AI
     - **Rig:** leader
     - **Role:** Technical Producer
     - **Cell:** leadership
@@ -55,20 +54,18 @@ ROSTER_TEXT = textwrap.dedent(
     The Orchestrator. Defends the schedule.
 
     ### Phil
-    - **Status:** AI
     - **Rig:** junior-dev
     - **Role:** Lead Backend Engineer
 
     Grumpy, cynical veteran. Despises feature creep.
 
     ### Neil
-    - **Status:** Human
+    - **Human:** yes
     - **Address:** neil
     - **Role:** Game Director
 
     ### Broken
-    - **Status:** Sometimes
-    - **Rig:** junior-dev
+    - **Rig:** ./run-agent.sh --headless
     """
 )
 

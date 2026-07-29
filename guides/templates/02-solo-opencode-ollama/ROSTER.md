@@ -1,11 +1,10 @@
 # Team Roster
 
 ### You
-- **Status:** Human
+- **Human:** yes
 - **Role:** Owner
 
 ### Wren
-- **Status:** AI
 - **Rig:** solo
 - **Leader:** yes
 - **Continue:** on

@@ -93,30 +93,26 @@ TREE_ROSTER = textwrap.dedent(
     # Tree Team
 
     ### Vic
-    - **Status:** AI
     - **Rig:** leader
     - **Leader:** yes
     - **Cell:** lead
     - **Lead:** Ned
 
     ### Ned
-    - **Status:** Human
+    - **Human:** yes
     - **Address:** ned
 
     ### Ann
-    - **Status:** AI
     - **Rig:** junior-dev
     - **Cell:** design
     - **Lead:** Vic
 
     ### Bea
-    - **Status:** AI
     - **Rig:** junior-dev
     - **Cell:** design
     - **Lead:** Ann
 
     ### Cal
-    - **Status:** AI
     - **Rig:** junior-dev
     - **Cell:** build
     - **Lead:** Vic
@@ -289,7 +285,7 @@ class TestRejections:
 
     def test_unknown_rig_dead_letters(self, ctx, repo, tells, fake_harness):
         (repo / "ROSTER.md").write_text(
-            "### Ghost\n- **Status:** AI\n- **Rig:** phantom\n- **Leader:** yes\n",
+            "### Ghost\n- **Rig:** phantom\n- **Leader:** yes\n",
             encoding="utf-8",
         )
         sent, _ = tells
@@ -305,7 +301,7 @@ class TestRejections:
 
     def test_no_leader_for_bare_node(self, ctx, repo, tells, fake_harness):
         (repo / "ROSTER.md").write_text(
-            "### Phil\n- **Status:** AI\n- **Rig:** junior-dev\n", encoding="utf-8"
+            "### Phil\n- **Rig:** junior-dev\n", encoding="utf-8"
         )
         sent, _ = tells
         handle_message(ctx, "gerry", "acme", "hi")
@@ -669,14 +665,12 @@ CONTINUE_ROSTER = textwrap.dedent(
     # Continue Team
 
     ### Ana
-    - **Status:** AI
     - **Rig:** resuming
     - **Leader:** yes
     - **Continue:** on
     - **Flush:** 1h
 
     ### Bob
-    - **Status:** AI
     - **Rig:** cold
     - **Flush:** 1h
     """
@@ -2115,12 +2109,10 @@ class TestCli:
             textwrap.dedent(
                 """\
                 ### Gerry
-                - **Status:** AI
                 - **Rig:** leader
                 - **Leader:** yes
 
                 ### Phil
-                - **Status:** AI
                 - **Rig:** junior-dev
                 """
             ),
@@ -2134,7 +2126,7 @@ class TestCli:
         root = tmp_path / "leaderless"
         root.mkdir()
         (root / "ROSTER.md").write_text(
-            "### Phil\n- **Status:** AI\n- **Rig:** junior-dev\n", encoding="utf-8"
+            "### Phil\n- **Rig:** junior-dev\n", encoding="utf-8"
         )
         rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
         assert rc == 1
@@ -2143,10 +2135,10 @@ class TestCli:
     def test_roster_check_warns_on_oversized_cell(self, r4t_home, tmp_path, rig_config, capsys):
         root = tmp_path / "bigcell"
         root.mkdir()
-        text = "### Boss\n- **Status:** AI\n- **Rig:** leader\n- **Leader:** yes\n- **Cell:** hq\n"
+        text = "### Boss\n- **Rig:** leader\n- **Leader:** yes\n- **Cell:** hq\n"
         for i in range(7):
             text += (
-                f"### M{i}\n- **Status:** AI\n- **Rig:** junior-dev\n"
+                f"### M{i}\n- **Rig:** junior-dev\n"
                 f"- **Cell:** c\n- **Lead:** Boss\n"
             )
         (root / "ROSTER.md").write_text(text, encoding="utf-8")
@@ -2160,9 +2152,9 @@ class TestCli:
         root = tmp_path / "sharedcli"
         root.mkdir()
         (root / "ROSTER.md").write_text(
-            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Leader:** yes\n"
+            "### Ana\n- **Rig:** solo\n- **Leader:** yes\n"
             "- **Continue:** on\n"
-            "### Bob\n- **Status:** AI\n- **Rig:** solo\n",
+            "### Bob\n- **Rig:** solo\n",
             encoding="utf-8",
         )
         config = tmp_path / "shared-rigs.json"
@@ -2180,7 +2172,7 @@ class TestCli:
         root = tmp_path / "nocontinue"
         root.mkdir()
         (root / "ROSTER.md").write_text(
-            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Leader:** yes\n"
+            "### Ana\n- **Rig:** solo\n- **Leader:** yes\n"
             "- **Continue:** on\n",
             encoding="utf-8",
         )
@@ -2198,8 +2190,8 @@ class TestCli:
         root = tmp_path / "badlead"
         root.mkdir()
         (root / "ROSTER.md").write_text(
-            "### Boss\n- **Status:** AI\n- **Rig:** leader\n- **Leader:** yes\n"
-            "### Kid\n- **Status:** AI\n- **Rig:** junior-dev\n- **Lead:** Ghost\n",
+            "### Boss\n- **Rig:** leader\n- **Leader:** yes\n"
+            "### Kid\n- **Rig:** junior-dev\n- **Lead:** Ghost\n",
             encoding="utf-8",
         )
         rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
@@ -2208,8 +2200,8 @@ class TestCli:
 
     def _clean_roster(self, root):
         (root / "ROSTER.md").write_text(
-            "### Gerry\n- **Status:** AI\n- **Rig:** leader\n- **Leader:** yes\n"
-            "### Phil\n- **Status:** AI\n- **Rig:** junior-dev\n",
+            "### Gerry\n- **Rig:** leader\n- **Leader:** yes\n"
+            "### Phil\n- **Rig:** junior-dev\n",
             encoding="utf-8",
         )
 
@@ -2434,12 +2426,10 @@ class TestDoorbellGate:
 WORKDIR_ROSTER = textwrap.dedent(
     """\
     ### Gerry
-    - **Status:** AI
     - **Rig:** leader
     - **Leader:** yes
 
     ### Bob
-    - **Status:** AI
     - **Rig:** junior-dev
     - **Workdir:** {workdir}
     """

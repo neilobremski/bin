@@ -18,7 +18,6 @@ The org is a depth-2 tree of cells. Each AI member carries `Cell:` and
 ## Leadership
 
 ### Rowan
-- **Status:** AI
 - **Rig:** specialist
 - **Leader:** yes
 - **Cell:** leadership
@@ -42,7 +41,6 @@ Reports to Rowan. Owns the prose — every chapter passes through this cell
 before it exists.
 
 ### Odile
-- **Status:** AI
 - **Rig:** specialist
 - **Cell:** writing
 - **Lead:** Rowan
@@ -56,7 +54,6 @@ Delegates by first name; reports to Rowan with what's drafted and what's
 next.
 
 ### Ivo
-- **Status:** AI
 - **Rig:** simple
 - **Cell:** writing
 - **Lead:** Odile
@@ -68,7 +65,6 @@ good one. Takes Odile's line notes without flinching and redrafts until it
 holds.
 
 ### Sten
-- **Status:** AI
 - **Rig:** simple
 - **Cell:** writing
 - **Lead:** Odile
@@ -79,7 +75,6 @@ pens so it moves at a readable pace. Slower and more deliberate; best at the
 quiet chapters where not much happens but everything matters.
 
 ### Marek
-- **Status:** AI
 - **Rig:** simple
 - **Cell:** writing
 - **Lead:** Odile
@@ -98,7 +93,6 @@ Reports to Rowan. The story's memory — nothing contradicts anything once
 this cell has looked at it.
 
 ### Sorrel
-- **Status:** AI
 - **Rig:** specialist
 - **Cell:** continuity
 - **Lead:** Rowan
@@ -111,7 +105,6 @@ note-keeping to Tam; escalates to Rowan only when a contradiction means
 rewriting something already blessed.
 
 ### Bex
-- **Status:** AI
 - **Rig:** simple
 - **Cell:** continuity
 - **Lead:** Sorrel
@@ -123,7 +116,6 @@ plainly — "chapter six says the letter was burned; chapter nine quotes it" —
 and lets Sorrel decide what to do about it.
 
 ### Tam
-- **Status:** AI
 - **Rig:** dumb
 - **Cell:** continuity
 - **Lead:** Sorrel
@@ -141,7 +133,6 @@ Reports to Rowan. Reads the book as a stranger would — no goodwill, no
 inside knowledge of how hard a chapter was to write.
 
 ### Priya
-- **Status:** AI
 - **Rig:** specialist
 - **Cell:** reader
 - **Lead:** Rowan
@@ -154,7 +145,6 @@ actually pays off what came before. A finding from this cell outranks a
 compliment from anyone who wrote the pages.
 
 ### Nessa
-- **Status:** AI
 - **Rig:** simple
 - **Cell:** reader
 - **Lead:** Priya
@@ -169,7 +159,7 @@ missed is worth a second look either way.
 ## Human
 
 ### Neil
-- **Status:** Human
+- **Human:** yes
 - **Address:** PLACEHOLDER
 - **Role:** Owns the mission, blesses the milestones
 

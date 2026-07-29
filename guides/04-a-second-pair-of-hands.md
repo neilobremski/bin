@@ -37,11 +37,10 @@ Two edits: the roster grows a member, and the rig config grows a rig.
 # Team Roster
 
 ### You
-- **Status:** Human
+- **Human:** yes
 - **Role:** Owner
 
 ### Wren
-- **Status:** AI
 - **Rig:** solo
 - **Leader:** yes
 - **Continue:** on
@@ -53,7 +52,6 @@ Wren is a roster of one: leader, developer, and correspondent in a single
 seat. Keep answers short and concrete.
 
 ### Moss
-- **Status:** AI
 - **Rig:** helper
 - **Workdir:** agents/moss
 - **Role:** Helper — quick lookups and drafts for Wren

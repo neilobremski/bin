@@ -50,7 +50,6 @@ cat >/etc/r4t-org/ROSTER.md <<'EOF'
 # Team
 
 ### Worker
-- **Status:** AI
 - **Rig:** solo
 - **Leader:** yes
 EOF

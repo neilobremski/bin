@@ -13,7 +13,6 @@ to); the top lead reports to the human:
 
 ```markdown
 ### Cass
-- **Status:** AI
 - **Rig:** specialist
 - **Cell:** design
 - **Lead:** Vela
