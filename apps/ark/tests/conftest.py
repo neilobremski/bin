@@ -26,7 +26,7 @@ def _no_real_subprocess(monkeypatch):
 def homes(tmp_path, monkeypatch):
     """Hermetic suite homes. Every probe path in the greeter resolves under
     tmp_path, so no test can read or touch a real ~/.config/a8s, ~/.config/r4t
-    or ~/.k7e."""
+    or ~/.config/k7e."""
     roots = {}
     for env, name in (("A8S_HOME", "a8s"), ("R4T_HOME", "r4t"), ("K7E_HOME", "k7e")):
         root = tmp_path / name

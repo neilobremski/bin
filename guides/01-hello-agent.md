@@ -53,9 +53,9 @@ r4t — roster for teams  (/home/you/.config/r4t)
   ✗ rigs   no rig config at /home/you/.config/r4t/rigs.json   (try: r4t init)
   ✗ teams  none under /home/you/.config/r4t/teams   (try: r4t init)
 
-k7e — knowledge engine  (/home/you/.k7e)
+k7e — knowledge engine  (/home/you/.config/k7e)
   ✓ cli    k7e -> /home/you/bin/k7e
-  ✗ store  no store at /home/you/.k7e   (try: k7e init)
+  ✗ store  no store at /home/you/.config/k7e   (try: k7e init)
 
 next: ark doctor — probe the harnesses and tools the suite runs on
 ```

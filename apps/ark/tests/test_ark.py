@@ -54,6 +54,12 @@ def test_r4t_home_falls_back_to_xdg_config(tmp_path, monkeypatch):
     assert ark.r4t_home() == tmp_path / "r4t"
 
 
+def test_k7e_home_falls_back_to_xdg_config(tmp_path, monkeypatch):
+    monkeypatch.delenv("K7E_HOME", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert ark.k7e_home() == tmp_path / "k7e"
+
+
 # ---------- a8s panel ----------
 
 def test_a8s_panel_is_all_misses_on_an_empty_home(homes):

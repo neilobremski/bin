@@ -221,8 +221,12 @@ def r4t_rows() -> list[Row]:
 # ---------- k7e ----------
 
 def k7e_home() -> Path:
-    override = os.environ.get("K7E_HOME", "").strip()
-    return Path(override).expanduser() if override else Path.home() / ".k7e"
+    raw = os.environ.get("K7E_HOME", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    return base / "k7e"
 
 
 def k7e_rows() -> list[Row]:

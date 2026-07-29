@@ -71,7 +71,7 @@ embeddings; an **LLM CLI** you configure via `llm_command` for distill/recall/co
 
 ## How it works (30 seconds)
 
-- Every fact is a markdown file under `$K7E_HOME/nodes/` (default `~/.k7e`).
+- Every fact is a markdown file under `$K7E_HOME/nodes/` (default `~/.config/k7e`).
   `.index.db` is a derived cache — delete it and `k7e reindex` rebuilds.
 - **Search** fuses BM25 + metadata + embeddings (RRF), then weights by
   confidence, recency decay, and use-count, with an optional LLM reranker.
