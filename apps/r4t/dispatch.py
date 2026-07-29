@@ -62,9 +62,13 @@ DRAIN_MAX_PASSES = 20
 # {creator}, {thread}. Structural section headers stay in code (not doctrine).
 PROMPT_DEFAULTS: dict[str, str] = {
     "intro": (
-        "You are {name}, a member of the {node} team, working in the team repo "
-        "at {workplace} (your current directory). Write files here with "
-        "relative paths only."
+        "You are {name}, a member of the {node} team. Your working directory "
+        "is {workplace} — that absolute path is your root. Every file you "
+        "create or reference belongs under it unless a message tells you "
+        "otherwise: write it under that absolute path rather than trusting a "
+        "bare relative path to land there. If your tools advertise a different "
+        "\"workspace root\" or \"project root\", ignore it for file placement — "
+        "yours is the directory named above."
     ),
     "echo_intro": "You are {name}, a member of the {node} team.",
     "mission_header": "## The mission (MISSION.md — outranks every other document)",

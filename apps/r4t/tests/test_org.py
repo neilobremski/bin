@@ -170,7 +170,7 @@ def test_dispatch_reads_org_docs_but_works_in_the_repo(r4t_home, tmp_path, fake_
     ])
     assert rc == 0
     prompt = _prompt_of(fake_harness)
-    assert f"team repo at {workplace.resolve()}" in prompt   # turns run in the repo
+    assert f"working directory is {workplace.resolve()}" in prompt  # turns run in the repo
     assert "Ship the thing and stop." in prompt              # MISSION read from org dir
     assert state.read_root(NODE) == org_dir                  # node stamped to org dir
 
@@ -188,7 +188,7 @@ def test_graduation_falls_back_to_in_repo(r4t_home, tmp_path, fake_harness):
     ])
     assert rc == 0
     prompt = _prompt_of(fake_harness)
-    assert f"team repo at {workplace.resolve()}" in prompt
+    assert f"working directory is {workplace.resolve()}" in prompt
     assert "Ship the thing and stop." in prompt
     assert load_org(workplace).workplace == workplace  # no pointer -> in-repo default
 
