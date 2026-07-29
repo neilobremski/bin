@@ -134,7 +134,7 @@ messaging doctrine, and whatever it prints becomes its one reply to you.
 That is the right shape for a roster of one — Sol has nobody to message
 but you — and it sidesteps a real failure mode: without echo, a member
 must send its reply with `tell`, and prose answers under ~80 characters
-are discarded as terminal chrome. Chapter 3 lifts echo when the team
+are discarded as terminal chrome. Chapter 4 lifts echo when the team
 grows.
 
 Lint before going live — r4t fails closed on any roster/rig disagreement:
