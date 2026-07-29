@@ -45,7 +45,7 @@ def load_seat(ctx: DispatchContext) -> tuple[Roster, Member]:
     human = next((m for m in roster.members if m.is_human), None)
     if human is None:
         raise SeatError(
-            "no human member in the roster — add one to ROSTER.md (Status: Human)"
+            "no human member in the roster — add one to ROSTER.md (Human: yes)"
         )
     return roster, human
 

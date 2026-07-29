@@ -167,7 +167,7 @@ def test_poll_inbox_consumes_and_renders(session, r4t_home):
 
 def test_run_chat_requires_human(ctx, repo, r4t_home):
     (repo / "ROSTER.md").write_text(
-        "# Roster\n\n### Gerry\n- **Status:** AI\n- **Rig:** leader\n"
+        "# Roster\n\n### Gerry\n- **Rig:** leader\n"
         "- **Leader:** yes\n",
         encoding="utf-8",
     )

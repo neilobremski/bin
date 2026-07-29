@@ -3,12 +3,11 @@
 Three-agent pipeline: Lead delegates → Dev builds → Tester verifies → Lead answers human.
 
 ### Owner
-- **Status:** Human
+- **Human:** yes
 - **Address:** human
 - **Role:** Product owner
 
 ### Lead
-- **Status:** AI
 - **Rig:** leader
 - **Leader:** yes
 - **Role:** Team lead
@@ -18,14 +17,12 @@ Three-agent pipeline: Lead delegates → Dev builds → Tester verifies → Lead
 **Turn 3 (from Tester, VERIFIED):** run `tell human "Done: battleship.py verified"` — do not delegate.
 
 ### Dev
-- **Status:** AI
 - **Rig:** member
 - **Role:** Developer
 
 Write **battleship.py** in this repo root. Then run `tell tester "battleship.py is ready"`. Stop.
 
 ### Tester
-- **Status:** AI
 - **Rig:** member
 - **Role:** Tester
 

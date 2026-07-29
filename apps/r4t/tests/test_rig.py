@@ -432,21 +432,21 @@ class TestContinueCollisions:
 
     def test_no_warning_when_clis_differ(self, tmp_path):
         assert self.collisions(tmp_path, (
-            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
-            "### Bob\n- **Status:** AI\n- **Rig:** other\n"
+            "### Ana\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Rig:** other\n"
         )) == []
 
     def test_no_warning_when_nobody_continues(self, tmp_path):
         assert self.collisions(tmp_path, (
-            "### Ana\n- **Status:** AI\n- **Rig:** solo\n\n"
-            "### Bob\n- **Status:** AI\n- **Rig:** solo\n"
+            "### Ana\n- **Rig:** solo\n\n"
+            "### Bob\n- **Rig:** solo\n"
         )) == []
 
     def test_warns_when_a_teammate_shares_the_cli(self, tmp_path):
         # Bob does not continue — he still writes the conversation Ana resumes.
         warnings = self.collisions(tmp_path, (
-            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
-            "### Bob\n- **Status:** AI\n- **Rig:** solo\n"
+            "### Ana\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Rig:** solo\n"
         ))
         assert len(warnings) == 1
         assert warnings[0].startswith("Ana: Continue: on")
@@ -454,8 +454,8 @@ class TestContinueCollisions:
 
     def test_warns_across_different_rigs_on_one_cli(self, tmp_path):
         warnings = self.collisions(tmp_path, (
-            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
-            "### Bob\n- **Status:** AI\n- **Rig:** twin\n"
+            "### Ana\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Rig:** twin\n"
         ))
         assert len(warnings) == 1 and "Bob" in warnings[0]
 
@@ -463,8 +463,8 @@ class TestContinueCollisions:
         # One member reaches opencode through `ollama launch`, the other runs it
         # directly — same per-directory session store, so they still collide.
         warnings = self.collisions(tmp_path, (
-            "### Ana\n- **Status:** AI\n- **Rig:** launched\n- **Continue:** on\n\n"
-            "### Bob\n- **Status:** AI\n- **Rig:** cloud\n"
+            "### Ana\n- **Rig:** launched\n- **Continue:** on\n\n"
+            "### Bob\n- **Rig:** cloud\n"
         ))
         assert len(warnings) == 1
         assert "Bob" in warnings[0] and "'opencode'" in warnings[0]
@@ -472,31 +472,31 @@ class TestContinueCollisions:
 
     def test_humans_and_broken_members_never_collide(self, tmp_path):
         assert self.collisions(tmp_path, (
-            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
-            "### Cid\n- **Status:** Human\n- **Address:** cid\n\n"
-            "### Dot\n- **Status:** AI\n"
+            "### Ana\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Cid\n- **Human:** yes\n- **Address:** cid\n\n"
+            "### Dot\n"
         )) == []
 
     def test_distinct_workdirs_on_one_cli_do_not_collide(self, tmp_path):
         # The conversation is keyed on (CLI, directory): a member with its own
         # Workdir: runs the shared CLI somewhere else entirely.
         assert self.collisions(tmp_path, (
-            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
-            "### Bob\n- **Status:** AI\n- **Rig:** solo\n- **Workdir:** agents/bob\n"
+            "### Ana\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Rig:** solo\n- **Workdir:** agents/bob\n"
         )) == []
 
     def test_same_explicit_workdir_still_collides(self, tmp_path):
         warnings = self.collisions(tmp_path, (
-            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n"
+            "### Ana\n- **Rig:** solo\n- **Continue:** on\n"
             "- **Workdir:** shared\n\n"
-            "### Bob\n- **Status:** AI\n- **Rig:** solo\n- **Workdir:** shared\n"
+            "### Bob\n- **Rig:** solo\n- **Workdir:** shared\n"
         ))
         assert len(warnings) == 1 and "Bob" in warnings[0]
 
     def test_workdir_resolving_to_the_workplace_collides(self, tmp_path):
         warnings = self.collisions(tmp_path, (
-            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
-            "### Bob\n- **Status:** AI\n- **Rig:** solo\n- **Workdir:** .\n"
+            "### Ana\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Rig:** solo\n- **Workdir:** .\n"
         ))
         assert len(warnings) == 1 and "Bob" in warnings[0]
 

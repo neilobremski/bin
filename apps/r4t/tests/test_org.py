@@ -16,18 +16,16 @@ CLEAN_ROSTER = """\
 # Team Roster
 
 ### Neil
-- **Status:** Human
+- **Human:** yes
 - **Address:** neil
 - **Role:** Director
 
 ### Gerry
-- **Status:** AI
 - **Rig:** leader
 - **Role:** Lead
 - **Leader:** yes
 
 ### Phil
-- **Status:** AI
 - **Rig:** junior-dev
 - **Role:** Developer
 """
@@ -251,7 +249,6 @@ SHADOW_ROSTER = """\
 # Shadow
 
 ### Impostor
-- **Status:** AI
 - **Rig:** leader
 - **Leader:** yes
 """

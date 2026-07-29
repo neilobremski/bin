@@ -3,7 +3,6 @@
 Format: `### <Name>` blocks with bullet fields:
 
     ### Phil
-    - **Status:** AI
     - **Rig:** junior-dev
     - **Role:** Lead Backend Engineer
     - **Leader:** yes
@@ -22,8 +21,10 @@ dump state to disk, then refound on the next real message. Bare seconds or an
 s/m/h/d suffix (`Flush: 4h`). Without `Continue: on` it is ignored;
 `r4t roster check` warns.
 
-Humans (`- **Status:** Human`) are never dispatched; an optional
-`- **Address:** <a8s-name>` tells teammates how to reach them. The Rig
+AI is the default and carries no marker. The human seat is marked
+`- **Human:** yes` and is never dispatched; an optional
+`- **Address:** <a8s-name>` tells teammates how to reach them. A human with
+a `Rig:` is an error — humans sit outside the turn system. The Rig
 value is a SYMBOLIC rig name resolved against the out-of-repo rig
 config — never a command. Parsing is defensive: a malformed block disables
 that one member (Member.error set) without crashing dispatch.
@@ -68,7 +69,7 @@ class RosterError(Exception):
 @dataclass
 class Member:
     name: str
-    status: str = "AI"
+    human: bool = False
     rig: str | None = None
     role: str = ""
     leader: bool = False
@@ -83,7 +84,7 @@ class Member:
 
     @property
     def is_human(self) -> bool:
-        return self.status.lower() == "human"
+        return self.human
 
     @property
     def error(self) -> str | None:
@@ -255,11 +256,12 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
         if key not in fields:
             fields[key] = _clean(match.group(2))
 
-    status = fields.get("status", "AI")
-    if status.lower() not in ("ai", "human"):
-        m.errors.append(f"Status must be Human or AI (got {status!r})")
-    else:
-        m.status = "Human" if status.lower() == "human" else "AI"
+    if "status" in fields:
+        m.errors.append(
+            "Status: is gone — mark the human seat with **Human:** yes; "
+            "AI members carry no marker"
+        )
+    m.human = _is_true(fields.get("human", ""))
 
     m.role = fields.get("role", fields.get("mandate", ""))
     m.leader = _is_true(fields.get("leader", ""))
@@ -276,7 +278,11 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
     m.workdir = fields.get("workdir", "")
 
     rig = fields.get("rig", "")
-    if rig:
+    if rig and m.is_human:
+        m.errors.append(
+            "Human members carry no Rig — humans are outside the turn system"
+        )
+    elif rig:
         if RIG_RE.match(rig):
             m.rig = rig.lower()
         else:

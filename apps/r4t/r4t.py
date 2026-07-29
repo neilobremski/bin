@@ -85,20 +85,20 @@ COMMAND_HELP = [
 ROSTER_TEMPLATE = """\
 # Team Roster
 
-Members are `### <Name>` blocks. `Status: Human` members are never
-dispatched: mail to them parks in the team's seat mailbox (`r4t seat`,
-`r4t chat`), and the optional `Address:` is a doorbell — a copy forwarded
-over a8s when no seat session is attached. `Rig:` names a SYMBOLIC rig
-defined in the out-of-repo rig config (~/.config/r4t/rigs.json). Free
-prose in a block becomes the member's persona.
+Members are `### <Name>` blocks. AI is the default and carries no marker.
+`Human: yes` members are never dispatched: mail to them parks in the team's
+seat mailbox (`r4t seat`, `r4t chat`), and the optional `Address:` is a
+doorbell — a copy forwarded over a8s when no seat session is attached.
+`Rig:` names a SYMBOLIC rig defined in the out-of-repo rig config
+(~/.config/r4t/rigs.json) and belongs only to AI members. Free prose in a
+block becomes the member's persona.
 
 ### Owner
-- **Status:** Human
+- **Human:** yes
 - **Address:** YOUR-A8S-NAME
 - **Role:** Product owner
 
 ### Lead
-- **Status:** AI
 - **Rig:** leader
 - **Leader:** yes
 - **Role:** Team lead — delegates work and answers the owner
@@ -107,7 +107,6 @@ Coordinates the team. Delegates implementation, follows up on replies, and
 synthesizes answers for whoever asked.
 
 ### Dev
-- **Status:** AI
 - **Rig:** member
 - **Role:** Developer
 
@@ -942,7 +941,7 @@ def cmd_seat(args: argparse.Namespace) -> int:
     if human is None:
         print(
             "seat: no human member in the roster — add one to ROSTER.md "
-            "(Status: Human)",
+            "(Human: yes)",
             file=sys.stderr,
         )
         return 2

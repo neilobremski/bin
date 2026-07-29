@@ -84,13 +84,13 @@ exists in `rigs.json`:
 
 ```markdown
 ### Reviewer
-- **Status:** AI
 - **Rig:** reviewer
 - **Role:** Code reviewer
 ```
 
-Humans use `Status: Human` and never get a rig. Optional
-`Address:` is their a8s name for outbound tells.
+AI is the default and carries no marker. The human seat is marked
+`Human: yes` and must not carry a rig. Optional `Address:` is their a8s
+name for outbound tells.
 
 ### 5. Lint before going live
 
