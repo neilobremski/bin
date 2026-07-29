@@ -64,6 +64,9 @@ DEFAULT_TASK_TTL_SECONDS = 7 * 86400
 COMMAND_HELP = [
     ("init", "Write starter ROSTER.md and ~/.config/r4t/rigs.json; print a8s registration"),
     ("status", "Budgets, queues, open threads, dead letters for one team"),
+    ("logs", "The team's event log: every governance decision and turn boundary"),
+    ("chat", "Interactive human seat: messages and team activity in one window"),
+    ("seat", "The roster human's team mailbox and voice (bare: summary)"),
     ("rig list", "Rigs, limits, and roster rig resolution (alias: ls)"),
     ("rig presets", "Named CLI presets aligned with a8s definitions"),
     ("rig add <rig> <preset>", "Add a rig to ~/.config/r4t/rigs.json from a preset"),
