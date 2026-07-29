@@ -1006,6 +1006,32 @@ def update_meta(node: str, name: str, **fields) -> dict:
     return meta
 
 
+# ---------- continue conversation record (founded / retired per member) ----------
+#
+# A continuing member's CLI conversation is keyed on the CLI binary in the turn
+# directory. The record says which CLI the current conversation lives on and
+# whether it has been retired (by an idle flush or a rig swap); a retired or
+# absent record makes the next turn refound cold from state on disk.
+
+def read_conversation(node: str, name: str) -> dict:
+    data = read_meta(node, name).get("conversation")
+    return data if isinstance(data, dict) else {}
+
+
+def record_conversation(node: str, name: str, cli: str) -> dict:
+    return update_meta(
+        node, name,
+        conversation={"cli": cli, "retired": False, "recorded_at": utc_now()},
+    )
+
+
+def retire_conversation(node: str, name: str) -> None:
+    convo = read_conversation(node, name)
+    if convo and not convo.get("retired"):
+        convo["retired"] = True
+        update_meta(node, name, conversation=convo)
+
+
 # ---------- harness pool rotation ----------
 
 def take_rotation(node: str, rig: str, pool_size: int) -> int:

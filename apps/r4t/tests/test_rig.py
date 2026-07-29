@@ -427,7 +427,7 @@ class TestContinueCollisions:
     def collisions(self, tmp_path, roster_text):
         config = load_rig_config(write_config(tmp_path, COLLISION_CONFIG))
         roster = parse_roster(roster_text, Path("ROSTER.md"))
-        return continue_collisions(roster, config)
+        return continue_collisions(roster, config, tmp_path)
 
     def test_no_warning_when_clis_differ(self, tmp_path):
         assert self.collisions(tmp_path, (
@@ -475,6 +475,29 @@ class TestContinueCollisions:
             "### Cid\n- **Status:** Human\n- **Address:** cid\n\n"
             "### Dot\n- **Status:** AI\n"
         )) == []
+
+    def test_distinct_workdirs_on_one_cli_do_not_collide(self, tmp_path):
+        # The conversation is keyed on (CLI, directory): a member with its own
+        # Workdir: runs the shared CLI somewhere else entirely.
+        assert self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** solo\n- **Workdir:** agents/bob\n"
+        )) == []
+
+    def test_same_explicit_workdir_still_collides(self, tmp_path):
+        warnings = self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n"
+            "- **Workdir:** shared\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** solo\n- **Workdir:** shared\n"
+        ))
+        assert len(warnings) == 1 and "Bob" in warnings[0]
+
+    def test_workdir_resolving_to_the_workplace_collides(self, tmp_path):
+        warnings = self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** solo\n- **Workdir:** .\n"
+        ))
+        assert len(warnings) == 1 and "Bob" in warnings[0]
 
 
 class TestDefaultPayload:
