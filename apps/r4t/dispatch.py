@@ -66,6 +66,7 @@ PROMPT_DEFAULTS: dict[str, str] = {
         "at {workplace} (your current directory). Write files here with "
         "relative paths only."
     ),
+    "echo_intro": "You are {name}, a member of the {node} team.",
     "mission_header": "## The mission (MISSION.md — outranks every other document)",
     "workdir_note": (
         "The team repo (org workplace) is at {workplace} — use that absolute "
@@ -492,6 +493,25 @@ def build_prompt(
         message_lines.append("")
         message_lines.append(body)
         message_lines.append("")
+    if rig.echo:
+        # An echo member has no tools and no concept of messages: no tell
+        # instructions, no teammate list, no how-to-work doctrine. It gets who
+        # it is, what has been said, and the new messages — its stdout IS the
+        # reply (_stage_echo_reply).
+        parts = [
+            ctx.prompt("echo_intro", name=member.name, node=ctx.node),
+            "",
+            *_mission_section(ctx, roster, member),
+            "## Who you are (from the team roster)",
+            member.persona or f"### {member.name}",
+            "",
+            "## Your conversation so far (messages you received and sent)",
+            history.strip() or "(no prior messages — this is your first recorded turn)",
+            "",
+            "## Messages since your last turn",
+            *(message_lines or ["(none)"]),
+        ]
+        return "\n".join(parts)
     workdir = resolve_workdir(ctx, member)
     workdir_lines: list[str] = []
     if workdir.resolve() != ctx.workplace.resolve():
@@ -1126,6 +1146,59 @@ def clean_transcript(output: str) -> str:
     return "\n".join(kept).strip()
 
 
+def _stage_echo_reply(
+    ctx: DispatchContext,
+    member: Member,
+    rig: Rig,
+    to: str,
+    output: str,
+) -> None:
+    """The echo rig's ONLY reply path: the turn's cleaned stdout becomes one
+    envelope to the newest inbound sender, staged pre-release so every gate
+    (quota, egress, attribution, hop) applies unchanged. Anything the model
+    somehow staged is noise — an echo member was never offered `tell` — and is
+    discarded. Output past `echo_max_chars` is truncated in the body with the
+    full text riding the same envelope as a markdown attachment (the a8s
+    bundle-dir mechanism `tell --attach` uses). Empty or chrome-only output
+    stays silent, SILENT logged."""
+    staging = state.staging_dir(ctx.node, member.name)
+    for stale in state.staged_envelopes(ctx.node, member.name):
+        stale.unlink(missing_ok=True)
+    reply = clean_transcript(output)
+    if not reply:
+        state.append_log(
+            ctx.node,
+            f"r4t: SILENT {member.name.lower()} (rig {rig.name}) exit 0 with "
+            f"{len(output.strip())} bytes of stdout but nothing worth "
+            "relaying survived transcript cleaning",
+        )
+        return
+    msg_id = tasks.new_thread_id()
+    body = reply
+    files: list[dict] = []
+    if len(reply) > rig.echo_max_chars:
+        name = "reply.md"
+        bundle = staging / msg_id
+        bundle.mkdir(parents=True, exist_ok=True)
+        (bundle / name).write_text(reply + "\n", encoding="utf-8")
+        body = (
+            reply[: rig.echo_max_chars]
+            + f"\n[truncated by r4t at {rig.echo_max_chars} chars — "
+            f"full reply attached as {name}]"
+        )
+        files = [{"filename": name}]
+    state.atomic_write_json(
+        staging / f"{msg_id}.json",
+        {"id": msg_id, "to": to, "content": body, "files": files},
+    )
+    state.append_log(
+        ctx.node,
+        f"r4t: ECHO-REPLY {member.name.lower()} (rig {rig.name}) "
+        f"{len(reply)} bytes of cleaned stdout staged as the reply to {to}"
+        + (" (full text attached)" if files else ""),
+    )
+
+
 def _capture_turn(
     ctx: DispatchContext,
     member: Member,
@@ -1325,7 +1398,9 @@ def _run_turn(
                 f"{_display_name(ctx.node, str(env_msg.get('from', '?')))}\n\n{entry_body}",
                 max_bytes=rig.history_max_bytes,
             )
-        if not state.staged_envelopes(ctx.node, member.name):
+        if rig.echo:
+            _stage_echo_reply(ctx, member, rig, newest_sender, output)
+        elif not state.staged_envelopes(ctx.node, member.name):
             # The classic weak-rig shape: the model answers on stdout instead
             # of running `tell`. `tell` always wins — a turn that staged
             # anything keeps its stdout as transcript — but a clean turn that

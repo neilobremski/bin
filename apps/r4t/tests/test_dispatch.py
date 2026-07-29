@@ -1082,6 +1082,167 @@ class TestStdoutFallback:
         assert "STDOUT-REPLY" not in read_log()
 
 
+def set_echo(config_path, rig_name="leader", **extra):
+    config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    config[rig_name]["echo"] = True
+    config[rig_name].update(extra)
+    Path(config_path).write_text(json.dumps(config), encoding="utf-8")
+
+
+class TestEchoRig:
+    def test_prompt_has_messages_but_no_messaging_scaffolding(self, ctx, fake_harness):
+        set_echo(ctx.config_path)
+        handle_message(ctx, "boss", "acme:gerry", "what is the plan?")
+        prompt = read_prompt(harness_calls(fake_harness)[0])
+        assert "You are Gerry, a member of the acme team." in prompt
+        assert "## Messages since your last turn" in prompt
+        assert "From: boss" in prompt
+        assert "what is the plan?" in prompt
+        assert "The Orchestrator" in prompt  # persona survives
+        assert "tell" not in prompt.lower()
+        assert "## How to work" not in prompt
+        assert "This is one turn" not in prompt
+        assert "Teammates" not in prompt
+
+    def test_stdout_staged_as_echo_reply_through_the_gates(self, ctx, repo, r4t_home):
+        set_echo(ctx.config_path)
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=stdout_only)
+        envelopes = outbox_envelopes(repo)
+        assert [e["to"] for e in envelopes] == ["boss"]
+        assert envelopes[0]["content"] == ANSWER.strip()
+        assert envelopes[0]["files"] == []
+        assert "r4t: ECHO-REPLY gerry" in read_log()
+        assert "STDOUT-REPLY" not in read_log()
+        assert tasks.list_tasks(NODE)[0]["status"] == tasks.STATUS_CLOSED
+
+    def test_short_answer_still_replies(self, ctx, repo, r4t_home):
+        # No STDOUT_REPLY_MIN_CHARS floor: an echo member answering "4" to a
+        # question is a reply, not a quiet turn.
+        def terse(rig, prompt, cwd, *, env=None, variant=0):
+            return 0, "4\n", 1.0, False
+
+        set_echo(ctx.config_path)
+        handle_message(ctx, "boss", "acme:gerry", "2+2?", run_fn=terse)
+        assert outbox_envelopes(repo)[0]["content"] == "4"
+        assert "r4t: ECHO-REPLY gerry" in read_log()
+
+    def test_staged_tells_are_discarded(self, ctx, repo, r4t_home):
+        # An echo member was never offered tell; anything staged is noise and
+        # the stdout reply is the only envelope released.
+        def tell_and_chatter(rig, prompt, cwd, *, env=None, variant=0):
+            outbox = dispatch.Path(env["TELL_OUTBOX_DIR"])
+            msg_id = new_ulid()
+            (outbox / f"{msg_id}.json").write_text(
+                json.dumps({"id": msg_id, "to": "outsider", "content": "sneaky"}),
+                encoding="utf-8",
+            )
+            return 0, ANSWER, 1.0, False
+
+        set_echo(ctx.config_path)
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=tell_and_chatter)
+        envelopes = outbox_envelopes(repo)
+        assert [e["to"] for e in envelopes] == ["boss"]
+        assert envelopes[0]["content"] == ANSWER.strip()
+
+    def test_empty_output_is_silent(self, ctx, repo, r4t_home):
+        def blank(rig, prompt, cwd, *, env=None, variant=0):
+            return 0, "", 1.0, False
+
+        set_echo(ctx.config_path)
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=blank)
+        assert outbox_envelopes(repo) == []
+        text = read_log()
+        assert "r4t: SILENT gerry" in text
+        assert "ECHO-REPLY" not in text
+
+    def test_chrome_only_output_is_silent(self, ctx, repo, r4t_home):
+        def chrome_only(rig, prompt, cwd, *, env=None, variant=0):
+            return 0, "\x1b[0m\n> build · qwen3:0.6b\n\x1b[0m→ \x1b[0mRead x.txt\n", 1.0, False
+
+        set_echo(ctx.config_path)
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=chrome_only)
+        assert outbox_envelopes(repo) == []
+        assert "r4t: SILENT gerry" in read_log()
+
+    def test_batch_composes_one_prompt_and_one_reply_to_newest_sender(
+        self, ctx, repo, r4t_home
+    ):
+        set_echo(ctx.config_path)
+        prompts = []
+
+        def capture(rig, prompt, cwd, *, env=None, variant=0):
+            prompts.append(prompt)
+            return 0, ANSWER, 1.0, False
+
+        handle_message(ctx, "acme:phil", "acme:gerry", "q one", drain_after=False)
+        handle_message(ctx, "acme:neil", "acme:gerry", "q two", drain_after=False)
+        assert drain(ctx, run_fn=capture) == 1
+        assert len(prompts) == 1
+        assert "q one" in prompts[0] and "q two" in prompts[0]
+        # Same resolution as the stdout fallback: ONE reply to the newest
+        # message's sender — here the human seat, so it parks there.
+        parked = seat_messages()
+        assert [m["from"] for m in parked] == ["acme:gerry"]
+        assert parked[0]["content"] == ANSWER.strip()
+        assert outbox_envelopes(repo) == []
+
+    def test_reply_to_internal_sender_wakes_them(self, ctx, fake_harness, r4t_home):
+        set_echo(ctx.config_path, rig_name="junior-dev")
+        handle_message(
+            ctx, f"{NODE}:gerry", "acme:phil", "question",
+            run_fn=stdout_only, drain_after=False,
+        )
+        assert drain(ctx, run_fn=stdout_only) == 1  # phil echoes back to gerry
+        drain(ctx)  # gerry's turn runs on the fake harness
+        prompts = [read_prompt(p) for p in harness_calls(fake_harness)]
+        assert any("From: phil" in p and ANSWER.strip() in p for p in prompts)
+
+    def test_long_output_truncates_body_and_attaches_full_text(
+        self, ctx, repo, r4t_home
+    ):
+        set_echo(ctx.config_path, echo_max_chars=100)
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=stdout_only)
+        (envelope,) = outbox_envelopes(repo)
+        assert envelope["content"].startswith(ANSWER.strip()[:100])
+        assert "truncated by r4t at 100 chars" in envelope["content"]
+        assert envelope["files"] == [{"filename": "reply.md"}]
+        attached = repo / ".outbox" / envelope["id"] / "reply.md"
+        assert attached.read_text(encoding="utf-8").strip() == ANSWER.strip()
+        assert "(full text attached)" in read_log()
+
+    def test_under_threshold_carries_no_attachment(self, ctx, repo, r4t_home):
+        set_echo(ctx.config_path)  # default echo_max_chars 1500 > len(ANSWER)
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=stdout_only)
+        (envelope,) = outbox_envelopes(repo)
+        assert envelope["files"] == []
+        assert "truncated" not in envelope["content"]
+        assert not (repo / ".outbox" / envelope["id"]).is_dir()
+
+    def test_failed_turn_stages_no_echo_reply(self, ctx, repo, r4t_home):
+        def crashed(rig, prompt, cwd, *, env=None, variant=0):
+            return 1, ANSWER, 1.0, False
+
+        set_echo(ctx.config_path)
+        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=crashed)
+        assert outbox_envelopes(repo) == []
+        assert "ECHO-REPLY" not in read_log()
+
+    def test_echo_and_continue_coexist_in_one_turn(self, continue_ctx, repo):
+        # Echo shapes the prompt and reply; continue shapes the argv — they
+        # compose in a single turn without special cases.
+        ctx, calls = continue_ctx
+        set_echo(ctx.config_path, rig_name="resuming")
+        run_one(ctx, "boss", "acme:ana", "first task")  # founds the conversation
+        assert run_one(ctx, "boss", "acme:ana", "second task") == 1
+        argv = continue_argvs(calls)[-1]
+        assert argv[-1] == "--continue"
+        assert "tell" not in argv[0].lower()
+        assert "## Messages since your last turn" in argv[0]
+        assert "r4t: ECHO-REPLY ana" in read_log()
+        envelopes = outbox_envelopes(ctx.root)
+        assert envelopes and all(e["to"] == "boss" for e in envelopes)
+
+
 class TestCleanTranscript:
     def test_strips_ansi_and_chrome(self):
         raw = (

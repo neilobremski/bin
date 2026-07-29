@@ -8,6 +8,7 @@ import pytest
 from rig import (
     CONFIGURABLE_RIG_KEYS,
     DEFAULT_BUDGET_EARN_PER_HOUR,
+    DEFAULT_ECHO_MAX_CHARS,
     DEFAULT_BUDGET_MAX,
     DEFAULT_CONCURRENCY,
     DEFAULT_MAX_CONCURRENT,
@@ -1052,6 +1053,64 @@ class TestRigSettingsCore:
         path = write_config(tmp_path, {"other": {"invoke": ["x", "{prompt}"]}})
         with pytest.raises(RigError, match="no rig 'worker'"):
             set_rig_value(path, "worker", "concurrency", "2")
+
+
+class TestEchoSetting:
+    def test_default_off(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "ollama", model="tiny")
+        rig = load_rig_config(path).rigs["worker"]
+        assert rig.echo is False
+        assert rig.echo_max_chars == DEFAULT_ECHO_MAX_CHARS == 1500
+        s = rig_setting(path, "worker", "echo")
+        assert (s.value, s.explicit, s.source) == (False, False, "built-in default")
+        assert s.display() == "false"
+
+    def test_set_get_unset_round_trip(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "ollama", model="tiny")
+        set_rig_value(path, "worker", "echo", "true")
+        assert json.loads(path.read_text(encoding="utf-8"))["worker"]["echo"] is True
+        assert load_rig_config(path).rigs["worker"].echo is True
+        s = rig_setting(path, "worker", "echo")
+        assert (s.value, s.explicit, s.display()) == (True, True, "true")
+        set_rig_value(path, "worker", "echo", "false")
+        assert load_rig_config(path).rigs["worker"].echo is False
+        assert unset_rig_value(path, "worker", "echo") is True
+        assert "echo" not in json.loads(path.read_text(encoding="utf-8"))["worker"]
+
+    def test_set_rejects_non_boolean(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "ollama", model="tiny")
+        with pytest.raises(RigError, match="must be true or false"):
+            set_rig_value(path, "worker", "echo", "yes")
+
+    def test_parse_rejects_non_boolean_json(self, tmp_path):
+        path = write_config(
+            tmp_path, {"worker": {"invoke": ["x", "{prompt}"], "echo": "true"}}
+        )
+        rig = load_rig_config(path).rigs["worker"]
+        assert "echo: expected true or false" in rig.error
+
+    def test_max_chars_set_and_validation(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "ollama", model="tiny")
+        set_rig_value(path, "worker", "echo_max_chars", "400")
+        assert load_rig_config(path).rigs["worker"].echo_max_chars == 400
+        with pytest.raises(RigError, match="positive"):
+            set_rig_value(path, "worker", "echo_max_chars", "0")
+
+    def test_set_via_cli(self, tmp_path, capsys):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "ollama", model="tiny")
+        assert r4t_main(
+            ["rig", "set", "worker", "echo", "true", "--rig-config", str(path)]
+        ) == 0
+        assert "set worker echo = true" in capsys.readouterr().out
+        assert r4t_main(
+            ["rig", "get", "worker", "echo", "--rig-config", str(path)]
+        ) == 0
+        assert capsys.readouterr().out.strip() == "true"
 
 
 class TestRigModelSetting:
