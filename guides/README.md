@@ -7,29 +7,27 @@ S T E
 ```
 
 You will raise a small crew of AI agents from nothing, chapter by chapter,
-on machinery you own. Each chapter builds one working thing — an agent you
-can message, a governed roster of one, a team that remembers — on top of
-the previous chapter's state, and every chapter ends with something you can
+on machinery you own. Each chapter builds one working thing — an agent that
+answers you, a governed roster, a team that remembers — on top of the
+previous chapter's state, and every chapter ends with something you can
 break, fix, and commit. The suite underneath is three tools:
 [a8s](../apps/a8s/README.md) routes the messages, [r4t](../apps/r4t/README.md)
-governs the teams, [k7e](../apps/k7e/README.md) keeps what they learn.
-
-## The name
-
-Read the wordmark by columns: `A-8-S`, `R-4-T`, `K-7-E` — the three product
-names. Read it by rows: `ARK / 847 / STE` — the suite's initials spell ARK,
-and the rows give it an address: **ARK, STE 847**. The name was there all
-along; the wordmark just files the paperwork.
+governs the teams, [k7e](../apps/k7e/README.md) keeps what they learn. Every
+chapter opens by naming which of the three it teaches, so the guide's spine
+is the build order itself.
 
 ## Chapters
 
-| # | Chapter | What you raise |
-|---|---------|----------------|
-| 01 | [Hello, Agent](01-hello-agent.md) | Your first a8s agent — tell it something, get a reply. No LLM required. |
-| 02 | [The Solo Agent](02-the-solo-agent.md) | A governed roster of one: Wren, on r4t, with a conversation that persists. |
-| 03 | [The Long Memory](03-the-long-memory.md) | Flush, refound, and rig portability — what Wren keeps when the conversation ends. |
-| 04 | [A Second Pair of Hands](04-a-second-pair-of-hands.md) | The roster grows to two: Wren delegates, Moss answers for free, budgets bite. |
-| 05+ | *(coming)* | k7e, more seats, cells, missions, and the machinery of a real crew. |
+| # | Chapter | Teaches | What you raise |
+|---|---------|---------|----------------|
+| 01 | [Hello, Agent](01-hello-agent.md) | a8s | `solo` — a thinking agent on your own hardware that answers what you tell it. |
+| 02 | [The Founding](02-the-founding.md) | r4t | solo joins a roster and becomes Wren: budgets, a queue, a persistent conversation, your seat. |
+| 03 | [The Long Memory](03-the-long-memory.md) | r4t | Flush, refound, and rig portability — what Wren keeps when the conversation ends. |
+| 04 | [A Second Pair of Hands](04-a-second-pair-of-hands.md) | r4t | The roster grows to two: Wren delegates, Moss answers for free, budgets bite. |
+| 05+ | *(coming)* | k7e | Knowledge that outlives a roster, more seats, cells, and missions. |
+
+Each chapter costs about twenty minutes of your attention and hands back
+something you keep using afterwards.
 
 ## Two blessed paths
 

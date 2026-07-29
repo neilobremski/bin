@@ -1,5 +1,7 @@
 # Chapter 3 — The Long Memory
 
+**Teaches R — [r4t](../apps/r4t/README.md), the roster.**
+
 ## 1. Capability
 
 At the end of this chapter Wren survives conversation death. You will end
@@ -15,8 +17,8 @@ About 20 minutes.
 
 ## 3. Starting state
 
-- Chapter 2 complete: Wren answers at the seat, and the customize step left
-  `Continue: 15m` in his roster block.
+- Chapter 2 complete: team `silo` registered on a8s, Wren answering at the
+  seat, and the customize step left `Continue: 15m` in his roster block.
 - Wren's conversation is live — if you just restarted the machine, send one
   seat message so there is a conversation to flush.
 
