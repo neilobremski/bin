@@ -5,7 +5,7 @@
 - **Role:** Owner
 
 ### Wren
-- **Rig:** solo
+- **Rig:** silo
 - **Leader:** yes
 - **Continue:** on
 - **Flush:** 15m

@@ -31,7 +31,7 @@ About 30 minutes.
 
 Two edits: the roster grows a member, and the rig config grows a rig.
 
-**Replace** `~/ark/solo/ROSTER.md` (whole file)
+**Replace** `~/ark/silo/ROSTER.md` (whole file)
 
 ```markdown
 # Team Roster
@@ -41,7 +41,7 @@ Two edits: the roster grows a member, and the rig config grows a rig.
 - **Role:** Owner
 
 ### Wren
-- **Rig:** solo
+- **Rig:** silo
 - **Leader:** yes
 - **Continue:** on
 - **Flush:** 15m
@@ -77,8 +77,8 @@ message:
 ```bash
 r4t rig add helper opencode-ollama --model qwen3.6
 r4t rig set helper echo true
-r4t rig unset solo echo
-cd ~/ark/solo
+r4t rig unset silo echo
+cd ~/ark/silo
 r4t roster check
 ```
 
@@ -89,9 +89,9 @@ added rig 'helper' (opencode-ollama) to /home/you/.config/r4t/rigs.json
   invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir . {prompt}
 Reference it from ROSTER.md: `- **Rig:** helper`
 set helper echo = true in /home/you/.config/r4t/rigs.json
-unset solo echo in /home/you/.config/r4t/rigs.json
+unset silo echo in /home/you/.config/r4t/rigs.json
 You: note — Human without an Address (team cannot tell them)
-/home/you/ark/solo/ROSTER.md: OK (3 member(s), leader Wren)
+/home/you/ark/silo/ROSTER.md: OK (3 member(s), leader Wren)
 ```
 
 From this turn on, Wren's prompt carries the messaging doctrine — the
@@ -104,8 +104,8 @@ Give Wren a task that names Moss:
 **Run**
 
 ```bash
-r4t seat send --node solo "Ask Moss for three name ideas for our team mascot, an octopus. Pick your favorite and tell me."
-r4t seat inbox --node solo
+r4t seat send --node silo "Ask Moss for three name ideas for our team mascot, an octopus. Pick your favorite and tell me."
+r4t seat inbox --node silo
 ```
 
 ## 6. Expected receipt
@@ -118,18 +118,18 @@ You should see:
 
 Not a typo. On the free path this is the *real* result, and it is worth
 more than a staged success. The work happened — read the thread's spine in
-the team log (`r4t logs --node solo` shows these events; turn boundaries
+the team log (`r4t logs --node silo` shows these events; turn boundaries
 between them omitted here):
 
 ```
-r4t: QUEUED solo:you -> wren thread=01ABC... hop=0 "Ask Moss for three name ideas for our team mascot, an octopus. Pick your favorit" (depth 1)
-r4t: QUEUED solo:wren -> moss thread=01ABC... hop=1 "I need three name ideas for our team mascot — an octopus. Keep them punchy, memo" (depth 1)
-r4t: ECHO-REPLY moss (rig helper) 232 bytes of cleaned stdout staged as the reply to solo:wren
-r4t: QUEUED solo:moss -> wren thread=01ABC... hop=2 "1. **Inkwell** — evokes the octopus "pen" while sounding sharp and professional " (depth 1)
-r4t: STDOUT-REPLY wren (rig solo) released nothing; 156 bytes of cleaned stdout staged as a reply to solo:moss
-r4t: QUEUED solo:wren -> moss thread=01ABC... hop=3 "**Inkwell** is the pick. Sharp, professional, and the octopus pun lands without " (depth 1)
-r4t: ECHO-REPLY moss (rig helper) 22 bytes of cleaned stdout staged as the reply to solo:wren
-r4t: QUEUED solo:moss -> wren thread=01ABC... hop=4 "Noted. Inkwell it is 🐙" (depth 1)
+r4t: QUEUED silo:you -> wren thread=01ABC... hop=0 "Ask Moss for three name ideas for our team mascot, an octopus. Pick your favorit" (depth 1)
+r4t: QUEUED silo:wren -> moss thread=01ABC... hop=1 "I need three name ideas for our team mascot — an octopus. Keep them punchy, memo" (depth 1)
+r4t: ECHO-REPLY moss (rig helper) 232 bytes of cleaned stdout staged as the reply to silo:wren
+r4t: QUEUED silo:moss -> wren thread=01ABC... hop=2 "1. **Inkwell** — evokes the octopus "pen" while sounding sharp and professional " (depth 1)
+r4t: STDOUT-REPLY wren (rig silo) released nothing; 156 bytes of cleaned stdout staged as a reply to silo:moss
+r4t: QUEUED silo:wren -> moss thread=01ABC... hop=3 "**Inkwell** is the pick. Sharp, professional, and the octopus pun lands without " (depth 1)
+r4t: ECHO-REPLY moss (rig helper) 22 bytes of cleaned stdout staged as the reply to silo:wren
+r4t: QUEUED silo:moss -> wren thread=01ABC... hop=4 "Noted. Inkwell it is 🐙" (depth 1)
 ```
 
 Read it hop by hop. **Hop 1** is the delegation working: Wren ran
@@ -143,7 +143,7 @@ acknowledged (hop 4), the two drifted into housekeeping for a few more
 hops, and r4t ended the loop the boring way:
 
 ```
-r4t: SILENT wren (rig solo) exit 0 with 85 bytes of stdout but nothing worth relaying survived transcript cleaning
+r4t: SILENT wren (rig silo) exit 0 with 85 bytes of stdout but nothing worth relaying survived transcript cleaning
 ```
 
 Nothing crashed, nothing looped forever, nobody spent money — but you
@@ -155,9 +155,9 @@ again and demand the `tell`:
 **Run**
 
 ```bash
-r4t seat send --node solo "Which mascot name did you pick? Send me the answer with the tell command."
-r4t seat inbox --node solo
-r4t logs --node solo --full -n 8
+r4t seat send --node silo "Which mascot name did you pick? Send me the answer with the tell command."
+r4t seat inbox --node silo
+r4t logs --node silo --full -n 8
 ```
 
 You should see:
@@ -185,34 +185,34 @@ because a fresh question from you makes you the newest sender:
 **Run**
 
 ```bash
-r4t seat send --node solo "Report in two or three full sentences: what did you ask Moss, what did Moss offer, and which mascot name won?"
-r4t seat inbox --node solo
+r4t seat send --node silo "Report in two or three full sentences: what did you ask Moss, what did Moss offer, and which mascot name won?"
+r4t seat inbox --node silo
 ```
 
 You should see:
 
 ```
-── from solo:wren (2026-07-29T05:47:12.961106Z)
+── from silo:wren (2026-07-29T05:47:12.961106Z)
 I asked Moss for three octopus name ideas. Moss offered Inkwell, Blotz, and Eight. Inkwell won — sharp, professional, with a subtle ink pun that lands cleanly.
 ```
 
 There is the delegated round trip, synthesized and delivered — Wren never
 ran `tell`, and the machinery covered for him: the log shows
-`r4t: STDOUT-REPLY wren (rig solo) released nothing; 157 bytes of cleaned
-stdout staged as a reply to solo:you`. Second: the direct route. The seat
+`r4t: STDOUT-REPLY wren (rig silo) released nothing; 157 bytes of cleaned
+stdout staged as a reply to silo:you`. Second: the direct route. The seat
 can address any member, so for quick lookups skip the middleman:
 
 **Run**
 
 ```bash
-r4t seat send --node solo --to moss "Three verbs that describe what an octopus does. Just the list."
-r4t seat inbox --node solo
+r4t seat send --node silo --to moss "Three verbs that describe what an octopus does. Just the list."
+r4t seat inbox --node silo
 ```
 
 You should see:
 
 ```
-── from solo:moss (2026-07-29T05:47:58.265173Z)
+── from silo:moss (2026-07-29T05:47:58.265173Z)
 1. Jet
 2. Camouflage
 3. Grasp
@@ -225,15 +225,15 @@ discipline is what you are paying for.) Now look at the team as a whole:
 **Run**
 
 ```bash
-r4t status --node solo
+r4t status --node silo
 ```
 
 You should see (roster section):
 
 ```
-Roster  (repo settings: /home/you/ark/solo/ROSTER.md)
+Roster  (repo settings: /home/you/ark/silo/ROSTER.md)
     You  Human  address=(none)   (try: add an **Address:** line so the team can reach them)
-  ✓ Wren  rig=solo  budget=5.2/8  [leader]
+  ✓ Wren  rig=silo  budget=5.2/8  [leader]
   ✓ Moss  rig=helper  budget=7/8
 ```
 
@@ -251,9 +251,9 @@ the real subscription behind it. Give Moss's rig a bucket of one:
 ```bash
 r4t rig set helper rig_budget_max 1
 r4t rig set helper rig_budget_earn_per_hour 1
-r4t seat send --node solo --to moss "One fun fact about octopus arms."
-r4t seat inbox --node solo
-r4t seat send --node solo --to moss "And one about octopus hearts."
+r4t seat send --node silo --to moss "One fun fact about octopus arms."
+r4t seat inbox --node silo
+r4t seat send --node silo --to moss "And one about octopus hearts."
 ```
 
 You should see:
@@ -261,7 +261,7 @@ You should see:
 ```
 set helper rig_budget_max = 1 in /home/you/.config/r4t/rigs.json
 set helper rig_budget_earn_per_hour = 1 in /home/you/.config/r4t/rigs.json
-── from solo:moss (2026-07-29T05:48:56.279303Z)
+── from silo:moss (2026-07-29T05:48:56.279303Z)
 Each of an octopus's eight arms can taste, touch, and move independently—thanks to most of its neurons residing in the arms rather than the brain.
 
 queued — Moss is resting — rig helper exhausted (0), ready in ~59 min
@@ -277,8 +277,8 @@ Read the receipt, then confirm it from the other two surfaces:
 **Run**
 
 ```bash
-r4t status --node solo
-r4t logs --node solo -n 1
+r4t status --node silo
+r4t logs --node silo -n 1
 ```
 
 You should see (roster section, and the log line):
@@ -305,8 +305,8 @@ Or lift the ceiling you just installed:
 ```bash
 r4t rig unset helper rig_budget_max
 r4t rig unset helper rig_budget_earn_per_hour
-r4t idle --node solo
-r4t seat inbox --node solo
+r4t idle --node silo
+r4t seat inbox --node silo
 ```
 
 You should see:
@@ -316,7 +316,7 @@ unset helper rig_budget_max in /home/you/.config/r4t/rigs.json
 unset helper rig_budget_earn_per_hour in /home/you/.config/r4t/rigs.json
 drained 1 queued turn(s); nudged the leader on 0 quiet thread(s)
 pruned 0 stale lock(s); expired 0 thread(s); drained 0 more queued turn(s)
-── from solo:moss (2026-07-29T05:50:20.969451Z)
+── from silo:moss (2026-07-29T05:50:20.969451Z)
 An octopus has three hearts. Two pump blood to the gills, one to the body. The main heart stops when swimming, which is why they prefer crawling.
 ```
 
@@ -331,14 +331,14 @@ One full round trip through the leader, end to end:
 **Run**
 
 ```bash
-r4t seat send --node solo "In two or three full sentences: what has Moss contributed to this team so far?"
-r4t seat inbox --node solo
+r4t seat send --node silo "In two or three full sentences: what has Moss contributed to this team so far?"
+r4t seat inbox --node silo
 ```
 
 You should see:
 
 ```
-── from solo:wren (2026-07-29T05:56:13.232267Z)
+── from silo:wren (2026-07-29T05:56:13.232267Z)
 Two things, both concrete: Moss drafted three octopus name options for our mascot (we landed on Inkwell), then committed ROSTER.md with Moss added to the team at `0a80bcf`. That's it — two small, done items.
 ```
 
@@ -372,14 +372,14 @@ with the full text attached to the same envelope as a markdown file.
 ## 12. Commit point
 
 The roster is the team; commit it. (The `helper` rig lives outside the
-repo with `solo`, by design.)
+repo with `silo`, by design.)
 
 **Run**
 
 ```bash
-cd ~/ark/solo
+cd ~/ark/silo
 git add ROSTER.md
-git commit -q -m "solo roster: Moss joins — helper rig, echo lifted from Wren"
+git commit -q -m "silo roster: Moss joins — helper rig, echo lifted from Wren"
 ```
 
 Copy-paste templates for this chapter's final state live in

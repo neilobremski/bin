@@ -34,37 +34,45 @@ ollama pull qwen3.6
 
 A team is two files with two jobs: `ROSTER.md` in the team repo says *who*
 exists, and `~/.config/r4t/rigs.json` — outside the repo, where a repo
-edit can't reach it — says what each member's **rig** actually runs. Make
-the team directory and let r4t write the starters:
+edit can't reach it — says what each member's **rig** actually runs.
+
+The team is named **silo**, and the directory name is the team name — r4t
+reads it straight off the folder. From outside a silo is one address;
+everything behind it — who exists, what they run, how they remember — is
+machinery the sender never sees. Today this one genuinely holds a single
+agent; chapter 4 puts a second pair of hands inside it without the address
+changing.
+
+Make the team directory and let r4t write the starters:
 
 **Run**
 
 ```bash
-mkdir -p ~/ark/solo
-cd ~/ark/solo
+mkdir -p ~/ark/silo
+cd ~/ark/silo
 r4t init
 ```
 
 You should see:
 
 ```
-roster: wrote starter /home/you/ark/solo/ROSTER.md
+roster: wrote starter /home/you/ark/silo/ROSTER.md
 rig config: wrote starter /home/you/.config/r4t/rigs.json
 
 Register and start the team (a namespace prefix cannot share a
 name with its agent, so the node is registered as <team>-node):
 
-  a8s add solo-node /home/you/ark/solo r4t
-  a8s namespace solo solo-node
-  a8s start solo-node
-  tell solo "hello"            # bare namespace -> roster leader
-  tell solo:dev "hello"        # namespace:member -> specific member
+  a8s add silo-node /home/you/ark/silo r4t
+  a8s namespace silo silo-node
+  a8s start silo-node
+  tell silo "hello"            # bare namespace -> roster leader
+  tell silo:dev "hello"        # namespace:member -> specific member
 ```
 
 The starter roster is a three-member team. Ours is smaller. Replace it
 with a roster of one AI and one human — you:
 
-**Replace** `~/ark/solo/ROSTER.md` (whole file)
+**Replace** `~/ark/silo/ROSTER.md` (whole file)
 
 ```markdown
 # Team Roster
@@ -74,7 +82,7 @@ with a roster of one AI and one human — you:
 - **Role:** Owner
 
 ### Wren
-- **Rig:** solo
+- **Rig:** silo
 - **Leader:** yes
 - **Continue:** on
 - **Workdir:** agents/wren
@@ -85,13 +93,13 @@ seat. Keep answers short and concrete.
 ```
 
 Four lines carry the weight. `Leader: yes` — external mail enters at Wren.
-`Rig: solo` — a symbolic name; what it runs comes next, from outside the
+`Rig: silo` — a symbolic name; what it runs comes next, from outside the
 repo. `Continue: on` — Wren's turns resume its CLI's own conversation
 instead of starting cold every wake. `Workdir: agents/wren` — Wren gets its
 own subfolder, so its conversation and files never collide with a future
 teammate's.
 
-Now define the `solo` rig. Pick your path — and note that these two
+Now define the `silo` rig. Pick your path — and note that these two
 presets are only the blessed pair: the other popular harness CLIs are
 presets too (`r4t rig presets` lists them, and later guide branches may
 walk through more of them), added by the same one-line command.
@@ -99,33 +107,33 @@ walk through more of them), added by the same one-line command.
 **Run** (free path)
 
 ```bash
-r4t rig add solo opencode-ollama --model qwen3.6
-r4t rig set solo echo true
+r4t rig add silo opencode-ollama --model qwen3.6
+r4t rig set silo echo true
 ```
 
 You should see:
 
 ```
-added rig 'solo' (opencode-ollama) to /home/you/.config/r4t/rigs.json
+added rig 'silo' (opencode-ollama) to /home/you/.config/r4t/rigs.json
   invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir . {prompt}
-Reference it from ROSTER.md: `- **Rig:** solo`
-set solo echo = true in /home/you/.config/r4t/rigs.json
+Reference it from ROSTER.md: `- **Rig:** silo`
+set silo echo = true in /home/you/.config/r4t/rigs.json
 ```
 
 **Run** (subscription path)
 
 ```bash
-r4t rig add solo cursor
-r4t rig set solo echo true
+r4t rig add silo cursor
+r4t rig set silo echo true
 ```
 
 You should see:
 
 ```
-added rig 'solo' (cursor) to /home/you/.config/r4t/rigs.json
+added rig 'silo' (cursor) to /home/you/.config/r4t/rigs.json
   invoke: agent --model auto -p --trust --force --approve-mcps {prompt}
-Reference it from ROSTER.md: `- **Rig:** solo`
-set solo echo = true in /home/you/.config/r4t/rigs.json
+Reference it from ROSTER.md: `- **Rig:** silo`
+set silo echo = true in /home/you/.config/r4t/rigs.json
 ```
 
 Naming no model of your own is the deliberate part: the preset writes
@@ -151,7 +159,7 @@ Lint before going live — r4t fails closed on any roster/rig disagreement:
 **Run**
 
 ```bash
-cd ~/ark/solo
+cd ~/ark/silo
 r4t roster check
 ```
 
@@ -159,7 +167,7 @@ You should see:
 
 ```
 You: note — Human without an Address (team cannot tell them)
-/home/you/ark/solo/ROSTER.md: OK (2 member(s), leader Wren)
+/home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
 The note is expected: you have no a8s doorbell address yet, so the team
@@ -169,18 +177,18 @@ instead. Finally, register the node on a8s exactly as `r4t init` printed:
 **Run**
 
 ```bash
-a8s add solo-node ~/ark/solo r4t
-a8s namespace solo solo-node
-a8s start solo-node
+a8s add silo-node ~/ark/silo r4t
+a8s namespace silo silo-node
+a8s start silo-node
 ```
 
 You should see:
 
 ```
-added solo-node -> /home/you/ark/solo
+added silo-node -> /home/you/ark/silo
 definition: /home/you/bin/apps/a8s/definitions/r4t.json  (explicit)
-bound solo: -> solo-node
-started solo-node as PID 23851
+bound silo: -> silo-node
+started silo-node as PID 23851
 ```
 
 ## 5. Run it
@@ -193,12 +201,12 @@ model loads; later turns take seconds.
 **Run**
 
 ```bash
-cd ~/ark/solo
-r4t seat send --node solo "In one sentence: what is your job on this team?"
-r4t seat inbox --node solo
+cd ~/ark/silo
+r4t seat send --node silo "In one sentence: what is your job on this team?"
+r4t seat inbox --node silo
 ```
 
-(`--node solo` is needed the first time; once the team has dispatched a
+(`--node silo` is needed the first time; once the team has dispatched a
 turn, r4t finds the node from inside the repo on its own.)
 
 ## 6. Expected receipt
@@ -206,7 +214,7 @@ turn, r4t finds the node from inside the repo on its own.)
 You should see:
 
 ```
-── from solo:wren (2026-07-29T04:55:04.121285Z)
+── from silo:wren (2026-07-29T04:55:04.121285Z)
 My job is to do the work and answer to the owner — handling everything from leadership to development as the sole member of the solo team.
 ```
 
@@ -216,14 +224,14 @@ that `Continue: on` means what it says — plant a codeword in one turn:
 **Run**
 
 ```bash
-r4t seat send --node solo "Remember this codeword: TIDEPOOL. Confirm you have it."
-r4t seat inbox --node solo
+r4t seat send --node silo "Remember this codeword: TIDEPOOL. Confirm you have it."
+r4t seat inbox --node silo
 ```
 
 You should see:
 
 ```
-── from solo:wren (2026-07-29T04:55:15.702909Z)
+── from silo:wren (2026-07-29T04:55:15.702909Z)
 Codeword confirmed: TIDEPOOL.
 ```
 
@@ -232,14 +240,14 @@ And ask for it back in a second, separate turn:
 **Run**
 
 ```bash
-r4t seat send --node solo "What was the codeword?"
-r4t seat inbox --node solo
+r4t seat send --node silo "What was the codeword?"
+r4t seat inbox --node silo
 ```
 
 You should see:
 
 ```
-── from solo:wren (2026-07-29T04:55:30.722365Z)
+── from silo:wren (2026-07-29T04:55:30.722365Z)
 TIDEPOOL.
 ```
 
@@ -255,17 +263,17 @@ session store, no continue support:
 **Run**
 
 ```bash
-r4t rig swap solo ollama --model qwen3.6
+r4t rig swap silo ollama --model qwen3.6
 r4t roster check
 ```
 
 You should see:
 
 ```
-swapped rig 'solo' to ollama in /home/you/.config/r4t/rigs.json
+swapped rig 'silo' to ollama in /home/you/.config/r4t/rigs.json
   invoke: ollama run qwen3.6 {prompt}
 You: note — Human without an Address (team cannot tell them)
-Wren: Wren has Continue: on but rig 'solo' does not support it (preset ollama; presets that continue: agy, claude, codex, cursor, opencode, opencode-ollama) — try: r4t rig swap solo <preset>
+Wren: Wren has Continue: on but rig 'silo' does not support it (preset ollama; presets that continue: agy, claude, codex, cursor, opencode, opencode-ollama) — try: r4t rig swap silo <preset>
 1 problem(s)
 ```
 
@@ -285,7 +293,7 @@ Take the error's suggestion:
 **Run**
 
 ```bash
-r4t rig swap solo opencode-ollama --model qwen3.6
+r4t rig swap silo opencode-ollama --model qwen3.6
 r4t roster check
 ```
 
@@ -294,10 +302,10 @@ r4t roster check
 You should see:
 
 ```
-swapped rig 'solo' to opencode-ollama in /home/you/.config/r4t/rigs.json
+swapped rig 'silo' to opencode-ollama in /home/you/.config/r4t/rigs.json
   invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir . {prompt}
 You: note — Human without an Address (team cannot tell them)
-/home/you/ark/solo/ROSTER.md: OK (2 member(s), leader Wren)
+/home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
 ## 10. Check
@@ -307,14 +315,14 @@ The codeword is the health check. Ask again:
 **Run**
 
 ```bash
-r4t seat send --node solo "What was the codeword?"
-r4t seat inbox --node solo
+r4t seat send --node silo "What was the codeword?"
+r4t seat inbox --node silo
 ```
 
 You should see:
 
 ```
-── from solo:wren (2026-07-29T04:55:49.122781Z)
+── from silo:wren (2026-07-29T04:55:49.122781Z)
 TIDEPOOL.
 ```
 
@@ -324,7 +332,7 @@ Wren still knows. The team is whole.
 
 One line in the roster: bound how long Wren's conversation may sit idle.
 
-**Replace** `~/ark/solo/ROSTER.md` — in Wren's block, directly under
+**Replace** `~/ark/silo/ROSTER.md` — in Wren's block, directly under
 `- **Continue:** on`, add:
 
 ```markdown
@@ -348,7 +356,7 @@ You should see:
 
 ```
 You: note — Human without an Address (team cannot tell them)
-/home/you/ark/solo/ROSTER.md: OK (2 member(s), leader Wren)
+/home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
 ## 12. Commit point
@@ -360,10 +368,10 @@ in commands.)
 **Run**
 
 ```bash
-cd ~/ark/solo
+cd ~/ark/silo
 git init -q
 git add ROSTER.md
-git commit -q -m "solo roster: Wren, continue on, flush 15m"
+git commit -q -m "silo roster: Wren, continue on, flush 15m"
 ```
 
 Copy-paste templates for this chapter's final state live in
