@@ -54,7 +54,7 @@ rig config: wrote starter /home/you/.config/r4t/rigs.json
 Register and start the team (a namespace prefix cannot share a
 name with its agent, so the node is registered as <team>-node):
 
-  a8s add solo-node /home/you/ark/solo /home/you/bin/apps/r4t/example-definition.json
+  a8s add solo-node /home/you/ark/solo r4t
   a8s namespace solo solo-node
   a8s start solo-node
   tell solo "hello"            # bare namespace -> roster leader
@@ -160,7 +160,7 @@ instead. Finally, register the node on a8s exactly as `r4t init` printed:
 **Run**
 
 ```bash
-a8s add solo-node ~/ark/solo ~/bin/apps/r4t/example-definition.json
+a8s add solo-node ~/ark/solo r4t
 a8s namespace solo solo-node
 a8s start solo-node
 ```
@@ -169,7 +169,7 @@ You should see:
 
 ```
 added solo-node -> /home/you/ark/solo
-definition: /home/you/bin/apps/r4t/example-definition.json  (explicit)
+definition: /home/you/bin/apps/a8s/definitions/r4t.json  (explicit)
 bound solo: -> solo-node
 started solo-node as PID 23851
 ```

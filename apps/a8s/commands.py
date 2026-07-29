@@ -174,6 +174,17 @@ def _install_skills_into(base: Path) -> int:
 
 # ---------- registry management commands ----------
 
+def _unresolved_definition_error(spec: str) -> str:
+    """Message for a definition argument that resolved to nothing. A bare name
+    (`r4t`) was meant to name a bundled/user definition, so list what exists;
+    anything else was meant to be a file. Mirrors `resolve_definition_arg`'s
+    own name-vs-path test."""
+    if Path(spec).expanduser().name != spec or spec.endswith(".json"):
+        return f"not a file: {spec}"
+    names = ", ".join(name for name, _, _ in list_definition_entries())
+    return f"unknown definition: {spec}\navailable: {names}\n(or pass a path to a .json file)"
+
+
 def cmd_add(args: list[str]) -> int:
     """`a8s add <name> <dir> [<definition>] [--KEY=value ...]` — register a node.
 
@@ -254,7 +265,7 @@ def cmd_add(args: list[str]) -> int:
         try:
             path = resolve_definition_arg(definition_arg)
         except FileNotFoundError:
-            print(f"not a file: {definition_arg}", file=sys.stderr)
+            print(_unresolved_definition_error(definition_arg), file=sys.stderr)
             return 1
         try:
             with path.open("r", encoding="utf-8") as f:
@@ -404,7 +415,7 @@ def cmd_define(args: list[str]) -> int:
     try:
         path = resolve_definition_arg(args[1])
     except FileNotFoundError:
-        print(f"not a file: {args[1]}", file=sys.stderr)
+        print(_unresolved_definition_error(args[1]), file=sys.stderr)
         return 1
     try:
         with path.open("r", encoding="utf-8") as f:

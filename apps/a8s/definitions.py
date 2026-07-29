@@ -144,19 +144,25 @@ def list_definition_entries() -> list[tuple[str, str, Path]]:
 def resolve_definition_arg(spec: str) -> Path:
     """Resolve an `a8s add` / `a8s define` definition argument.
 
-    Prefers an existing filesystem path. A bare name (`filedrop` or `filedrop.json`)
-    that is not a local file resolves against bundled `definitions/`, then
-    user-installed ``~/.a8s/definitions/``.
+    A bare name — no path separator, no `.json` suffix (`filedrop`, `r4t`) —
+    is a definition NAME and resolves only against bundled `definitions/`,
+    then user-installed ``~/.a8s/definitions/``. The working directory is
+    deliberately not consulted for it, so an unrelated same-named file next to
+    the caller (`~/bin/r4t`, the CLI shim) cannot shadow the definition.
+    Anything else is a filesystem path first, with a bare `<name>.json`
+    falling back to the same two definition dirs.
     """
     raw = Path(spec).expanduser()
-    if raw.is_file():
-        return raw.resolve()
-    try:
-        resolved = raw.resolve()
-        if resolved.is_file():
-            return resolved
-    except OSError:
-        pass
+    is_name = raw.name == spec and not spec.endswith(".json")
+    if not is_name:
+        if raw.is_file():
+            return raw.resolve()
+        try:
+            resolved = raw.resolve()
+            if resolved.is_file():
+                return resolved
+        except OSError:
+            pass
 
     if len(raw.parts) == 1:
         name = raw.name

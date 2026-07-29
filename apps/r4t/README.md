@@ -44,7 +44,7 @@ rigs to CLIs (default: OpenCode). Swap any rig in one command —
 Register the team on a8s (`r4t init` prints these with your paths):
 
 ```bash
-a8s add your-repo-node ~/your-repo ~/bin/apps/r4t/example-definition.json
+a8s add your-repo-node ~/your-repo r4t
 a8s namespace your-repo your-repo-node
 a8s start your-repo-node
 ```
