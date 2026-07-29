@@ -2,6 +2,10 @@
 
 These are my common command-line utilities. Install by `source`'ing `install.sh` after cloning.
 
+On Windows, put this directory on `PATH` and PowerShell finds the `.ps1` shims
+on its own — `ark`, `a8s`, `tell`, `tells`, `r4t`, `k7e`, and `n0b` all run
+without typing the extension. The matching `.cmd` shims cover `cmd.exe`.
+
 New to the Ark Suite (a8s + r4t + k7e)? Start with **[The Ark Raising](guides/README.md)** — a chapter-by-chapter build-along that raises a crew of AI agents from nothing.
 
 ## Note on Shebangs

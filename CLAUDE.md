@@ -46,6 +46,11 @@ finds `python3`/`python`/`py` via `Get-Command`. The pattern uses
 multi-line comment. `tell` is a thin shim around `a8s tell`; don't add new
 polyglots without reading an existing one (e.g., `~/bin/a8s`) first.
 
+Windows can't run the extensionless polyglot from `PATH`, so the important
+top-level commands also ship a sibling `.ps1` (PowerShell prefers it over the
+extensionless file) and a `.cmd` for `cmd.exe`. Both are thin: resolve the
+repo dir, find python, exec the entry-point `.py`, propagate the exit code.
+
 ### Install hook
 
 `install.sh` is sourced from a shell rc. It adds `~/bin/` to `$PATH`. Pass
