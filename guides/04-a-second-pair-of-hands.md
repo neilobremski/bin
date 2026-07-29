@@ -1,5 +1,7 @@
 # Chapter 4 — A Second Pair of Hands
 
+**Teaches R — [r4t](../apps/r4t/README.md), the roster.**
+
 ## 1. Capability
 
 At the end of this chapter the roster is two: Wren leads, and **Moss** — a
@@ -17,11 +19,12 @@ delegate.
 
 ## 2. Time
 
-About 30 minutes.
+About 20 minutes.
 
 ## 3. Starting state
 
-- Chapter 3 complete: Wren on `Continue: 15m`, answering at the seat.
+- Chapter 3 complete: Wren on `Continue: 15m`, answering at the seat, with a
+  `STATUS.md` he refounds from.
 - The free path runs both members on one `qwen3.6` — no second model, no
   extra download. (Subscription path: Moss still runs local and free; only
   Wren's rig differs, exactly as in chapters 2–3.)

@@ -1,47 +1,46 @@
-# Chapter 2 — The Solo Agent
+# Chapter 2 — The Founding
+
+**Teaches R — [r4t](../apps/r4t/README.md), the roster.**
 
 ## 1. Capability
 
-At the end of this chapter you will have **Wren**: a roster of one — a
-single AI member behind r4t, with spend budgets, a swappable rig, and a
-conversation that persists across turns. You will prove the persistence
-with a codeword, break the configuration on purpose, and read the
-fail-closed error that stops it from ever half-running.
+At the end of this chapter your agent has a team around it. Same machine,
+same model, same kind of answers — but the agent is **Wren**, the one member
+of team **silo**, and r4t holds the edges chapter 1's `solo` was holding
+bare: a spend budget, a queue that parks messages instead of losing them, a
+conversation that persists across turns, and a seat you speak from as
+yourself. You will prove the persistence with a codeword, break the
+configuration on purpose, and read the fail-closed error that stops it from
+ever half-running.
 
 ## 2. Time
 
-About 30 minutes, plus a one-time model download on the free path.
+About 20 minutes. Nothing new to install.
 
 ## 3. Starting state
 
-- Chapter 1 complete: `hello` and `me` registered, `ark` shows the a8s
-  section green.
-- One harness, depending on your path:
-  - **Free path** — `ollama` installed and serving, with the model pulled:
-
-**Run**
-
-```bash
-ollama pull qwen3.6
-```
-
-  - **Subscription path** — the Cursor agent CLI (`agent`) installed and
-    logged in.
-
-`ark doctor` should show your chosen harness green before you continue.
+- Chapter 1 complete: `solo` answers a `tell` from the seat at `~/ark/me`,
+  and `ark` shows the a8s section green.
+- The same harness chapter 1 used — `ollama` with `qwen3.6` on the free
+  path, the Cursor agent CLI (`agent`) on the subscription path.
 
 ## 4. The change
 
-A team is two files with two jobs: `ROSTER.md` in the team repo says *who*
-exists, and `~/.config/r4t/rigs.json` — outside the repo, where a repo
-edit can't reach it — says what each member's **rig** actually runs.
+Chapter 1's agent carries every sharp edge itself. Nothing bounds what it
+spends. A message that lands while it is mid-answer waits on nothing but
+luck. Every wake starts from zero, because there is nothing in `solo.json`
+that could hold a conversation open. r4t takes all of that off your hands —
+and it governs *rosters*, not lone agents, so the first move is to give the
+agent a roster to belong to.
 
-The team is named **silo**, and the directory name is the team name — r4t
-reads it straight off the folder. From outside a silo is one address;
-everything behind it — who exists, what they run, how they remember — is
-machinery the sender never sees. Today this one genuinely holds a single
-agent; chapter 4 puts a second pair of hands inside it without the address
-changing.
+A team is two files with two jobs: `ROSTER.md` in the team repo says *who*
+exists, and `~/.config/r4t/rigs.json` — outside the repo, where a repo edit
+can't reach it — says what each member's **rig** actually runs.
+
+The directory name is the team name; r4t reads it off the folder. From
+outside, the team is one address, and who stands behind it is machinery the
+sender never sees. Chapter 4 puts a second pair of hands behind that address
+without the address changing.
 
 Make the team directory and let r4t write the starters:
 
@@ -92,12 +91,17 @@ Wren is a roster of one: leader, developer, and correspondent in a single
 seat. Keep answers short and concrete.
 ```
 
-Four lines carry the weight. `Leader: yes` — external mail enters at Wren.
-`Rig: silo` — a symbolic name; what it runs comes next, from outside the
-repo. `Continue: on` — Wren's turns resume its CLI's own conversation
-instead of starting cold every wake. `Workdir: agents/wren` — Wren gets its
-own subfolder, so its conversation and files never collide with a future
-teammate's.
+The prose under Wren's heading does the job the seeded `prompt=` string does
+in chapter 1: it is the character the answers come out in. On a team that
+string lives in the roster, beside the name it belongs to, and r4t puts it in
+Wren's prompt at every turn.
+
+Four lines carry the rest of the weight. `Leader: yes` — external mail
+enters at Wren. `Rig: silo` — a symbolic name; what it runs comes next, from
+outside the repo. `Continue: on` — Wren's turns resume its CLI's own
+conversation instead of starting cold every wake, which is the edge chapter 1
+had no way to hold. `Workdir: agents/wren` — Wren gets its own subfolder, so
+its conversation and files never collide with a future teammate's.
 
 Now define the `silo` rig. Pick your path — and note that these two
 presets are only the blessed pair: the other popular harness CLIs are
@@ -119,6 +123,10 @@ added rig 'silo' (opencode-ollama) to /home/you/.config/r4t/rigs.json
 Reference it from ROSTER.md: `- **Rig:** silo`
 set silo echo = true in /home/you/.config/r4t/rigs.json
 ```
+
+That `invoke:` line is the argv you typed into `solo.json` by hand in
+chapter 1. It is a rig now: named once, kept outside the repo, and available
+to every member who asks for it by name.
 
 **Run** (subscription path)
 
@@ -148,11 +156,11 @@ only when you mean to. (`agent models` lists what your account can run.)
 
 `echo true` makes Wren **stdout-only**: its turn prompt carries no
 messaging doctrine, and whatever it prints becomes its one reply to you.
-That is the right shape for a roster of one — Wren has nobody to message
-but you — and it sidesteps a real failure mode: without echo, a member
-must send its reply with `tell`, and prose answers under ~80 characters
-are discarded as terminal chrome. Chapter 4 lifts echo when the team
-grows.
+That is the right shape for a roster of one — Wren has nobody to message but
+you — and it is the last two lines of chapter 1's `reply.sh` done for you:
+capture what the harness printed, send it to whoever asked. Without echo, a
+member has to run `tell` itself, and prose answers under ~80 characters get
+discarded as terminal chrome. Chapter 4 lifts echo when the team grows.
 
 Lint before going live — r4t fails closed on any roster/rig disagreement:
 
@@ -190,6 +198,29 @@ definition: /home/you/bin/apps/a8s/definitions/r4t.json  (explicit)
 bound silo: -> silo-node
 started silo-node as PID 23851
 ```
+
+Wren has chapter 1's job now, so retire the bare node and let the team's
+address take over:
+
+**Run**
+
+```bash
+a8s stop solo
+a8s remove solo
+```
+
+You should see:
+
+```
+solo: sent SIGTERM to PID 11786
+waiting up to 600s for stop…
+solo: stopped
+removed solo
+```
+
+`~/ark/solo` and its two files stay on disk — only the registration went
+away. The address is what moved: one name on the registry reaches a whole
+roster, and a roster can grow.
 
 ## 5. Run it
 
@@ -252,7 +283,8 @@ TIDEPOOL.
 ```
 
 Two processes, two wakes, one conversation. That continuity is what
-`Continue: on` buys.
+`Continue: on` buys, and it is the one thing chapter 1's agent could not do
+at any price.
 
 ## 7. Break it
 
@@ -326,7 +358,31 @@ You should see:
 TIDEPOOL.
 ```
 
-Wren still knows. The team is whole.
+Wren still knows. Then ask r4t where the team stands:
+
+**Run**
+
+```bash
+r4t status --node silo
+```
+
+You should see (health and roster sections):
+
+```
+Health
+  ✓ nothing waiting on you
+  ✓ no runaway signs (3 turn(s) last 10m)
+  ✓ all 1 member(s) healthy
+
+Roster  (repo settings: /home/you/ark/silo/ROSTER.md)
+    You   Human  address=(none)   (try: add an **Address:** line so the team can reach them)
+  ✓ Wren  rig=silo  budget=5.1/8  [leader]
+```
+
+Three answers a bare agent cannot give you: nothing is waiting on you,
+nothing is looping, and Wren is inside its spend budget. `budget=5.1/8` is
+the guard rail chapter 1 had nowhere to put — every turn above drew from that
+bucket, and it refills on a clock. Chapter 4 makes it bite.
 
 ## 11. Customize
 
@@ -377,3 +433,6 @@ git commit -q -m "silo roster: Wren, continue 15m"
 Copy-paste templates for this chapter's final state live in
 [templates/02-solo-opencode-ollama/](templates/02-solo-opencode-ollama/)
 and [templates/02-solo-cursor/](templates/02-solo-cursor/).
+
+Wren remembers everything inside one conversation. Chapter 3 ends the
+conversation and asks what survives.
