@@ -28,6 +28,7 @@ from dispatch import (
     split_recipient,
 )
 from rig import (
+    DEFAULT_CONCURRENCY,
     RigError,
     HARNESS_PRESETS,
     add_preset_rig,
@@ -63,7 +64,7 @@ R4T_DIR = Path(__file__).resolve().parent
 COMMAND_HELP = [
     ("init", "Write starter ROSTER.md and ~/.config/r4t/rigs.json; print a8s registration"),
     ("status", "Budgets, queues, open threads, dead letters for one team"),
-    ("rig list", "Rig invoke lines, limits, and roster rig resolution"),
+    ("rig list", "Rigs, limits, and roster rig resolution (alias: ls)"),
     ("rig presets", "Named CLI presets aligned with a8s definitions"),
     ("rig add <rig> <preset>", "Add a rig to ~/.config/r4t/rigs.json from a preset"),
     ("rig remove <rig>", "Remove a rig from the config (alias: rm)"),
@@ -173,69 +174,152 @@ def _context(args: argparse.Namespace, node: str) -> DispatchContext:
     )
 
 
-def _print_rig_summary(config_path: Path, roster_path: Path | None = None) -> None:
+def _print_table(
+    headers: list[str], rows: list[tuple[str, ...]], indent: str = ""
+) -> None:
+    """Aligned columns in the shape `a8s ls` uses: uppercase header, three-space
+    gutters, no padding on the trailing column."""
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def fmt(cells: tuple[str, ...]) -> str:
+        last = len(cells) - 1
+        line = "   ".join(
+            cell.ljust(widths[i]) if i < last else cell
+            for i, cell in enumerate(cells)
+        )
+        return f"{indent}{line}"
+
+    print(fmt(tuple(headers)))
+    for row in rows:
+        print(fmt(row))
+
+
+def _rig_model(rig) -> str:
+    """What this rig actually runs. An explicit `model` setting wins; otherwise
+    read the token after --model/-m, which is where a preset-built invoke
+    carries it."""
+    if rig.model:
+        return rig.model
+    argv = next(iter(rig.pool()), [])
+    for flag in ("--model", "-m"):
+        if flag in argv:
+            at = argv.index(flag) + 1
+            if at < len(argv):
+                return argv[at]
+    return "-"
+
+
+def _print_rig_table(config, indent: str, wide: bool) -> None:
+    rigs = [(n, config.rigs[n]) for n in sorted(config.rigs) if not config.rigs[n].error]
+    show_concurrency = any(r.concurrency != DEFAULT_CONCURRENCY for _, r in rigs)
+    show_rig_budget = any(r.rig_budget_max is not None for _, r in rigs)
+
+    headers = ["RIG", "PRESET", "MODEL"]
+    if show_concurrency:
+        headers.append("CONC")
+    headers += ["TIMEOUT", "SENDS", "BUDGET"]
+    if show_rig_budget:
+        headers.append("RIG-BUDGET")
+    if wide:
+        headers.append("INVOKE")
+
+    rows: list[tuple[str, ...]] = []
+    for name, rig in rigs:
+        row = [name, rig.preset or "-", _rig_model(rig)]
+        if show_concurrency:
+            row.append(str(rig.concurrency))
+        row += [
+            f"{rig.timeout_seconds:g}s",
+            str(rig.max_sends_per_turn),
+            f"{rig.budget_max:g}/+{rig.budget_earn_per_hour:g}h",
+        ]
+        if show_rig_budget:
+            row.append(
+                "-"
+                if rig.rig_budget_max is None
+                else f"{rig.rig_budget_max:g}/+{rig.rig_budget_earn_per_hour:g}h"
+            )
+        if wide:
+            pool = rig.pool()
+            argv = " ".join(pool[0])
+            if len(pool) > 1:
+                argv += f"  [+{len(pool) - 1} pool variant(s)]"
+            row.append(argv)
+        rows.append(tuple(row))
+
+    if rows:
+        _print_table(headers, rows, indent)
+    invalid = [(n, config.rigs[n]) for n in sorted(config.rigs) if config.rigs[n].error]
+    if invalid:
+        print()
+        print(f"{indent}invalid:")
+        for name, rig in invalid:
+            print(f"{indent}  {name}: {rig.error}")
+        print(f"{indent}  (try: edit {config.path})")
+
+
+def _print_roster_table(config, roster_path: Path, indent: str) -> None:
+    try:
+        roster = load_roster(roster_path)
+    except RosterError as e:
+        print(f"{indent}roster ({roster_path.name}): {e}")
+        return
+    rows: list[tuple[str, ...]] = []
+    for m in roster.members:
+        if m.is_human:
+            rows.append((m.name, "-", "human"))
+        elif m.errors:
+            rows.append((m.name, "-", f"DISABLED — {m.error}"))
+        else:
+            rig, err, pinned = config.rig_for(m)
+            if rig is None:
+                rows.append((m.name, "-", f"FAIL CLOSED — {err}"))
+            else:
+                rows.append((m.name, rig.name, "pinned" if pinned else ""))
+    print(f"{indent}roster ({roster_path}):")
+    _print_table(["MEMBER", "RIG", "NOTE"], rows, indent + "  ")
+
+
+def _print_rig_summary(
+    config_path: Path,
+    roster_path: Path | None = None,
+    *,
+    indent: str = "  ",
+    wide: bool = False,
+) -> None:
     try:
         config = load_rig_config(config_path)
     except RigError as e:
-        print(f"  error: {e}")
+        print(f"{indent}error: {e}")
         return
     if config.missing:
-        print("  (no rigs yet — try: r4t rig add <rig> <preset>, or r4t init)")
+        print(f"{indent}(no rigs yet — try: r4t rig add <rig> <preset>, or r4t init)")
         return
-    for name in sorted(config.rigs):
-        rig = config.rigs[name]
-        if rig.error:
-            print(f"  {name}: INVALID — {rig.error}")
-            continue
-        pool = rig.pool()
-        argv = " ".join(pool[0])
-        if len(pool) > 1:
-            argv += f"  [+{len(pool) - 1} pool variant(s)]"
-        limits = (
-            f"timeout={rig.timeout_seconds:g}s "
-            f"budget={rig.budget_max:g}/+{rig.budget_earn_per_hour:g}per-h "
-            f"sends={rig.max_sends_per_turn}"
-        )
-        if rig.rig_budget_max is not None:
-            limits += (
-                f" rig-budget={rig.rig_budget_max:g}/"
-                f"+{rig.rig_budget_earn_per_hour:g}per-h"
-            )
-        print(f"  {name}: {argv}  ({limits})")
+    _print_rig_table(config, indent, wide)
     if config.pins:
-        print("  pins:")
+        print()
+        print(f"{indent}pins:")
         for agent in sorted(config.pins):
-            print(f"    {agent} -> {config.pins[agent]}")
+            print(f"{indent}  {agent} -> {config.pins[agent]}")
+    print()
     print(
-        f"  throttle: max_concurrent={config.throttle.max_concurrent} "
+        f"{indent}throttle:   max_concurrent={config.throttle.max_concurrent} "
         f"min_seconds_between_turn_starts="
         f"{config.throttle.min_seconds_between_turn_starts:g}"
     )
     print(
-        f"  governance: cell_budget={config.cell_budget_max:g}/"
+        f"{indent}governance: cell_budget={config.cell_budget_max:g}/"
         f"+{config.cell_budget_earn_per_hour:g}per-h "
         f"quiet_task={config.quiet_task_seconds:g}s "
         f"breaker_cap={config.breaker_cap} "
         f"breaker_cooldown={config.breaker_cooldown_seconds:g}s"
     )
     if roster_path and roster_path.is_file():
-        try:
-            roster = load_roster(roster_path)
-        except RosterError as e:
-            print(f"  roster ({roster_path.name}): {e}")
-            return
-        print(f"  roster ({roster_path}):")
-        for m in roster.members:
-            if m.is_human:
-                print(f"    {m.name}: Human")
-            elif m.errors:
-                print(f"    {m.name}: DISABLED — {m.error}")
-            else:
-                rig, err, pinned = config.rig_for(m)
-                if rig is None:
-                    print(f"    {m.name}: FAIL CLOSED — {err}")
-                else:
-                    print(f"    {m.name}: {rig.name}" + (" (pinned)" if pinned else ""))
+        print()
+        _print_roster_table(config, roster_path, indent)
 
 
 def _print_team_summaries() -> None:
@@ -926,7 +1010,7 @@ def cmd_seat(args: argparse.Namespace) -> int:
 
 
 RIG_COMMAND_HELP = [
-    ("rig list", "Rig invoke lines, limits, and roster rig resolution"),
+    ("rig list", "Rigs, limits, and roster rig resolution (alias: ls; --wide)"),
     ("rig presets", "Named CLI presets aligned with a8s definitions"),
     ("rig add <rig> <preset>", "Add a rig (creates the config if needed; --model M, --force)"),
     ("rig swap <rig> <preset>", "Switch an existing rig to a preset, keeping its settings"),
@@ -970,8 +1054,17 @@ def cmd_rig_overview(args: argparse.Namespace) -> int:
 def cmd_rig_list(args: argparse.Namespace) -> int:
     config_path = resolve_config_path(args.rig_config)
     print(f"rig config: {config_path}" + (" (missing)" if not config_path.is_file() else ""))
+    print()
     roster_path = resolve_roster_path(_resolve_root(args.root), args.roster)
-    _print_rig_summary(config_path, roster_path if roster_path.is_file() else None)
+    _print_rig_summary(
+        config_path,
+        roster_path if roster_path.is_file() else None,
+        indent="",
+        wide=args.wide,
+    )
+    if config_path.is_file() and not args.wide:
+        print()
+        print("(full invoke lines: r4t rig ls --wide)")
     return 0
 
 
@@ -1580,9 +1673,16 @@ def build_parser() -> argparse.ArgumentParser:
     rig_p.set_defaults(func=cmd_rig_overview)
     rig_sub = rig_p.add_subparsers(dest="action", required=False)
     rig_list_p = rig_sub.add_parser(
-        "list", help="Show configured rigs and resolved roster rigs."
+        "list",
+        aliases=["ls"],
+        help="Show configured rigs and resolved roster rigs.",
     )
     _add_common(rig_list_p)
+    rig_list_p.add_argument(
+        "--wide",
+        action="store_true",
+        help="Add each rig's full invoke line as a trailing column.",
+    )
     rig_list_p.set_defaults(func=cmd_rig_list)
 
     rig_presets_p = rig_sub.add_parser(

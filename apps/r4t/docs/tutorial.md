@@ -96,7 +96,7 @@ Humans use `Status: Human` and never get a rig. Optional
 
 ```bash
 r4t roster check      # roster shape + every Rig line resolves to a rig
-r4t rig list      # rigs, invoke lines, and roster resolution
+r4t rig ls        # rigs, limits, and roster resolution (--wide adds invokes)
 ```
 
 Fix anything `roster check` reports before registering the team or sending
@@ -201,7 +201,7 @@ ordinary `tell` and release after the turn. Full walk-through:
 | `r4t init` | Starter `ROSTER.md` + `~/.config/r4t/rigs.json` |
 | `r4t rig presets` | Named CLI templates (from a8s definitions) |
 | `r4t rig add <rig> <preset>` | Define a rig in the rig config |
-| `r4t rig list` | Show rigs and how roster members resolve |
+| `r4t rig list` (alias `ls`) | Show rigs and how roster members resolve (`--wide` for invoke lines) |
 | `r4t roster check` | Lint roster and rig mappings |
 | `r4t status --node <team>` | Member budgets, queue depths, threads, dead letters |
 | `r4t sandbox --fake` | End-to-end plumbing test without LLM calls |
