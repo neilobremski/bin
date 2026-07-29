@@ -2513,8 +2513,8 @@ class TestDefault:
         assert "r4t — Roster For Teams" in out
         assert f"R4T_HOME: {r4t_home}" in out
         assert "Rigs" in out and "junior-dev" in out and "RIG " in out
-        assert "Commands" in out and "init" in out
-        assert "sandbox --fake" in out
+        assert "Getting started" in out and "init" in out
+        assert "Every day" in out and "flush <member>" in out
         assert "Next steps" in out
         assert f"{NODE}:" in out
         assert "ROSTER.md" in out
