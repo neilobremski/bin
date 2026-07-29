@@ -174,6 +174,10 @@ HARNESS_PRESETS: dict[str, dict] = {
             ".",
             "{prompt}",
         ],
+        # `ollama launch` passes the appended flag through to opencode, whose
+        # own per-directory session store then works normally (verified live
+        # against a local model: planted, resumed, and founded cold cleanly).
+        "continue_argv": ["--continue"],
     },
     "claude-ollama": {
         "text_tier": "small",

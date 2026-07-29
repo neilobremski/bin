@@ -275,7 +275,7 @@ class TestContinue:
         # codex is absent on purpose: it resumes with the `codex exec resume`
         # subcommand, which no appended argv can express.
         assert continue_presets() == [
-            "agy", "claude", "copilot", "cursor", "opencode",
+            "agy", "claude", "copilot", "cursor", "opencode", "opencode-ollama",
         ]
 
     def test_continue_tokens_are_appended_to_the_argv(self, tmp_path):
@@ -340,6 +340,18 @@ class TestContinue:
         assert config.rigs["bare"].cli == "ollama"
         assert config.rigs["custom"].cli == "agent"
 
+    def test_launched_opencode_shares_the_opencode_conversation(self, tmp_path):
+        # The session store belongs to opencode and is per-directory whether or
+        # not `ollama launch` started it, so both rigs collide as one CLI.
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "cloud", "opencode")
+        add_preset_rig(path, "local", "opencode-ollama", model="qwen3")
+        config = load_rig_config(path)
+        assert config.rigs["local"].cli == config.rigs["cloud"].cli == "opencode"
+        assert config.rigs["local"].supports_continue
+        assert config.rigs["local"].argv("hi", continue_conversation=True)[-1] == "--continue"
+        assert config.rigs["local"].continue_scope == "directory"
+
     def test_continue_on_unsupported_rig_fails_closed(self, tmp_path):
         config = load_rig_config(write_config(tmp_path, {
             "t": {"preset": "codex", "invoke": ["codex", "exec", "{prompt}"]},
@@ -365,6 +377,11 @@ COLLISION_CONFIG = {
     "twin": {"preset": "claude", "invoke": ["claude", "--model", "x", "-p", "{prompt}"]},
     "other": {"preset": "cursor", "invoke": ["agent", "-p", "{prompt}"]},
     "wide": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]},
+    "cloud": {"preset": "opencode", "invoke": ["opencode", "run", "--dir", ".", "{prompt}"]},
+    "launched": {
+        "preset": "opencode-ollama",
+        "invoke": ["ollama", "launch", "opencode", "--model", "m", "--", "run", "{prompt}"],
+    },
 }
 
 
@@ -427,6 +444,17 @@ class TestContinueCollisions:
             "### Ana\n- **Status:** AI\n- **Rig:** wide\n- **Continue:** on\n\n"
             "### Bob\n- **Status:** AI\n- **Rig:** other\n"
         )) == []
+
+    def test_launcher_does_not_hide_a_shared_conversation(self, tmp_path):
+        # One member reaches opencode through `ollama launch`, the other runs it
+        # directly — same per-directory session store, so they still collide.
+        warnings = self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** launched\n- **Continue:** on\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** cloud\n"
+        ))
+        assert len(warnings) == 1
+        assert "Bob" in warnings[0] and "'opencode'" in warnings[0]
+        assert "per directory" in warnings[0]
 
     def test_humans_and_broken_members_never_collide(self, tmp_path):
         assert self.collisions(tmp_path, (
