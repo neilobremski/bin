@@ -26,9 +26,9 @@ along; the wordmark just files the paperwork.
 | # | Chapter | What you raise |
 |---|---------|----------------|
 | 01 | [Hello, Agent](01-hello-agent.md) | Your first a8s agent — tell it something, get a reply. No LLM required. |
-| 02 | [The Solo Agent](02-the-solo-agent.md) | A governed roster of one: Sol, on r4t, with a conversation that persists. |
-| 03 | [The Long Memory](03-the-long-memory.md) | Flush, refound, and rig portability — what Sol keeps when the conversation ends. |
-| 04 | [A Second Pair of Hands](04-a-second-pair-of-hands.md) | The roster grows to two: Sol delegates, Pip answers for free, budgets bite. |
+| 02 | [The Solo Agent](02-the-solo-agent.md) | A governed roster of one: Wren, on r4t, with a conversation that persists. |
+| 03 | [The Long Memory](03-the-long-memory.md) | Flush, refound, and rig portability — what Wren keeps when the conversation ends. |
+| 04 | [A Second Pair of Hands](04-a-second-pair-of-hands.md) | The roster grows to two: Wren delegates, Moss answers for free, budgets bite. |
 | 05+ | *(coming)* | k7e, more seats, cells, missions, and the machinery of a real crew. |
 
 ## Two blessed paths

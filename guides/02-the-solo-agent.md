@@ -2,7 +2,7 @@
 
 ## 1. Capability
 
-At the end of this chapter you will have **Sol**: a roster of one — a
+At the end of this chapter you will have **Wren**: a roster of one — a
 single AI member behind r4t, with spend budgets, a swappable rig, and a
 conversation that persists across turns. You will prove the persistence
 with a codeword, break the configuration on purpose, and read the
@@ -73,26 +73,29 @@ with a roster of one AI and one human — you:
 - **Status:** Human
 - **Role:** Owner
 
-### Sol
+### Wren
 - **Status:** AI
 - **Rig:** solo
 - **Leader:** yes
 - **Continue:** on
-- **Workdir:** agents/sol
+- **Workdir:** agents/wren
 - **Role:** The solo agent — does the work and answers the owner
 
-Sol is a roster of one: leader, developer, and correspondent in a single
+Wren is a roster of one: leader, developer, and correspondent in a single
 seat. Keep answers short and concrete.
 ```
 
-Four lines carry the weight. `Leader: yes` — external mail enters at Sol.
+Four lines carry the weight. `Leader: yes` — external mail enters at Wren.
 `Rig: solo` — a symbolic name; what it runs comes next, from outside the
-repo. `Continue: on` — Sol's turns resume its CLI's own conversation
-instead of starting cold every wake. `Workdir: agents/sol` — Sol gets its
+repo. `Continue: on` — Wren's turns resume its CLI's own conversation
+instead of starting cold every wake. `Workdir: agents/wren` — Wren gets its
 own subfolder, so its conversation and files never collide with a future
 teammate's.
 
-Now define the `solo` rig. Pick your path:
+Now define the `solo` rig. Pick your path — and note that these two
+presets are only the blessed pair: the other popular harness CLIs are
+presets too (`r4t rig presets` lists them, and later guide branches may
+walk through more of them), added by the same one-line command.
 
 **Run** (free path)
 
@@ -113,7 +116,7 @@ set solo echo = true in /home/you/.config/r4t/rigs.json
 **Run** (subscription path)
 
 ```bash
-r4t rig add solo cursor --model claude-fable-5-medium
+r4t rig add solo cursor
 r4t rig set solo echo true
 ```
 
@@ -121,17 +124,21 @@ You should see:
 
 ```
 added rig 'solo' (cursor) to /home/you/.config/r4t/rigs.json
-  invoke: agent --model claude-fable-5-medium -p --trust --force --approve-mcps {prompt}
+  invoke: agent -p --trust --force --approve-mcps {prompt}
 Reference it from ROSTER.md: `- **Rig:** solo`
 set solo echo = true in /home/you/.config/r4t/rigs.json
 ```
 
-(`agent models` lists what your account can run; any Fable-class model
-slug works in place of `claude-fable-5-medium`.)
+No `--model` is the deliberate part: the invoke line carries no model
+flag, so the harness runs whatever your Cursor subscription defaults to —
+covered by what you already pay. Pin one with `--model <name>` and you
+can land on a frontier model billed as usage-based credits, which a
+chatty agent burns through fast; add the flag only when you mean to.
+(`agent models` lists what your account can run.)
 
-`echo true` makes Sol **stdout-only**: its turn prompt carries no
+`echo true` makes Wren **stdout-only**: its turn prompt carries no
 messaging doctrine, and whatever it prints becomes its one reply to you.
-That is the right shape for a roster of one — Sol has nobody to message
+That is the right shape for a roster of one — Wren has nobody to message
 but you — and it sidesteps a real failure mode: without echo, a member
 must send its reply with `tell`, and prose answers under ~80 characters
 are discarded as terminal chrome. Chapter 4 lifts echo when the team
@@ -150,7 +157,7 @@ You should see:
 
 ```
 You: note — Human without an Address (team cannot tell them)
-/home/you/ark/solo/ROSTER.md: OK (2 member(s), leader Sol)
+/home/you/ark/solo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
 The note is expected: you have no a8s doorbell address yet, so the team
@@ -177,7 +184,7 @@ started solo-node as PID 23851
 ## 5. Run it
 
 You are the roster's Human, and r4t gives you a **seat**: send as
-yourself, and read what parks for you. `seat send` runs Sol's turn
+yourself, and read what parks for you. `seat send` runs Wren's turn
 synchronously — the first turn takes a minute on the free path while the
 model loads; later turns take seconds.
 
@@ -197,11 +204,11 @@ turn, r4t finds the node from inside the repo on its own.)
 You should see:
 
 ```
-── from solo:sol (2026-07-29T04:55:04.121285Z)
+── from solo:wren (2026-07-29T04:55:04.121285Z)
 My job is to do the work and answer to the owner — handling everything from leadership to development as the sole member of the solo team.
 ```
 
-Sol read its own roster block and answered in character. Now the proof
+Wren read its own roster block and answered in character. Now the proof
 that `Continue: on` means what it says — plant a codeword in one turn:
 
 **Run**
@@ -214,7 +221,7 @@ r4t seat inbox --node solo
 You should see:
 
 ```
-── from solo:sol (2026-07-29T04:55:15.702909Z)
+── from solo:wren (2026-07-29T04:55:15.702909Z)
 Codeword confirmed: TIDEPOOL.
 ```
 
@@ -230,7 +237,7 @@ r4t seat inbox --node solo
 You should see:
 
 ```
-── from solo:sol (2026-07-29T04:55:30.722365Z)
+── from solo:wren (2026-07-29T04:55:30.722365Z)
 TIDEPOOL.
 ```
 
@@ -240,7 +247,7 @@ Two processes, two wakes, one conversation. That continuity is what
 ## 7. Break it
 
 `Continue: on` needs a rig whose CLI can actually resume a conversation.
-Swap Sol's rig to the bare `ollama` preset — a raw model prompt, no
+Swap Wren's rig to the bare `ollama` preset — a raw model prompt, no
 session store, no continue support:
 
 **Run**
@@ -256,7 +263,7 @@ You should see:
 swapped rig 'solo' to ollama in /home/you/.config/r4t/rigs.json
   invoke: ollama run qwen3.6 {prompt}
 You: note — Human without an Address (team cannot tell them)
-Sol: Sol has Continue: on but rig 'solo' does not support it (preset ollama; presets that continue: agy, claude, codex, cursor, opencode, opencode-ollama) — try: r4t rig swap solo <preset>
+Wren: Wren has Continue: on but rig 'solo' does not support it (preset ollama; presets that continue: agy, claude, codex, cursor, opencode, opencode-ollama) — try: r4t rig swap solo <preset>
 1 problem(s)
 ```
 
@@ -280,8 +287,7 @@ r4t rig swap solo opencode-ollama --model qwen3.6
 r4t roster check
 ```
 
-(Subscription path: swap back to `cursor --model claude-fable-5-medium`
-instead.)
+(Subscription path: swap back to `cursor` instead.)
 
 You should see:
 
@@ -289,7 +295,7 @@ You should see:
 swapped rig 'solo' to opencode-ollama in /home/you/.config/r4t/rigs.json
   invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir . {prompt}
 You: note — Human without an Address (team cannot tell them)
-/home/you/ark/solo/ROSTER.md: OK (2 member(s), leader Sol)
+/home/you/ark/solo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
 ## 10. Check
@@ -306,24 +312,24 @@ r4t seat inbox --node solo
 You should see:
 
 ```
-── from solo:sol (2026-07-29T04:55:49.122781Z)
+── from solo:wren (2026-07-29T04:55:49.122781Z)
 TIDEPOOL.
 ```
 
-Sol still knows. The team is whole.
+Wren still knows. The team is whole.
 
 ## 11. Customize
 
-One line in the roster: bound how long Sol's conversation may sit idle.
+One line in the roster: bound how long Wren's conversation may sit idle.
 
-**Replace** `~/ark/solo/ROSTER.md` — in Sol's block, directly under
+**Replace** `~/ark/solo/ROSTER.md` — in Wren's block, directly under
 `- **Continue:** on`, add:
 
 ```markdown
 - **Flush:** 4h
 ```
 
-A conversation idle past four hours is retired — Sol is prompted once to
+A conversation idle past four hours is retired — Wren is prompted once to
 write its state to disk, and the next real message founds a fresh
 conversation from that saved state. It keeps a long-lived agent from
 dragging weeks of stale context into every turn; the full mechanics are
@@ -339,7 +345,7 @@ You should see:
 
 ```
 You: note — Human without an Address (team cannot tell them)
-/home/you/ark/solo/ROSTER.md: OK (2 member(s), leader Sol)
+/home/you/ark/solo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
 ## 12. Commit point
@@ -354,7 +360,7 @@ in commands.)
 cd ~/ark/solo
 git init -q
 git add ROSTER.md
-git commit -q -m "solo roster: Sol, continue on, flush 4h"
+git commit -q -m "solo roster: Wren, continue on, flush 4h"
 ```
 
 Copy-paste templates for this chapter's final state live in
