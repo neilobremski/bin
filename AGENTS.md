@@ -53,8 +53,8 @@ repo dir, find python, exec the entry-point `.py`, propagate the exit code.
 
 `install.sh` is sourced from a shell rc. It adds `~/bin/` to `$PATH`. Pass
 `--skills` to also symlink `docs/*.md` and `apps/n0b/docs/*.md` into `~/.claude/skills/` (when Claude
-Code is present) and `~/.cursor/skills/` for Cursor. Per-agent skill install
-is `a8s install` from the agent directory.
+Code is present) and `~/.cursor/skills/` for Cursor. That mechanism installs the
+user's own tool docs; a8s installs nothing into a project.
 
 Adding a new top-level CLI: write the script, write `docs/<name>.md` with YAML
 frontmatter if it should be installable as a Claude skill.
@@ -121,9 +121,9 @@ and never generate receipts for them. Older subscribers safely drop the
 reserved destination. `a8s trace <ULID>` reads correlated boundaries from
 `~/.a8s/transactions.tsv`.
 
-Run `a8s install` from an agent root to link bundled skills into
-`.claude/skills/`, `.cursor/skills/`, and `.codex/skills/` there. Use `a8s install --global` for
-user-home install; `source ~/bin/install.sh --skills` for top-level doc skills.
+a8s plants no skill files in an agent's repo: `tell` reads `TELL_OUTBOX_DIR`
+from the environment a8s injects on wake. Top-level doc skills for the user's
+own harness come from `source ~/bin/install.sh --skills`.
 
 ## Common operations
 

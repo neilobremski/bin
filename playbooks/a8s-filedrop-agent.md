@@ -40,7 +40,7 @@ directs you to.**
 Do **not**:
 
 - Run `a8s add` / `define` / `defs` / `start` / `stop` / `update` /
-  `discover` / `remote` / `install` (or similar)
+  `discover` / `remote` (or similar)
 - Edit `~/.a8s`, `~/.config/a8s`, `network.json`, `secrets.json`, definitions,
   or other seats' trees
 - Browse or `find` sibling seats (e.g. listing every directory under

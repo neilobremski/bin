@@ -1,7 +1,7 @@
 """a8s commands — every cmd_* function dispatched by cli.py.
 
 Grouped by section:
-  registry mgmt    — add, define, ls, discover, install
+  registry mgmt    — add, define, ls, discover
   aliases          — alias, unalias, aliases
   namespaces       — namespace, unnamespace, namespaces
   process control  — start, run, step, stop, kill, exit, ps
@@ -27,7 +27,6 @@ from pathlib import Path
 
 from core import (
     ENTRYPOINT,
-    SKILLS_DIR,
     _pid_alive,
     _preview,
     agent_dir,
@@ -81,95 +80,6 @@ from registry import (
 )
 from txlog import read_events
 from ulid import is_ulid
-
-
-# ---------- skill installation helpers ----------
-
-def _link_symlink(link: Path, target: Path) -> tuple[bool, str | None]:
-    """Create or refresh `link` -> `target`. Returns (ok, error_message)."""
-    target = target.resolve()
-    if link.is_symlink():
-        if os.readlink(link) == str(target):
-            return True, None
-        link.unlink()
-    elif link.exists():
-        return False, f"{link} exists and is not a symlink; refusing to overwrite"
-    link.parent.mkdir(parents=True, exist_ok=True)
-    link.symlink_to(target)
-    return True, None
-
-
-def _install_skill_claude(skill_dir: Path, base: Path) -> str:
-    dest = base / ".claude" / "skills" / skill_dir.name / "SKILL.md"
-    ok, err = _link_symlink(dest, skill_dir / "SKILL.md")
-    if not ok:
-        return f"  claude: {err}"
-    rel = dest.relative_to(base) if dest.is_relative_to(base) else dest
-    return f"  claude: linked {rel}"
-
-
-def _install_skill_cursor(skill_dir: Path, base: Path) -> str:
-    dest = base / ".cursor" / "skills" / skill_dir.name / "SKILL.md"
-    ok, err = _link_symlink(dest, skill_dir / "SKILL.md")
-    if not ok:
-        return f"  cursor: {err}"
-    rel = dest.relative_to(base) if dest.is_relative_to(base) else dest
-    return f"  cursor: linked {rel}"
-
-
-def _install_skill_agy(skill_dir: Path, base: Path) -> str:
-    if shutil.which("agy") is None:
-        return "  agy: not on PATH; skipping"
-    return "  agy: plugin install not yet supported; skipping"
-
-
-def _install_skill_codex(skill_dir: Path, base: Path) -> str:
-    codex_skills = base / ".codex" / "skills"
-    target = codex_skills / skill_dir.name
-    ok, err = _link_symlink(target, skill_dir)
-    if not ok:
-        return f"  codex: {err}"
-    rel = target.relative_to(base) if target.is_relative_to(base) else target
-    return f"  codex: linked {rel}"
-
-
-def _install_skill_copilot(skill_dir: Path, base: Path) -> str:
-    if shutil.which("copilot") is None:
-        return "  copilot: not on PATH; skipping"
-    dest = base / ".claude" / "skills" / skill_dir.name / "SKILL.md"
-    ok, err = _link_symlink(dest, skill_dir / "SKILL.md")
-    if not ok:
-        return f"  copilot: {err}"
-    return f"  copilot: linked {dest.relative_to(base)} (Copilot also loads .github/copilot-instructions.md when present)"
-
-
-def _install_skill_opencode(skill_dir: Path, base: Path) -> str:
-    if shutil.which("opencode") is None:
-        return "  opencode: not on PATH; skipping"
-    return _install_skill_claude(skill_dir, base).replace("  claude:", "  opencode:", 1)
-
-
-def _install_skills_into(base: Path) -> int:
-    if not SKILLS_DIR.is_dir():
-        print(f"no skills directory at {SKILLS_DIR}", file=sys.stderr)
-        return 1
-    skill_dirs = [
-        d for d in sorted(SKILLS_DIR.iterdir())
-        if d.is_dir() and (d / "SKILL.md").is_file()
-    ]
-    if not skill_dirs:
-        print(f"no skills found in {SKILLS_DIR}")
-        return 0
-    print(f"installing {len(skill_dirs)} skill(s) into {base}:")
-    for skill_dir in skill_dirs:
-        print(f"\n[{skill_dir.name}]")
-        print(_install_skill_claude(skill_dir, base))
-        print(_install_skill_cursor(skill_dir, base))
-        print(_install_skill_agy(skill_dir, base))
-        print(_install_skill_codex(skill_dir, base))
-        print(_install_skill_copilot(skill_dir, base))
-        print(_install_skill_opencode(skill_dir, base))
-    return 0
 
 
 # ---------- registry management commands ----------
@@ -768,54 +678,6 @@ def cmd_discover(args: list[str]) -> int:
             print(f"a8s define {name} {default_definition_path(kind)}")
         print()
     return 0
-
-
-def cmd_install(args: list[str]) -> int:
-    """Install bundled skills into an agent directory (default CWD) or --global home."""
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        prog="a8s install",
-        description=(
-            "Install a8s skills into an agent directory (default: CWD). "
-            "Creates .claude/skills/, .cursor/skills/, and .codex/skills/ "
-            "symlinks under the target. Use --global to install into user home instead."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "examples:\n"
-            "  cd ~/projects/my-agent && a8s install\n"
-            "  a8s install /path/to/agent\n"
-            "  a8s install --global\n"
-        ),
-    )
-    parser.add_argument(
-        "path",
-        nargs="?",
-        help="agent root to install into (default: current directory)",
-    )
-    parser.add_argument(
-        "--global",
-        dest="global_install",
-        action="store_true",
-        help="install into user home (~/.claude/skills, ~/.cursor/skills, ~/.codex/skills)",
-    )
-    try:
-        parsed = parser.parse_args(args)
-        if parsed.global_install and parsed.path is not None:
-            parser.error("path argument conflicts with --global")
-    except SystemExit as e:
-        return int(e.code if e.code is not None else 0)
-
-    if parsed.global_install:
-        base = Path.home()
-    else:
-        base = Path(parsed.path or ".").expanduser().resolve()
-        if not base.is_dir():
-            print(f"not a directory: {base}", file=sys.stderr)
-            return 1
-
-    return _install_skills_into(base)
 
 
 DEFAULT_CLIENT_BIN = Path("/usr/local/bin")

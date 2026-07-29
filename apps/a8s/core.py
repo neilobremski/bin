@@ -48,7 +48,6 @@ MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MiB
 
 # Path constants — computed once at module load.
 SCRIPT_DIR = Path(__file__).resolve().parent
-SKILLS_DIR = SCRIPT_DIR / "skills"
 BIN_ROOT = SCRIPT_DIR.parent.parent
 DEFINITIONS_DIR = SCRIPT_DIR / "definitions"
 TELL_OUTBOX_DIR_ENV = "TELL_OUTBOX_DIR"

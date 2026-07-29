@@ -25,5 +25,4 @@ All bash scripts use `#!/usr/bin/env bash` instead of `#!/bin/bash`. This allows
 ## Claude Code Skills
 
 Top-level tool docs under `docs/` and `apps/n0b/docs/` can be installed as agent skills with
-`source ~/bin/install.sh --skills` (Claude Code and Cursor). a8s agent skills
-(`tell`, etc.) install per-project via `a8s install` from the agent directory.
+`source ~/bin/install.sh --skills` (Claude Code and Cursor).
