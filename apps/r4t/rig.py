@@ -76,7 +76,9 @@ RESERVED_CONFIG_KEYS = frozenset({
 # regex (matched case-insensitively against a failed turn's output) that says
 # the CLI refused to launch because there is no conversation in this directory
 # yet — only cursor does that; the others quietly found one and exit 0, so they
-# need no pattern.
+# need no pattern. `continue_anchor` places the tokens immediately after that
+# argv token instead of at the end, the way `model_anchor` does — a CLI whose
+# continuation is a subcommand cannot be appended to a finished argv.
 HARNESS_PRESETS: dict[str, dict] = {
     "claude": {
         "text_tier": "big",
@@ -96,8 +98,12 @@ HARNESS_PRESETS: dict[str, dict] = {
         "continue_argv": ["--continue"],
     },
     "codex": {
-        # No continue_argv: codex resumes via the `codex exec resume` SUBCOMMAND,
-        # which cannot be expressed as tokens appended to an existing argv.
+        # Continuation is the `resume --last` SUBCOMMAND, so it cannot be
+        # appended to a finished argv — it goes immediately after `exec`, the
+        # same anchor the model flags use, leaving
+        # `codex exec resume --last -m MODEL <flags> <prompt>`.
+        # `resume` also takes an optional [SESSION_ID] in place of --last: the
+        # native way to pin ONE conversation, which is where #256 will look.
         "text_tier": "big",
         "description": "OpenAI Codex CLI — matches apps/a8s/definitions/codex.json",
         "a8s_definition": "codex.json",
@@ -111,6 +117,8 @@ HARNESS_PRESETS: dict[str, dict] = {
         ],
         "model_argv": ["-m", "{model}"],
         "model_anchor": "exec",
+        "continue_argv": ["resume", "--last"],
+        "continue_anchor": "exec",
     },
     "cursor": {
         "text_tier": "moderate",
@@ -384,8 +392,21 @@ class Rig:
         return list(HARNESS_PRESETS.get(self.preset or "", {}).get("continue_argv", ()))
 
     @property
+    def continue_anchor(self) -> str | None:
+        """The argv token the continue tokens go immediately after. None (every
+        flag-shaped CLI) means append at the end; codex needs one because
+        `resume --last` is a subcommand and only reads in that position."""
+        return HARNESS_PRESETS.get(self.preset or "", {}).get("continue_anchor")
+
+    @property
     def supports_continue(self) -> bool:
-        return bool(self.continue_argv)
+        """False unless the tokens have somewhere to go. An anchored preset
+        whose invoke was hand-edited past its anchor fails closed here rather
+        than building an argv the CLI would read as something else."""
+        if not self.continue_argv:
+            return False
+        anchor = self.continue_anchor
+        return anchor is None or all(anchor in argv for argv in self.pool())
 
     @property
     def cli(self) -> str:
@@ -423,8 +444,10 @@ class Rig:
         pool = self.pool()
         chosen = pool[index % len(pool)]
         argv = [a.replace(PROMPT_PLACEHOLDER, prompt) for a in chosen]
-        if continue_conversation:
-            argv += self.continue_argv
+        if continue_conversation and self.continue_argv:
+            anchor = self.continue_anchor
+            at = argv.index(anchor) + 1 if anchor else len(argv)
+            argv[at:at] = self.continue_argv
         return argv
 
 

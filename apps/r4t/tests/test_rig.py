@@ -272,12 +272,11 @@ class TestArgv:
 class TestContinue:
     def test_only_verified_presets_declare_continue(self):
         # Each of these was verified against the installed CLI's own --help and
-        # then live. Two are absent on purpose: codex resumes with the
-        # `codex exec resume` subcommand, which no appended argv can express,
-        # and copilot resumes the machine's most recent session whatever the
-        # directory, which no working directory can keep apart (#256).
+        # then live. copilot is absent on purpose: it resumes the machine's most
+        # recent session whatever the directory, which no working directory can
+        # keep apart (#256).
         assert continue_presets() == [
-            "agy", "claude", "cursor", "opencode", "opencode-ollama",
+            "agy", "claude", "codex", "cursor", "opencode", "opencode-ollama",
         ]
 
     def test_continue_tokens_are_appended_to_the_argv(self, tmp_path):
@@ -353,7 +352,7 @@ class TestContinue:
 
     def test_continue_on_unsupported_rig_fails_closed(self, tmp_path):
         config = load_rig_config(write_config(tmp_path, {
-            "t": {"preset": "codex", "invoke": ["codex", "exec", "{prompt}"]},
+            "t": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]},
         }))
         asker = member(name="Ana", rig="t")
         asker.continue_conversation = True
@@ -365,10 +364,51 @@ class TestContinue:
 
     def test_continue_off_runs_on_any_rig(self, tmp_path):
         config = load_rig_config(write_config(tmp_path, {
-            "t": {"preset": "codex", "invoke": ["codex", "exec", "{prompt}"]},
+            "t": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]},
         }))
         rig, err, _pinned = config.rig_for(member(name="Ana", rig="t"))
         assert rig is not None and err is None
+
+    def test_codex_continue_is_anchored_after_exec(self, tmp_path):
+        # `resume --last` is a subcommand: it only reads immediately after
+        # `exec`, never appended to a finished argv.
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "codex")
+        rig = load_rig_config(path).rigs["worker"]
+        assert rig.continue_anchor == "exec"
+        assert rig.argv("hi", continue_conversation=True) == [
+            "codex", "exec", "resume", "--last",
+            "--full-auto", "--skip-git-repo-check", "hi",
+        ]
+
+    def test_codex_continue_and_model_splice_in_the_right_order(self, tmp_path):
+        # Both anchor on `exec`; the model is spliced at add time and continue
+        # at turn time, which lands continue first — the order codex requires.
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "codex", model="gpt-5")
+        rig = load_rig_config(path).rigs["worker"]
+        assert rig.argv("hi", continue_conversation=True) == [
+            "codex", "exec", "resume", "--last", "-m", "gpt-5",
+            "--full-auto", "--skip-git-repo-check", "hi",
+        ]
+
+    def test_codex_founds_cold_without_a_detection_pattern(self, tmp_path):
+        # `exec resume --last` in a virgin directory exits 0 and founds one,
+        # so there is no failure to retry (verified live).
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "codex")
+        rig = load_rig_config(path).rigs["worker"]
+        assert not rig.had_no_prior_conversation("No previous chats found.")
+
+    def test_anchored_preset_without_its_anchor_fails_closed(self, tmp_path):
+        # A hand-edited invoke that lost `exec` has nowhere to put the tokens.
+        config = load_rig_config(write_config(tmp_path, {
+            "t": {"preset": "codex", "invoke": ["codex-wrapper", "{prompt}"]},
+        }))
+        assert config.rigs["t"].supports_continue is False
+        asker = member(name="Ana", rig="t")
+        asker.continue_conversation = True
+        assert config.rig_for(asker)[0] is None
 
 
 COLLISION_CONFIG = {

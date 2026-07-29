@@ -1782,7 +1782,7 @@ class TestCli:
         )
         config = tmp_path / "nocontinue-rigs.json"
         config.write_text(
-            json.dumps({"solo": {"preset": "codex", "invoke": ["codex", "exec", "{prompt}"]}}),
+            json.dumps({"solo": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]}}),
             encoding="utf-8",
         )
         rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(config))
