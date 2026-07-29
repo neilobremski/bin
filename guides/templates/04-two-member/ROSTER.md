@@ -9,7 +9,7 @@
 - **Rig:** solo
 - **Leader:** yes
 - **Continue:** on
-- **Flush:** 4h
+- **Flush:** 15m
 - **Workdir:** agents/wren
 - **Role:** The solo agent — does the work and answers the owner
 

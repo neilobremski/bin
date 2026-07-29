@@ -329,14 +329,15 @@ One line in the roster: bound how long Wren's conversation may sit idle.
 `- **Continue:** on`, add:
 
 ```markdown
-- **Flush:** 4h
+- **Flush:** 15m
 ```
 
-A conversation idle past four hours is retired — Wren is prompted once to
-write its state to disk, and the next real message founds a fresh
+A conversation idle past fifteen minutes is retired — Wren is prompted
+once to write its state to disk, and the next real message founds a fresh
 conversation from that saved state. It keeps a long-lived agent from
-dragging weeks of stale context into every turn; the full mechanics are
-chapter 3's subject.
+dragging weeks of stale context into every turn, and it sits near where
+the providers stop discounting a resumed conversation; the full mechanics
+are chapter 3's subject.
 
 **Run**
 
@@ -363,7 +364,7 @@ in commands.)
 cd ~/ark/solo
 git init -q
 git add ROSTER.md
-git commit -q -m "solo roster: Wren, continue on, flush 4h"
+git commit -q -m "solo roster: Wren, continue on, flush 15m"
 ```
 
 Copy-paste templates for this chapter's final state live in
