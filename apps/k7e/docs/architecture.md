@@ -9,7 +9,7 @@ database.
 
 ## Storage layout
 
-`K7E_HOME` (default `~/.k7e`):
+`K7E_HOME` (default `~/.config/k7e`, honoring `XDG_CONFIG_HOME`):
 
 ```
 $K7E_HOME/

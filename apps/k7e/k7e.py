@@ -22,7 +22,7 @@ Surface (CLI):
   check [--fix]               structural integrity audit
 
 State:
-  K7E_HOME (env) or ~/.k7e    base directory for the knowledge store
+  K7E_HOME (env) or ~/.config/k7e   base directory for the knowledge store
   $K7E_HOME/nodes/            atomic markdown entries (source of truth)
   $K7E_HOME/mocs/             Maps of Content (mutable indexes)
   $K7E_HOME/assets/           content-addressed binaries

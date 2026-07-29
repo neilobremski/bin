@@ -7,7 +7,8 @@ Binary assets stored content-addressed (SHA256 hash + extension).
 Same content = same hash = one file.
 
 Zero non-stdlib dependencies. Embeddings use ollama HTTP API (urllib).
-Configurable root via K7E_HOME env var (defaults to ~/.k7e).
+Configurable root via K7E_HOME env var (defaults to ~/.config/k7e, honoring
+XDG_CONFIG_HOME).
 """
 
 import hashlib
@@ -26,8 +27,12 @@ from pathlib import Path
 
 
 def _k7e_home():
-    override = os.environ.get("K7E_HOME")
-    return Path(override) if override else Path.home() / ".k7e"
+    override = os.environ.get("K7E_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    return base / "k7e"
 
 
 NODES_DIR = None

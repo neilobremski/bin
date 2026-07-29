@@ -44,8 +44,12 @@ LLM_PURPOSES = {
 
 
 def _k7e_home():
-    override = os.environ.get("K7E_HOME")
-    return Path(override) if override else Path.home() / ".k7e"
+    override = os.environ.get("K7E_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    return base / "k7e"
 
 
 def config_path():

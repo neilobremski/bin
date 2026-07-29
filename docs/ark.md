@@ -39,9 +39,9 @@ r4t — roster for teams  (~/.config/r4t)
   ✓ rigs   2 rig(s): leader, worker
   ✗ teams  none under ~/.config/r4t/teams   (try: r4t init)
 
-k7e — knowledge engine  (~/.k7e)
+k7e — knowledge engine  (~/.config/k7e)
   ✓ cli    k7e -> /path/to/k7e
-  ✓ store  41 entr(ies) under ~/.k7e/nodes
+  ✓ store  41 entr(ies) under ~/.config/k7e/nodes
   ✗ index  no search index   (try: k7e reindex)
 ```
 
