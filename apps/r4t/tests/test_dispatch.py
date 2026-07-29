@@ -1218,6 +1218,36 @@ class TestEchoRig:
         assert "truncated" not in envelope["content"]
         assert not (repo / ".outbox" / envelope["id"]).is_dir()
 
+    def test_long_reply_to_human_parks_with_attachment(
+        self, ctx, repo, r4t_home, capsys
+    ):
+        set_echo(ctx.config_path, echo_max_chars=100)
+        handle_message(ctx, "acme:neil", "acme:gerry", "question", run_fn=stdout_only)
+        assert r4t_main([
+            "seat", "inbox", "--peek", "--json", "--node", NODE,
+            "--root", str(repo), "--rig-config", str(ctx.config_path),
+            "--simulate-tell",
+        ]) == 0
+        envelope = json.loads(capsys.readouterr().out.strip())
+        assert "truncated by r4t at 100 chars" in envelope["content"]
+        (entry,) = envelope["files"]
+        assert entry["filename"] == "reply.md"
+        stored = Path(entry["path"])
+        assert stored.read_text(encoding="utf-8").strip() == ANSWER.strip()
+        assert "WARN attachments dropped" not in read_log()
+        assert r4t_main([
+            "seat", "inbox", "--node", NODE, "--root", str(repo),
+            "--rig-config", str(ctx.config_path), "--simulate-tell",
+        ]) == 0
+        assert f"(attachment: reply.md at {stored})" in capsys.readouterr().out
+
+    def test_short_reply_to_human_parks_without_files(self, ctx, r4t_home):
+        set_echo(ctx.config_path)
+        handle_message(ctx, "acme:neil", "acme:gerry", "question", run_fn=stdout_only)
+        (parked,) = seat_messages()
+        assert parked["content"] == ANSWER.strip()
+        assert parked["files"] == []
+
     def test_failed_turn_stages_no_echo_reply(self, ctx, repo, r4t_home):
         def crashed(rig, prompt, cwd, *, env=None, variant=0):
             return 1, ANSWER, 1.0, False

@@ -905,6 +905,11 @@ def cmd_seat(args: argparse.Namespace) -> int:
                     f" ({envelope.get('parked_at', '?')})"
                 )
                 print(envelope.get("content", ""))
+                for f in envelope.get("files") or []:
+                    print(
+                        f"(attachment: {f.get('filename', '?')} "
+                        f"at {f.get('path', '?')})"
+                    )
                 print()
             if not args.peek:
                 state.mark_seat_read(node, human.name, path)

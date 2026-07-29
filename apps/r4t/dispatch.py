@@ -343,14 +343,20 @@ def _park_seat(
     *,
     thread: str | None = None,
     roster: Roster | None = None,
+    files: list[dict] | None = None,
+    bundle: Path | None = None,
 ) -> None:
     """Deliver a message to a roster human: park it in the node's seat
-    mailbox, and ring the `Address:` doorbell (a forwarded copy over a8s)
-    only when no seat session is attached to read it live. When the org sets a
+    mailbox (attachments copied into seat storage alongside it), and ring the
+    `Address:` doorbell (a forwarded copy over a8s) only when no seat session
+    is attached to read it live. The doorbell forward is body-only —
+    attachments wait in the seat mailbox. When the org sets a
     `doorbell_check`, that command gates the ring — the message is always parked
     first (seat mail is never lost), and a failing gate suppresses only the
     ring and replies to the sender with an error."""
-    state.park_seat_message(ctx.node, member.name, sender, body)
+    state.park_seat_message(
+        ctx.node, member.name, sender, body, files=files, bundle=bundle
+    )
     if not (member.address and not state.seat_attached(ctx.node, member.name)):
         state.append_log(
             ctx.node, f"r4t: SEAT {member.name.lower()} <- {sender} (parked)"
@@ -704,6 +710,8 @@ def _ingest(
     hop: int = 0,
     roster: Roster | None = None,
     config: RigConfig | None = None,
+    files: list[dict] | None = None,
+    bundle: Path | None = None,
 ) -> str:
     """Resolve the recipient and enqueue a structured r4t-message. Humans park
     in the seat; undeliverable mail dead-letters with an audit record; a
@@ -766,7 +774,10 @@ def _ingest(
             return DEAD
 
     if member.is_human:
-        _park_seat(ctx, member, sender, body, thread=thread, roster=roster)
+        _park_seat(
+            ctx, member, sender, body, thread=thread, roster=roster,
+            files=files, bundle=bundle,
+        )
         return SKIPPED
 
     if member.errors:
@@ -848,19 +859,24 @@ def _release_one(
 ) -> None:
     to = str(envelope.get("to", "")).strip()
     if _is_internal(ctx.node, to):
+        bundle = staging / str(envelope.get("id", ""))
         _ingest(
             ctx, sender_addr, to, body,
             klass="auto", internal=True, thread=thread_id, hop=next_hop,
             roster=roster, config=config,
+            files=envelope.get("files") or [],
+            bundle=bundle if bundle.is_dir() else None,
         )
-        bundle = staging / str(envelope.get("id", ""))
         if bundle.is_dir():
             shutil.rmtree(bundle, ignore_errors=True)
-            state.append_log(
-                ctx.node,
-                f"r4t: WARN attachments dropped on intra-team route "
-                f"{sender_addr} -> {to}",
-            )
+            # A human recipient's park copied the files into seat storage;
+            # AI-member queues still carry no attachments.
+            if _human_member(ctx.node, roster, to) is None:
+                state.append_log(
+                    ctx.node,
+                    f"r4t: WARN attachments dropped on intra-team route "
+                    f"{sender_addr} -> {to}",
+                )
         state.append_log(
             ctx.node,
             f"r4t: RELEASED-internal {sender_addr} -> {to} thread={thread_id} "
