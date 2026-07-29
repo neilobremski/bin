@@ -189,6 +189,20 @@ def append_history(
     _atomic_write_text(history_path(node, name), _truncate_history(combined, max_bytes))
 
 
+def archive_history(node: str, name: str) -> Path | None:
+    """Rename the member's history log to a timestamped sibling, so the next
+    turn starts a fresh one and the prompt carries no transcript. Returns the
+    archive path, or None when the member has no history. Never deletes — the
+    log is the record of what was said."""
+    path = history_path(node, name)
+    if not path.is_file():
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    archive = path.with_name(f"history-{stamp}.md")
+    os.replace(path, archive)
+    return archive
+
+
 # ---------- locks ----------
 
 def _pid_alive(pid: int) -> bool:
