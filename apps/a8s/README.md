@@ -19,8 +19,8 @@ The win at scale: a team of agents that share knowledge through ordinary convers
 
 Humans and desktop IDE sessions (Cursor, Claude Code, Codex) can run a
 **filedrop** node: `a8s start` keeps delivering into `.inbox`, and you watch
-with `tells -f` (inbound only). Deployed agents do not use this path — they
-only need the installable `tell` skill.
+with `tells -f` (inbound only). Deployed agents do not use this path — a8s
+sets `TELL_OUTBOX_DIR` on wake, so `tell` works from their own root.
 
 → **[Filedrop setup](docs/filedrop.md)** (`a8s add … filedrop`, handler)
 → **[Agent playbook](../../playbooks/a8s-filedrop-agent.md)** (IDE seats: send/receive norms)
@@ -226,12 +226,11 @@ Env vars apply only when a key is absent from `settings.json` (e.g. `A8S_CONVO_M
 Pre-v1 rename: `convo_max_limit` / `A8S_CONVO_MAX_LIMIT` were replaced by `convo_max_rows` / `A8S_CONVO_MAX_ROWS`. Existing values under the old names are ignored.
 
 
-### Skills
+### Client install
 
 
 |                      |                                                                                                         |
 | -------------------- | ------------------------------------------------------------------------------------------------------- |
-| `a8s install`        | Install bundled skills into the current agent dir (or `--global` for user home).                        |
 | `a8s install-client` | Copy `apps/a8s` to `/usr/local/lib/a8s/` and install `/usr/local/bin/tell` (`sudo`). Re-run to upgrade. |
 
 
@@ -497,7 +496,7 @@ apps/a8s/
 ├── cli.py            COMMANDS table, dispatch, main
 ├── definitions/      built-in JSONs (claude/cursor/codex/default)
 ├── dummy-cli         fallback bash script
-├── skills/           tell skill only (installable into Claude / Cursor / Codex)
+├── skills/           tell skill markdown (agent-facing send-only usage)
 └── tests/
     ├── agents/       per-tool fixture dirs (CLAUDE/GEMINI/CODEX/Llama)
     ├── fixtures/     mock-cli + mock.json for end-to-end tests

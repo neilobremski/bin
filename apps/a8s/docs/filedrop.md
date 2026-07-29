@@ -4,8 +4,9 @@ A **filedrop** is an a8s node that receives mail as files in `<root>/.inbox/`
 instead of waking a CLI. Use it from a human terminal or a desktop IDE session
 (Cursor, Claude Code, Codex) — not a deployed agent woken by a8s.
 
-Deployed agents only need the installable [`tell` skill](../skills/tell/SKILL.md).
-They never see this doc: a8s sets `TELL_OUTBOX_DIR` on wake.
+Deployed agents never see this doc: a8s sets `TELL_OUTBOX_DIR` on wake, so
+`tell` resolves their outbox with no setup. Send-side usage for those agents
+reads as [`tell` skill markdown](../skills/tell/SKILL.md).
 
 **Filedrop agents (IDE seats):** point them at
 [`playbooks/a8s-filedrop-agent.md`](../../../playbooks/a8s-filedrop-agent.md) — session playbook

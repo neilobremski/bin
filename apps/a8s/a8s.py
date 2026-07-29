@@ -22,7 +22,6 @@ Surface (CLI):
   start / run / step          handler attachment (1+ agents per process)
   stop / kill / exit / ls     handler control
   tell / tells                send a message / wait for the next one
-  install                     install canonical skills
   install-client              install standalone tell to /usr/local
   logs <name>... [--tail N] [-f]   per-agent log readout (merge-sorted)
 
