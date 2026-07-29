@@ -16,6 +16,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 import state
 import tasks
@@ -60,31 +61,95 @@ from roster import (
 
 DEFAULT_TASK_TTL_SECONDS = 7 * 86400
 
+
+class Command(NamedTuple):
+    """One row of the visible CLI surface.
+
+    `parser` names the top-level subcommand whose argparse `help=` this row's
+    blurb becomes, so the bare-`r4t` panel and `r4t --help` share one wording.
+    """
+
+    display: str
+    blurb: str
+    parser: str | None = None
+    hint: str | None = None
+
+
 COMMAND_HELP = [
-    ("init", "Write starter ROSTER.md and ~/.config/r4t/rigs.json; print a8s registration"),
-    ("status", "Budgets, queues, open threads, dead letters for one team"),
-    ("logs", "The team's event log: every governance decision and turn boundary"),
-    ("chat", "Interactive human seat: messages and team activity in one window"),
-    ("seat", "The roster human's team mailbox and voice (bare: summary)"),
-    ("rig list", "Rigs, limits, and roster rig resolution (alias: ls)"),
-    ("rig presets", "Named CLI presets aligned with a8s definitions"),
-    ("rig add <rig> <preset>", "Add a rig to ~/.config/r4t/rigs.json from a preset"),
-    ("rig remove <rig>", "Remove a rig from the config (alias: rm)"),
-    ("rig set <rig> <key> <val>", "Write a rig setting (get/unset/configure too)"),
-    ("judge <node> --rig <rig>", "Grade a finished run against the MAST failure taxonomy"),
-    ("roster check", "Lint ROSTER.md against the rig config"),
-    ("task list", "List conversation threads for a team"),
-    ("task show <id>", "Show one task ledger record as JSON"),
-    ("clear", "Prune stale locks, expire idle threads, drain queued turns"),
-    ("flush <member>", "Dump a member's state, retire the conversation, archive its history"),
-    ("idle", "Nudge agents with unfinished work, then clear"),
-    ("sandbox", "Disposable end-to-end run with graded report"),
-    ("sandbox --fake", "Same pipeline with deterministic fake agents (no LLM)"),
-    ("sandbox --fake --break dev", "Fake run with a member whose harness always fails"),
-    ("sandbox --preset NAME", "Live sandbox harness (see `r4t rig presets`)"),
-    ("sandbox --preset opencode-ollama --model M", "Live sandbox via Ollama-local OpenCode"),
-    ("dispatch", "Handle one delivered message (a8s invoke entry)"),
+    (
+        "Getting started",
+        [
+            Command("init", "Set up this repo: a starter roster and rig config", "init"),
+            Command(
+                "roster check",
+                "Check the roster reads cleanly and every rig resolves",
+                "roster",
+            ),
+            Command("rig", "Rigs: what each name on the roster actually runs", "rig"),
+            Command("rig list", "Your rigs, and the member riding each one"),
+            Command(
+                "rig presets",
+                "Ready-made rigs to start from",
+                None,
+                "r4t rig add <rig> <preset>",
+            ),
+            Command("rig add <rig> <preset>", "Add a rig from a preset"),
+            Command("rig set <rig> <key> <val>", "Change one rig setting"),
+        ],
+    ),
+    (
+        "Every day",
+        [
+            Command(
+                "status",
+                "Where a team stands: budgets, queues, open threads",
+                "status",
+            ),
+            Command(
+                "logs",
+                "Everything the team does, as it happens",
+                "logs",
+                "r4t logs -f",
+            ),
+            Command(
+                "chat",
+                "Your seat at the team: speak, and watch the work land",
+                "chat",
+            ),
+            Command(
+                "seat",
+                "Read messages waiting for you and answer them",
+                "seat",
+            ),
+            Command(
+                "flush <member>",
+                "Save a member's state and start the conversation fresh",
+                "flush",
+            ),
+            Command("task list", "The team's conversation threads", "task"),
+            Command("task show <id>", "One thread, in full"),
+        ],
+    ),
+    (
+        "Verification",
+        [
+            Command(
+                "check",
+                "Sweep a team's work for the patterns you forbid",
+                "check",
+            ),
+        ],
+    ),
 ]
+
+PARSER_HELP = {
+    cmd.parser: cmd.blurb
+    for _section, cmds in COMMAND_HELP
+    for cmd in cmds
+    if cmd.parser
+}
+
+HIDDEN_COMMANDS = ("clear", "dispatch", "idle", "judge", "lab", "sandbox")
 
 ROSTER_TEMPLATE = """\
 # Team Roster
@@ -347,6 +412,23 @@ def _print_team_summaries() -> None:
             print(f"    locked: {lock.get('agent', '?')} pid={lock.get('pid', '?')}")
 
 
+def _cmd_help(name: str) -> str:
+    return PARSER_HELP[name] + "."
+
+
+def _print_command_panel() -> None:
+    width = max(len(cmd.display) for _section, cmds in COMMAND_HELP for cmd in cmds)
+    for index, (section, cmds) in enumerate(COMMAND_HELP):
+        if index:
+            print()
+        print(section)
+        for cmd in cmds:
+            line = f"  {cmd.display:<{width}}  {cmd.blurb}"
+            if cmd.hint:
+                line += f"   (try: {cmd.hint})"
+            print(line)
+
+
 def _next_steps(
     *,
     config_missing: bool,
@@ -366,9 +448,10 @@ def _next_steps(
         steps.append("`r4t init` — prints the a8s add / namespace / start sequence")
     elif len(teams) == 1:
         steps.append(f"`r4t status --node {teams[0]}` — budgets, queues, threads")
+        steps.append(f"`r4t chat --node {teams[0]}` — take your seat at the team")
     else:
         steps.append("`r4t status --node <team>` — pick a team from the list above")
-    steps.append("`r4t sandbox --fake` — end-to-end plumbing check without LLM calls")
+        steps.append("`r4t chat --node <team>` — take your seat at the team")
     return steps
 
 
@@ -408,10 +491,7 @@ def cmd_default(_args: argparse.Namespace) -> int:
     else:
         print(f"  no ROSTER.md under {root}")
     print()
-    print("Commands")
-    width = max(len(name) for name, _ in COMMAND_HELP)
-    for name, blurb in COMMAND_HELP:
-        print(f"  {name:<{width}}  {blurb}")
+    _print_command_panel()
     print()
     print("Next steps")
     for step in _next_steps(
@@ -1109,7 +1189,7 @@ def cmd_rig_overview(args: argparse.Namespace) -> int:
         if roster_path.is_file():
             print("  - `r4t roster check` — lint roster ↔ rig mappings")
         print("  - `r4t rig add <rig> <preset>` — add another rig")
-        print("  - `r4t sandbox --fake` — end-to-end plumbing check without LLM calls")
+        print("  - `r4t rig get <rig>` — see a rig's effective settings")
     return 0
 
 
@@ -1587,166 +1667,29 @@ def build_parser() -> argparse.ArgumentParser:
         prog="r4t",
         description="Roster For Teams — define agents in ROSTER.md; govern turns on a8s.",
     )
-    sub = p.add_subparsers(dest="command", required=False)
+    sub = p.add_subparsers(dest="command", required=False, metavar="COMMAND")
     p.set_defaults(func=cmd_default)
 
-    dispatch_p = sub.add_parser(
-        "dispatch", help="Handle one delivered message (the a8s invoke entry)."
+    init_p = sub.add_parser(
+        "init",
+        help=_cmd_help("init"),
+        description="Write a starter ROSTER.md and ~/.config/r4t/rigs.json; print "
+        "the a8s registration sequence.",
     )
-    _add_common(dispatch_p)
-    dispatch_p.add_argument("--from", dest="from_agent", required=True)
-    dispatch_p.add_argument(
-        "--to",
-        required=True,
-        help="Full recipient as delivered ($RECIPIENT): <node> or <node>:<member>.",
-    )
-    dispatch_p.add_argument("--message", required=True)
-    dispatch_p.add_argument(
-        "--no-drain",
-        action="store_true",
-        help="Skip the deferred-message drain passes around this message.",
-    )
-    _add_tell_flags(dispatch_p)
-    dispatch_p.set_defaults(func=cmd_dispatch)
+    init_p.add_argument("--root", help="Repo to initialize (default: cwd).")
+    init_p.set_defaults(func=cmd_init)
 
-    clear_p = sub.add_parser(
-        "clear", help="Maintenance: prune stale locks, expire tasks, drain."
-    )
-    _add_common(clear_p, with_node=True)
-    _add_older_than(clear_p)
-    _add_tell_flags(clear_p)
-    clear_p.set_defaults(func=cmd_clear)
-
-    flush_p = sub.add_parser(
-        "flush",
-        help="Save a member's state to disk and start their conversation over.",
-    )
-    _add_common(flush_p, with_node=True)
-    flush_p.add_argument(
-        "members", nargs="*", metavar="MEMBER", help="Members to flush."
-    )
-    flush_p.add_argument(
-        "--all", action="store_true", help="Every member on the roster."
-    )
-    flush_p.add_argument(
-        "--no-dump",
-        action="store_true",
-        help="Skip the save turn — for a conversation that cannot or should "
-        "not write its state down.",
-    )
-    _add_tell_flags(flush_p)
-    flush_p.set_defaults(func=cmd_flush)
-
-    idle_p = sub.add_parser(
-        "idle",
-        help="Idle pass: nudge active agents with unfinished business, then clear.",
-    )
-    _add_common(idle_p, with_node=True)
-    _add_older_than(idle_p)
-    _add_tell_flags(idle_p)
-    idle_p.set_defaults(func=cmd_idle)
-
-    status_p = sub.add_parser("status", help="Per-team status.")
-    _add_common(status_p, with_node=True)
-    _add_tell_flags(status_p)
-    status_p.set_defaults(func=cmd_status)
-
-    logs_p = sub.add_parser(
-        "logs", help="The team's own event log: every governance decision "
-        "and turn boundary, including traffic that never reaches a8s."
-    )
-    _add_common(logs_p, with_node=True)
-    logs_p.add_argument(
-        "-f", "--follow", action="store_true", help="Keep streaming new events."
-    )
-    logs_p.add_argument(
-        "-n", "--lines", type=int, default=40,
-        help="Backfill this many lines first (0 = everything kept on disk).",
-    )
-    logs_p.add_argument(
-        "--full", action="store_true",
-        help="Raw daily log, prompts and transcripts included.",
-    )
-    logs_p.add_argument(
-        "--agent", metavar="MEMBER",
-        help="Only one member's activity; with --full, their captured turns.",
-    )
-    logs_p.set_defaults(func=cmd_logs)
-
-    check_p = sub.add_parser(
-        "check",
-        help="Forbidden-pattern sweep: opaque pass/fail on stdout, findings on "
-        "stderr. Patterns live in ~/.config/r4t/checklists/.",
-    )
-    _add_common(check_p)
-    check_p.add_argument(
-        "node", nargs="?",
-        help="Team node name (default: sole ~/.config/r4t team).",
-    )
-    check_p.set_defaults(func=cmd_check)
-
-    judge_p = sub.add_parser(
-        "judge",
-        help="Grade a finished run against the MAST failure taxonomy "
-        "(post-hoc; the report is for humans, not agents).",
-    )
-    judge_p.add_argument(
-        "node", nargs="?",
-        help="Team node name (default: sole ~/.config/r4t team).",
-    )
-    judge_p.add_argument(
-        "--rig", required=True,
-        help="Configured rig that runs the judge prompts.",
-    )
-    judge_p.add_argument(
-        "--json", action="store_true",
-        help="Machine-readable report on stdout.",
-    )
-    judge_p.add_argument(
-        "--rig-config",
-        help="Harness config path (default: ~/.config/r4t/rigs.json).",
-    )
-    judge_p.set_defaults(func=cmd_judge)
-
-    chat_p = sub.add_parser(
-        "chat", help="Interactive human seat: messages and team activity in one window."
-    )
-    _add_common(chat_p, with_node=True)
-    _add_tell_flags(chat_p)
-    chat_p.add_argument(
-        "--plain", action="store_true",
-        help="Line UI instead of the full-screen TUI.",
-    )
-    chat_p.add_argument(
-        "--attach", metavar="MEMBER",
-        help="Open watching a member read-only (messages in and turn output live).",
-    )
-    chat_p.set_defaults(func=cmd_chat)
-
-    seat_p = sub.add_parser(
-        "seat", help="The roster human's team mailbox and voice (bare: summary)."
-    )
-    seat_p.add_argument(
-        "action", nargs="?", choices=["inbox", "send"],
-        help="inbox: read parked messages; send: speak as the human.",
-    )
-    seat_p.add_argument("message", nargs="*", help="send: message text.")
-    seat_p.add_argument("--to", help="send: member first name (default: the leader).")
-    seat_p.add_argument(
-        "--peek", action="store_true", help="inbox: leave messages unread."
-    )
-    seat_p.add_argument(
-        "--json", action="store_true", dest="as_json",
-        help="inbox: one JSON object per message.",
-    )
-    _add_common(seat_p, with_node=True)
-    _add_tell_flags(seat_p)
-    seat_p.set_defaults(func=cmd_seat)
+    roster_p = sub.add_parser("roster", help=_cmd_help("roster"))
+    roster_sub = roster_p.add_subparsers(dest="action", required=True)
+    roster_check_p = roster_sub.add_parser("check", help="Lint the roster.")
+    _add_common(roster_check_p)
+    roster_check_p.set_defaults(func=cmd_roster_check)
 
     rig_p = sub.add_parser(
         "rig",
         aliases=["rigs"],
-        help="Harness config commands (bare: overview + next steps).",
+        help=_cmd_help("rig"),
+        description="Harness config commands (bare: overview + next steps).",
     )
     rig_p.set_defaults(func=cmd_rig_overview)
     rig_sub = rig_p.add_subparsers(dest="action", required=False)
@@ -1891,29 +1834,170 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rig_unset_p.set_defaults(func=cmd_rig_unset)
 
-    task_p = sub.add_parser("task", help="Task ledger commands.")
+    status_p = sub.add_parser("status", help=_cmd_help("status"))
+    _add_common(status_p, with_node=True)
+    _add_tell_flags(status_p)
+    status_p.set_defaults(func=cmd_status)
+
+    logs_p = sub.add_parser("logs", help=_cmd_help("logs"))
+    _add_common(logs_p, with_node=True)
+    logs_p.add_argument(
+        "-f", "--follow", action="store_true", help="Keep streaming new events."
+    )
+    logs_p.add_argument(
+        "-n", "--lines", type=int, default=40,
+        help="Backfill this many lines first (0 = everything kept on disk).",
+    )
+    logs_p.add_argument(
+        "--full", action="store_true",
+        help="Raw daily log, prompts and transcripts included.",
+    )
+    logs_p.add_argument(
+        "--agent", metavar="MEMBER",
+        help="Only one member's activity; with --full, their captured turns.",
+    )
+    logs_p.set_defaults(func=cmd_logs)
+
+    chat_p = sub.add_parser(
+        "chat",
+        help=_cmd_help("chat"),
+        description="Interactive human seat: messages and team activity in one window.",
+    )
+    _add_common(chat_p, with_node=True)
+    _add_tell_flags(chat_p)
+    chat_p.add_argument(
+        "--plain", action="store_true",
+        help="Line UI instead of the full-screen TUI.",
+    )
+    chat_p.add_argument(
+        "--attach", metavar="MEMBER",
+        help="Open watching a member read-only (messages in and turn output live).",
+    )
+    chat_p.set_defaults(func=cmd_chat)
+
+    seat_p = sub.add_parser(
+        "seat",
+        help=_cmd_help("seat"),
+        description="The roster human's team mailbox and voice (bare: summary).",
+    )
+    seat_p.add_argument(
+        "action", nargs="?", choices=["inbox", "send"],
+        help="inbox: read parked messages; send: speak as the human.",
+    )
+    seat_p.add_argument("message", nargs="*", help="send: message text.")
+    seat_p.add_argument("--to", help="send: member first name (default: the leader).")
+    seat_p.add_argument(
+        "--peek", action="store_true", help="inbox: leave messages unread."
+    )
+    seat_p.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="inbox: one JSON object per message.",
+    )
+    _add_common(seat_p, with_node=True)
+    _add_tell_flags(seat_p)
+    seat_p.set_defaults(func=cmd_seat)
+
+    flush_p = sub.add_parser("flush", help=_cmd_help("flush"))
+    _add_common(flush_p, with_node=True)
+    flush_p.add_argument(
+        "members", nargs="*", metavar="MEMBER", help="Members to flush."
+    )
+    flush_p.add_argument(
+        "--all", action="store_true", help="Every member on the roster."
+    )
+    flush_p.add_argument(
+        "--no-dump",
+        action="store_true",
+        help="Skip the save turn — for a conversation that cannot or should "
+        "not write its state down.",
+    )
+    _add_tell_flags(flush_p)
+    flush_p.set_defaults(func=cmd_flush)
+
+    task_p = sub.add_parser("task", help=_cmd_help("task"))
     task_p.add_argument("action", choices=["list", "show"])
     task_p.add_argument("id", nargs="?", help="Task ULID.")
     task_p.add_argument("--node", help="Team node name (default: sole ~/.config/r4t team).")
     task_p.set_defaults(func=cmd_task)
 
-    roster_p = sub.add_parser("roster", help="Roster commands.")
-    roster_sub = roster_p.add_subparsers(dest="action", required=True)
-    roster_check_p = roster_sub.add_parser("check", help="Lint the roster.")
-    _add_common(roster_check_p)
-    roster_check_p.set_defaults(func=cmd_roster_check)
-
-    init_p = sub.add_parser(
-        "init",
-        help="Write a starter ROSTER.md and ~/.config/r4t/rigs.json; print the "
-        "a8s registration sequence.",
+    check_p = sub.add_parser(
+        "check",
+        help=_cmd_help("check"),
+        description="Forbidden-pattern sweep: opaque pass/fail on stdout, findings "
+        "on stderr. Patterns live in ~/.config/r4t/checklists/.",
     )
-    init_p.add_argument("--root", help="Repo to initialize (default: cwd).")
-    init_p.set_defaults(func=cmd_init)
+    _add_common(check_p)
+    check_p.add_argument(
+        "node", nargs="?",
+        help="Team node name (default: sole ~/.config/r4t team).",
+    )
+    check_p.set_defaults(func=cmd_check)
+
+    # HIDDEN_COMMANDS from here down: machinery a8s and cron invoke, plus
+    # maintainer tooling. Omitting `help=` keeps each command and its own
+    # --help intact while dropping it from the top-level listing.
+    dispatch_p = sub.add_parser(
+        "dispatch", description="Handle one delivered message (the a8s invoke entry)."
+    )
+    _add_common(dispatch_p)
+    dispatch_p.add_argument("--from", dest="from_agent", required=True)
+    dispatch_p.add_argument(
+        "--to",
+        required=True,
+        help="Full recipient as delivered ($RECIPIENT): <node> or <node>:<member>.",
+    )
+    dispatch_p.add_argument("--message", required=True)
+    dispatch_p.add_argument(
+        "--no-drain",
+        action="store_true",
+        help="Skip the deferred-message drain passes around this message.",
+    )
+    _add_tell_flags(dispatch_p)
+    dispatch_p.set_defaults(func=cmd_dispatch)
+
+    clear_p = sub.add_parser(
+        "clear", description="Maintenance: prune stale locks, expire tasks, drain."
+    )
+    _add_common(clear_p, with_node=True)
+    _add_older_than(clear_p)
+    _add_tell_flags(clear_p)
+    clear_p.set_defaults(func=cmd_clear)
+
+    idle_p = sub.add_parser(
+        "idle",
+        description="Idle pass: nudge active agents with unfinished business, then clear.",
+    )
+    _add_common(idle_p, with_node=True)
+    _add_older_than(idle_p)
+    _add_tell_flags(idle_p)
+    idle_p.set_defaults(func=cmd_idle)
+
+    judge_p = sub.add_parser(
+        "judge",
+        description="Grade a finished run against the MAST failure taxonomy "
+        "(post-hoc; the report is for humans, not agents).",
+    )
+    judge_p.add_argument(
+        "node", nargs="?",
+        help="Team node name (default: sole ~/.config/r4t team).",
+    )
+    judge_p.add_argument(
+        "--rig", required=True,
+        help="Configured rig that runs the judge prompts.",
+    )
+    judge_p.add_argument(
+        "--json", action="store_true",
+        help="Machine-readable report on stdout.",
+    )
+    judge_p.add_argument(
+        "--rig-config",
+        help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    judge_p.set_defaults(func=cmd_judge)
 
     sandbox_p = sub.add_parser(
         "sandbox",
-        help="Disposable end-to-end team run in a temp A8S_HOME/R4T_HOME; "
+        description="Disposable end-to-end team run in a temp A8S_HOME/R4T_HOME; "
         "logs to stderr, report on stdout.",
     )
     sandbox_p.add_argument(
@@ -1944,7 +2028,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     lab_p = sub.add_parser(
         "lab",
-        help="Run repo-bundled repeatable experiments (see apps/r4t/experiments/).",
+        description="Run repo-bundled repeatable experiments (see apps/r4t/experiments/).",
     )
     lab_p.set_defaults(func=cmd_lab_overview)
     lab_sub = lab_p.add_subparsers(dest="action", required=False)
