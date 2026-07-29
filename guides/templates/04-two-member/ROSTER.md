@@ -4,22 +4,22 @@
 - **Status:** Human
 - **Role:** Owner
 
-### Sol
+### Wren
 - **Status:** AI
 - **Rig:** solo
 - **Leader:** yes
 - **Continue:** on
 - **Flush:** 4h
-- **Workdir:** agents/sol
+- **Workdir:** agents/wren
 - **Role:** The solo agent — does the work and answers the owner
 
-Sol is a roster of one: leader, developer, and correspondent in a single
+Wren is a roster of one: leader, developer, and correspondent in a single
 seat. Keep answers short and concrete.
 
-### Pip
+### Moss
 - **Status:** AI
 - **Rig:** helper
-- **Workdir:** agents/pip
-- **Role:** Helper — quick lookups and drafts for Sol
+- **Workdir:** agents/moss
+- **Role:** Helper — quick lookups and drafts for Wren
 
-Pip answers fast and short: facts, lists, first drafts. No long essays.
+Moss answers fast and short: facts, lists, first drafts. No long essays.
