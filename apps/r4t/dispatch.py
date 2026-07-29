@@ -112,6 +112,10 @@ PROMPT_DEFAULTS: dict[str, str] = {
         "Reply to them with where things stand — what is done and what remains. "
         "You do not have to finish the work, just report current state."
     ),
+    "history_in_harness": (
+        "This turn continues the session you are already in — your earlier "
+        "messages and replies are above in it, so they are not repeated here."
+    ),
     "flush_dump": "Save your current state and progress to STATUS.md.",
     "refound_preamble": "Check your STATUS.md to refresh your memory.",
     "mission_review": (
@@ -482,7 +486,15 @@ def build_prompt(
     member: Member,
     batch: list[dict],
     rig: Rig,
+    *,
+    continues: bool = False,
 ) -> str:
+    """`continues` means this turn runs inside the CLI's own conversation
+    (`Continue: on`, a rig that resumes, and not a refound) — the harness
+    already carries the whole conversation, so embedding r4t's transcript of it
+    would send the same context twice. A one-line note stands in its place so
+    the missing section never reads as amnesia. Echo members always get the
+    transcript: they have no CLI conversation at all."""
     history = state.read_history(ctx.node, member.name)
     teammates = _teammate_lines(ctx, roster, member)
     message_lines: list[str] = []
@@ -528,6 +540,10 @@ def build_prompt(
         workdir_lines = [
             ctx.prompt("workdir_note", workplace=ctx.workplace.resolve())
         ]
+    history_section = (
+        ctx.prompt("history_in_harness") if continues
+        else history.strip() or "(no prior messages — this is your first recorded turn)"
+    )
     parts = [
         ctx.prompt(
             "intro",
@@ -542,7 +558,7 @@ def build_prompt(
         member.persona or f"### {member.name}",
         "",
         "## Your conversation so far (messages you received and sent)",
-        history.strip() or "(no prior messages — this is your first recorded turn)",
+        history_section,
         "",
         "## Messages since your last turn",
         *(message_lines or ["(none)"]),
@@ -1262,6 +1278,32 @@ def _capture_turn(
         )
 
 
+def _refound_turn(ctx: DispatchContext, member: Member, rig: Rig) -> bool:
+    """True when this turn must found the member's conversation instead of
+    continuing it — no continue argv, a read-your-state preamble on the prompt,
+    and the embedded history kept (a cold CLI carries nothing).
+
+    Rig-swap retirement happens here: the conversation is keyed on the CLI, so
+    a rig that now drives a different CLI cannot resume it — the old CLI may be
+    quota-dead, so no dump turn; state on disk is whatever the last flush or
+    the member's own writing left. A swap that keeps the CLI key (model-only,
+    launcher variant) keeps the conversation."""
+    if not member.continue_conversation:
+        return False
+    convo = state.read_conversation(ctx.node, member.name)
+    if convo and not convo.get("retired") and convo.get("cli") != rig.cli:
+        state.retire_conversation(ctx.node, member.name)
+        state.append_log(
+            ctx.node,
+            f"r4t: CONTINUE-SWAP {member.name.lower()} (rig {rig.name}) "
+            f"drives {rig.cli!r} but the conversation lives on "
+            f"{convo.get('cli')!r} — retired; this turn refounds from "
+            "state on disk",
+        )
+        convo = {}
+    return not convo or bool(convo.get("retired"))
+
+
 def _run_turn(
     ctx: DispatchContext,
     config: RigConfig,
@@ -1277,27 +1319,12 @@ def _run_turn(
     newest_hop = int(batch[-1].get("hop", 0) or 0)
     newest_sender = str(batch[-1].get("from", "")) or f"{ctx.node}"
 
-    # Rig-swap retirement: the conversation is keyed on the CLI, so a rig that
-    # now drives a different CLI cannot resume it — the old CLI may be
-    # quota-dead, so no dump turn; state on disk is whatever the last flush or
-    # the member's own writing left. A swap that keeps the CLI key (model-only,
-    # launcher variant) keeps the conversation. A retired or absent record
-    # makes this turn a refound: no continue argv, and a read-your-state
-    # preamble tops the prompt.
-    refound = False
-    if member.continue_conversation:
-        convo = state.read_conversation(ctx.node, member.name)
-        if convo and not convo.get("retired") and convo.get("cli") != rig.cli:
-            state.retire_conversation(ctx.node, member.name)
-            state.append_log(
-                ctx.node,
-                f"r4t: CONTINUE-SWAP {member.name.lower()} (rig {rig.name}) "
-                f"drives {rig.cli!r} but the conversation lives on "
-                f"{convo.get('cli')!r} — retired; this turn refounds from "
-                "state on disk",
-            )
-            convo = {}
-        refound = not convo or bool(convo.get("retired"))
+    refound = _refound_turn(ctx, member, rig)
+    # The one fact the rest of the turn keys on: this turn really does run
+    # inside the CLI's existing conversation. It drives the continue argv AND
+    # the prompt (which then omits the history the CLI is already carrying), so
+    # it is decided once, here, before the prompt is built.
+    continuing = member.continue_conversation and rig.supports_continue and not refound
 
     variant = state.take_rotation(ctx.node, rig.name, rig.pool_size)
     staging = state.prepare_staging(ctx.node, member.name)
@@ -1312,7 +1339,7 @@ def _run_turn(
             "started": state.utc_now(),
         },
     )
-    prompt = build_prompt(ctx, roster, member, batch, rig)
+    prompt = build_prompt(ctx, roster, member, batch, rig, continues=continuing)
     if refound:
         prompt = ctx.prompt("refound_preamble") + "\n\n" + prompt
 
@@ -1325,9 +1352,8 @@ def _run_turn(
     env["R4T_MEMBER"] = member.name
     # `Continue: on` — the member's own CLI conversation carries its recent work
     # forward and the provider cache prices the wake as a continuation rather
-    # than a fresh full prompt. rig_for has already refused any member whose rig
-    # cannot continue, so no second check is needed here.
-    if member.continue_conversation and not refound:
+    # than a fresh full prompt.
+    if continuing:
         env["R4T_CONTINUE"] = "1"
     # The org's OS-level boundary (org.py) rides in the same way — one setting
     # wraps every member turn regardless of rig (machinery outside, hands inside).
