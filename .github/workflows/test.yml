@@ -71,6 +71,16 @@ jobs:
       - run: pip install pytest
       - run: python -m pytest apps/k7e/tests/ -x -q -m "not llm"
 
+  ark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest apps/ark/tests/ -x -q
+
   r4t-isolation:
     runs-on: ubuntu-latest
     needs: changes

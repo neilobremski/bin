@@ -10,6 +10,7 @@ All bash scripts use `#!/usr/bin/env bash` instead of `#!/bin/bash`. This allows
 
 | Command | Description |
 |---------|-------------|
+| `ark` | Front door to the Ark Suite — suite status and `ark doctor` prereq probes ([docs](docs/ark.md)) |
 | `n0b` | Kitchen-sink utilities — `n0b json`, `n0b az tail`, `n0b ai video`, etc. ([apps/n0b/README.md](apps/n0b/README.md)) |
 | `h` | Highlight text patterns in color by piping ([docs](docs/h.md)) |
 | `install.sh` | Add ~/bin directory to PATH |
