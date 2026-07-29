@@ -332,11 +332,11 @@ Wren still knows. The team is whole.
 
 One line in the roster: bound how long Wren's conversation may sit idle.
 
-**Replace** `~/ark/silo/ROSTER.md` — in Wren's block, directly under
-`- **Continue:** on`, add:
+**Replace** `~/ark/silo/ROSTER.md` — in Wren's block, swap the `Continue:`
+line for a duration:
 
 ```markdown
-- **Flush:** 15m
+- **Continue:** 15m
 ```
 
 A conversation idle past fifteen minutes is retired — Wren is prompted
@@ -371,7 +371,7 @@ in commands.)
 cd ~/ark/silo
 git init -q
 git add ROSTER.md
-git commit -q -m "silo roster: Wren, continue on, flush 15m"
+git commit -q -m "silo roster: Wren, continue 15m"
 ```
 
 Copy-paste templates for this chapter's final state live in

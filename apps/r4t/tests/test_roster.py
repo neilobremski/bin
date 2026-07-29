@@ -7,7 +7,6 @@ import pytest
 
 from roster import (
     RosterError,
-    flush_warnings,
     load_roster,
     parse_roster,
     resolve_roster_path,
@@ -97,47 +96,43 @@ class TestParsing:
         assert ana.rig == "r"
         assert not ana.errors
 
-    def test_flush_bare_seconds(self):
-        roster = parse(
-            "### A\n- **Rig:** r\n- **Continue:** on\n"
-            "- **Flush:** 90\n"
-        )
-        assert roster.find("a").flush_seconds == 90.0
+    def test_continue_on_has_no_flush_window(self):
+        assert parse(CONTINUE_TEXT).find("ana").flush_seconds is None
+
+    def test_continue_bare_seconds(self):
+        member = parse("### A\n- **Rig:** r\n- **Continue:** 90\n").find("a")
+        assert member.continue_conversation is True
+        assert member.flush_seconds == 90.0
 
     @pytest.mark.parametrize(
         "value,seconds",
         [("30s", 30.0), ("5m", 300.0), ("4h", 14400.0), ("2d", 172800.0)],
     )
-    def test_flush_suffixes(self, value, seconds):
-        roster = parse(
-            f"### A\n- **Rig:** r\n- **Continue:** on\n"
-            f"- **Flush:** {value}\n"
-        )
-        assert roster.find("a").flush_seconds == seconds
+    def test_continue_duration_suffixes(self, value, seconds):
+        member = parse(f"### A\n- **Rig:** r\n- **Continue:** {value}\n").find("a")
+        assert member.continue_conversation is True
+        assert member.flush_seconds == seconds
 
-    def test_flush_absent_is_none(self):
-        assert parse(CONTINUE_TEXT).find("ana").flush_seconds is None
+    def test_continue_off_has_no_flush_window(self):
+        assert parse(CONTINUE_TEXT).find("cid").flush_seconds is None
 
-    def test_flush_malformed_disables_member(self):
-        roster = parse(
-            "### A\n- **Rig:** r\n- **Continue:** on\n"
-            "- **Flush:** soon\n"
-        )
-        assert "Flush" in roster.find("a").error
+    @pytest.mark.parametrize("value", ["0", "0m", "-5m"])
+    def test_continue_non_positive_duration_disables_member(self, value):
+        member = parse(f"### A\n- **Rig:** r\n- **Continue:** {value}\n").find("a")
+        assert "Continue must be on, off, or an idle window" in member.error
+        assert member.continue_conversation is False
 
-    def test_flush_without_continue_warns(self):
-        roster = parse(
-            "### A\n- **Rig:** r\n- **Flush:** 4h\n"
-        )
-        warnings = flush_warnings(roster)
-        assert len(warnings) == 1 and warnings[0].startswith("A: Flush")
+    def test_continue_garbage_disables_member(self):
+        member = parse("### A\n- **Rig:** r\n- **Continue:** soon\n").find("a")
+        assert "Continue must be on, off, or an idle window" in member.error
+        assert member.continue_conversation is False
 
-    def test_flush_with_continue_does_not_warn(self):
-        roster = parse(
-            "### A\n- **Rig:** r\n- **Continue:** on\n"
-            "- **Flush:** 4h\n"
-        )
-        assert flush_warnings(roster) == []
+    def test_flush_field_disables_member(self):
+        member = parse(
+            "### A\n- **Rig:** r\n- **Continue:** on\n- **Flush:** 4h\n"
+        ).find("a")
+        assert "Flush: is not a field" in member.error
+        assert "(try: Continue: 15m)" in member.error
 
     def test_lookup_is_case_insensitive(self, repo):
         roster = load_roster(repo / "ROSTER.md")

@@ -46,9 +46,12 @@ CLI from the same effective directory (the workplace root, or their resolved
 `Workdir:`) land in the same one. `r4t roster check` warns when that happens —
 it never blocks, but the fix is another CLI or distinct `Workdir:` lines.
 
-An optional `- **Flush:** 4h` (bare seconds or an s/m/h/d suffix) bounds how
-long a continuing conversation may sit idle before it is retired — dumped to
-disk, then refounded from that state on the next real message. The `r4t idle`
+`- **Continue:** 4h` (bare seconds or a duration with an s/m/h/d suffix)
+continues the conversation *and* bounds how long it may sit idle before it is
+retired — dumped to disk, then refounded from that state on the next real
+message. `on` leaves the window open; anything but `on`, `off`, or a positive
+duration is a roster error, so an idle window can never ride a member that
+runs cold. The `r4t idle`
 sweep retires a conversation idle past the duration by running a budget-gated
 dump turn (a normal continuing turn prompting the member to save its state to
 STATUS.md). A rig swap that changes the CLI retires the conversation
@@ -58,7 +61,7 @@ and preamble are overridable via the node definition's `prompts` object (keys
 `flush_dump` and `refound_preamble`).
 
 `r4t flush <member> [<member> ...]` (or `--all` for the whole roster) does the
-same on demand, for any member — no `Flush:` field and no idle wait. It runs
+same on demand, for any member — no window and no idle wait. It runs
 the dump turn, retires the conversation, and then archives the member's
 `agents/<member>/history.md` to a timestamped sibling, so the refound reads
 STATUS.md rather than a transcript of everything it was told. Nothing is

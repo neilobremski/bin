@@ -15,14 +15,14 @@ About 20 minutes.
 
 ## 3. Starting state
 
-- Chapter 2 complete: Wren answers at the seat, `Continue: on`, and the
-  customize step left `Flush: 15m` in his roster block.
+- Chapter 2 complete: Wren answers at the seat, and the customize step left
+  `Continue: 15m` in his roster block.
 - Wren's conversation is live — if you just restarted the machine, send one
   seat message so there is a conversation to flush.
 
 ## 4. The change
 
-`Flush: 15m` is a promise you made in chapter 2 without seeing it kept: a
+`Continue: 15m` is a promise you made in chapter 2 without seeing it kept: a
 conversation idle past fifteen minutes is retired on the node's next idle
 pass. Fifteen minutes is the right setting and the wrong demo — you are not
 going to sit here watching a clock. `r4t flush` is the same cycle on your
@@ -51,19 +51,8 @@ You: note — Human without an Address (team cannot tell them)
 /home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
-One rule worth knowing before you rely on the roster field: `Flush:` only
-means something next to `Continue: on` — flush retires a *continuing*
-conversation. Set it on a member without `Continue: on` and the lint warns
-instead of blocking:
-
-```
-warning: Wren: Flush: set but Continue: is off — flush retires a continuing
-conversation, so it is ignored here
-/home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren, 1 warning(s))
-```
-
-Harmless, but it means the field is doing nothing. Yours says OK — keep
-going.
+The idle window rides the same field that turns the conversation on, so a
+member who runs cold can never carry one.
 
 ## 5. Run it
 
@@ -393,7 +382,7 @@ from stale context. `--no-dump` skips the save turn for a conversation you
 do not want banked — a rig that is out of quota and cannot run the turn, or
 one whose recent context is exactly what you are trying to be rid of.
 
-The `Flush:` window covers the same ground while you are not looking, and
+The `Continue:` window covers the same ground while you are not looking, and
 fifteen minutes is a good default: short pauses keep their momentum, and
 after a longer one the flush has already banked what matters in
 `STATUS.md`, so the next message starts fresh without starting over. Set it

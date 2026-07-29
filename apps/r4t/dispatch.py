@@ -1848,7 +1848,7 @@ def _quiet_task_sweep(
 #
 # A continuing conversation left idle eventually goes stale or falls out of
 # the provider cache — re-caching a huge context at frontier prices costs real
-# money for one message. `Flush: <duration>` bounds that: once the member's
+# money for one message. `Continue: <duration>` bounds that: once the member's
 # last turn is older than the duration, a DUMP TURN (a normal continuing turn
 # whose prompt asks the member to write its state to disk) runs and the
 # conversation is retired; the next real message refounds cold from that state.
@@ -1927,9 +1927,9 @@ def _flush_sweep(
 
 # ---------- manual flush (the on-demand verb) ----------
 #
-# The sweep waits out `Flush:`; the verb runs on the operator's word, so it
-# checks neither. It goes one step further than the sweep and archives the
-# member's history log: the refound then reads STATUS.md and nothing else,
+# The sweep waits out the `Continue:` window; the verb runs on the operator's
+# word, so it checks neither. It goes one step further than the sweep and
+# archives the member's history log: the refound reads STATUS.md and nothing else,
 # which is what makes a memory test provable and what cures a conversation
 # whose recent transcript is the problem.
 

@@ -54,7 +54,6 @@ from roster import (
     Member,
     Roster,
     RosterError,
-    flush_warnings,
     load_roster,
     resolve_roster_path,
 )
@@ -1425,9 +1424,6 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
         for message in continue_collisions(roster, config, org.workplace):
             print(f"warning: {message}")
             warnings += 1
-    for message in flush_warnings(roster):
-        print(f"warning: {message}")
-        warnings += 1
     for severity, message in roster.tree_problems():
         if severity == "error":
             print(message)
