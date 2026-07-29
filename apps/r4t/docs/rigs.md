@@ -57,6 +57,39 @@ member's next turn runs cold with a read-your-state preamble; the dump prompt
 and preamble are overridable via the node definition's `prompts` object (keys
 `flush_dump` and `refound_preamble`).
 
+## `Workdir:` and the root the harness advertises
+
+`- **Workdir:** <path>` in the roster runs a member's turns from its own
+directory (relative paths resolve against the workplace; absolute and `~`
+paths may live outside the repo). r4t sets the harness subprocess cwd to it,
+and the member's prompt names it as the absolute root everything it writes
+belongs under.
+
+**Rigs do not all treat that directory as the project root.** The
+opencode-family presets keep two paths: the working directory and a separate
+*workspace root* discovered by walking up for a `.git` — the enclosing repo.
+Both are shown to the model, and a model that takes the advertised root at its
+word writes there by absolute path. `claude`/`cursor` advertise no competing
+root, so their members stay in the workdir. No opencode flag or env var pins
+the root; `--dir` does not.
+
+The `ollama launch`-wrapped presets are worse: the wrapper does not carry the
+subprocess cwd through, so the harness runs in whatever directory invoked r4t
+(under a8s, the agent root) and never sees the workdir at all. A relative path
+from one of those members lands there, not in the workdir — measured, not
+inferred.
+
+So the prompt is the portable mitigation, and the only one that reaches every
+rig: the intro states the member's absolute working directory, tells it to
+write under that path rather than trusting a bare relative one, and tells it
+to ignore any workspace/project root its tools advertise. It is doctrine, not
+a guarantee — models obey it imperfectly, and it is overridable per node via
+the `prompts` object's `intro` key. When placement has to be certain, change
+the filesystem instead: give the workdir its own `.git`
+(`git worktree add agents/bob`), or point `Workdir:` at an absolute path with
+no repo above it. See issue #273 for the investigation and the obedience
+measurements.
+
 ## Picking a model (`--model`)
 
 `r4t rig add` and `r4t rig swap` take an optional `--model`. For most presets

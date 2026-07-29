@@ -811,6 +811,56 @@ class TestContinueTurns:
         assert state.queue_depth(NODE, "ana") == 1  # normal requeue path
 
 
+HISTORY_HEADER = "## Your conversation so far"
+IN_HARNESS = "This turn continues the session you are already in"
+
+
+class TestContinuedTurnHistory:
+    """A turn that really resumes the CLI's conversation must not also carry
+    r4t's transcript of it — the harness already has every word."""
+
+    def test_continuing_turn_omits_the_history(self, continue_ctx):
+        ctx, calls = continue_ctx
+        run_one(ctx, "boss", "acme:ana", "first task")
+        assert run_one(ctx, "boss", "acme:ana", "second task") == 1
+        argv = continue_argvs(calls)[-1]
+        assert argv[-1] == "--continue"  # genuinely a continuation
+        prompt = argv[0]
+        assert HISTORY_HEADER in prompt  # the section stays, its body changes
+        assert IN_HARNESS in prompt
+        assert "first task" not in prompt  # the CLI is already carrying it
+
+    def test_refound_turn_still_embeds_the_history(self, continue_ctx):
+        ctx, calls = continue_ctx
+        run_one(ctx, "boss", "acme:ana", "first task")
+        state.retire_conversation(NODE, "ana")
+        assert run_one(ctx, "boss", "acme:ana", "second task") == 1
+        argv = continue_argvs(calls)[-1]
+        assert "--continue" not in argv  # cold CLI: the transcript is all it has
+        assert "first task" in argv[0]
+        assert IN_HARNESS not in argv[0]
+
+    def test_member_without_continue_keeps_the_history(self, continue_ctx):
+        ctx, calls = continue_ctx
+        run_one(ctx, "acme:ana", "acme:bob", "first task")
+        assert run_one(ctx, "acme:ana", "acme:bob", "second task") == 1
+        prompt = continue_argvs(calls)[-1][0]
+        assert "first task" in prompt
+        assert IN_HARNESS not in prompt
+
+    def test_echo_member_keeps_the_history(self, ctx):
+        # An echo member has no CLI conversation at all — the embedded
+        # transcript IS its memory, whatever the caller passes.
+        state.append_history(NODE, "phil", "## old turn\n\nearlier chatter")
+        roster = load_roster(ctx.roster_path)
+        prompt = dispatch.build_prompt(
+            ctx, roster, roster.find("phil"), [], Rig(name="t", echo=True),
+            continues=True,
+        )
+        assert "earlier chatter" in prompt
+        assert IN_HARNESS not in prompt
+
+
 class TestConversationRetirement:
     def test_rig_swap_retires_and_refounds(self, continue_ctx):
         # The recorded conversation lives on another CLI: retire it (no dump
