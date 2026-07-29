@@ -124,17 +124,20 @@ You should see:
 
 ```
 added rig 'solo' (cursor) to /home/you/.config/r4t/rigs.json
-  invoke: agent -p --trust --force --approve-mcps {prompt}
+  invoke: agent --model auto -p --trust --force --approve-mcps {prompt}
 Reference it from ROSTER.md: `- **Rig:** solo`
 set solo echo = true in /home/you/.config/r4t/rigs.json
 ```
 
-No `--model` is the deliberate part: the invoke line carries no model
-flag, so the harness runs whatever your Cursor subscription defaults to —
-covered by what you already pay. Pin one with `--model <name>` and you
-can land on a frontier model billed as usage-based credits, which a
-chatty agent burns through fast; add the flag only when you mean to.
-(`agent models` lists what your account can run.)
+Naming no model of your own is the deliberate part: the preset writes
+`--model auto`, which is the Cursor CLI's own way of saying *whatever my
+subscription defaults to* — covered by what you already pay. The pin
+itself matters. Left off entirely, `agent` reuses the last model it was
+given on this machine, so an invoke with no flag inherits a choice you
+cannot see and did not make here. Name one yourself with
+`--model <name>` and you can land on a frontier model billed as
+usage-based credits, which a chatty agent burns through fast; do that
+only when you mean to. (`agent models` lists what your account can run.)
 
 `echo true` makes Wren **stdout-only**: its turn prompt carries no
 messaging doctrine, and whatever it prints becomes its one reply to you.

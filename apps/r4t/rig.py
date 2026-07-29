@@ -140,6 +140,12 @@ HARNESS_PRESETS: dict[str, dict] = {
             "{prompt}",
         ],
         "model_argv": ["--model", "{model}"],
+        # `agent` reuses the LAST --model it was given when the flag is
+        # omitted, so an unpinned invoke inherits invisible machine-global
+        # state — a rig founded "modelless" kept riding a usage-limited
+        # frontier model (#275). `auto` is the CLI's own way to say "the
+        # subscription default", so pin it; an explicit --model still wins.
+        "model_default": "auto",
         "continue_argv": ["--continue"],
         "no_prior_conversation": r"no previous chats found",
     },
@@ -570,8 +576,13 @@ def continue_collisions(roster: Roster, config: RigConfig, workplace: Path) -> l
 
 
 def format_preset_invoke(preset: str) -> str:
+    """The invoke a bare `rig add <preset>` produces, for display. Presets whose
+    argv carries an inline `{model}` show the placeholder — they have no bare
+    form to display."""
     entry = HARNESS_PRESETS[preset]
-    return " ".join(entry["invoke"])
+    if any("{model}" in arg for arg in entry["invoke"]):
+        return " ".join(entry["invoke"])
+    return " ".join(build_preset_invoke(preset))
 
 
 def build_preset_invoke(preset: str, *, model: str | None = None) -> list[str]:
@@ -587,14 +598,16 @@ def build_preset_invoke(preset: str, *, model: str | None = None) -> list[str]:
       ships new versions, so a value baked in at add-time would go stale).
     - `model_argv` presets without a resolver (claude/codex/cursor/opencode):
       splice the flag pair with the resolved value now. --model is OPTIONAL —
-      absent, the base argv is returned and the CLI's own default applies.
+      absent, the base argv is returned and the CLI's own default applies,
+      unless the preset names a `model_default` to stand in (cursor, whose CLI
+      would otherwise reuse the last model used on the machine).
     """
     preset_key = preset.strip().lower()
     if preset_key not in HARNESS_PRESETS:
         known = ", ".join(preset_names())
         raise RigError(f"unknown preset {preset!r}; choose one of: {known}")
     entry = HARNESS_PRESETS[preset_key]
-    model_value = (model or "").strip()
+    model_value = (model or "").strip() or entry.get("model_default", "")
 
     if any("{model}" in arg for arg in entry["invoke"]):
         if not model_value:
