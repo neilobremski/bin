@@ -98,9 +98,10 @@ and on-disk pid/log paths. The contract changes only when the user declares v1.
 
 ### SKILL.md YAML — quoted scalars only
 
-Codex's YAML parser is strict and fails silently on unquoted descriptions
-containing colons or `FILE:` lines. Always quote `name:` and `description:`
-in skill frontmatter.
+Harness YAML parsers differ: copilot rejects unquoted descriptions
+containing colons outright (skill dropped), and other parsers have their
+own strictness. Always quote `name:` and `description:` in skill
+frontmatter.
 
 ## Top-level scripts: `tell`
 
