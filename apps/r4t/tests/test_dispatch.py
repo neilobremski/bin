@@ -1179,6 +1179,15 @@ def stdout_only(rig, prompt, cwd, *, env=None, variant=0):
     return 0, ANSWER, 1.0, False
 
 
+def enqueue_internal(ctx, name, body="Save your state to STATUS.md."):
+    """The shape every r4t-generated turn shares — flush dump, class=error,
+    mission review: a prompt from the synthetic sender `r4t:<node>`."""
+    state.enqueue(NODE, name, {
+        "from": f"r4t:{NODE}", "to": f"{NODE}:{name}",
+        "thread": new_ulid(), "hop": 0, "class": "auto", "body": body,
+    })
+
+
 class TestStdoutFallback:
     def test_stdout_becomes_reply_to_external_sender(self, ctx, repo, r4t_home):
         handle_message(ctx, "boss", "acme:gerry", "question", run_fn=stdout_only)
@@ -1280,6 +1289,15 @@ class TestStdoutFallback:
         handle_message(ctx, "boss", "acme:gerry", "question", run_fn=crashed)
         assert outbox_envelopes(repo) == []
         assert "STDOUT-REPLY" not in read_log()
+
+    def test_internal_only_batch_stages_nothing(self, ctx, repo, r4t_home):
+        enqueue_internal(ctx, "gerry")
+        assert drain(ctx, run_fn=stdout_only) == 1
+        assert outbox_envelopes(repo) == []
+        text = read_log()
+        assert "r4t: SILENT gerry" in text
+        assert "r4t-internal senders" in text
+        assert "STDOUT-REPLY" not in text
 
 
 def set_echo(config_path, rig_name="leader", **extra):
@@ -1385,6 +1403,40 @@ class TestEchoRig:
         assert [m["from"] for m in parked] == ["acme:gerry"]
         assert parked[0]["content"] == ANSWER.strip()
         assert outbox_envelopes(repo) == []
+
+    def test_dump_turn_stages_nothing(self, ctx, repo, r4t_home):
+        # The flush leak (#293): a dump turn's only sender is `r4t:acme`, which
+        # is no mailbox — its chatter stays transcript.
+        def tell_and_chatter(rig, prompt, cwd, *, env=None, variant=0):
+            outbox = dispatch.Path(env["TELL_OUTBOX_DIR"])
+            msg_id = new_ulid()
+            (outbox / f"{msg_id}.json").write_text(
+                json.dumps({"id": msg_id, "to": "outsider", "content": "sneaky"}),
+                encoding="utf-8",
+            )
+            return 0, ANSWER, 1.0, False
+
+        set_echo(ctx.config_path)
+        enqueue_internal(ctx, "gerry")
+        assert drain(ctx, run_fn=tell_and_chatter) == 1
+        assert outbox_envelopes(repo) == []  # staged noise still discarded
+        assert seat_messages() == []
+        text = read_log()
+        assert "r4t: SILENT gerry" in text
+        assert "r4t-internal senders" in text
+        assert "ECHO-REPLY" not in text
+
+    def test_mixed_batch_replies_to_the_real_sender(self, ctx, repo, r4t_home):
+        # A dump prompt landing behind a real message must not swallow the
+        # reply: the newest REAL sender is the target.
+        set_echo(ctx.config_path)
+        handle_message(ctx, "boss", "acme:gerry", "question", drain_after=False)
+        enqueue_internal(ctx, "gerry")
+        assert drain(ctx, run_fn=stdout_only) == 1
+        envelopes = outbox_envelopes(repo)
+        assert [e["to"] for e in envelopes] == ["boss"]
+        assert envelopes[0]["content"] == ANSWER.strip()
+        assert "r4t: ECHO-REPLY gerry" in read_log()
 
     def test_reply_to_internal_sender_wakes_them(self, ctx, fake_harness, r4t_home):
         set_echo(ctx.config_path, rig_name="junior-dev")

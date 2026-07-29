@@ -176,6 +176,12 @@ simply asked a question just answers). A reply longer than `echo_max_chars`
 (default 1500) is truncated in the body with the full text attached to the
 same envelope as a markdown file; empty or chrome-only output stays silent.
 
+`r4t:<node>` is the dispatcher's own voice — the flush dump prompt, an error
+notice, a mission review — and no mailbox. A turn whose whole batch came from
+it has no sender to answer, so the stdout stays transcript (`SILENT` in the
+log); the same rule holds the `STDOUT-REPLY` fallback on non-echo rigs. A batch
+mixing r4t's prompt with a real message still replies to the real sender.
+
 ## The economics: budgets, not cuts
 
 A member runs while its own spend bucket, the shared cell bucket, and (if the
