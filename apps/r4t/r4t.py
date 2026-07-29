@@ -58,7 +58,6 @@ from roster import (
 )
 
 DEFAULT_TASK_TTL_SECONDS = 7 * 86400
-R4T_DIR = Path(__file__).resolve().parent
 
 COMMAND_HELP = [
     ("init", "Write starter ROSTER.md and ~/.config/r4t/rigs.json; print a8s registration"),
@@ -1321,12 +1320,11 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     team = re.sub(r"[^a-z0-9_-]+", "-", root.name.lower()).strip("-") or "team"
     node = f"{team}-node"
-    definition = R4T_DIR / "example-definition.json"
     print()
     print("Register and start the team (a namespace prefix cannot share a")
     print("name with its agent, so the node is registered as <team>-node):")
     print()
-    print(f"  a8s add {node} {root} {definition}")
+    print(f"  a8s add {node} {root} r4t")
     print(f"  a8s namespace {team} {node}")
     print(f"  a8s start {node}")
     print(f'  tell {team} "hello"            # bare namespace -> roster leader')

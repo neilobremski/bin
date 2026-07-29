@@ -50,7 +50,7 @@ r4t init
 It then prints the exact **a8s registration** sequence for your repo name:
 
 ```bash
-a8s add myrepo-node /path/to/my-team-repo ~/bin/apps/r4t/example-definition.json
+a8s add myrepo-node /path/to/my-team-repo r4t
 a8s namespace myrepo myrepo-node
 a8s start myrepo-node
 tell myrepo-node "hello"       # bare agent name -> roster leader
@@ -213,7 +213,7 @@ ordinary `tell` and release after the turn. Full walk-through:
 r4t init --root ~/repos/acme           # keeps an existing ROSTER.md if present
 r4t rig add junior-dev opencode   # if roster references junior-dev
 r4t roster check
-a8s add acme-node ~/repos/acme ~/bin/apps/r4t/example-definition.json
+a8s add acme-node ~/repos/acme r4t
 a8s namespace acme acme-node
 a8s start acme-node
 tell acme "Ship the refactor; report when reviewed."

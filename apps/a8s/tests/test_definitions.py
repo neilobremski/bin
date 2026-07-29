@@ -318,6 +318,15 @@ class TestResolveDefinitionArg:
         custom.write_text("{}")
         assert resolve_definition_arg(str(custom)) == custom.resolve()
 
+    def test_bare_r4t_kind(self):
+        assert resolve_definition_arg("r4t") == default_definition_path("r4t").resolve()
+
+    def test_bare_name_not_shadowed_by_cwd_file(self, tmp_path, monkeypatch):
+        (tmp_path / "r4t").write_text("#!/usr/bin/env bash\n")
+        monkeypatch.chdir(tmp_path)
+        assert resolve_definition_arg("r4t") == default_definition_path("r4t").resolve()
+        assert resolve_definition_arg("./r4t") == (tmp_path / "r4t").resolve()
+
     def test_unknown_bare_raises(self):
         with pytest.raises(FileNotFoundError):
             resolve_definition_arg("no-such-definition-kind")

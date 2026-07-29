@@ -106,10 +106,31 @@ class TestCmdAddBundledDefinition:
         assert cmd_add(["seat", str(agent_root), "filedrop.json"]) == 0
         assert load_registry()["seat"]["definition"] == str(default_definition_path("filedrop"))
 
-    def test_unknown_bare_kind_rejected(self, fake_home, agent_root, capsys):
+    def test_bare_r4t_kind(self, fake_home, agent_root, capsys):
+        from definitions import default_definition_path
+
+        assert cmd_add(["solo-node", str(agent_root), "r4t"]) == 0
+        assert load_registry()["solo-node"]["definition"] == str(
+            default_definition_path("r4t")
+        )
+        capsys.readouterr()
+        assert cmd_ls([]) == 0
+        assert "r4t" in capsys.readouterr().out
+
+    def test_unknown_bare_kind_lists_available(self, fake_home, agent_root, capsys):
         rc = cmd_add(["seat", str(agent_root), "not-a-real-def"])
         assert rc == 1
-        assert "not a file: not-a-real-def" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "unknown definition: not-a-real-def" in err
+        assert "filedrop" in err and "r4t" in err
+
+    def test_unknown_path_reports_not_a_file(self, fake_home, agent_root, tmp_path, capsys):
+        missing = tmp_path / "nope.json"
+        rc = cmd_add(["seat", str(agent_root), str(missing)])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert f"not a file: {missing}" in err
+        assert "unknown definition" not in err
 
     def test_explicit_path_still_works(self, fake_home, agent_root, tmp_path):
         custom = tmp_path / "custom.json"
