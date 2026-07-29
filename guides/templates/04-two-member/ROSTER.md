@@ -7,8 +7,7 @@
 ### Wren
 - **Rig:** silo
 - **Leader:** yes
-- **Continue:** on
-- **Flush:** 15m
+- **Continue:** 15m
 - **Workdir:** agents/wren
 - **Role:** The solo agent — does the work and answers the owner
 

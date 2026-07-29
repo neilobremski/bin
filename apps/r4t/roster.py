@@ -15,11 +15,11 @@ work, and the provider cache makes an expensive rig affordable. It needs a rig
 whose preset supports it (rig.py), and members sharing a CLI in one directory
 share that conversation, so `r4t roster check` warns about the overlap.
 
-`Flush:` (optional, only meaningful with `Continue: on`) is how long the
-member's conversation may sit idle before the `r4t idle` sweep retires it —
-dump state to disk, then refound on the next real message. Bare seconds or an
-s/m/h/d suffix (`Flush: 4h`). Without `Continue: on` it is ignored;
-`r4t roster check` warns.
+`Continue: on` keeps that conversation until something else retires it.
+`Continue: 15m` — bare seconds or a duration with an s/m/h/d suffix — bounds
+it: the `r4t idle` sweep retires a conversation that has sat idle that long,
+dumping state to disk so the member refounds on the next real message. Any
+other value is a member error.
 
 AI is the default and carries no marker. The human seat is marked
 `- **Human:** yes` and is never dispatched; an optional
@@ -58,14 +58,20 @@ FLUSH_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhd]?)$", re.IGNORECASE)
 FLUSH_UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
+CONTINUE_ERROR = (
+    "Continue must be on, off, or an idle window like 15m "
+    "(seconds or a duration with an s/m/h/d suffix)"
+)
+
+
 def parse_flush(value: str) -> float:
     match = FLUSH_RE.match(value.strip())
     if not match:
-        raise ValueError(
-            f"Flush must be seconds or a duration with an s/m/h/d suffix "
-            f"(got {value!r})"
-        )
-    return float(match.group(1)) * FLUSH_UNIT_SECONDS[match.group(2).lower()]
+        raise ValueError(f"{CONTINUE_ERROR} (got {value!r})")
+    seconds = float(match.group(1)) * FLUSH_UNIT_SECONDS[match.group(2).lower()]
+    if seconds <= 0:
+        raise ValueError(f"{CONTINUE_ERROR} (got {value!r})")
+    return seconds
 
 
 class RosterError(Exception):
@@ -219,20 +225,6 @@ class Roster:
         return out
 
 
-def flush_warnings(roster: Roster) -> list[str]:
-    """Warn (never block) where `Flush:` is set without `Continue: on` — flush
-    only retires a continuing conversation, so the field does nothing there."""
-    return [
-        f"{m.name}: Flush: set but Continue: is off — flush retires a "
-        f"continuing conversation, so it is ignored here"
-        for m in roster.members
-        if not m.is_human
-        and not m.errors
-        and m.flush_seconds is not None
-        and not m.continue_conversation
-    ]
-
-
 def resolve_roster_path(root: Path, raw: str | None) -> Path:
     if not raw:
         return root / DEFAULT_ROSTER_NAME
@@ -248,6 +240,10 @@ def _clean(value: str) -> str:
 
 def _is_true(value: str) -> bool:
     return value.strip().lower() in ("yes", "true", "y", "1", "on")
+
+
+def _is_false(value: str) -> bool:
+    return value.strip().lower() in ("", "no", "false", "n", "off")
 
 
 def _member_from_block(name: str, lines: list[str]) -> Member:
@@ -272,13 +268,21 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
     m.role = fields.get("role", fields.get("mandate", ""))
     m.leader = _is_true(fields.get("leader", ""))
     m.address = fields.get("address") or None
-    m.continue_conversation = _is_true(fields.get("continue", ""))
-    flush = fields.get("flush", "")
-    if flush:
+    if "flush" in fields:
+        m.errors.append(
+            "Flush: is not a field — the idle window rides Continue: "
+            "(try: Continue: 15m)"
+        )
+    cont = fields.get("continue", "")
+    if _is_true(cont):
+        m.continue_conversation = True
+    elif not _is_false(cont):
         try:
-            m.flush_seconds = parse_flush(flush)
+            m.flush_seconds = parse_flush(cont)
         except ValueError as e:
             m.errors.append(str(e))
+        else:
+            m.continue_conversation = True
     m.cell = fields.get("cell", "")
     m.lead = fields.get("lead", "")
     m.workdir = fields.get("workdir", "")

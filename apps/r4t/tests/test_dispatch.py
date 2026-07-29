@@ -667,12 +667,10 @@ CONTINUE_ROSTER = textwrap.dedent(
     ### Ana
     - **Rig:** resuming
     - **Leader:** yes
-    - **Continue:** on
-    - **Flush:** 1h
+    - **Continue:** 1h
 
     ### Bob
     - **Rig:** cold
-    - **Flush:** 1h
     """
 )
 
@@ -937,8 +935,8 @@ class TestIdleFlush:
         assert run_idle(ctx)["flushed"] == []
         assert len(continue_argvs(calls)) == before
 
-    def test_flush_ignored_without_continue(self, continue_ctx):
-        # Bob carries Flush: without Continue: on — lint warns; dispatch ignores.
+    def test_no_flush_without_continue(self, continue_ctx):
+        # Bob runs fresh every turn — there is no conversation to retire.
         ctx, calls = continue_ctx
         assert run_one(ctx, "acme:ana", "acme:bob", "task") == 1
         age_last_turn("bob")
@@ -1021,8 +1019,8 @@ class TestFlushVerb:
         assert state.read_history(NODE, "ana") == ""
         assert "FLUSH archived ana" in read_log()
 
-    def test_flush_needs_no_idle_wait_and_no_flush_field(self, continue_ctx):
-        # The sweep waits out `Flush:`; a fresh turn is flushable on the word.
+    def test_flush_needs_no_idle_wait(self, continue_ctx):
+        # The sweep waits out the window; a fresh turn is flushable on the word.
         ctx, _calls = continue_ctx
         self.found(ctx)
         assert run_idle(ctx)["flushed"] == []
