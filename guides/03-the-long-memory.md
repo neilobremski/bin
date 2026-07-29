@@ -390,8 +390,7 @@ premium over ordinary input. Most OpenAI models charge plain input with
 no surcharge at all, though GPT-5.6 writes at a premium again. One miss,
 three different bills.
 
-No provider's boundary sits anywhere near four hours, which is what this
-chapter used to teach. Anthropic's caches hold five minutes by default
+The boundaries are short. Anthropic's caches hold five minutes by default
 and an hour at the outside; GPT-5.6 guarantees at least thirty; older
 OpenAI models can stretch to a day. Fifteen minutes is the default taught
 here because it falls inside the shortest of them: a pause that long has
