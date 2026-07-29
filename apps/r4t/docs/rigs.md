@@ -41,6 +41,12 @@ A CLI keeps ONE conversation per directory, so two members running the same
 CLI in the team workplace land in the same one. `r4t roster check` warns when
 that happens — it never blocks, but the fix is to put them on different CLIs.
 
+`copilot` is the exception: its `--continue` resumes the machine's most recent
+session whatever the directory, so two continuing copilot members share one
+conversation even from different directories — and so does any other org
+running copilot on the same machine. Give at most one member on a machine a
+continuing copilot rig.
+
 ## Picking a model (`--model`)
 
 `r4t rig add` and `r4t rig swap` take an optional `--model`. For most presets

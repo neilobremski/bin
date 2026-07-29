@@ -313,6 +313,18 @@ class TestContinue:
         # claude founds a conversation silently, so it declares no pattern.
         assert not config.rigs["k"].had_no_prior_conversation("No previous chats found.")
 
+    def test_continue_scope_defaults_to_the_directory(self, tmp_path):
+        # copilot resumes the machine's most recent session whatever the cwd
+        # (verified live); every other CLI keys on the directory it runs from.
+        config = load_rig_config(write_config(tmp_path, {
+            "wide": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]},
+            "here": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
+            "none": {"invoke": ["run", "{prompt}"]},
+        }))
+        assert config.rigs["wide"].continue_scope == "global"
+        assert config.rigs["here"].continue_scope == "directory"
+        assert config.rigs["none"].continue_scope == "directory"
+
     def test_cli_key_sees_through_ollama_launch(self, tmp_path):
         config = load_rig_config(write_config(tmp_path, {
             "direct": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
@@ -352,6 +364,7 @@ COLLISION_CONFIG = {
     "solo": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
     "twin": {"preset": "claude", "invoke": ["claude", "--model", "x", "-p", "{prompt}"]},
     "other": {"preset": "cursor", "invoke": ["agent", "-p", "{prompt}"]},
+    "wide": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]},
 }
 
 
@@ -389,6 +402,31 @@ class TestContinueCollisions:
             "### Bob\n- **Status:** AI\n- **Rig:** twin\n"
         ))
         assert len(warnings) == 1 and "Bob" in warnings[0]
+
+    def test_global_scope_warning_says_machine_wide(self, tmp_path):
+        warnings = self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** wide\n- **Continue:** on\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** wide\n"
+        ))
+        assert len(warnings) == 1
+        assert "machine's most recent session" in warnings[0]
+        assert "any other org" in warnings[0]
+        assert "no workdir can separate them" in warnings[0]
+
+    def test_directory_scope_warning_stays_directory_scoped(self, tmp_path):
+        warnings = self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** solo\n"
+        ))
+        assert "per directory" in warnings[0]
+        assert "machine" not in warnings[0]
+
+    def test_global_scope_still_needs_a_same_cli_teammate(self, tmp_path):
+        # The lint sees one roster; a lone copilot member is all it can vouch for.
+        assert self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** wide\n- **Continue:** on\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** other\n"
+        )) == []
 
     def test_humans_and_broken_members_never_collide(self, tmp_path):
         assert self.collisions(tmp_path, (

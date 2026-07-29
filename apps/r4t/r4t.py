@@ -28,6 +28,7 @@ from dispatch import (
     split_recipient,
 )
 from rig import (
+    CONTINUE_SCOPE_GLOBAL,
     RigError,
     HARNESS_PRESETS,
     add_preset_rig,
@@ -972,9 +973,15 @@ def cmd_rig_presets(_args: argparse.Namespace) -> int:
         print(f"  {'':<{width}}  headless: {entry['headless']}")
         print(f"  {'':<{width}}  invoke: {format_preset_invoke(name)}")
         if entry.get("continue_argv"):
+            scope = (
+                " — resumes the machine's most recent session, not this "
+                "directory's"
+                if entry.get("continue_scope") == CONTINUE_SCOPE_GLOBAL
+                else ""
+            )
             print(
                 f"  {'':<{width}}  continue: {' '.join(entry['continue_argv'])} "
-                "(roster `- **Continue:** on`)"
+                f"(roster `- **Continue:** on`){scope}"
             )
     print()
     print("Add one: r4t rig add <rig-name> <preset>")
