@@ -992,6 +992,162 @@ class TestIdleFlush:
         assert convo["retired"] is False
 
 
+def flush(ctx, *names, dump=True, run_fn=run_harness):
+    roster = load_roster(ctx.roster_path)
+    config = load_rig_config(ctx.config_path)
+    members = [roster.find(n) for n in names]
+    return dispatch.run_flush(ctx, config, roster, members, dump=dump, run_fn=run_fn)
+
+
+def history_archives(name="ana"):
+    return sorted(state.agent_dir(NODE, name).glob("history-*.md"))
+
+
+class TestFlushVerb:
+    def found(self, ctx):
+        assert run_one(ctx, "boss", "acme:ana", "first task") == 1
+
+    def test_dump_turn_retires_and_archives_the_history(self, continue_ctx):
+        ctx, calls = continue_ctx
+        self.found(ctx)
+        (result,) = flush(ctx, "ana")
+        dump = continue_argvs(calls)[-1]
+        assert dump[-1] == "--continue"  # the dump rides the conversation
+        assert DUMP_PROMPT in dump[0]
+        assert result["dumped"] and result["retired"]
+        assert state.read_conversation(NODE, "ana")["retired"] is True
+        (archive,) = history_archives()
+        assert "first task" in archive.read_text(encoding="utf-8")
+        assert state.read_history(NODE, "ana") == ""
+        assert "FLUSH archived ana" in read_log()
+
+    def test_flush_needs_no_idle_wait_and_no_flush_field(self, continue_ctx):
+        # The sweep waits out `Flush:`; a fresh turn is flushable on the word.
+        ctx, _calls = continue_ctx
+        self.found(ctx)
+        assert run_idle(ctx)["flushed"] == []
+        assert flush(ctx, "ana")[0]["retired"] is True
+
+    def test_refound_after_flush_carries_no_transcript(self, continue_ctx):
+        ctx, calls = continue_ctx
+        self.found(ctx)
+        flush(ctx, "ana")
+        assert run_one(ctx, "boss", "acme:ana", "new work") == 1
+        argv = continue_argvs(calls)[-1]
+        assert "--continue" not in argv
+        assert argv[0].startswith(REFOUND_PREAMBLE)
+        assert "first task" not in argv[0]
+
+    def test_no_dump_retires_and_archives_without_a_turn(self, continue_ctx):
+        ctx, calls = continue_ctx
+        self.found(ctx)
+        before = len(continue_argvs(calls))
+        (result,) = flush(ctx, "ana", dump=False)
+        assert len(continue_argvs(calls)) == before
+        assert not result["dumped"]
+        assert result["retired"] and result["archived"] is not None
+        assert state.read_conversation(NODE, "ana")["retired"] is True
+
+    def test_several_members_in_one_call(self, continue_ctx):
+        ctx, _calls = continue_ctx
+        self.found(ctx)
+        assert run_one(ctx, "acme:ana", "acme:bob", "task") == 1
+        results = flush(ctx, "ana", "bob")
+        assert [r["member"] for r in results] == ["Ana", "Bob"]
+        assert all(r["archived"] is not None for r in results)
+        assert results[1]["retired"] is False  # Bob holds no conversation
+
+    def test_member_with_nothing_to_flush_reports_clean(self, continue_ctx):
+        ctx, _calls = continue_ctx
+        (result,) = flush(ctx, "bob")
+        assert not result["failed"] and not result["skipped"]
+        assert not result["retired"] and result["archived"] is None
+
+    def test_failed_dump_keeps_the_conversation_and_the_history(self, continue_ctx):
+        """A dump turn that fails banked nothing, so the flush takes nothing
+        away: the conversation still holds the state that never reached disk,
+        and the history log stays in the prompt path. `--no-dump` is the way
+        through for a conversation that can never dump."""
+        ctx, _calls = continue_ctx
+        self.found(ctx)
+        (result,) = flush(ctx, "ana", run_fn=fail_run)
+        assert result["failed"]
+        assert state.read_conversation(NODE, "ana")["retired"] is False
+        assert "first task" in state.read_history(NODE, "ana")
+        assert history_archives() == []
+
+    def test_human_and_broken_members_are_skipped_by_name(self, continue_ctx):
+        ctx, calls = continue_ctx
+        ctx.roster_path.write_text(
+            CONTINUE_ROSTER + "\n### Zoe\n- **Human:** yes\n\n### Rex\n- **Continue:** on\n",
+            encoding="utf-8",
+        )
+        results = flush(ctx, "zoe", "rex")
+        assert results[0]["skipped"] == "human member"
+        assert "Rig" in results[1]["skipped"]
+        assert continue_argvs(calls) == []
+
+    def test_resting_member_is_reported_as_failed(self, continue_ctx):
+        ctx, _calls = continue_ctx
+        self.found(ctx)
+        empty_member_budget(ctx, "ana")
+        (result,) = flush(ctx, "ana")
+        assert "resting" in result["failed"]
+        assert state.read_conversation(NODE, "ana")["retired"] is False
+        assert "FLUSH deferred — ana" in read_log()
+
+
+def flush_cli(ctx, *args):
+    return r4t_main([
+        "flush", "--node", NODE, "--root", str(ctx.root),
+        "--rig-config", str(ctx.config_path), "--no-notify", *args,
+    ])
+
+
+class TestFlushCommand:
+    def test_bare_flush_is_an_error(self, continue_ctx, capsys):
+        ctx, _calls = continue_ctx
+        assert flush_cli(ctx) == 2
+        assert "--all" in capsys.readouterr().err
+
+    def test_members_and_all_together_are_an_error(self, continue_ctx):
+        ctx, _calls = continue_ctx
+        assert flush_cli(ctx, "ana", "--all") == 2
+
+    def test_unknown_member_is_an_error(self, continue_ctx, capsys):
+        ctx, _calls = continue_ctx
+        assert flush_cli(ctx, "zed") == 2
+        assert "no team member named 'zed'" in capsys.readouterr().err
+
+    def test_named_member_flushes(self, continue_ctx, capsys):
+        ctx, _calls = continue_ctx
+        assert run_one(ctx, "boss", "acme:ana", "first task") == 1
+        assert flush_cli(ctx, "ana") == 0
+        out = capsys.readouterr().out
+        assert "flushed ana" in out and "archived history as history-" in out
+        assert state.read_conversation(NODE, "ana")["retired"] is True
+
+    def test_all_covers_the_roster_and_names_who_was_skipped(
+        self, continue_ctx, capsys
+    ):
+        ctx, _calls = continue_ctx
+        assert run_one(ctx, "boss", "acme:ana", "first task") == 1
+        assert flush_cli(ctx, "--all", "--no-dump") == 0
+        out = capsys.readouterr().out
+        assert "flushed ana" in out
+        assert "nothing to flush for bob" in out
+
+    def test_failed_dump_exits_non_zero(self, continue_ctx, capsys, tmp_path):
+        ctx, _calls = continue_ctx
+        assert run_one(ctx, "boss", "acme:ana", "first task") == 1
+        (tmp_path / "continue-harness.py").write_text(
+            "import sys\nsys.exit(1)\n", encoding="utf-8"
+        )
+        assert flush_cli(ctx, "ana") == 1
+        assert "failed ana" in capsys.readouterr().out
+        assert state.read_conversation(NODE, "ana")["retired"] is False
+
+
 class TestTurnSerialization:
     def test_message_arriving_mid_turn_never_spawns_a_second_turn(self, ctx):
         """Pins the guarantee continue depends on: one turn at a time per

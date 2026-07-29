@@ -2,17 +2,16 @@
 
 ## 1. Capability
 
-At the end of this chapter Wren survives conversation death. You will watch
-the **flush cycle** end an idle conversation on purpose — Wren is prompted
-once to write his state to `STATUS.md`, the conversation is retired, and
-the next real message **refounds** him from that file. Then you will do
-something harsher: swap Wren's rig to a different CLI mid-life and watch him
-come back coherent on the other side. The conversation is disposable; the
-agent is not.
+At the end of this chapter Wren survives conversation death. You will end
+his conversation on purpose — Wren is prompted once to write his state to
+`STATUS.md`, the conversation is retired, and the next real message
+**refounds** him from that file. Then you will do something harsher: swap
+Wren's rig to a different CLI mid-life and watch him come back coherent on
+the other side. The conversation is disposable; the agent is not.
 
 ## 2. Time
 
-About 30 minutes, most of it deliberate waiting.
+About 20 minutes.
 
 ## 3. Starting state
 
@@ -24,17 +23,19 @@ About 30 minutes, most of it deliberate waiting.
 ## 4. The change
 
 `Flush: 15m` is a promise you made in chapter 2 without seeing it kept: a
-conversation idle past fifteen minutes is retired. Fifteen minutes is the
-right setting and still the wrong demo — you are not going to sit here
-watching a clock. The value takes bare seconds or an `s`/`m`/`h`/`d`
-suffix, so shrink the window further for one session:
+conversation idle past fifteen minutes is retired on the node's next idle
+pass. Fifteen minutes is the right setting and the wrong demo — you are not
+going to sit here watching a clock. `r4t flush` is the same cycle on your
+word:
 
-**Replace** `~/ark/silo/ROSTER.md` — in Wren's block, the `Flush:` line
-becomes:
-
-```markdown
-- **Flush:** 60
+```bash
+r4t flush --node silo wren
 ```
+
+It runs the dump turn, retires the conversation, and archives Wren's
+message history — the transcript r4t keeps for him — so a refounded Wren
+has exactly one place left to remember from. That last part is what makes
+the rest of this chapter a test rather than a demonstration.
 
 **Run**
 
@@ -50,8 +51,8 @@ You: note — Human without an Address (team cannot tell them)
 /home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
-One rule worth knowing before you rely on this line: `Flush:` only means
-something next to `Continue: on` — flush retires a *continuing*
+One rule worth knowing before you rely on the roster field: `Flush:` only
+means something next to `Continue: on` — flush retires a *continuing*
 conversation. Set it on a member without `Continue: on` and the lint warns
 instead of blocking:
 
@@ -82,51 +83,48 @@ You should see:
 Supply cache at grid square K-19 recorded. Confirming storage complete.
 ```
 
-Now leave the team alone for a bit over a minute — the window is 60
-seconds of *idle*, measured from Wren's last completed turn. Then run the
-idle sweep. `r4t idle` is the janitor pass a running node performs on its
-own; invoking it by hand lets you watch it work:
+Now end the conversation:
 
 **Run**
 
 ```bash
-r4t idle --node silo
+r4t flush --node silo wren
 ```
 
 You should see:
 
 ```
-drained 0 queued turn(s); nudged the leader on 0 quiet thread(s)
-pruned 0 stale lock(s); expired 0 thread(s); drained 0 more queued turn(s)
+flushed wren — dumped state to disk, retired the conversation, archived history as history-20260729T052013449271Z.md
 ```
 
-The summary doesn't mention the flush — the receipt lives in the team log
-and on disk, which is where the next section takes you.
+One line per member. The full receipt lives in the team log and on disk,
+which is where the next section takes you.
 
 ## 6. Expected receipt
 
 **Run**
 
 ```bash
-r4t logs --node silo -n 6
+r4t logs --node silo -n 7
 ```
 
 You should see:
 
 ```
-r4t: FLUSH dump turn -> wren (conversation idle > 60s)
+r4t: FLUSH dump turn -> wren (r4t flush)
 turn: 1 message(s) -> Wren (threads 01ABC..., rig silo)
 done: Wren, exit 0 in 28.8s
 r4t: ECHO-REPLY wren (rig silo) 674 bytes of cleaned stdout staged as the reply to r4t:silo
 r4t: RELEASED silo:wren -> r4t:silo thread=01ABC... hop=1
 r4t: FLUSH retired wren's conversation — the next real message refounds it from state on disk
+r4t: FLUSH archived wren's history log as history-20260729T052013449271Z.md — a fresh one starts at the next turn
 ```
 
-Two `FLUSH` events bracket a real turn. The **dump turn** is an ordinary
+Three `FLUSH` events around a real turn. The **dump turn** is an ordinary
 continuing turn whose prompt asks one thing: "Save your current state and
 progress to STATUS.md." It is logged, captured, and budgeted like any
-other turn, and only if it exits cleanly is the conversation retired. Look
-at what Wren wrote:
+other turn, and only if it exits cleanly does the retirement — and the
+archiving — follow. Look at what Wren wrote:
 
 **Run**
 
@@ -159,7 +157,8 @@ relative paths at the repo root, so on the free path it appears at
 `agents/wren/STATUS.md` instead. Either way it is inside the team repo,
 which matters at the commit point.)
 
-The conversation is now retired. Ask for the fact back:
+The conversation is retired and the message history is out of the prompt
+path. Ask for the fact back:
 
 **Run**
 
@@ -179,15 +178,16 @@ That turn was a **refound**: no continue flag on the CLI (there is no
 conversation left to continue), and the prompt opens with a preamble —
 "Check your STATUS.md to refresh your memory." A fresh conversation,
 founded from saved state, holding facts learned in a conversation that no
-longer exists.
+longer exists. There was one place that answer could have come from: the
+file you just read.
 
 ### The rig swap
 
-Flush is scheduled death. A rig swap is sudden death: the conversation is
-keyed on the CLI that holds it, so a rig that now drives a *different* CLI
-cannot resume it — and r4t does not try, because the old CLI may be
-quota-dead and unable to run a dump turn. State on disk is whatever the
-last flush left. Swap Wren to the other path's harness (this beat needs a
+Flush is death you schedule or ask for. A rig swap is sudden death: the
+conversation is keyed on the CLI that holds it, so a rig that now drives a
+*different* CLI cannot resume it — and r4t does not try, because the old CLI
+may be quota-dead and unable to run a dump turn. State on disk is whatever
+the last flush left. Swap Wren to the other path's harness (this beat needs a
 second continue-capable CLI installed — `agent` here; free-path readers
 with only ollama can read along, the machinery is identical):
 
@@ -263,14 +263,13 @@ message is queued, not lost; wait the minutes it names and run
 
 ## 7. Break it
 
-`STATUS.md` looks like a single point of failure, so attack it. Retire the
-conversation again — wait a bit over a minute, flush, then delete the
-state file before sending the recall:
+`STATUS.md` is now the single point of failure, so attack it. Flush again,
+delete the state file, then send the recall:
 
 **Run**
 
 ```bash
-r4t idle --node silo
+r4t flush --node silo wren
 rm STATUS.md
 r4t seat send --node silo "What was the codeword?"
 r4t seat inbox --node silo
@@ -280,48 +279,63 @@ You should see:
 
 ```
 ── from silo:wren (2026-07-29T05:34:01.509705Z)
-Codeword: TIDEPOOL
+I have no record of a codeword — STATUS.md is missing and I have nothing else on file.
 ```
 
-The lobotomy failed. Worth understanding rather than celebrating.
+The lobotomy worked. Worth understanding rather than panicking over.
 
 ## 8. Diagnose
 
-The refound turn told Wren to check a file that did not exist — so why does
-he still know? Because `STATUS.md` was never the only layer. Every turn's
-prompt carries a section r4t maintains itself:
+Two layers hold a refounded Wren's memory, and you have now removed both.
+`STATUS.md` is the layer Wren writes himself — judgments, progress,
+structure. The other is machinery-kept: every turn's prompt carries a
+section r4t maintains for him,
 
 ```
 ## Your conversation so far (messages you received and sent)
 ```
 
-— the member's rolling message history, machinery-kept, capped by the
-rig's history budget. The codeword rode in on that. So refound memory is
-belt and braces: `STATUS.md` holds what the *member* chose to write down
-(judgments, progress, structure), the rolling history holds what was
-*said* recently (until it scrolls off the cap). Delete one and the other
-covers — for a while. A fact old enough to have scrolled out of history
-survives only if Wren wrote it to `STATUS.md`. That is the layer you just
-deleted, and on a longer-lived agent the loss would have been real.
-
-## 9. Fix
-
-Nothing is broken in the machinery — what's missing is the file, and the
-machinery that wrote it once will write it again. Wait past the window and
-run another sweep:
+— the rolling message history, capped by the rig's history budget. `r4t
+flush` archives that log instead of carrying it forward, which is why the
+recall in section 6 proved anything at all:
 
 **Run**
 
 ```bash
-r4t idle --node silo
-ls STATUS.md
+ls ~/.config/r4t/teams/silo/agents/wren/
+```
+
+You should see:
+
+```
+history-20260729T052013449271Z.md  history.md  meta.json
+history-20260729T053355901744Z.md  live.log    turns
+```
+
+Nothing is deleted — every archived word is still readable — but an
+archived log is out of the prompt, so a refounded Wren answers from
+`STATUS.md` or not at all. On a long-lived agent that is the real stake: a
+fact old enough to have scrolled past the history cap survives only where
+Wren wrote it down.
+
+## 9. Fix
+
+Nothing is broken in the machinery — what's missing is the file, and the
+machinery that wrote it once will write it again. Give Wren the fact and
+flush:
+
+**Run**
+
+```bash
+r4t seat send --node silo "The codeword is TIDEPOOL and the supply cache is at grid square K-19."
+r4t flush --node silo wren
 head -8 STATUS.md
 ```
 
 You should see:
 
 ```
-STATUS.md
+flushed wren — dumped state to disk, retired the conversation, archived history as history-20260729T053902117630Z.md
 # STATUS.md — Wren
 
 ## Codeword
@@ -331,7 +345,7 @@ TIDEPOOL (confirmed)
 - Supply cache location: grid square K-19
 ```
 
-The dump turn regenerated it from the live conversation.
+The dump turn wrote it back out of the live conversation.
 
 ## 10. Check
 
@@ -353,39 +367,39 @@ Codeword: TIDEPOOL — Cache: grid square K-19
 ```
 
 Flushed, refounded, swapped, swapped back, state file deleted and
-regrown — and Wren still answers. The team is whole.
+rewritten — and Wren still answers. The team is whole.
 
 ## 11. Customize
 
-Put the window back where it belongs:
-
-**Replace** `~/ark/silo/ROSTER.md` — Wren's `Flush:` line becomes:
-
-```markdown
-- **Flush:** 15m
-```
+Park the whole team on your way out — one flag, every member:
 
 **Run**
 
 ```bash
-r4t roster check
+r4t flush --node silo --all
 ```
 
 You should see:
 
 ```
-You: note — Human without an Address (team cannot tell them)
-/home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
+flushed wren — dumped state to disk, retired the conversation, archived history as history-20260729T054417338205Z.md
+skipped you — human member
 ```
 
-The window says how long a pause Wren's conversation survives. Fifteen
-minutes is a good default: short pauses keep their momentum, and after a
-longer one the flush has already banked everything that matters in
-`STATUS.md`, so the next message starts fresh without starting over.
-Set it late enough that normal working pauses don't cost Wren his
-short-term memory, early enough that he isn't dragging yesterday into
-today. On paid rigs a short window also keeps resumed context from
-billing at full length; the mechanics behind that live in
+That is the habit worth keeping: before a long break, after a run that
+filled a conversation with dead ends, or when a member starts answering
+from stale context. `--no-dump` skips the save turn for a conversation you
+do not want banked — a rig that is out of quota and cannot run the turn, or
+one whose recent context is exactly what you are trying to be rid of.
+
+The `Flush:` window covers the same ground while you are not looking, and
+fifteen minutes is a good default: short pauses keep their momentum, and
+after a longer one the flush has already banked what matters in
+`STATUS.md`, so the next message starts fresh without starting over. Set it
+late enough that normal working pauses don't cost Wren his short-term
+memory, early enough that he isn't dragging yesterday into today. On paid
+rigs a short window also keeps resumed context from billing at full length;
+the mechanics behind that live in
 [Prompt-Cache Economics](https://github.com/neilobremski/bin/wiki/Prompt-Cache-Economics).
 
 ## 12. Commit point

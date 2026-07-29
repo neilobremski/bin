@@ -1892,6 +1892,112 @@ def _flush_sweep(
     return flushed
 
 
+# ---------- manual flush (the on-demand verb) ----------
+#
+# The sweep waits out `Flush:`; the verb runs on the operator's word, so it
+# checks neither. It goes one step further than the sweep and archives the
+# member's history log: the refound then reads STATUS.md and nothing else,
+# which is what makes a memory test provable and what cures a conversation
+# whose recent transcript is the problem.
+
+
+def _flush_member(
+    ctx: DispatchContext,
+    config: RigConfig,
+    roster: Roster,
+    member: Member,
+    dump: bool,
+    run_fn,
+) -> dict:
+    result = {
+        "member": member.name,
+        "dumped": False,
+        "retired": False,
+        "archived": None,
+        "skipped": "",
+        "failed": "",
+    }
+    if member.is_human:
+        result["skipped"] = "human member"
+        return result
+    if member.errors:
+        result["skipped"] = member.error
+        return result
+    convo = state.read_conversation(ctx.node, member.name)
+    live = bool(convo) and not convo.get("retired")
+    if dump and live:
+        rig, err, _pinned = config.rig_for(member)
+        if rig is None:
+            result["skipped"] = err
+            return result
+        runnable, reason = _runnable(ctx, config, member, rig)
+        if not runnable:
+            state.append_log(
+                ctx.node, f"r4t: FLUSH deferred — {member.name.lower()} {reason}"
+            )
+            result["failed"] = reason
+            return result
+        state.enqueue(
+            ctx.node,
+            member.name,
+            {
+                "from": f"r4t:{ctx.node}",
+                "to": f"{ctx.node}:{member.name.lower()}",
+                "thread": tasks.new_thread_id(),
+                "hop": 0,
+                "class": "auto",
+                "body": ctx.prompt("flush_dump"),
+            },
+        )
+        state.append_log(
+            ctx.node, f"r4t: FLUSH dump turn -> {member.name.lower()} (r4t flush)"
+        )
+        ran = _run_member_turn(ctx, config, roster, member, rig, run_fn)
+        last_turn = state.read_meta(ctx.node, member.name).get("last_turn") or {}
+        if ran != RAN or last_turn.get("exit") != 0 or last_turn.get("timed_out"):
+            # Nothing was banked, so nothing is thrown away: the conversation
+            # still holds the state the dump failed to write. --no-dump is the
+            # way past a conversation that cannot dump at all.
+            result["failed"] = "the dump turn did not complete"
+            return result
+        result["dumped"] = True
+    if live:
+        state.retire_conversation(ctx.node, member.name)
+        state.append_log(
+            ctx.node,
+            f"r4t: FLUSH retired {member.name.lower()}'s conversation — "
+            "the next real message refounds it from state on disk",
+        )
+        result["retired"] = True
+    archived = state.archive_history(ctx.node, member.name)
+    if archived is not None:
+        state.append_log(
+            ctx.node,
+            f"r4t: FLUSH archived {member.name.lower()}'s history log as "
+            f"{archived.name} — a fresh one starts at the next turn",
+        )
+        result["archived"] = archived
+    return result
+
+
+def run_flush(
+    ctx: DispatchContext,
+    config: RigConfig,
+    roster: Roster,
+    members: list[Member],
+    *,
+    dump: bool = True,
+    run_fn=run_harness,
+) -> list[dict]:
+    """Flush each member on demand: dump turn, retire the conversation, archive
+    the history log. `dump=False` skips the turn — a poisoned or quota-dead
+    conversation must not be asked to write its state down. Returns one result
+    per member, in the order asked."""
+    return [
+        _flush_member(ctx, config, roster, member, dump, run_fn) for member in members
+    ]
+
+
 # ---------- mission-review idle turn (the furnace burns on its own) ----------
 
 MISSION_REVIEW_BACKOFF_BASE = 2

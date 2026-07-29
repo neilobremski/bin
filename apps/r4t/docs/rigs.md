@@ -57,6 +57,18 @@ member's next turn runs cold with a read-your-state preamble; the dump prompt
 and preamble are overridable via the node definition's `prompts` object (keys
 `flush_dump` and `refound_preamble`).
 
+`r4t flush <member> [<member> ...]` (or `--all` for the whole roster) does the
+same on demand, for any member — no `Flush:` field and no idle wait. It runs
+the dump turn, retires the conversation, and then archives the member's
+`agents/<member>/history.md` to a timestamped sibling, so the refound reads
+STATUS.md rather than a transcript of everything it was told. Nothing is
+deleted; the archive stays on disk. `--no-dump` skips the turn for a
+conversation that cannot dump (quota-dead) or should not (one whose recent
+context is itself the problem — a dump would bank it into STATUS.md). A dump
+turn that fails changes nothing: the conversation and the history stay put,
+and the exit code names the member. The idle sweep keeps the history in place,
+because there the refound is meant to carry rolling context forward.
+
 ## `Workdir:` and the root the harness advertises
 
 `- **Workdir:** <path>` in the roster runs a member's turns from its own

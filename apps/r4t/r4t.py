@@ -24,6 +24,7 @@ from dispatch import (
     DispatchContext,
     handle_message,
     run_clear,
+    run_flush,
     run_idle,
     split_recipient,
 )
@@ -73,6 +74,7 @@ COMMAND_HELP = [
     ("task list", "List conversation threads for a team"),
     ("task show <id>", "Show one task ledger record as JSON"),
     ("clear", "Prune stale locks, expire idle threads, drain queued turns"),
+    ("flush <member>", "Dump a member's state, retire the conversation, archive its history"),
     ("idle", "Nudge agents with unfinished work, then clear"),
     ("sandbox", "Disposable end-to-end run with graded report"),
     ("sandbox --fake", "Same pipeline with deterministic fake agents (no LLM)"),
@@ -448,6 +450,66 @@ def cmd_clear(args: argparse.Namespace) -> int:
         + f"; drained {summary['drained']} queued turn(s)"
     )
     return 0
+
+
+def _flush_line(result: dict) -> str:
+    name = result["member"].lower()
+    if result["skipped"]:
+        return f"skipped {name} — {result['skipped']}"
+    if result["failed"]:
+        return (
+            f"failed {name} — {result['failed']}; conversation and history "
+            "left as they are"
+        )
+    done = []
+    if result["dumped"]:
+        done.append("dumped state to disk")
+    if result["retired"]:
+        done.append("retired the conversation")
+    if result["archived"] is not None:
+        done.append(f"archived history as {result['archived'].name}")
+    if not done:
+        return f"nothing to flush for {name} — no conversation, no history"
+    return f"flushed {name} — {', '.join(done)}"
+
+
+def cmd_flush(args: argparse.Namespace) -> int:
+    node = _resolve_node(args.node)
+    if node is None:
+        return 2
+    if bool(args.members) == bool(args.all):
+        print(
+            "flush: name the members to flush, or pass --all — not both "
+            f"(try: r4t flush --node {node} <name>)",
+            file=sys.stderr,
+        )
+        return 2
+    ctx = _context(args, node)
+    try:
+        roster = load_roster(ctx.roster_path)
+        config = load_rig_config(ctx.config_path)
+    except (RosterError, RigError) as e:
+        print(f"flush: {e}", file=sys.stderr)
+        return 2
+    if args.all:
+        members = list(roster.members)
+    else:
+        members = []
+        for raw in args.members:
+            member = roster.find(raw)
+            if member is None:
+                names = ", ".join(roster.names()) or "(none)"
+                print(
+                    f"flush: no team member named {raw!r} — "
+                    f"(try: r4t flush --node {node} <name>; members: {names})",
+                    file=sys.stderr,
+                )
+                return 2
+            members.append(member)
+    results = run_flush(ctx, config, roster, members, dump=not args.no_dump)
+    for result in results:
+        print(_flush_line(result))
+    return 1 if any(r["failed"] for r in results) else 0
 
 
 def cmd_idle(args: argparse.Namespace) -> int:
@@ -1555,6 +1617,26 @@ def build_parser() -> argparse.ArgumentParser:
     _add_older_than(clear_p)
     _add_tell_flags(clear_p)
     clear_p.set_defaults(func=cmd_clear)
+
+    flush_p = sub.add_parser(
+        "flush",
+        help="Save a member's state to disk and start their conversation over.",
+    )
+    _add_common(flush_p, with_node=True)
+    flush_p.add_argument(
+        "members", nargs="*", metavar="MEMBER", help="Members to flush."
+    )
+    flush_p.add_argument(
+        "--all", action="store_true", help="Every member on the roster."
+    )
+    flush_p.add_argument(
+        "--no-dump",
+        action="store_true",
+        help="Skip the save turn — for a conversation that cannot or should "
+        "not write its state down.",
+    )
+    _add_tell_flags(flush_p)
+    flush_p.set_defaults(func=cmd_flush)
 
     idle_p = sub.add_parser(
         "idle",
