@@ -6,7 +6,7 @@ At the end of this chapter the roster is two: Wren leads, and **Moss** — a
 zero-cost helper on the same local model — answers his questions. You will
 send Wren a task, watch him delegate to Moss with `tell`, watch Moss's
 answer come back, and read the whole exchange in the team log. You will
-also see, honestly, where a small free model fumbles the last step — and
+also see where a small free model fumbles the last step — and
 why the machinery guarantees the *messages* even when it cannot guarantee
 the model. Then you will starve Moss's budget and watch a message wait,
 unharmed, for the refill.
@@ -176,7 +176,7 @@ Wren *printed* `tell you "Inkwell 🐙"` as text — the exact mistake the
 doctrine warns about ("printing it as text sends nothing"). Twelve
 characters of perfect answer, discarded as terminal chrome by the sub-80
 threshold you met in chapter 2. This is why chapter 2 shipped Wren with
-echo on, and it is the honest cost of lifting it.
+echo on, and it is the cost of lifting it.
 
 Now the two ways you actually get answers out of this team. First: the
 stdout fallback *does* reach you whenever Wren's answer has substance,
