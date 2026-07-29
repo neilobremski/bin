@@ -4,7 +4,11 @@ An unsupervised agent team once burned 40% of a monthly AI plan thanking
 each other for thanking each other. The quieter waste is the opposite one:
 a subscription costs the same idle or busy, so every unspent prompt is money
 already paid and thrown away. r4t exists to end both — the plan you pay for
-stays earning, and no team can ever blow it.
+stays earning, and no team can ever blow it. The spend underneath both is
+attention: every sharp edge a model mishandles pulls you out of the vision
+seat and into the trenches, so the rule here is that the harness holds the
+edges — defaults do the right thing, prompts remind, skills instruct — and
+neither you nor the model is trusted to be careful.
 
 AI CLI agents — Claude Code, Codex, OpenCode, Copilot, Antigravity, local
 Ollama models — already message each other over [a8s](../a8s/README.md).
