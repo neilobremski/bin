@@ -663,6 +663,127 @@ class TestFailureBreaker:
         assert drain(ctx, run_fn=ok_run) == 0  # reopened for another cooldown
 
 
+CONTINUE_ROSTER = textwrap.dedent(
+    """\
+    # Continue Team
+
+    ### Ana
+    - **Status:** AI
+    - **Rig:** resuming
+    - **Leader:** yes
+    - **Continue:** on
+
+    ### Bob
+    - **Status:** AI
+    - **Rig:** cold
+    """
+)
+
+
+@pytest.fixture
+def continue_ctx(r4t_home, tmp_path, tells):
+    """A team whose CLI refuses to launch with --continue until a conversation
+    exists in the turn directory — the real cursor behavior, faked. The marker
+    file stands in for that conversation."""
+    from dispatch import DispatchContext
+
+    calls = tmp_path / "continue-calls"
+    calls.mkdir()
+    marker = tmp_path / "conversation-exists"
+    script = tmp_path / "continue-harness.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""\
+            import json, os, sys
+            calls_dir = {str(calls)!r}
+            n = len(os.listdir(calls_dir))
+            with open(os.path.join(calls_dir, f"call-{{n:03d}}.json"), "w") as f:
+                json.dump(sys.argv[1:], f)
+            if "--continue" in sys.argv and not os.path.exists({str(marker)!r}):
+                sys.stderr.write("No previous chats found.\\n")
+                sys.exit(1)
+            open({str(marker)!r}, "w").close()
+            print("continue harness ran")
+            """
+        ),
+        encoding="utf-8",
+    )
+    rig = {
+        "preset": "cursor",
+        "invoke": [sys.executable, str(script), "{prompt}"],
+        "timeout_seconds": 30,
+        "budget_max": 100,
+        "budget_earn_per_hour": 50,
+    }
+    config = {
+        "throttle": {"max_concurrent": 0, "min_seconds_between_turn_starts": 0},
+        "cell_budget_max": 200,
+        "cell_budget_earn_per_hour": 100,
+        "resuming": rig,
+        "cold": dict(rig),
+    }
+    config_path = tmp_path / "continue-rigs.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    root = tmp_path / "continue-repo"
+    root.mkdir()
+    (root / "ROSTER.md").write_text(CONTINUE_ROSTER, encoding="utf-8")
+    _sent, capture = tells
+    ctx = DispatchContext(
+        root=root,
+        node=NODE,
+        roster_path=root / "ROSTER.md",
+        config_path=config_path,
+        tell_fn=capture,
+    )
+    return ctx, calls
+
+
+def continue_argvs(calls):
+    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(calls.iterdir())]
+
+
+class TestContinueTurns:
+    def test_founding_turn_retries_once_without_continue(self, continue_ctx):
+        ctx, calls = continue_ctx
+        assert run_one(ctx, "boss", "acme:ana", "first task") == 1
+        first, second = continue_argvs(calls)
+        assert first[-1] == "--continue"  # asked to resume; the CLI refused
+        assert "--continue" not in second  # founded the conversation instead
+        assert "CONTINUE-COLD ana" in read_log()
+
+    def test_founding_turn_is_not_a_failure(self, continue_ctx):
+        ctx, calls = continue_ctx
+        assert run_one(ctx, "boss", "acme:ana", "first task") == 1
+        assert state.queue_depth(NODE, "ana") == 0  # batch released, not requeued
+        assert state.read_meta(NODE, "ana")["consecutive_failures"] == 0
+
+    def test_later_turns_continue_the_conversation(self, continue_ctx):
+        ctx, calls = continue_ctx
+        run_one(ctx, "boss", "acme:ana", "first task")
+        assert run_one(ctx, "boss", "acme:ana", "second task") == 1
+        assert len(continue_argvs(calls)) == 3  # 2 to found, 1 continuing
+        assert continue_argvs(calls)[2][-1] == "--continue"
+        assert read_log().count("CONTINUE-COLD") == 1  # retried once, ever
+
+    def test_member_without_continue_never_gets_the_flag(self, continue_ctx):
+        ctx, calls = continue_ctx
+        assert run_one(ctx, "acme:ana", "acme:bob", "task") == 1
+        argvs = continue_argvs(calls)
+        assert len(argvs) == 1 and "--continue" not in argvs[0]
+
+    def test_other_failures_are_not_retried(self, continue_ctx):
+        ctx, _calls = continue_ctx
+        seen = []
+
+        def broken(rig, prompt, cwd, *, env=None, variant=0):
+            seen.append(env.get("R4T_CONTINUE"))
+            return 1, "segfault", 0.1, False
+
+        assert run_one(ctx, "boss", "acme:ana", "task", run_fn=broken) == 1
+        assert seen == ["1"]  # one attempt only
+        assert state.queue_depth(NODE, "ana") == 1  # normal requeue path
+
+
 ANSWER = "Here is my long detailed answer about the payload format. " * 3
 
 
@@ -1630,6 +1751,44 @@ class TestCli:
         assert rc == 0  # a warning does not fail the check
         assert "warning" in out and "soft cap 6" in out
         assert "1 warning(s)" in out
+
+    def test_roster_check_warns_on_shared_continue_cli(self, r4t_home, tmp_path, capsys):
+        root = tmp_path / "sharedcli"
+        root.mkdir()
+        (root / "ROSTER.md").write_text(
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Leader:** yes\n"
+            "- **Continue:** on\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** solo\n",
+            encoding="utf-8",
+        )
+        config = tmp_path / "shared-rigs.json"
+        config.write_text(
+            json.dumps({"solo": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]}}),
+            encoding="utf-8",
+        )
+        rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(config))
+        out = capsys.readouterr().out
+        assert rc == 0  # a warning does not fail the check
+        assert "Ana: Continue: on" in out and "Bob" in out
+        assert "1 warning(s)" in out
+
+    def test_roster_check_errors_on_continue_without_support(self, r4t_home, tmp_path, capsys):
+        root = tmp_path / "nocontinue"
+        root.mkdir()
+        (root / "ROSTER.md").write_text(
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Leader:** yes\n"
+            "- **Continue:** on\n",
+            encoding="utf-8",
+        )
+        config = tmp_path / "nocontinue-rigs.json"
+        config.write_text(
+            json.dumps({"solo": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]}}),
+            encoding="utf-8",
+        )
+        rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(config))
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "does not support it" in out and "r4t rig swap solo <preset>" in out
 
     def test_roster_check_errors_on_unknown_lead(self, r4t_home, tmp_path, rig_config, capsys):
         root = tmp_path / "badlead"

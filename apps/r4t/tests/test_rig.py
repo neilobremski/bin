@@ -20,6 +20,8 @@ from rig import (
     RigError,
     add_preset_rig,
     build_preset_invoke,
+    continue_collisions,
+    continue_presets,
     default_config_payload,
     format_preset_invoke,
     fuzzy_match_model,
@@ -33,7 +35,7 @@ from rig import (
     swap_preset_rig,
     unset_rig_value,
 )
-from roster import Member
+from roster import Member, parse_roster
 from r4t import main as r4t_main
 
 
@@ -265,6 +267,214 @@ class TestArgv:
             write_config(tmp_path, {"t": {"invoke": ["run", "prompt={prompt}"]}})
         )
         assert config.rigs["t"].argv("X") == ["run", "prompt=X"]
+
+
+class TestContinue:
+    def test_only_verified_presets_declare_continue(self):
+        # Each of these was verified against the installed CLI's own --help and
+        # then live. copilot is absent on purpose: it resumes the machine's most
+        # recent session whatever the directory, which no working directory can
+        # keep apart (#256).
+        assert continue_presets() == [
+            "agy", "claude", "codex", "cursor", "opencode", "opencode-ollama",
+        ]
+
+    def test_continue_tokens_are_appended_to_the_argv(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "t": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
+        }))
+        rig = config.rigs["t"]
+        assert rig.supports_continue
+        assert rig.argv("hi") == ["claude", "-p", "hi"]
+        assert rig.argv("hi", continue_conversation=True) == [
+            "claude", "-p", "hi", "--continue",
+        ]
+
+    def test_rig_without_preset_cannot_continue(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {"t": {"invoke": ["run", "{prompt}"]}}))
+        rig = config.rigs["t"]
+        assert rig.supports_continue is False
+        assert rig.argv("hi", continue_conversation=True) == ["run", "hi"]
+
+    def test_added_preset_rig_carries_its_preset(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "solo", "cursor")
+        rig = load_rig_config(path).rigs["solo"]
+        assert rig.preset == "cursor"
+        assert rig.argv("hi", continue_conversation=True)[-1] == "--continue"
+
+    def test_no_prior_conversation_pattern_is_per_preset(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "c": {"preset": "cursor", "invoke": ["agent", "-p", "{prompt}"]},
+            "k": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
+        }))
+        assert config.rigs["c"].had_no_prior_conversation("No previous chats found.")
+        assert config.rigs["c"].had_no_prior_conversation("no PREVIOUS chats found")
+        assert not config.rigs["c"].had_no_prior_conversation("some other failure")
+        # claude founds a conversation silently, so it declares no pattern.
+        assert not config.rigs["k"].had_no_prior_conversation("No previous chats found.")
+
+    def test_copilot_is_unsupported_until_sessions_are_pinned(self, tmp_path):
+        # Its --continue reaches the machine's most recent session whatever the
+        # directory, so no member can be kept apart from another (#256).
+        config = load_rig_config(write_config(tmp_path, {
+            "t": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]},
+        }))
+        rig = config.rigs["t"]
+        assert rig.supports_continue is False
+        assert rig.argv("hi", continue_conversation=True) == ["copilot", "-p", "hi"]
+
+    def test_cli_key_sees_through_ollama_launch(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "direct": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
+            "local": {
+                "preset": "claude-ollama",
+                "invoke": ["ollama", "launch", "claude", "-y", "--", "-p", "{prompt}"],
+            },
+            "bare": {"preset": "ollama", "invoke": ["ollama", "run", "m", "{prompt}"]},
+            "custom": {"invoke": ["/opt/bin/agent", "{prompt}"]},
+        }))
+        assert config.rigs["direct"].cli == "claude"
+        assert config.rigs["local"].cli == "claude"
+        assert config.rigs["bare"].cli == "ollama"
+        assert config.rigs["custom"].cli == "agent"
+
+    def test_launched_opencode_shares_the_opencode_conversation(self, tmp_path):
+        # The session store belongs to opencode and is per-directory whether or
+        # not `ollama launch` started it, so both rigs collide as one CLI.
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "cloud", "opencode")
+        add_preset_rig(path, "local", "opencode-ollama", model="qwen3")
+        config = load_rig_config(path)
+        assert config.rigs["local"].cli == config.rigs["cloud"].cli == "opencode"
+        assert config.rigs["local"].supports_continue
+        assert config.rigs["local"].argv("hi", continue_conversation=True)[-1] == "--continue"
+
+    def test_continue_on_unsupported_rig_fails_closed(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "t": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]},
+        }))
+        asker = member(name="Ana", rig="t")
+        asker.continue_conversation = True
+        rig, err, _pinned = config.rig_for(asker)
+        assert rig is None
+        assert "Continue: on" in err
+        assert "claude" in err
+        assert "try: r4t rig swap t <preset>" in err
+
+    def test_continue_off_runs_on_any_rig(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "t": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]},
+        }))
+        rig, err, _pinned = config.rig_for(member(name="Ana", rig="t"))
+        assert rig is not None and err is None
+
+    def test_codex_continue_is_anchored_after_exec(self, tmp_path):
+        # `resume --last` is a subcommand: it only reads immediately after
+        # `exec`, never appended to a finished argv.
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "codex")
+        rig = load_rig_config(path).rigs["worker"]
+        assert rig.continue_anchor == "exec"
+        assert rig.argv("hi", continue_conversation=True) == [
+            "codex", "exec", "resume", "--last",
+            "--full-auto", "--skip-git-repo-check", "hi",
+        ]
+
+    def test_codex_continue_and_model_splice_in_the_right_order(self, tmp_path):
+        # Both anchor on `exec`; the model is spliced at add time and continue
+        # at turn time, which lands continue first — the order codex requires.
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "codex", model="gpt-5")
+        rig = load_rig_config(path).rigs["worker"]
+        assert rig.argv("hi", continue_conversation=True) == [
+            "codex", "exec", "resume", "--last", "-m", "gpt-5",
+            "--full-auto", "--skip-git-repo-check", "hi",
+        ]
+
+    def test_codex_founds_cold_without_a_detection_pattern(self, tmp_path):
+        # `exec resume --last` in a virgin directory exits 0 and founds one,
+        # so there is no failure to retry (verified live).
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "codex")
+        rig = load_rig_config(path).rigs["worker"]
+        assert not rig.had_no_prior_conversation("No previous chats found.")
+
+    def test_anchored_preset_without_its_anchor_fails_closed(self, tmp_path):
+        # A hand-edited invoke that lost `exec` has nowhere to put the tokens.
+        config = load_rig_config(write_config(tmp_path, {
+            "t": {"preset": "codex", "invoke": ["codex-wrapper", "{prompt}"]},
+        }))
+        assert config.rigs["t"].supports_continue is False
+        asker = member(name="Ana", rig="t")
+        asker.continue_conversation = True
+        assert config.rig_for(asker)[0] is None
+
+
+COLLISION_CONFIG = {
+    "solo": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
+    "twin": {"preset": "claude", "invoke": ["claude", "--model", "x", "-p", "{prompt}"]},
+    "other": {"preset": "cursor", "invoke": ["agent", "-p", "{prompt}"]},
+    "cloud": {"preset": "opencode", "invoke": ["opencode", "run", "--dir", ".", "{prompt}"]},
+    "launched": {
+        "preset": "opencode-ollama",
+        "invoke": ["ollama", "launch", "opencode", "--model", "m", "--", "run", "{prompt}"],
+    },
+}
+
+
+class TestContinueCollisions:
+    def collisions(self, tmp_path, roster_text):
+        config = load_rig_config(write_config(tmp_path, COLLISION_CONFIG))
+        roster = parse_roster(roster_text, Path("ROSTER.md"))
+        return continue_collisions(roster, config)
+
+    def test_no_warning_when_clis_differ(self, tmp_path):
+        assert self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** other\n"
+        )) == []
+
+    def test_no_warning_when_nobody_continues(self, tmp_path):
+        assert self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** solo\n"
+        )) == []
+
+    def test_warns_when_a_teammate_shares_the_cli(self, tmp_path):
+        # Bob does not continue — he still writes the conversation Ana resumes.
+        warnings = self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** solo\n"
+        ))
+        assert len(warnings) == 1
+        assert warnings[0].startswith("Ana: Continue: on")
+        assert "Bob" in warnings[0] and "'claude'" in warnings[0]
+
+    def test_warns_across_different_rigs_on_one_cli(self, tmp_path):
+        warnings = self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** twin\n"
+        ))
+        assert len(warnings) == 1 and "Bob" in warnings[0]
+
+    def test_launcher_does_not_hide_a_shared_conversation(self, tmp_path):
+        # One member reaches opencode through `ollama launch`, the other runs it
+        # directly — same per-directory session store, so they still collide.
+        warnings = self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** launched\n- **Continue:** on\n\n"
+            "### Bob\n- **Status:** AI\n- **Rig:** cloud\n"
+        ))
+        assert len(warnings) == 1
+        assert "Bob" in warnings[0] and "'opencode'" in warnings[0]
+        assert "per directory" in warnings[0]
+
+    def test_humans_and_broken_members_never_collide(self, tmp_path):
+        assert self.collisions(tmp_path, (
+            "### Ana\n- **Status:** AI\n- **Rig:** solo\n- **Continue:** on\n\n"
+            "### Cid\n- **Status:** Human\n- **Address:** cid\n\n"
+            "### Dot\n- **Status:** AI\n"
+        )) == []
 
 
 class TestDefaultPayload:

@@ -521,8 +521,15 @@ def run_harness(
     the choice rides in via the turn env and the argv is wrapped in the OS-level
     boundary — every member turn of that org, whatever rig. An isolation prereq
     that fails closed returns a nonzero exit like any other failed turn — the
-    batch stays queued and the breaker counts it."""
-    argv = rig.argv(prompt, variant)
+    batch stays queued and the breaker counts it.
+
+    `R4T_CONTINUE` in the env (set for a member with `Continue: on`) appends the
+    rig's continue tokens so the CLI resumes the conversation it already has in
+    `cwd`. It rides the env for the same reason isolation does: the run_fn
+    contract stays narrow."""
+    argv = rig.argv(
+        prompt, variant, continue_conversation=(env or {}).get("R4T_CONTINUE") == "1"
+    )
     if rig.model_resolver == "agy-live":
         # Resolve the friendly --model against the live `agy models` list before
         # every turn — the display names drift as agy ships versions, and agy
@@ -1173,6 +1180,12 @@ def _run_turn(
     # (r4t-<node>-<member>-<ts>) without widening the run_fn contract.
     env["R4T_NODE"] = ctx.node
     env["R4T_MEMBER"] = member.name
+    # `Continue: on` — the member's own CLI conversation carries its recent work
+    # forward and the provider cache prices the wake as a continuation rather
+    # than a fresh full prompt. rig_for has already refused any member whose rig
+    # cannot continue, so no second check is needed here.
+    if member.continue_conversation:
+        env["R4T_CONTINUE"] = "1"
     # The org's OS-level boundary (org.py) rides in the same way — one setting
     # wraps every member turn regardless of rig (machinery outside, hands inside).
     env.update(ctx.isolation.to_env())
@@ -1188,6 +1201,27 @@ def _run_turn(
     exit_code, output, duration, timed_out = run_fn(
         rig, prompt, ctx.workplace, env=env, variant=variant
     )
+
+    # Some CLIs (cursor) refuse to launch at all when asked to continue a
+    # conversation that does not exist yet — the state every continuing member
+    # starts in. Retry that ONE failure cold: the turn founds the conversation
+    # every later turn continues. Any other failure falls through to the normal
+    # requeue-and-breaker path.
+    if (
+        member.continue_conversation
+        and (timed_out or exit_code != 0)
+        and rig.had_no_prior_conversation(output)
+    ):
+        state.append_log(
+            ctx.node,
+            f"r4t: CONTINUE-COLD {member.name.lower()} (rig {rig.name}) exit "
+            f"{exit_code}: no conversation to continue in {ctx.workplace} — "
+            "retrying once without it to found one",
+        )
+        del env["R4T_CONTINUE"]
+        exit_code, output, duration, timed_out = run_fn(
+            rig, prompt, ctx.workplace, env=env, variant=variant
+        )
 
     outcome = f"exit {exit_code} in {duration:.1f}s"
     if timed_out:

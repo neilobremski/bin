@@ -7,7 +7,14 @@ Format: `### <Name>` blocks with bullet fields:
     - **Rig:** junior-dev
     - **Role:** Lead Backend Engineer
     - **Leader:** yes
+    - **Continue:** on
     Free persona prose lives anywhere in the block.
+
+`Continue:` (default off) runs the member's turns inside its CLI's own
+conversation instead of a fresh prompt every wake — the agent keeps its recent
+work, and the provider cache makes an expensive rig affordable. It needs a rig
+whose preset supports it (rig.py), and members sharing a CLI in one directory
+share that conversation, so `r4t roster check` warns about the overlap.
 
 Humans (`- **Status:** Human`) are never dispatched; an optional
 `- **Address:** <a8s-name>` tells teammates how to reach them. The Rig
@@ -41,6 +48,7 @@ class Member:
     role: str = ""
     leader: bool = False
     address: str | None = None
+    continue_conversation: bool = False
     cell: str = ""
     lead: str = ""
     persona: str = ""
@@ -191,7 +199,7 @@ def _clean(value: str) -> str:
 
 
 def _is_true(value: str) -> bool:
-    return value.strip().lower() in ("yes", "true", "y", "1")
+    return value.strip().lower() in ("yes", "true", "y", "1", "on")
 
 
 def _member_from_block(name: str, lines: list[str]) -> Member:
@@ -215,6 +223,7 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
     m.role = fields.get("role", fields.get("mandate", ""))
     m.leader = _is_true(fields.get("leader", ""))
     m.address = fields.get("address") or None
+    m.continue_conversation = _is_true(fields.get("continue", ""))
     m.cell = fields.get("cell", "")
     m.lead = fields.get("lead", "")
 

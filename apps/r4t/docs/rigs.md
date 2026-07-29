@@ -27,6 +27,24 @@ r4t rig remove worker                 # drop a rig (alias: rm)
 if a roster member or pin still references the rig, naming what does; pass
 `--force` to remove anyway.
 
+## Continuing a conversation
+
+A member with `- **Continue:** on` in the roster runs its turns inside its
+CLI's own conversation instead of a cold prompt every wake: the agent keeps
+its recent work, and the provider cache prices the wake as a continuation.
+It needs a rig whose preset supports it — `claude`, `codex`, `cursor`,
+`opencode`, `opencode-ollama`, `agy` (`r4t rig presets` marks them); anything
+else fails closed at `r4t roster check` and at dispatch. Most presets append a
+`--continue` flag; `codex` resumes through the `exec resume --last` subcommand,
+so its tokens are inserted after `exec` instead. `copilot` is the one
+unsupported CLI: its `--continue` resumes the machine's most recent session
+whatever the directory, so members cannot be kept apart, and supporting it
+cleanly means pinning a session id per member (issue #256).
+
+A CLI keeps ONE conversation per directory, so two members running the same
+CLI in the team workplace land in the same one. `r4t roster check` warns when
+that happens — it never blocks, but the fix is to put them on different CLIs.
+
 ## Picking a model (`--model`)
 
 `r4t rig add` and `r4t rig swap` take an optional `--model`. For most presets
