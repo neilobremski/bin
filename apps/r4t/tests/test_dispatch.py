@@ -673,10 +673,12 @@ CONTINUE_ROSTER = textwrap.dedent(
     - **Rig:** resuming
     - **Leader:** yes
     - **Continue:** on
+    - **Flush:** 1h
 
     ### Bob
     - **Status:** AI
     - **Rig:** cold
+    - **Flush:** 1h
     """
 )
 
@@ -743,37 +745,67 @@ def continue_argvs(calls):
     return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(calls.iterdir())]
 
 
-class TestContinueTurns:
-    def test_founding_turn_retries_once_without_continue(self, continue_ctx):
-        ctx, calls = continue_ctx
-        assert run_one(ctx, "boss", "acme:ana", "first task") == 1
-        first, second = continue_argvs(calls)
-        assert first[-1] == "--continue"  # asked to resume; the CLI refused
-        assert "--continue" not in second  # founded the conversation instead
-        assert "CONTINUE-COLD ana" in read_log()
+REFOUND_PREAMBLE = "Check your STATUS.md to refresh your memory."
+DUMP_PROMPT = "Save your current state and progress to STATUS.md."
 
-    def test_founding_turn_is_not_a_failure(self, continue_ctx):
+
+def continue_cli(ctx, name="ana"):
+    config = load_rig_config(ctx.config_path)
+    member = load_roster(ctx.roster_path).find(name)
+    rig, _e, _p = config.rig_for(member)
+    return rig.cli
+
+
+class TestContinueTurns:
+    def test_first_turn_refounds_cold_with_the_preamble(self, continue_ctx):
+        # No recorded conversation: the turn founds one — no continue argv,
+        # read-your-state preamble on top of the prompt.
         ctx, calls = continue_ctx
         assert run_one(ctx, "boss", "acme:ana", "first task") == 1
-        assert state.queue_depth(NODE, "ana") == 0  # batch released, not requeued
-        assert state.read_meta(NODE, "ana")["consecutive_failures"] == 0
+        (argv,) = continue_argvs(calls)
+        assert "--continue" not in argv
+        assert argv[0].startswith(REFOUND_PREAMBLE)
+
+    def test_successful_refound_records_the_conversation(self, continue_ctx):
+        ctx, calls = continue_ctx
+        assert run_one(ctx, "boss", "acme:ana", "first task") == 1
+        convo = state.read_conversation(NODE, "ana")
+        assert convo["cli"] == continue_cli(ctx)
+        assert convo["retired"] is False
 
     def test_later_turns_continue_the_conversation(self, continue_ctx):
         ctx, calls = continue_ctx
         run_one(ctx, "boss", "acme:ana", "first task")
         assert run_one(ctx, "boss", "acme:ana", "second task") == 1
-        assert len(continue_argvs(calls)) == 3  # 2 to found, 1 continuing
-        assert continue_argvs(calls)[2][-1] == "--continue"
-        assert read_log().count("CONTINUE-COLD") == 1  # retried once, ever
+        argvs = continue_argvs(calls)
+        assert len(argvs) == 2
+        assert argvs[1][-1] == "--continue"
+        assert REFOUND_PREAMBLE not in argvs[1][0]
+
+    def test_lost_conversation_retries_once_cold(self, continue_ctx):
+        # A conversation is recorded but the CLI store lost it (the fake CLI's
+        # marker is absent) — the CONTINUE-COLD retry founds a new one.
+        ctx, calls = continue_ctx
+        state.record_conversation(NODE, "ana", continue_cli(ctx))
+        assert run_one(ctx, "boss", "acme:ana", "task") == 1
+        first, second = continue_argvs(calls)
+        assert first[-1] == "--continue"  # asked to resume; the CLI refused
+        assert "--continue" not in second  # founded the conversation instead
+        assert "CONTINUE-COLD ana" in read_log()
+        assert state.queue_depth(NODE, "ana") == 0  # not a failure
+        assert state.read_meta(NODE, "ana")["consecutive_failures"] == 0
+        assert state.read_conversation(NODE, "ana")["retired"] is False
 
     def test_member_without_continue_never_gets_the_flag(self, continue_ctx):
         ctx, calls = continue_ctx
         assert run_one(ctx, "acme:ana", "acme:bob", "task") == 1
         argvs = continue_argvs(calls)
         assert len(argvs) == 1 and "--continue" not in argvs[0]
+        assert state.read_conversation(NODE, "bob") == {}
 
     def test_other_failures_are_not_retried(self, continue_ctx):
         ctx, _calls = continue_ctx
+        state.record_conversation(NODE, "ana", continue_cli(ctx))
         seen = []
 
         def broken(rig, prompt, cwd, *, env=None, variant=0):
@@ -783,6 +815,161 @@ class TestContinueTurns:
         assert run_one(ctx, "boss", "acme:ana", "task", run_fn=broken) == 1
         assert seen == ["1"]  # one attempt only
         assert state.queue_depth(NODE, "ana") == 1  # normal requeue path
+
+
+class TestConversationRetirement:
+    def test_rig_swap_retires_and_refounds(self, continue_ctx):
+        # The recorded conversation lives on another CLI: retire it (no dump
+        # turn — the old CLI may be quota-dead) and refound on the new one.
+        ctx, calls = continue_ctx
+        state.record_conversation(NODE, "ana", "claude")
+        assert run_one(ctx, "boss", "acme:ana", "task") == 1
+        (argv,) = continue_argvs(calls)
+        assert "--continue" not in argv
+        assert argv[0].startswith(REFOUND_PREAMBLE)
+        assert "CONTINUE-SWAP ana" in read_log()
+        convo = state.read_conversation(NODE, "ana")
+        assert convo["cli"] == continue_cli(ctx) and convo["retired"] is False
+
+    def test_same_cli_swap_keeps_the_conversation(self, continue_ctx):
+        # Ana moves from rig "resuming" to rig "cold" — same CLI, same store,
+        # same cwd — so the conversation survives the swap.
+        ctx, calls = continue_ctx
+        run_one(ctx, "boss", "acme:ana", "first task")
+        (ctx.roster_path).write_text(
+            CONTINUE_ROSTER.replace("**Rig:** resuming", "**Rig:** cold"),
+            encoding="utf-8",
+        )
+        assert run_one(ctx, "boss", "acme:ana", "second task") == 1
+        assert continue_argvs(calls)[-1][-1] == "--continue"
+        assert "CONTINUE-SWAP" not in read_log()
+
+    def test_retired_conversation_refounds_with_preamble(self, continue_ctx):
+        ctx, calls = continue_ctx
+        run_one(ctx, "boss", "acme:ana", "first task")
+        state.retire_conversation(NODE, "ana")
+        assert run_one(ctx, "boss", "acme:ana", "second task") == 1
+        argv = continue_argvs(calls)[-1]
+        assert "--continue" not in argv
+        assert argv[0].startswith(REFOUND_PREAMBLE)
+        assert state.read_conversation(NODE, "ana")["retired"] is False
+
+
+def age_last_turn(name):
+    state.update_meta(NODE, name, last_completed_at="2020-01-01T00:00:00Z")
+
+
+class TestIdleFlush:
+    def found(self, ctx):
+        assert run_one(ctx, "boss", "acme:ana", "first task") == 1
+
+    def test_no_flush_before_the_threshold(self, continue_ctx):
+        ctx, calls = continue_ctx
+        self.found(ctx)
+        summary = run_idle(ctx)
+        assert summary["flushed"] == []
+        assert len(continue_argvs(calls)) == 1  # no dump turn ran
+        assert state.read_conversation(NODE, "ana")["retired"] is False
+
+    def test_flush_dump_turn_then_retirement(self, continue_ctx):
+        ctx, calls = continue_ctx
+        self.found(ctx)
+        age_last_turn("ana")
+        summary = run_idle(ctx)
+        assert summary["flushed"] == ["Ana"]
+        dump = continue_argvs(calls)[-1]
+        assert dump[-1] == "--continue"  # the dump rides the conversation
+        assert DUMP_PROMPT in dump[0]
+        assert state.read_conversation(NODE, "ana")["retired"] is True
+        assert "FLUSH retired ana" in read_log()
+
+    def test_retired_conversation_not_flushed_again(self, continue_ctx):
+        ctx, calls = continue_ctx
+        self.found(ctx)
+        age_last_turn("ana")
+        run_idle(ctx)
+        before = len(continue_argvs(calls))
+        age_last_turn("ana")
+        assert run_idle(ctx)["flushed"] == []
+        assert len(continue_argvs(calls)) == before
+
+    def test_flush_ignored_without_continue(self, continue_ctx):
+        # Bob carries Flush: without Continue: on — lint warns; dispatch ignores.
+        ctx, calls = continue_ctx
+        assert run_one(ctx, "acme:ana", "acme:bob", "task") == 1
+        age_last_turn("bob")
+        assert run_idle(ctx)["flushed"] == []
+        assert len(continue_argvs(calls)) == 1
+
+    def test_flush_is_budget_gated_like_mission_review(self, continue_ctx):
+        ctx, calls = continue_ctx
+        self.found(ctx)
+        age_last_turn("ana")
+        empty_member_budget(ctx, "ana")
+        assert run_idle(ctx)["flushed"] == []
+        assert "FLUSH deferred — ana" in read_log()
+        assert state.read_conversation(NODE, "ana")["retired"] is False
+        # The bucket refills: the next sweep runs the dump and retires.
+        state.atomic_write_json(
+            state.buckets_path(NODE), {"ana": {"level": 100, "at": time.time()}}
+        )
+        assert run_idle(ctx)["flushed"] == ["Ana"]
+        assert state.read_conversation(NODE, "ana")["retired"] is True
+
+    def test_dump_and_refound_templates_override_via_definition(
+        self, continue_ctx, tmp_path
+    ):
+        ctx, calls = continue_ctx
+        p = tmp_path / "defn.json"
+        p.write_text(
+            json.dumps({"invoke": ["x"], "prompts": {
+                "flush_dump": "DUMP EVERYTHING NOW",
+                "refound_preamble": "READ THE LOG FIRST",
+            }}),
+            encoding="utf-8",
+        )
+        ctx = replace(ctx, definition_path=p)
+        assert run_one(ctx, "boss", "acme:ana", "first task") == 1
+        assert continue_argvs(calls)[0][0].startswith("READ THE LOG FIRST")
+        age_last_turn("ana")
+        assert run_idle(ctx)["flushed"] == ["Ana"]
+        assert "DUMP EVERYTHING NOW" in continue_argvs(calls)[-1][0]
+
+    def test_real_message_after_flush_refounds(self, continue_ctx):
+        ctx, calls = continue_ctx
+        self.found(ctx)
+        age_last_turn("ana")
+        run_idle(ctx)
+        assert run_one(ctx, "boss", "acme:ana", "new work") == 1
+        argv = continue_argvs(calls)[-1]
+        assert "--continue" not in argv
+        assert argv[0].startswith(REFOUND_PREAMBLE)
+        convo = state.read_conversation(NODE, "ana")
+        assert convo["retired"] is False
+
+
+class TestTurnSerialization:
+    def test_message_arriving_mid_turn_never_spawns_a_second_turn(self, ctx):
+        """Pins the guarantee continue depends on: one turn at a time per
+        member. The agent .lock is held for the whole turn and claim_queue
+        snapshots under it, so a mid-turn arrival queues for the NEXT turn —
+        it must never start a second CLI on the same conversation."""
+        turns = []
+
+        def run_fn(rig, prompt, cwd, *, env=None, variant=0):
+            turns.append(prompt)
+            state.enqueue(NODE, "phil", {
+                "from": "acme:gerry", "to": "acme:phil",
+                "thread": "T", "hop": 0, "class": "auto", "body": "mid-turn",
+            })
+            assert drain(ctx, run_fn=run_fn) == 0  # lock held: no nested turn
+            return 0, "ok", 0.1, False
+
+        assert run_one(ctx, "acme:gerry", "acme:phil", "first", run_fn=run_fn) == 1
+        assert len(turns) == 1
+        assert state.queue_depth(NODE, "phil") == 1  # mid-turn message held
+        assert drain(ctx, run_fn=ok_run) == 1  # ...and rides the next turn
+        assert state.queue_depth(NODE, "phil") == 0
 
 
 ANSWER = "Here is my long detailed answer about the payload format. " * 3

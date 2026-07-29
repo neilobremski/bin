@@ -48,7 +48,14 @@ from rig import (
 )
 from notify import resolve_tell_fn, simulate_enabled
 from org import check_org, load_org
-from roster import Member, Roster, RosterError, load_roster, resolve_roster_path
+from roster import (
+    Member,
+    Roster,
+    RosterError,
+    flush_warnings,
+    load_roster,
+    resolve_roster_path,
+)
 
 DEFAULT_TASK_TTL_SECONDS = 7 * 86400
 R4T_DIR = Path(__file__).resolve().parent
@@ -1254,9 +1261,12 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
         problems += 1
     warnings = 0
     if config is not None:
-        for message in continue_collisions(roster, config):
+        for message in continue_collisions(roster, config, org.workplace):
             print(f"warning: {message}")
             warnings += 1
+    for message in flush_warnings(roster):
+        print(f"warning: {message}")
+        warnings += 1
     for severity, message in roster.tree_problems():
         if severity == "error":
             print(message)

@@ -42,8 +42,20 @@ whatever the directory, so members cannot be kept apart, and supporting it
 cleanly means pinning a session id per member (issue #256).
 
 A CLI keeps ONE conversation per directory, so two members running the same
-CLI in the team workplace land in the same one. `r4t roster check` warns when
-that happens — it never blocks, but the fix is to put them on different CLIs.
+CLI from the same effective directory (the workplace root, or their resolved
+`Workdir:`) land in the same one. `r4t roster check` warns when that happens —
+it never blocks, but the fix is another CLI or distinct `Workdir:` lines.
+
+An optional `- **Flush:** 4h` (bare seconds or an s/m/h/d suffix) bounds how
+long a continuing conversation may sit idle before it is retired — dumped to
+disk, then refounded from that state on the next real message. The `r4t idle`
+sweep retires a conversation idle past the duration by running a budget-gated
+dump turn (a normal continuing turn prompting the member to save its state to
+STATUS.md). A rig swap that changes the CLI retires the conversation
+immediately, with no dump turn — the old CLI may be quota-dead. A retired
+member's next turn runs cold with a read-your-state preamble; the dump prompt
+and preamble are overridable via the node definition's `prompts` object (keys
+`flush_dump` and `refound_preamble`).
 
 ## Picking a model (`--model`)
 

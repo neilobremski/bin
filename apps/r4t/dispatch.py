@@ -45,6 +45,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import isolate
@@ -106,6 +107,8 @@ PROMPT_DEFAULTS: dict[str, str] = {
         "Reply to them with where things stand — what is done and what remains. "
         "You do not have to finish the work, just report current state."
     ),
+    "flush_dump": "Save your current state and progress to STATUS.md.",
+    "refound_preamble": "Check your STATUS.md to refresh your memory.",
     "mission_review": (
         "The team's queues are empty and no thread is open, but the mission "
         "may not be met. Review MISSION.md against where things stand and "
@@ -1181,6 +1184,28 @@ def _run_turn(
     newest_hop = int(batch[-1].get("hop", 0) or 0)
     newest_sender = str(batch[-1].get("from", "")) or f"{ctx.node}"
 
+    # Rig-swap retirement: the conversation is keyed on the CLI, so a rig that
+    # now drives a different CLI cannot resume it — the old CLI may be
+    # quota-dead, so no dump turn; state on disk is whatever the last flush or
+    # the member's own writing left. A swap that keeps the CLI key (model-only,
+    # launcher variant) keeps the conversation. A retired or absent record
+    # makes this turn a refound: no continue argv, and a read-your-state
+    # preamble tops the prompt.
+    refound = False
+    if member.continue_conversation:
+        convo = state.read_conversation(ctx.node, member.name)
+        if convo and not convo.get("retired") and convo.get("cli") != rig.cli:
+            state.retire_conversation(ctx.node, member.name)
+            state.append_log(
+                ctx.node,
+                f"r4t: CONTINUE-SWAP {member.name.lower()} (rig {rig.name}) "
+                f"drives {rig.cli!r} but the conversation lives on "
+                f"{convo.get('cli')!r} — retired; this turn refounds from "
+                "state on disk",
+            )
+            convo = {}
+        refound = not convo or bool(convo.get("retired"))
+
     variant = state.take_rotation(ctx.node, rig.name, rig.pool_size)
     staging = state.prepare_staging(ctx.node, member.name)
     state.write_turn(
@@ -1195,6 +1220,8 @@ def _run_turn(
         },
     )
     prompt = build_prompt(ctx, roster, member, batch, rig)
+    if refound:
+        prompt = ctx.prompt("refound_preamble") + "\n\n" + prompt
 
     env = dict(os.environ)
     env["TELL_OUTBOX_DIR"] = str(staging)
@@ -1207,7 +1234,7 @@ def _run_turn(
     # forward and the provider cache prices the wake as a continuation rather
     # than a fresh full prompt. rig_for has already refused any member whose rig
     # cannot continue, so no second check is needed here.
-    if member.continue_conversation:
+    if member.continue_conversation and not refound:
         env["R4T_CONTINUE"] = "1"
     # The org's OS-level boundary (org.py) rides in the same way — one setting
     # wraps every member turn regardless of rig (machinery outside, hands inside).
@@ -1233,19 +1260,19 @@ def _run_turn(
     # every later turn continues. Any other failure falls through to the normal
     # requeue-and-breaker path.
     if (
-        member.continue_conversation
+        "R4T_CONTINUE" in env
         and (timed_out or exit_code != 0)
         and rig.had_no_prior_conversation(output)
     ):
         state.append_log(
             ctx.node,
             f"r4t: CONTINUE-COLD {member.name.lower()} (rig {rig.name}) exit "
-            f"{exit_code}: no conversation to continue in {ctx.workplace} — "
+            f"{exit_code}: no conversation to continue in {workdir} — "
             "retrying once without it to found one",
         )
         del env["R4T_CONTINUE"]
         exit_code, output, duration, timed_out = run_fn(
-            rig, prompt, ctx.workplace, env=env, variant=variant
+            rig, prompt, workdir, env=env, variant=variant
         )
 
     outcome = f"exit {exit_code} in {duration:.1f}s"
@@ -1269,6 +1296,11 @@ def _run_turn(
     )
 
     failed = timed_out or exit_code != 0
+    if not failed and member.continue_conversation:
+        # One recording path for every way a conversation comes to exist —
+        # a refound, the CONTINUE-COLD founding retry, and a normal continue
+        # all land here: the current CLI key, retired cleared.
+        state.record_conversation(ctx.node, member.name, rig.cli)
     if failed:
         # A failed turn releases nothing and returns its whole batch to the
         # queue: the messages are never lost, and the breaker accumulates
@@ -1658,6 +1690,87 @@ def _quiet_task_sweep(
     return nudged
 
 
+# ---------- idle conversation flush (retire, dump, refound) ----------
+#
+# A continuing conversation left idle eventually goes stale or falls out of
+# the provider cache — re-caching a huge context at frontier prices costs real
+# money for one message. `Flush: <duration>` bounds that: once the member's
+# last turn is older than the duration, a DUMP TURN (a normal continuing turn
+# whose prompt asks the member to write its state to disk) runs and the
+# conversation is retired; the next real message refounds cold from that state.
+
+
+def _last_completed(node: str, name: str) -> float | None:
+    raw = str(state.read_meta(node, name).get("last_completed_at", ""))
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _flush_sweep(
+    ctx: DispatchContext, config: RigConfig, roster: Roster, run_fn
+) -> list[str]:
+    """Retire idle continuing conversations. Budget-gated exactly like
+    mission-review: no budget skips the member this sweep and retries when it
+    refills. The dump turn is a real turn — logged, captured, counted — and
+    retirement is marked only when it succeeds. Returns members retired."""
+    flushed: list[str] = []
+    now = time.time()
+    for member in roster.members:
+        if member.is_human or member.errors:
+            continue
+        if not member.continue_conversation or member.flush_seconds is None:
+            continue
+        convo = state.read_conversation(ctx.node, member.name)
+        if not convo or convo.get("retired"):
+            continue
+        if state.queue_depth(ctx.node, member.name):
+            continue  # queued work will run a real continuing turn anyway
+        last = _last_completed(ctx.node, member.name)
+        if last is None or now - last < member.flush_seconds:
+            continue
+        rig, _err, _pinned = config.rig_for(member)
+        if rig is None:
+            continue
+        runnable, reason = _runnable(ctx, config, member, rig)
+        if not runnable:
+            state.append_log(
+                ctx.node,
+                f"r4t: FLUSH deferred — {member.name.lower()} {reason}",
+            )
+            continue
+        state.enqueue(
+            ctx.node,
+            member.name,
+            {
+                "from": f"r4t:{ctx.node}",
+                "to": f"{ctx.node}:{member.name.lower()}",
+                "thread": tasks.new_thread_id(),
+                "hop": 0,
+                "class": "auto",
+                "body": ctx.prompt("flush_dump"),
+            },
+        )
+        state.append_log(
+            ctx.node,
+            f"r4t: FLUSH dump turn -> {member.name.lower()} (conversation idle "
+            f"> {member.flush_seconds:g}s)",
+        )
+        if _run_member_turn(ctx, config, roster, member, rig, run_fn) != RAN:
+            continue
+        last_turn = state.read_meta(ctx.node, member.name).get("last_turn") or {}
+        if last_turn.get("exit") == 0 and not last_turn.get("timed_out"):
+            state.retire_conversation(ctx.node, member.name)
+            state.append_log(
+                ctx.node,
+                f"r4t: FLUSH retired {member.name.lower()}'s conversation — "
+                "the next real message refounds it from state on disk",
+            )
+            flushed.append(member.name)
+    return flushed
+
+
 # ---------- mission-review idle turn (the furnace burns on its own) ----------
 
 MISSION_REVIEW_BACKOFF_BASE = 2
@@ -1786,7 +1899,8 @@ def _mission_review(
 
 def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
     """One idle pass: nudge the leader about quiet unanswered threads, drain
-    every runnable member's queue, then — if the org is structurally stalled —
+    every runnable member's queue, retire idle continuing conversations
+    (_flush_sweep), then — if the org is structurally stalled —
     hand the top leader a budget-gated mission-review turn. Crash recovery needs
     no special path — a turn that never completed left its messages in the queue
     (they were claimed only at a turn that ran), so the next runnable turn picks
@@ -1796,10 +1910,17 @@ def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
         config = load_rig_config(ctx.config_path)
     except (RosterError, RigError) as e:
         state.append_log(ctx.node, f"r4t: IDLE-SKIPPED {e}")
-        return {"quiet_nudged": [], "drained": 0, "mission_review": {"fired": False}, "error": str(e)}
+        return {
+            "quiet_nudged": [], "drained": 0, "flushed": [],
+            "mission_review": {"fired": False}, "error": str(e),
+        }
     nudged = _quiet_task_sweep(ctx, config, roster)
     drained = drain_until_quiet(ctx, run_fn=run_fn)
+    flushed = _flush_sweep(ctx, config, roster, run_fn)
     review = _mission_review(ctx, config, roster, drained, run_fn)
     if review.get("fired"):
         drained += drain_until_quiet(ctx, run_fn=run_fn)
-    return {"quiet_nudged": nudged, "drained": drained, "mission_review": review}
+    return {
+        "quiet_nudged": nudged, "drained": drained, "flushed": flushed,
+        "mission_review": review,
+    }

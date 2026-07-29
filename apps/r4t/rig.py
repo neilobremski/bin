@@ -514,34 +514,48 @@ def continue_presets() -> list[str]:
     return [n for n in preset_names() if HARNESS_PRESETS[n].get("continue_argv")]
 
 
-def continue_collisions(roster: Roster, config: RigConfig) -> list[str]:
+def _effective_cwd(member: Member, workplace: Path) -> Path:
+    """The directory the member's turns run from, mirroring
+    dispatch.resolve_workdir: the resolved `Workdir:` when set, else the
+    workplace root."""
+    if not member.workdir:
+        return workplace.resolve()
+    p = Path(member.workdir).expanduser()
+    if not p.is_absolute():
+        p = workplace / p
+    return p.resolve()
+
+
+def continue_collisions(roster: Roster, config: RigConfig, workplace: Path) -> list[str]:
     """Warn (never block) where `Continue: on` will cross wires with a teammate.
 
     A CLI keys its conversation on the directory it runs from, so two members
-    driving the SAME CLI from the same directory land in one conversation —
-    reading each other's turns and overwriting each other's tail. The other
-    member does not have to be continuing to clobber it; it only has to run the
-    same CLI there. Today every member works in the one team workplace, so the
-    CLI alone identifies the conversation; a per-member workdir would widen the
-    key to (directory, CLI)."""
-    seats: list[tuple[Member, Rig]] = []
+    driving the SAME CLI from the SAME effective directory (the workplace root,
+    or the resolved `Workdir:` when set) land in one conversation — reading
+    each other's turns and overwriting each other's tail. The other member does
+    not have to be continuing to clobber it; it only has to run the same CLI
+    there. Distinct workdirs keep members on one CLI apart."""
+    seats: list[tuple[Member, Rig, Path]] = []
     for m in roster.members:
         if m.is_human or m.errors:
             continue
         rig, _err, _pinned = config.rig_for(m)
         if rig is not None:
-            seats.append((m, rig))
+            seats.append((m, rig, _effective_cwd(m, workplace)))
     out: list[str] = []
-    for member, rig in seats:
+    for member, rig, cwd in seats:
         if not member.continue_conversation:
             continue
-        others = [o.name for o, r in seats if o is not member and r.cli == rig.cli]
+        others = [
+            o.name for o, r, c in seats
+            if o is not member and r.cli == rig.cli and c == cwd
+        ]
         if others:
             out.append(
                 f"{member.name}: Continue: on, but {', '.join(others)} also run "
-                f"{rig.cli!r} in the same directory — one CLI keeps one "
-                f"conversation per directory, so their turns will land in "
-                f"{member.name}'s (try: move one of them to a rig on another CLI)"
+                f"{rig.cli!r} in {cwd} — one CLI keeps one conversation per "
+                f"directory, so their turns will land in {member.name}'s "
+                f"(try: another CLI, or a distinct Workdir:)"
             )
     return out
 
