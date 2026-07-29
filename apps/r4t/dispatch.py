@@ -90,9 +90,13 @@ PROMPT_DEFAULTS: dict[str, str] = {
     ),
     "work_tell": (
         "- Send messages with the `tell` shell command (run it via your shell "
-        "tool — printing it as text sends nothing):\n"
-        "    - reply to whoever asked: tell <name> \"<message>\"\n"
-        "    - a teammate: tell <name> \"<message>\". Teammates:"
+        "tool — printing it as text sends nothing). Body on stdin, delimiter "
+        "quoted so nothing expands ($ ` \\ arrive byte-exact):\n"
+        "        tell <name> - <<'EOF'\n"
+        "        <your message>\n"
+        "        EOF\n"
+        "    Or write the body with your file tool: tell <name> - < msg.md. "
+        "<name> is whoever asked, or a teammate. Teammates:"
     ),
     "work_direct": (
         "- Speak to teammates directly and one at a time — do not post to "

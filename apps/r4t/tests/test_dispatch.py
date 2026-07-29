@@ -1976,6 +1976,15 @@ class TestMissionInjection:
         assert "the only thing the recipient sees" in prompt
         assert "not done until it is committed" in prompt
 
+    def test_tell_teaching_is_stdin_with_a_quoted_heredoc(self, ctx):
+        # The quoted delimiter is the load-bearing part: it suppresses every
+        # shell expansion, so a body carrying $, ` or \ arrives byte-exact.
+        prompt = self._prompt(ctx, "Phil")
+        assert "tell <name> - <<'EOF'" in prompt
+        assert "\nEOF" in prompt.replace("        ", "")
+        assert "tell <name> - < msg.md" in prompt
+        assert 'tell <name> "<message>"' not in prompt
+
 
 class TestTreeEnforcement:
     def test_non_adjacent_tell_reroutes_to_lead(self, tree_ctx, monkeypatch):
