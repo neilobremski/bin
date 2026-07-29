@@ -453,14 +453,37 @@ def seat_read_dir(node: str, name: str) -> Path:
     return seat_dir(node, name) / "read"
 
 
-def park_seat_message(node: str, name: str, sender: str, content: str) -> Path:
+def park_seat_message(
+    node: str,
+    name: str,
+    sender: str,
+    content: str,
+    *,
+    files: list[dict] | None = None,
+    bundle: Path | None = None,
+) -> Path:
+    """Park one message in the human's seat inbox. When the envelope carried
+    attachments (`files` entries + the staged `bundle` dir), copy them into the
+    seat's own storage so they outlive the per-turn staging dir; the parked
+    JSON records filename + stored path for each."""
     envelope = {
         "id": new_ulid(),
         "from": sender,
         "to": name.strip().lower(),
         "content": content,
+        "files": [],
         "parked_at": utc_now(),
     }
+    if files and bundle is not None:
+        store = seat_dir(node, name) / "files" / envelope["id"]
+        for entry in files:
+            src = bundle / str(entry.get("filename", ""))
+            if not src.is_file():
+                continue
+            store.mkdir(parents=True, exist_ok=True)
+            dest = store / src.name
+            shutil.copyfile(src, dest)
+            envelope["files"].append({"filename": src.name, "path": str(dest)})
     path = seat_inbox_dir(node, name) / f"{envelope['id']}.json"
     atomic_write_json(path, envelope)
     return path

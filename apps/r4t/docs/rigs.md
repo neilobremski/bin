@@ -88,7 +88,8 @@ other r4t preset, agy is trusted with normal filesystem permissions.
 
 Rig settings never need hand-edited JSON. The configurable keys are
 `concurrency`, `rig_budget_max`, `rig_budget_earn_per_hour`, the context knobs
-`history_max_bytes` / `history_body_max` / `prompt_body_max`, and `model`
+`history_max_bytes` / `history_body_max` / `prompt_body_max`, `model`, and the
+echo keys `echo` / `echo_max_chars`
 (each detailed in the [knob table](#governance-knobs) below).
 
 ```bash
@@ -117,6 +118,18 @@ recorded preset, exactly like `rig add --model` (agy keeps its live fuzzy match
 per turn). A rig with no recorded preset errors, pointing at
 `r4t rig swap <rig> <preset> --model ...`. Raw `invoke` arrays are never
 exposed through this surface; use `rig add`/`swap` to change the harness.
+
+## Echo rigs
+
+`r4t rig set <rig> echo true` makes the rig's members stdout-only: their turn
+prompt carries no `tell` instructions or messaging doctrine — just who they
+are, their history, and the new messages — and the turn's cleaned stdout is
+staged as the one reply to the sender (`ECHO-REPLY` in the log), through the
+same release gates every send passes. Use it for models that misuse `tell`
+(small models told to message via a shell tool can loop, while the same model
+simply asked a question just answers). A reply longer than `echo_max_chars`
+(default 1500) is truncated in the body with the full text attached to the
+same envelope as a markdown file; empty or chrome-only output stays silent.
 
 ## The economics: budgets, not cuts
 
@@ -155,6 +168,7 @@ invoke lines is a fully governed team. Rationale and prior art per layer:
 | `rig_budget_max` / `rig_budget_earn_per_hour` (rig) | unset (no rig gate) | Machine-global rig spend bucket for the subscription behind the rig. A turn also costs 1 rig unit; when empty, every member on that rig rests on every team. Set both together to bind a shared plan (e.g. 20 / 20 for ~20 prompts an hour) | A shared subscription outrunning its real quota across projects |
 | `max_sends_per_turn` (rig) | 6 | Envelopes released per turn; excess dead-letters | Runaway fan-out width |
 | `history_max_bytes` / `history_body_max` / `prompt_body_max` (rig) | by preset tier — big (agy/codex/claude) 50k/12k/24k · moderate (cursor/opencode/copilot) 25k/6k/12k · small (ollama variants, or no preset) 8192/2000/4000 | Context sizing on the rig: rolling-history budget, per-entry history clip, and per-message prompt clip. `rig add`/`swap` record the preset; explicit values override the tier | A weak rig drowning in context, or a strong one starved of it |
+| `echo` / `echo_max_chars` (rig) | false / 1500 | Stdout-only members (see [Echo rigs](#echo-rigs)): no messaging scaffolding in the prompt, cleaned stdout staged as the one reply, bodies past the cap truncated with the full text attached | A model that misuses `tell`, looping "I did it" messages instead of answering |
 | `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed | Hung harnesses |
 | `concurrency` (rig) | 1 | Live turns within one rig | Rig-wide pile-ups |
 | `cell_budget_max` / `cell_budget_earn_per_hour` | 16 / 8 | Shared cell spend bucket; a turn also costs 1 cell unit. When empty, everyone rests | Whole-cell money burn |

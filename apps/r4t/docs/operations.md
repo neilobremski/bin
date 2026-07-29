@@ -30,7 +30,8 @@ A human roster member is a first-class team address: teammates just
 disconnect. When the seat is unattended dispatch rings the `Address:`
 doorbell (a copy forwarded over a8s to the human's phone); a reply from that
 Address is the human speaking, so it re-enters through the seat path and
-routes like a chat send. Outsiders other than the human do not reach the
+routes like a chat send. The doorbell forward is body-only — attachments wait
+in the seat mailbox, where `r4t seat inbox` prints their stored paths. Outsiders other than the human do not reach the
 seat directly — like all external traffic they enter through the top lead.
 Two surfaces read and speak for it:
 

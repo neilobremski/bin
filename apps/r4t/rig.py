@@ -30,6 +30,12 @@ ceiling binds every team on the machine that shares the rig; a turn also costs
 `rig_budget_max` is set, `rig_budget_earn_per_hour` must be set too — a real
 plan always declares a refill rate.
 
+`echo` — the rig's members never see `tell` or any messaging instructions:
+they are simply prompted with the message content and their cleaned stdout is
+staged as the one reply, through the same release gates every send passes.
+`echo_max_chars` (default 1500) caps that reply's body; longer output is
+truncated with the full text attached as a markdown file on the same envelope.
+
 `preset` — the harness preset the rig was created from (`r4t rig add`/`swap`
 record it). It defaults the text knobs (`history_max_bytes` /
 `history_body_max` / `prompt_body_max`) by the preset's text tier (TEXT_TIERS);
@@ -342,6 +348,7 @@ def text_defaults(preset: str | None) -> dict[str, int]:
     return TEXT_TIERS.get(tier or "small", TEXT_TIERS["small"])
 DEFAULT_BUDGET_MAX = 8.0
 DEFAULT_BUDGET_EARN_PER_HOUR = 4.0
+DEFAULT_ECHO_MAX_CHARS = 1500
 DEFAULT_MAX_CONCURRENT = 1
 DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS = 15.0
 DEFAULT_CELL_BUDGET_MAX = 16.0
@@ -382,6 +389,8 @@ class Rig:
     model: str | None = None
     model_resolver: str | None = None
     preset: str | None = None
+    echo: bool = False
+    echo_max_chars: int = DEFAULT_ECHO_MAX_CHARS
     error: str | None = None
 
     @property
@@ -826,8 +835,10 @@ CONFIGURABLE_INT_KEYS = (
     "history_max_bytes",
     "history_body_max",
     "prompt_body_max",
+    "echo_max_chars",
 )
 CONFIGURABLE_FLOAT_KEYS = ("rig_budget_max", "rig_budget_earn_per_hour")
+CONFIGURABLE_BOOL_KEYS = ("echo",)
 CONFIGURABLE_RIG_KEYS = (
     "concurrency",
     "rig_budget_max",
@@ -836,6 +847,8 @@ CONFIGURABLE_RIG_KEYS = (
     "history_body_max",
     "prompt_body_max",
     "model",
+    "echo",
+    "echo_max_chars",
 )
 
 
@@ -853,6 +866,8 @@ class RigSetting:
     def display(self) -> str:
         if self.value is None:
             return "unset"
+        if isinstance(self.value, bool):
+            return "true" if self.value else "false"
         if isinstance(self.value, float):
             return f"{self.value:g}"
         return str(self.value)
@@ -903,6 +918,14 @@ def _resolve_setting(entry: dict, key: str) -> RigSetting:
         if "concurrency" in entry:
             return RigSetting(key, int(entry["concurrency"]), "explicit", True)
         return RigSetting(key, DEFAULT_CONCURRENCY, "built-in default", False)
+    if key == "echo":
+        if "echo" in entry:
+            return RigSetting(key, bool(entry["echo"]), "explicit", True)
+        return RigSetting(key, False, "built-in default", False)
+    if key == "echo_max_chars":
+        if "echo_max_chars" in entry:
+            return RigSetting(key, int(entry["echo_max_chars"]), "explicit", True)
+        return RigSetting(key, DEFAULT_ECHO_MAX_CHARS, "built-in default", False)
     if key in CONFIGURABLE_FLOAT_KEYS:
         if key in entry:
             return RigSetting(key, float(entry[key]), "explicit", True)
@@ -977,6 +1000,18 @@ def set_rig_value(path: Path, rig_name: str, key: str, value: object) -> RigSett
         model = str(value).strip()
         set_rig_model(path, rig_key, model)
         return RigSetting("model", model, "explicit", True)
+    if key in CONFIGURABLE_BOOL_KEYS:
+        text = str(value).strip().lower()
+        if text not in ("true", "false"):
+            raise RigError(
+                f"{key} must be true or false, got {value!r} "
+                f"(try: r4t rig set <rig> {key} true)"
+            )
+        flag = text == "true"
+        _, entry, payload = _rig_entry(path, rig_name)
+        entry[key] = flag
+        atomic_write_json(path, payload)
+        return RigSetting(key, flag, "explicit", True)
     number = _parse_setting_number(key, value)
     _, entry, payload = _rig_entry(path, rig_name)
     entry[key] = number
@@ -1097,6 +1132,17 @@ def _parse_rig(name: str, raw: object) -> Rig:
         if err:
             problems.append(f"{knob}: {err}")
         setattr(rig, knob, int(value))
+
+    raw_echo = raw.get("echo")
+    if raw_echo is not None:
+        if not isinstance(raw_echo, bool):
+            problems.append(f"echo: expected true or false, got {raw_echo!r}")
+        else:
+            rig.echo = raw_echo
+    echo_max, err = _positive_number(raw.get("echo_max_chars"), DEFAULT_ECHO_MAX_CHARS)
+    if err:
+        problems.append(f"echo_max_chars: {err}")
+    rig.echo_max_chars = int(echo_max)
 
     # The rig spend bucket is opt-in: absent leaves both None and the rig gate
     # off. If present, both knobs are required — a real subscription always

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import state
 import tasks
@@ -56,6 +57,28 @@ def test_seat_inbox_peek_and_json(repo, rig_config, r4t_home, capsys):
     assert envelope["from"] == "acme:gerry"
     assert envelope["content"] == "hello"
     assert len(state.list_seat_messages(NODE, "neil")) == 1
+
+
+def test_park_without_files_records_empty_files(r4t_home):
+    path = state.park_seat_message(NODE, "Neil", "acme:gerry", "hello")
+    assert json.loads(path.read_text(encoding="utf-8"))["files"] == []
+
+
+def test_park_with_bundle_copies_into_seat_storage(r4t_home, tmp_path, capsys, repo, rig_config):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "notes.md").write_text("full text", encoding="utf-8")
+    path = state.park_seat_message(
+        NODE, "Neil", "acme:gerry", "see attached",
+        files=[{"filename": "notes.md"}], bundle=bundle,
+    )
+    (entry,) = json.loads(path.read_text(encoding="utf-8"))["files"]
+    stored = Path(entry["path"])
+    assert entry["filename"] == "notes.md"
+    assert stored.read_text(encoding="utf-8") == "full text"
+    assert state.seat_dir(NODE, "neil") in stored.parents
+    assert _seat(repo, rig_config, "inbox") == 0
+    assert f"(attachment: notes.md at {stored})" in capsys.readouterr().out
 
 
 def test_seat_send_creates_task_as_human(repo, rig_config, r4t_home, fake_harness):
