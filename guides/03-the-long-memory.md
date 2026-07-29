@@ -105,7 +105,7 @@ which is where the next section takes you.
 **Run**
 
 ```bash
-r4t logs --node silo -n 7
+r4t logs --node silo -n 6
 ```
 
 You should see:
@@ -114,8 +114,7 @@ You should see:
 r4t: FLUSH dump turn -> wren (r4t flush)
 turn: 1 message(s) -> Wren (threads 01ABC..., rig silo)
 done: Wren, exit 0 in 28.8s
-r4t: ECHO-REPLY wren (rig silo) 674 bytes of cleaned stdout staged as the reply to r4t:silo
-r4t: RELEASED silo:wren -> r4t:silo thread=01ABC... hop=1
+r4t: SILENT wren (rig silo) answered only r4t-internal senders; its 674 bytes of stdout stay transcript, nothing staged
 r4t: FLUSH retired wren's conversation — the next real message refounds it from state on disk
 r4t: FLUSH archived wren's history log as history-20260729T052013449271Z.md — a fresh one starts at the next turn
 ```
@@ -124,7 +123,9 @@ Three `FLUSH` events around a real turn. The **dump turn** is an ordinary
 continuing turn whose prompt asks one thing: "Save your current state and
 progress to STATUS.md." It is logged, captured, and budgeted like any
 other turn, and only if it exits cleanly does the retirement — and the
-archiving — follow. Look at what Wren wrote:
+archiving — follow. The `SILENT` line is that turn answering r4t rather than a
+teammate: no one asked, so whatever Wren said on his way to disk stays in the
+turn capture instead of landing in someone's inbox. Look at what Wren wrote:
 
 **Run**
 

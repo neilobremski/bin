@@ -1196,10 +1196,14 @@ def _stage_echo_reply(
     discarded. Output past `echo_max_chars` is truncated in the body with the
     full text riding the same envelope as a markdown attachment (the a8s
     bundle-dir mechanism `tell --attach` uses). Empty or chrome-only output
-    stays silent, SILENT logged."""
+    stays silent, SILENT logged; so does an empty `to`, the turn that answered
+    nobody but r4t."""
     staging = state.staging_dir(ctx.node, member.name)
     for stale in state.staged_envelopes(ctx.node, member.name):
         stale.unlink(missing_ok=True)
+    if not to:
+        _log_internal_only(ctx, member, rig, output)
+        return
     reply = clean_transcript(output)
     if not reply:
         state.append_log(
@@ -1232,6 +1236,20 @@ def _stage_echo_reply(
         f"r4t: ECHO-REPLY {member.name.lower()} (rig {rig.name}) "
         f"{len(reply)} bytes of cleaned stdout staged as the reply to {to}"
         + (" (full text attached)" if files else ""),
+    )
+
+
+def _log_internal_only(
+    ctx: DispatchContext,
+    member: Member,
+    rig: Rig,
+    output: str,
+) -> None:
+    state.append_log(
+        ctx.node,
+        f"r4t: SILENT {member.name.lower()} (rig {rig.name}) answered only "
+        f"r4t-internal senders; its {len(output.strip())} bytes of stdout stay "
+        "transcript, nothing staged",
     )
 
 
@@ -1318,6 +1336,19 @@ def _run_turn(
     newest_thread = str(batch[-1].get("thread", "")) or "?"
     newest_hop = int(batch[-1].get("hop", 0) or 0)
     newest_sender = str(batch[-1].get("from", "")) or f"{ctx.node}"
+    # `r4t:<node>` is a synthetic sender — the dispatcher's own voice on dump,
+    # error and review turns — not a mailbox, so no stdout-derived reply may be
+    # addressed to it. The reply target is the newest sender that is a real one;
+    # a batch carrying nothing but r4t's own prompts has no target at all.
+    internal_sender = f"r4t:{ctx.node}"
+    reply_target = next(
+        (
+            str(env_msg.get("from", "")) or f"{ctx.node}"
+            for env_msg in reversed(batch)
+            if str(env_msg.get("from", "")) != internal_sender
+        ),
+        "",
+    )
 
     refound = _refound_turn(ctx, member, rig)
     # The one fact the rest of the turn keys on: this turn really does run
@@ -1445,7 +1476,7 @@ def _run_turn(
                 max_bytes=rig.history_max_bytes,
             )
         if rig.echo:
-            _stage_echo_reply(ctx, member, rig, newest_sender, output)
+            _stage_echo_reply(ctx, member, rig, reply_target, output)
         elif not state.staged_envelopes(ctx.node, member.name):
             # The classic weak-rig shape: the model answers on stdout instead
             # of running `tell`. `tell` always wins — a turn that staged
@@ -1453,17 +1484,19 @@ def _run_turn(
             # released nothing gets its cleaned stdout staged as ONE reply to
             # the newest message's sender, riding the normal release gates.
             reply = clean_transcript(output)
-            if len(reply) > STDOUT_REPLY_MIN_CHARS:
+            if len(reply) > STDOUT_REPLY_MIN_CHARS and not reply_target:
+                _log_internal_only(ctx, member, rig, output)
+            elif len(reply) > STDOUT_REPLY_MIN_CHARS:
                 msg_id = tasks.new_thread_id()
                 state.atomic_write_json(
                     state.staging_dir(ctx.node, member.name) / f"{msg_id}.json",
-                    {"id": msg_id, "to": newest_sender, "content": reply, "files": []},
+                    {"id": msg_id, "to": reply_target, "content": reply, "files": []},
                 )
                 state.append_log(
                     ctx.node,
                     f"r4t: STDOUT-REPLY {member.name.lower()} (rig {rig.name}) "
                     f"released nothing; {len(reply)} bytes of cleaned stdout "
-                    f"staged as a reply to {newest_sender}",
+                    f"staged as a reply to {reply_target}",
                 )
             elif not output.strip():
                 # The blank-response quota signal (Neil's field observation):
@@ -1531,9 +1564,9 @@ def _run_turn(
             f"failed turns, rig {rig.name}) — turns pause; one probe per "
             f"{config.breaker_cooldown_seconds:g}s until a turn succeeds",
         )
-    if exit_code == 127:
+    if exit_code == 127 and reply_target:
         _tell_error(
-            ctx, newest_sender,
+            ctx, reply_target,
             f"{member.name}'s harness (rig {rig.name}) failed to start: "
             f"{output.strip()}",
             thread=newest_thread, roster=roster,
