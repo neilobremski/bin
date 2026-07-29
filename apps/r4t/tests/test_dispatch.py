@@ -2002,10 +2002,35 @@ class TestCli:
         rc = self.run("rig", "list", "--root", str(repo), "--rig-config", str(rig_config))
         assert rc == 0
         out = capsys.readouterr().out
-        assert "junior-dev:" in out
+        lines = out.splitlines()
+        header = next(line for line in lines if line.startswith("RIG "))
+        assert header.split() == [
+            "RIG", "PRESET", "MODEL", "CONC", "TIMEOUT", "SENDS", "BUDGET",
+        ]
+        rig_rows = [line for line in lines if line.startswith(("leader ", "junior-dev "))]
+        assert len(rig_rows) == 2
+        assert "{prompt}" not in out
         assert "gerry -> leader" in out
-        assert "Phil: junior-dev" in out
-        assert "Neil: Human" in out
+        assert "throttle:" in out and "governance:" in out
+        assert "MEMBER" in out and "Phil" in out and "junior-dev" in out
+        assert "Neil" in out and "human" in out
+        assert "(full invoke lines: r4t rig ls --wide)" in out
+
+    def test_rigs_ls_matches_rig_list(self, r4t_home, repo, rig_config, capsys):
+        args = ("--root", str(repo), "--rig-config", str(rig_config))
+        assert self.run("rig", "list", *args) == 0
+        listed = capsys.readouterr().out
+        assert self.run("rigs", "ls", *args) == 0
+        assert capsys.readouterr().out == listed
+
+    def test_rig_list_wide_shows_invoke(self, r4t_home, repo, rig_config, capsys):
+        rc = self.run(
+            "rig", "list", "--wide", "--root", str(repo), "--rig-config", str(rig_config)
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert next(line for line in out.splitlines() if line.startswith("RIG ")).split()[-1] == "INVOKE"
+        assert "{prompt}" in out
 
     def test_rig_presets(self, capsys):
         rc = self.run("rig", "presets")
@@ -2227,7 +2252,7 @@ class TestDefault:
         out = capsys.readouterr().out
         assert "r4t — Roster For Teams" in out
         assert f"R4T_HOME: {r4t_home}" in out
-        assert "Rigs" in out and "junior-dev:" in out
+        assert "Rigs" in out and "junior-dev" in out and "RIG " in out
         assert "Commands" in out and "init" in out
         assert "sandbox --fake" in out
         assert "Next steps" in out

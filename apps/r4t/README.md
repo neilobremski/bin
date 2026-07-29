@@ -34,7 +34,7 @@ Now a real team on your repo:
 cd ~/your-repo
 r4t init          # writes ROSTER.md (owner + Lead + Dev) and rigs.json
 r4t roster check  # -> ".../ROSTER.md: OK (3 member(s), leader Lead)"
-r4t rig list      # each rig's CLI, limits, and roster resolution
+r4t rig ls        # each rig's model, limits, and roster resolution
 ```
 
 The roster names members and symbolic rigs; `~/.config/r4t/rigs.json` maps
