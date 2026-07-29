@@ -81,6 +81,7 @@ in production too. Full flow: [docs/message-flow.md](docs/message-flow.md).
 
 ## Learn more
 
+- [The Ark Raising](../../guides/README.md) — the suite build-along; [chapter 2](../../guides/02-the-solo-agent.md) raises a governed roster of one
 - [Tutorial](docs/tutorial.md) — first team, step by step, fail-closed rules
 - [Rigs](docs/rigs.md) — presets, `--model`, settings, the governance knob table
 - [Message flow](docs/message-flow.md) — threads, queues, the stdout fallback
