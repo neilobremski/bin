@@ -124,17 +124,20 @@ You should see:
 
 ```
 added rig 'solo' (cursor) to /home/you/.config/r4t/rigs.json
-  invoke: agent -p --trust --force --approve-mcps {prompt}
+  invoke: agent --model auto -p --trust --force --approve-mcps {prompt}
 Reference it from ROSTER.md: `- **Rig:** solo`
 set solo echo = true in /home/you/.config/r4t/rigs.json
 ```
 
-No `--model` is the deliberate part: the invoke line carries no model
-flag, so the harness runs whatever your Cursor subscription defaults to —
-covered by what you already pay. Pin one with `--model <name>` and you
-can land on a frontier model billed as usage-based credits, which a
-chatty agent burns through fast; add the flag only when you mean to.
-(`agent models` lists what your account can run.)
+Naming no model of your own is the deliberate part: the preset writes
+`--model auto`, which is the Cursor CLI's own way of saying *whatever my
+subscription defaults to* — covered by what you already pay. The pin
+itself matters. Left off entirely, `agent` reuses the last model it was
+given on this machine, so an invoke with no flag inherits a choice you
+cannot see and did not make here. Name one yourself with
+`--model <name>` and you can land on a frontier model billed as
+usage-based credits, which a chatty agent burns through fast; do that
+only when you mean to. (`agent models` lists what your account can run.)
 
 `echo true` makes Wren **stdout-only**: its turn prompt carries no
 messaging doctrine, and whatever it prints becomes its one reply to you.
@@ -326,14 +329,15 @@ One line in the roster: bound how long Wren's conversation may sit idle.
 `- **Continue:** on`, add:
 
 ```markdown
-- **Flush:** 4h
+- **Flush:** 15m
 ```
 
-A conversation idle past four hours is retired — Wren is prompted once to
-write its state to disk, and the next real message founds a fresh
+A conversation idle past fifteen minutes is retired — Wren is prompted
+once to write its state to disk, and the next real message founds a fresh
 conversation from that saved state. It keeps a long-lived agent from
-dragging weeks of stale context into every turn; the full mechanics are
-chapter 3's subject.
+dragging weeks of stale context into every turn, and it sits near where
+the providers stop discounting a resumed conversation; the full mechanics
+are chapter 3's subject.
 
 **Run**
 
@@ -360,7 +364,7 @@ in commands.)
 cd ~/ark/solo
 git init -q
 git add ROSTER.md
-git commit -q -m "solo roster: Wren, continue on, flush 4h"
+git commit -q -m "solo roster: Wren, continue on, flush 15m"
 ```
 
 Copy-paste templates for this chapter's final state live in

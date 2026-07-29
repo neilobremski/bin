@@ -21,7 +21,7 @@ About 30 minutes.
 
 ## 3. Starting state
 
-- Chapter 3 complete: Wren on `Continue: on` / `Flush: 4h`, answering at
+- Chapter 3 complete: Wren on `Continue: on` / `Flush: 15m`, answering at
   the seat.
 - The free path runs both members on one `qwen3.6` — no second model, no
   extra download. (Subscription path: Moss still runs local and free; only
@@ -45,7 +45,7 @@ Two edits: the roster grows a member, and the rig config grows a rig.
 - **Rig:** solo
 - **Leader:** yes
 - **Continue:** on
-- **Flush:** 4h
+- **Flush:** 15m
 - **Workdir:** agents/wren
 - **Role:** The solo agent — does the work and answers the owner
 

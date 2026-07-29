@@ -778,8 +778,16 @@ class TestModelSplice:
     resolution)."""
 
     def test_optional_when_absent_returns_base(self):
-        for preset in ("claude", "codex", "cursor", "opencode", "agy"):
+        for preset in ("claude", "codex", "opencode", "agy"):
             assert build_preset_invoke(preset) == HARNESS_PRESETS[preset]["invoke"]
+
+    def test_cursor_pins_auto_when_no_model_is_given(self):
+        # `agent` reuses the last --model used on the machine when the flag is
+        # omitted, so the bare preset must still name one (#275).
+        argv = build_preset_invoke("cursor")
+        assert argv[:3] == ["agent", "--model", "auto"]
+        assert argv[-1] == "{prompt}"
+        assert format_preset_invoke("cursor").startswith("agent --model auto")
 
     def test_claude_splices_after_executable(self):
         argv = build_preset_invoke("claude", model="sonnet")
@@ -794,6 +802,18 @@ class TestModelSplice:
     def test_cursor_splices_after_executable(self):
         argv = build_preset_invoke("cursor", model="sonnet-4-thinking")
         assert argv[:3] == ["agent", "--model", "sonnet-4-thinking"]
+        assert "auto" not in argv
+
+    def test_cursor_add_without_model_records_the_auto_pin(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "solo", "cursor")
+        assert load_rig_config(path).rigs["solo"].invoke[:3] == [
+            "agent", "--model", "auto",
+        ]
+        add_preset_rig(path, "pinned", "cursor", model="sonnet-4-thinking")
+        assert load_rig_config(path).rigs["pinned"].invoke[:3] == [
+            "agent", "--model", "sonnet-4-thinking",
+        ]
 
     def test_opencode_splices_after_run(self):
         argv = build_preset_invoke("opencode", model="anthropic/claude-sonnet-4-5")

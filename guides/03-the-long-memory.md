@@ -17,17 +17,17 @@ About 30 minutes, most of it deliberate waiting.
 ## 3. Starting state
 
 - Chapter 2 complete: Wren answers at the seat, `Continue: on`, and the
-  customize step left `Flush: 4h` in his roster block.
+  customize step left `Flush: 15m` in his roster block.
 - Wren's conversation is live — if you just restarted the machine, send one
   seat message so there is a conversation to flush.
 
 ## 4. The change
 
-`Flush: 4h` is a promise you made in chapter 2 without seeing it kept: a
-conversation idle past four hours is retired. Four hours is the right
-setting and the wrong demo — you are not going to sit here for four hours.
-The value takes bare seconds or an `s`/`m`/`h`/`d` suffix, so shrink the
-window for one session:
+`Flush: 15m` is a promise you made in chapter 2 without seeing it kept: a
+conversation idle past fifteen minutes is retired. Fifteen minutes is the
+right setting and still the wrong demo — you are not going to sit here
+watching a clock. The value takes bare seconds or an `s`/`m`/`h`/`d`
+suffix, so shrink the window further for one session:
 
 **Replace** `~/ark/solo/ROSTER.md` — in Wren's block, the `Flush:` line
 becomes:
@@ -363,7 +363,7 @@ Put the window back where it belongs:
 **Replace** `~/ark/solo/ROSTER.md` — Wren's `Flush:` line becomes:
 
 ```markdown
-- **Flush:** 4h
+- **Flush:** 15m
 ```
 
 **Run**
@@ -379,13 +379,35 @@ You: note — Human without an Address (team cannot tell them)
 /home/you/ark/solo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
-Choosing a window is cache economics: a conversation left idle falls out
-of the provider's prompt cache, and re-caching weeks of stale context at
-frontier prices is real money spent on messages nobody needed — flush
-early enough to avoid that, late enough that normal working pauses don't
-cost Wren his short-term memory. Four hours suits a daily-driver agent; on
-the free path the meter is zero and the window is purely about context
-hygiene.
+Choosing a window is cache economics, and two different clocks are
+running. The conversation is yours — it sits on disk and expires only
+when you say so. The provider's prompt cache is merely a discount on
+replaying that conversation, and it is the discount that lapses. When it
+has lapsed the harness resends the same transcript and nothing is
+forgotten; the tokens are simply re-billed, and not the same way
+everywhere. Anthropic charges the re-cached prefix as a cache *write*, a
+premium over ordinary input. Most OpenAI models charge plain input with
+no surcharge at all, though GPT-5.6 writes at a premium again. One miss,
+three different bills.
+
+No provider's boundary sits anywhere near four hours, which is what this
+chapter used to teach. Anthropic's caches hold five minutes by default
+and an hour at the outside; GPT-5.6 guarantees at least thirty; older
+OpenAI models can stretch to a day. Fifteen minutes is the default taught
+here because it falls inside the shortest of them: a pause that long has
+usually cost you the discount already, so retiring the conversation gives
+up nothing you still had, and the next turn carries only what `STATUS.md`
+says matters.
+
+The subscription path is not exempt. Cursor and Copilot plans meter
+cache-writes against your included usage the way they meter everything
+else, so a long-idle conversation resumed at full length spends real
+allowance on messages nobody needed. On the free path the meter reads
+zero and the window is purely context hygiene — set it late enough that
+normal working pauses don't cost Wren his short-term memory, early enough
+that he isn't dragging yesterday into today. The pricing and retention
+figures behind all of this are collected in
+[Prompt-Cache Economics](https://github.com/neilobremski/bin/wiki/Prompt-Cache-Economics).
 
 ## 12. Commit point
 
