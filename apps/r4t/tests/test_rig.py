@@ -1292,15 +1292,63 @@ def _mcp_rig(tmp_path, preset, model=None):
 
 
 class TestMcpSetting:
-    def test_default_off_everywhere(self, tmp_path):
+    @pytest.mark.parametrize("preset", ["claude", "codex", "copilot", "opencode"])
+    def test_unset_defaults_on_where_the_idiom_is_invisible_to_the_repo(
+        self, tmp_path, preset
+    ):
         path = tmp_path / "rigs.json"
-        add_preset_rig(path, "worker", "opencode")
+        add_preset_rig(path, "worker", preset)
         rig = load_rig_config(path).rigs["worker"]
-        assert rig.mcp is False
+        assert rig.mcp is None
+        assert rig.mcp_on is True
         s = rig_setting(path, "worker", "mcp")
         assert (s.value, s.explicit, s.source, s.display()) == (
-            False, False, "built-in default", "false"
+            True, False, f"from preset {preset}", "true"
         )
+
+    def test_unset_defaults_off_for_cursor_which_would_write_into_the_repo(
+        self, tmp_path
+    ):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "cursor")
+        rig = load_rig_config(path).rigs["worker"]
+        assert (rig.mcp, rig.mcp_on) == (None, False)
+        s = rig_setting(path, "worker", "mcp")
+        assert (s.value, s.explicit, s.source) == (False, False, "from preset cursor")
+
+    @pytest.mark.parametrize("preset,model", [("agy", None), ("ollama", "tiny")])
+    def test_unset_resolves_off_silently_without_an_idiom(self, tmp_path, preset, model):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", preset, model=model)
+        rig = load_rig_config(path).rigs["worker"]
+        assert (rig.mcp, rig.mcp_on, rig.error) == (None, False, None)
+
+    def test_presetless_rig_resolves_off(self, tmp_path):
+        path = write_config(tmp_path, {"worker": {"invoke": ["x", "{prompt}"]}})
+        rig = load_rig_config(path).rigs["worker"]
+        assert (rig.mcp, rig.mcp_on) == (None, False)
+        s = rig_setting(path, "worker", "mcp")
+        assert (s.value, s.explicit, s.source) == (False, False, "built-in default")
+
+    def test_explicit_off_beats_a_default_on_preset(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        set_rig_value(path, "worker", "mcp", "off")
+        rig = load_rig_config(path).rigs["worker"]
+        assert (rig.mcp, rig.mcp_on) == (False, False)
+        s = rig_setting(path, "worker", "mcp")
+        assert (s.value, s.explicit, s.source) == (False, True, "explicit")
+        assert unset_rig_value(path, "worker", "mcp") is True
+        assert load_rig_config(path).rigs["worker"].mcp_on is True
+
+    def test_a_fresh_rig_carries_no_mcp_key(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        assert "mcp" not in json.loads(path.read_text(encoding="utf-8"))["worker"]
+        set_rig_value(path, "worker", "mcp", "off")
+        assert json.loads(path.read_text(encoding="utf-8"))["worker"]["mcp"] is False
+        unset_rig_value(path, "worker", "mcp")
+        assert "mcp" not in json.loads(path.read_text(encoding="utf-8"))["worker"]
 
     def test_set_get_unset_round_trip(self, tmp_path):
         path = tmp_path / "rigs.json"
@@ -1369,7 +1417,7 @@ class TestMcpSetting:
         )
         rig = load_rig_config(path).rigs["worker"]
         assert rig.error and "~/.gemini" in rig.error
-        assert rig.mcp is False
+        assert (rig.mcp, rig.mcp_on) == (None, False)
         assert load_rig_config(path).rig_for(member(rig="worker"))[0] is None
 
     def test_parse_rejects_non_boolean_json(self, tmp_path):

@@ -586,7 +586,7 @@ def build_prompt(
         "## How to work",
         ctx.prompt("work_batch"),
         ctx.prompt("work_never_wait"),
-        ctx.prompt("work_tell_mcp" if rig.mcp else "work_tell"),
+        ctx.prompt("work_tell_mcp" if rig.mcp_on else "work_tell"),
         *(teammates or ["    - (none)"]),
         ctx.prompt("work_direct"),
         ctx.prompt("work_no_ack"),
@@ -643,7 +643,7 @@ def run_harness(
     # cross when the wrapper is told to carry them — so the injection states its
     # needs and the wrapper below honours them.
     mcp = McpPlan(argv=argv)
-    if rig.mcp and env is not None:
+    if rig.mcp_on and env is not None:
         mcp = apply_mcp(rig, argv, env, cwd, isolation)
         argv = mcp.argv
 

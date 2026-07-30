@@ -171,8 +171,9 @@ deterministic name and lets `--rm` reap it.
 
 ## The `a8s_tell` tool behind the boundary
 
-`r4t rig set <rig> mcp on` ([rigs](rigs.md#the-a8s_tell-tool-mcp)) injects the
-a8s MCP server into every turn, and each harness takes it a different way:
+The `mcp` knob ([rigs](rigs.md#the-a8s_tell-tool-mcp)) — on by default on most
+presets — injects the a8s MCP server into every turn, and each harness takes it
+a different way:
 claude, codex and copilot read a flag, so it rides argv through both wrappers
 untouched; opencode reads a file named by `OPENCODE_CONFIG`; cursor reads
 `.cursor/mcp.json` in the workdir. A boundary keeps only what it is told to keep,

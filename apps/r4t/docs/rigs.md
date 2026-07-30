@@ -187,19 +187,28 @@ mixing r4t's prompt with a real message still replies to the real sender.
 
 ## The `a8s_tell` tool (`mcp`)
 
-`r4t rig set <rig> mcp on` gives the rig's members a real tool instead of a
-shell command: every turn spawns `a8s mcp serve` through the harness's own
-config, and the prompt teaches the `a8s_tell` tool by name. The message body
-travels as a tool argument, so `$1.25`, backticks and Windows paths reach the
-recipient byte-exact with no quoting for the model to get right — and on a
-small local model that also lifts the "said it, never sent it" rate, which is
-what the tool buys over the heredoc teaching. Default is off, and off is the
-shell teaching unchanged. Two presets refuse the knob and say so: `agy` reads
-MCP config only from `~/.gemini`, and bare `ollama` has no tool use at all, so
-`rig set` errors with a `(try: r4t rig swap <rig> ...)` hint rather than
-running turns whose tool never appears. Under an org boundary (`run_as` /
-`container`) r4t carries each harness's idiom across and fails the turn closed
-when it cannot — see [isolation](isolation.md#the-a8s_tell-tool-behind-the-boundary).
+The `mcp` knob gives the rig's members a real tool instead of a shell command:
+every turn spawns `a8s mcp serve` through the harness's own config, and the
+prompt teaches the `a8s_tell` tool by name. The message body travels as a tool
+argument, so `$1.25`, backticks and Windows paths reach the recipient byte-exact
+with no quoting for the model to get right — and on a small local model that
+also lifts the "said it, never sent it" rate, which is what the tool buys over
+the heredoc teaching.
+
+It is **on by default** on `claude`, `codex`, `copilot` and `opencode` (and
+their `ollama launch` variants): their idioms are a flag, a `-c` override or a
+config file under the member's own state dir, so nothing lands in the team repo.
+`cursor` is **opt-in** — its only idiom writes `.cursor/mcp.json` into the
+working tree, and writing a file into your repo is a different consent level
+than passing a flag. `r4t rig set <rig> mcp off` is the escape hatch on any rig,
+and `r4t rig get <rig> mcp` says whether the value is `explicit` or came `from
+preset <name>`. Two presets have no per-turn path at all — `agy` reads MCP
+config only from `~/.gemini`, bare `ollama` has no tool use — so they resolve
+off silently and `rig set <rig> mcp on` errors there with a
+`(try: r4t rig swap <rig> ...)` hint rather than running turns whose tool never
+appears. Under an org boundary (`run_as` / `container`) r4t carries each
+harness's idiom across and fails the turn closed when it cannot — see
+[isolation](isolation.md#the-a8s_tell-tool-behind-the-boundary).
 
 ## The economics: budgets, not cuts
 
@@ -239,7 +248,7 @@ invoke lines is a fully governed team. Rationale and prior art per layer:
 | `max_sends_per_turn` (rig) | 6 | Envelopes released per turn; excess dead-letters | Runaway fan-out width |
 | `history_max_bytes` / `history_body_max` / `prompt_body_max` (rig) | by preset tier — big (agy/codex/claude) 50k/12k/24k · moderate (cursor/opencode/copilot) 25k/6k/12k · small (ollama variants, or no preset) 8192/2000/4000 | Context sizing on the rig: rolling-history budget, per-entry history clip, and per-message prompt clip. `rig add`/`swap` record the preset; explicit values override the tier | A weak rig drowning in context, or a strong one starved of it |
 | `echo` / `echo_max_chars` (rig) | false / 1500 | Stdout-only members (see [Echo rigs](#echo-rigs)): no messaging scaffolding in the prompt, cleaned stdout staged as the one reply, bodies past the cap truncated with the full text attached | A model that misuses `tell`, looping "I did it" messages instead of answering |
-| `mcp` (rig) | false | Members send with the `a8s_tell` tool instead of the `tell` shell command (see [The `a8s_tell` tool](#the-a8s_tell-tool-mcp)): `a8s mcp serve` is injected per turn through the harness's own idiom and the prompt names the tool. `agy` and bare `ollama` refuse it | Shell quoting mangling a body, and a member that describes a message instead of sending one |
+| `mcp` (rig) | by preset — **on** for claude/codex/copilot/opencode and their `ollama launch` variants; **off** for cursor (its idiom writes `.cursor/mcp.json` into your repo) and for agy / bare ollama (no per-turn idiom) | Members send with the `a8s_tell` tool instead of the `tell` shell command (see [The `a8s_tell` tool](#the-a8s_tell-tool-mcp)): `a8s mcp serve` is injected per turn through the harness's own idiom and the prompt names the tool. `mcp off` is the escape hatch anywhere; `mcp on` errors on agy and bare ollama | Shell quoting mangling a body, and a member that describes a message instead of sending one |
 | `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed | Hung harnesses |
 | `concurrency` (rig) | 1 | Live turns within one rig | Rig-wide pile-ups |
 | `cell_budget_max` / `cell_budget_earn_per_hour` | 16 / 8 | Shared cell spend bucket; a turn also costs 1 cell unit. When empty, everyone rests | Whole-cell money burn |

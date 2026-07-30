@@ -2821,10 +2821,15 @@ class TestMcpKnob:
         roster = load_roster(ctx.roster_path)
         return dispatch.build_prompt(ctx, roster, roster.find("phil"), [], rig)
 
-    def test_knob_off_keeps_the_heredoc_teaching(self, ctx):
-        prompt = self._prompt(ctx, Rig(name="t", preset="opencode"))
+    def test_explicit_off_keeps_the_heredoc_teaching(self, ctx):
+        prompt = self._prompt(ctx, Rig(name="t", preset="opencode", mcp=False))
         assert HEREDOC_TEACHING in prompt
         assert "a8s_tell" not in prompt
+
+    def test_unset_follows_the_preset_default(self, ctx):
+        assert "`a8s_tell` tool" in self._prompt(ctx, Rig(name="t", preset="opencode"))
+        assert HEREDOC_TEACHING in self._prompt(ctx, Rig(name="t", preset="cursor"))
+        assert HEREDOC_TEACHING in self._prompt(ctx, Rig(name="t", preset="agy"))
 
     def test_knob_on_names_the_tool_instead(self, ctx):
         prompt = self._prompt(ctx, Rig(name="t", preset="opencode", mcp=True))
@@ -2860,7 +2865,7 @@ class TestMcpKnob:
     def test_turn_env_untouched_when_off(self, tmp_path):
         staging = tmp_path / "agents" / "phil" / "staging"
         staging.mkdir(parents=True)
-        rig = self._echo_env_rig(tmp_path, preset="opencode")
+        rig = self._echo_env_rig(tmp_path, preset="opencode", mcp=False)
         env = {k: v for k, v in os.environ.items() if k != "OPENCODE_CONFIG"}
         env["TELL_OUTBOX_DIR"] = str(staging)
 
@@ -2875,12 +2880,20 @@ class TestMcpKnob:
             "apply_mcp",
             lambda rig, argv, env, cwd, iso: calls.append(rig) or McpPlan(argv=argv),
         )
-        rig = self._echo_env_rig(tmp_path, preset="opencode")
+        rig = self._echo_env_rig(tmp_path, preset="opencode", mcp=False)
         run_harness(rig, "x", tmp_path, env=dict(os.environ))
         assert calls == []
 
         run_harness(
-            self._echo_env_rig(tmp_path, preset="opencode", mcp=True),
+            self._echo_env_rig(tmp_path, preset="cursor"),
+            "x",
+            tmp_path,
+            env=dict(os.environ),
+        )
+        assert calls == []
+
+        run_harness(
+            self._echo_env_rig(tmp_path, preset="opencode"),
             "x",
             tmp_path,
             env=dict(os.environ),
