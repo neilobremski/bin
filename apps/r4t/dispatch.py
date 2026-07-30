@@ -1852,7 +1852,42 @@ def run_clear(ctx: DispatchContext, older_than: float, *, run_fn=run_harness) ->
     pruned = state.prune_stale_locks(ctx.node)
     expired = tasks.expire_tasks(ctx.node, older_than)
     drained = drain_until_quiet(ctx, run_fn=run_fn)
-    return {"locks_pruned": pruned, "tasks_expired": expired, "drained": drained}
+    days, months = _run_retention(ctx)
+    return {
+        "locks_pruned": pruned,
+        "tasks_expired": expired,
+        "drained": drained,
+        "log_days_pruned": days,
+        "velocity_months_rotated": months,
+    }
+
+
+def _run_retention(ctx: DispatchContext) -> tuple[list[str], list[str]]:
+    """Bound the two files that grow per turn forever: drop day logs past
+    `log_retention_days`, and rotate finished months out of velocity.csv.
+    Both are announced in the log — nothing is silently dropped — and
+    dead-letter records are deliberately untouched (they wait for a human).
+    An unreadable rig config skips retention rather than guessing a policy
+    that deletes."""
+    try:
+        retention = load_rig_config(ctx.config_path).log_retention_days
+    except RigError:
+        return [], []
+    days = state.prune_day_logs(ctx.node, retention)
+    if days:
+        state.append_log(
+            ctx.node,
+            f"r4t: PRUNED {len(days)} day log(s) past {retention}-day retention "
+            f"({days[0]}..{days[-1]})",
+        )
+    months = [] if state.live_locks(ctx.node) else state.rotate_velocity(ctx.node)
+    if months:
+        state.append_log(
+            ctx.node,
+            "r4t: ROTATED velocity rows for finished month(s) "
+            f"{', '.join(months)} into velocity-<month>.csv",
+        )
+    return days, months
 
 
 # ---------- quiet-thread sweep (the termination backstop) ----------

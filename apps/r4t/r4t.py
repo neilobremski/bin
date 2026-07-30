@@ -530,8 +530,20 @@ def cmd_clear(args: argparse.Namespace) -> int:
         f"expired {len(expired)} thread(s)"
         + (f" ({', '.join(expired)})" if expired else "")
         + f"; drained {summary['drained']} queued turn(s)"
+        + _retention_line(summary)
     )
     return 0
+
+
+def _retention_line(summary: dict) -> str:
+    days = summary["log_days_pruned"]
+    months = summary["velocity_months_rotated"]
+    parts = []
+    if days:
+        parts.append(f"pruned {len(days)} day log(s) ({days[0]}..{days[-1]})")
+    if months:
+        parts.append(f"rotated velocity for {', '.join(months)}")
+    return ("; " + "; ".join(parts)) if parts else ""
 
 
 def _flush_line(result: dict) -> str:
@@ -612,6 +624,7 @@ def cmd_idle(args: argparse.Namespace) -> int:
         f"pruned {clear_summary['locks_pruned']} stale lock(s); "
         f"expired {len(expired)} thread(s); "
         f"drained {clear_summary['drained']} more queued turn(s)"
+        + _retention_line(clear_summary)
     )
     return 0
 
@@ -1956,7 +1969,11 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch_p.set_defaults(func=cmd_dispatch)
 
     clear_p = sub.add_parser(
-        "clear", description="Maintenance: prune stale locks, expire tasks, drain."
+        "clear",
+        description=(
+            "Maintenance: prune stale locks, expire tasks, drain, and apply "
+            "log retention."
+        ),
     )
     _add_common(clear_p, with_node=True)
     _add_older_than(clear_p)

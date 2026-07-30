@@ -7,6 +7,7 @@ import sys
 import textwrap
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -2468,6 +2469,52 @@ class TestCli:
         assert "pruned 1 stale lock(s)" in out
         assert "expired 1 thread(s)" in out
         assert tasks.load_task(NODE, stale["id"]) is None
+
+    def test_clear_applies_log_retention(self, r4t_home, repo, rig_config, capsys):
+        log_dir = state.team_dir(NODE) / "log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "2020-01-01.md").write_text("ancient\n", encoding="utf-8")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        (log_dir / f"{today}.md").write_text("fresh\n", encoding="utf-8")
+        velocity = state.team_dir(NODE) / "velocity.csv"
+        velocity.write_text(
+            state.VELOCITY_HEADER + "2020-01-01T00:00:00Z,phil,junior-dev,x,0,1.00,0\n",
+            encoding="utf-8",
+        )
+        rc = self.run(
+            "clear", "--root", str(repo), "--node", NODE,
+            "--rig-config", str(rig_config), "--no-notify",
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "pruned 1 day log(s) (2020-01-01..2020-01-01)" in out
+        assert "rotated velocity for 2020-01" in out
+        assert not (log_dir / "2020-01-01.md").is_file()
+        today_log = (log_dir / f"{today}.md").read_text(encoding="utf-8")
+        assert "fresh" in today_log
+        assert "r4t: PRUNED 1 day log(s) past 14-day retention" in today_log
+        assert "r4t: ROTATED velocity rows" in today_log
+        assert (state.team_dir(NODE) / "velocity-2020-01.csv").is_file()
+        assert velocity.read_text(encoding="utf-8") == state.VELOCITY_HEADER
+
+    def test_clear_keeps_everything_at_zero_retention(
+        self, r4t_home, repo, tmp_path, fake_harness, capsys
+    ):
+        script, _out = fake_harness
+        config = _local_base_config(script)
+        config["log_retention_days"] = 0
+        config_path = tmp_path / "keep-forever-rigs.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        log_dir = state.team_dir(NODE) / "log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "2019-06-01.md").write_text("ancient\n", encoding="utf-8")
+        rc = self.run(
+            "clear", "--root", str(repo), "--node", NODE,
+            "--rig-config", str(config_path), "--no-notify",
+        )
+        assert rc == 0
+        assert "day log(s)" not in capsys.readouterr().out
+        assert (log_dir / "2019-06-01.md").is_file()
 
     def test_roster_check_flags_problems(self, r4t_home, repo, rig_config, capsys):
         rc = self.run("roster", "check", "--root", str(repo), "--rig-config", str(rig_config))
