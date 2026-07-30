@@ -24,8 +24,11 @@ honors A8S_HOME).
     ├── buckets.json               per-member + team spend budgets (turns, not tokens)
     ├── rotation.json              per-rig round-robin index for harness pools
     ├── last-turn-start            cadence stamp for the team throttle
-    ├── log/<date>.md              full I/O transcript, append-only
-    └── velocity.csv               one row per harness turn
+    ├── log/<date>.md              full I/O transcript, append-only; `r4t clear`
+    │                              drops whole days past `log_retention_days`
+    ├── velocity.csv               one row per harness turn, current month
+    └── velocity-<month>.csv       finished months, rotated out by `r4t clear`
+                                   and never pruned (the cost record)
 
 One file sits ABOVE the teams, at the R4T_HOME root — rig-buckets.json, the
 machine-global rig spend buckets: a rig maps to a real subscription shared by
@@ -44,7 +47,7 @@ import re
 import shutil
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ulid import new as new_ulid
@@ -53,6 +56,8 @@ _queue_seq = itertools.count()
 
 HISTORY_ENTRY_RE = re.compile(r"(?m)^(?=## )")
 VELOCITY_HEADER = "timestamp,agent,rig,thread,hop,duration_seconds,exit_code\n"
+DAY_LOG_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+VELOCITY_MONTH_RE = re.compile(r"(\d{4}-\d{2})-\d{2}T")
 
 
 def utc_now() -> str:
@@ -571,6 +576,32 @@ def recent_log_lines(node: str, *, days: int = 2) -> list[str]:
     return lines
 
 
+def prune_day_logs(node: str, retention_days: int) -> list[str]:
+    """Delete whole day-log files outside the retention window, keeping the
+    most recent `retention_days` UTC days (today included). Whole files only:
+    a surviving day stays byte-identical to what was written, so no partial
+    truncation can ever corrupt a transcript mid-turn. `retention_days` of 0
+    keeps every day forever. Returns the days dropped, oldest first."""
+    if retention_days <= 0:
+        return []
+    log_dir = team_dir(node) / "log"
+    if not log_dir.is_dir():
+        return []
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=retention_days - 1)
+    ).strftime("%Y-%m-%d")
+    dropped: list[str] = []
+    for path in sorted(log_dir.glob("*.md")):
+        if not DAY_LOG_RE.fullmatch(path.stem) or path.stem >= cutoff:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        dropped.append(path.stem)
+    return dropped
+
+
 def _csv_field(value: object) -> str:
     text = str(value)
     if any(c in text for c in ",\"\n"):
@@ -607,6 +638,47 @@ def record_velocity(
         if fresh:
             f.write(VELOCITY_HEADER)
         f.write(row + "\n")
+
+
+def rotate_velocity(node: str) -> list[str]:
+    """Move rows from finished months out of velocity.csv into
+    `velocity-<YYYY-MM>.csv` siblings, leaving the live file holding the
+    current month. The monthly files are never pruned — turn economics is the
+    record of what the team cost, and a row per turn stays small — so rotation
+    bounds what every reader parses without dropping anything. Returns the
+    months archived, oldest first.
+
+    The caller rotates only while no turn is live: a running turn appends to
+    velocity.csv, and rewriting it underneath that append would lose the row."""
+    path = team_dir(node) / "velocity.csv"
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return []
+    if not lines or lines[0] != VELOCITY_HEADER:
+        return []
+    current = datetime.now(timezone.utc).strftime("%Y-%m")
+    keep: list[str] = []
+    by_month: dict[str, list[str]] = {}
+    for row in lines[1:]:
+        stamped = VELOCITY_MONTH_RE.match(row)
+        if stamped and stamped.group(1) < current:
+            by_month.setdefault(stamped.group(1), []).append(row)
+        else:
+            keep.append(row)
+    if not by_month:
+        return []
+    for month, rows in sorted(by_month.items()):
+        archive = path.with_name(f"velocity-{month}.csv")
+        fresh = not archive.is_file()
+        with archive.open("a", encoding="utf-8") as f:
+            if fresh:
+                f.write(VELOCITY_HEADER)
+            f.writelines(rows)
+    _atomic_write_text(path, VELOCITY_HEADER + "".join(keep))
+    return sorted(by_month)
 
 
 # ---------- per-turn state (staging outbox + crash evidence) ----------
@@ -721,7 +793,8 @@ def read_live_log_tail(node: str, name: str, offset: int) -> tuple[str, int]:
 # prompting problem cannot be diagnosed after the fact. Turn capture keeps the
 # most recent TURN_RETENTION turns per member as standalone markdown files —
 # the full assembled prompt and the full raw harness output, every turn,
-# successes and timeouts alike. Day logs and #159 own long-term retention.
+# successes and timeouts alike. Long-term retention belongs to the day logs
+# and `log_retention_days` (prune_day_logs).
 
 TURN_RETENTION = 50
 

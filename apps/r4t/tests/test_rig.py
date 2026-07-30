@@ -82,6 +82,7 @@ class TestLoading:
         assert config.breaker_cap == 5
         assert config.breaker_cooldown_seconds == 600.0
         assert config.quiet_task_seconds == 1800.0
+        assert config.log_retention_days == 14
 
     def test_explicit_limits(self, tmp_path):
         config = load_rig_config(
@@ -114,6 +115,7 @@ class TestLoading:
                     "breaker_cap": 2,
                     "breaker_cooldown_seconds": 30,
                     "quiet_task_seconds": 60,
+                    "log_retention_days": 3,
                 },
             )
         )
@@ -124,6 +126,25 @@ class TestLoading:
         assert config.breaker_cap == 2
         assert config.breaker_cooldown_seconds == 30
         assert config.quiet_task_seconds == 60
+        assert config.log_retention_days == 3
+
+    def test_log_retention_zero_means_keep_forever(self, tmp_path):
+        config = load_rig_config(
+            write_config(
+                tmp_path,
+                {"t": {"invoke": ["x", "{prompt}"]}, "log_retention_days": 0},
+            )
+        )
+        assert config.log_retention_days == 0
+
+    def test_negative_log_retention_raises(self, tmp_path):
+        with pytest.raises(RigError):
+            load_rig_config(
+                write_config(
+                    tmp_path,
+                    {"t": {"invoke": ["x", "{prompt}"]}, "log_retention_days": -1},
+                )
+            )
 
     def test_bad_governance_values_raise(self, tmp_path):
         for key, value in (

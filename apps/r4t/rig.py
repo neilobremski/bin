@@ -16,6 +16,8 @@ optional — every knob has a sane default; see README.md for the table):
   bucket. A turn costs 1 cell unit; when it is empty no member runs.
 - `"quiet_task_seconds"` — a thread quiet this long with its originator still
   unanswered wakes the leader with a nudge to reply with current state.
+- `"log_retention_days"` — how many UTC days of team transcript `r4t clear`
+  keeps; older day files are deleted whole. 0 keeps every day forever.
 - `"breaker_cap"` / `"breaker_cooldown_seconds"` — per-member failure breaker:
   consecutive failed turns (nonzero exit or timeout) that trip it, and how
   long turns stay paused per failure before one probe turn is let through.
@@ -92,6 +94,7 @@ RESERVED_CONFIG_KEYS = frozenset({
     "breaker_cap",
     "breaker_cooldown_seconds",
     "quiet_task_seconds",
+    "log_retention_days",
 })
 
 # `continue_argv` is present only where the CLI's own `--help` was read and the
@@ -394,6 +397,7 @@ DEFAULT_CELL_BUDGET_EARN_PER_HOUR = 8.0
 DEFAULT_BREAKER_CAP = 5
 DEFAULT_BREAKER_COOLDOWN_SECONDS = 600.0
 DEFAULT_QUIET_TASK_SECONDS = 1800.0
+DEFAULT_LOG_RETENTION_DAYS = 14
 
 
 class RigError(Exception):
@@ -532,6 +536,7 @@ class RigConfig:
     breaker_cap: int = DEFAULT_BREAKER_CAP
     breaker_cooldown_seconds: float = DEFAULT_BREAKER_COOLDOWN_SECONDS
     quiet_task_seconds: float = DEFAULT_QUIET_TASK_SECONDS
+    log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
     missing: bool = False
 
     def rig_for(self, member: Member) -> tuple[Rig | None, str | None, bool]:
@@ -1604,6 +1609,11 @@ def load_rig_config(path: Path) -> RigConfig:
             if n <= 0:
                 raise RigError(f"{key} must be positive, got {value!r}")
             setattr(config, key, int(n))
+            continue
+        if key == "log_retention_days":
+            config.log_retention_days = int(
+                _non_negative_number(value, DEFAULT_LOG_RETENTION_DAYS, key)
+            )
             continue
         if key in (
             "cell_budget_max",
