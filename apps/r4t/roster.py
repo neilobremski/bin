@@ -35,11 +35,12 @@ directory for turns. Relative paths resolve against the org workplace
 outside the repo entirely. Absent means the member runs from the workplace
 root. The directory is created on demand at the start of a turn.
 It sets the turn's cwd — which every rig receives, `ollama launch` wrappers
-included — and the prompt names it as the member's root, but no harness is
-obliged to treat it as the project root: opencode-family rigs also advertise
-the enclosing git root to the model as a "workspace root". A workdir nested in
-a repo can therefore still attract writes to the repo root (issue #273; see
-docs/rigs.md).
+included — fills a `{workdir}` in the rig's invoke for a CLI that takes its
+working directory as an argument, and the prompt names it as the member's root.
+No harness is obliged to treat it as the project root, though:
+opencode-family rigs also advertise the enclosing git root to the model as a
+"workspace root". A workdir nested in a repo can therefore still attract writes
+to the repo root (issue #273; see docs/rigs.md).
 """
 from __future__ import annotations
 

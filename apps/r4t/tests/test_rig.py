@@ -272,6 +272,62 @@ class TestArgv:
         assert config.rigs["t"].argv("X") == ["run", "prompt=X"]
 
 
+class TestWorkdirPlaceholder:
+    """`{workdir}` carries the member's resolved `Workdir:` into the argv, for a
+    harness that takes its working directory as an argument (#273)."""
+
+    def _rig(self, tmp_path, argv):
+        return load_rig_config(write_config(tmp_path, {"t": {"invoke": argv}})).rigs["t"]
+
+    def test_substituted_when_given(self, tmp_path):
+        rig = self._rig(tmp_path, ["oc", "--dir", "{workdir}", "{prompt}"])
+        assert rig.argv("hi", workdir="/repo/agents/bob") == [
+            "oc", "--dir", "/repo/agents/bob", "hi",
+        ]
+
+    def test_accepts_a_path(self, tmp_path):
+        rig = self._rig(tmp_path, ["oc", "--dir", "{workdir}", "{prompt}"])
+        assert rig.argv("hi", workdir=Path("/repo/agents/bob"))[2] == "/repo/agents/bob"
+
+    def test_left_alone_when_not_given(self, tmp_path):
+        rig = self._rig(tmp_path, ["oc", "--dir", "{workdir}", "{prompt}"])
+        assert rig.argv("hi") == ["oc", "--dir", "{workdir}", "hi"]
+
+    def test_prompt_text_is_never_read_as_a_placeholder(self, tmp_path):
+        # A teammate may write "{workdir}" in a message; the prompt is data.
+        rig = self._rig(tmp_path, ["oc", "--dir", "{workdir}", "{prompt}"])
+        argv = rig.argv("put it in {workdir}", workdir="/repo/agents/bob")
+        assert argv == ["oc", "--dir", "/repo/agents/bob", "put it in {workdir}"]
+
+    def test_embedded_in_a_token(self, tmp_path):
+        rig = self._rig(tmp_path, ["oc", "--dir={workdir}", "{prompt}"])
+        assert rig.argv("hi", workdir="/w")[1] == "--dir=/w"
+
+    def test_substituted_in_every_pool_variant(self, tmp_path):
+        rig = self._rig(tmp_path, [
+            ["oc", "--dir", "{workdir}", "{prompt}"],
+            ["oc", "--dir", "{workdir}", "-m", "local", "{prompt}"],
+        ])
+        assert rig.argv("hi", 0, workdir="/w")[2] == "/w"
+        assert rig.argv("hi", 1, workdir="/w")[2] == "/w"
+
+    def test_opencode_presets_pin_the_workdir_absolutely(self):
+        # opencode resolves a RELATIVE --dir against $PWD (its real cwd only as
+        # a fallback), and a spawned harness inherits the PWD of whoever started
+        # r4t — so `--dir .` anchored the file tools outside the workdir.
+        for preset in ("opencode", "opencode-ollama"):
+            argv = HARNESS_PRESETS[preset]["invoke"]
+            assert "--dir" in argv
+            assert argv[argv.index("--dir") + 1] == "{workdir}"
+            assert "." not in argv
+
+    def test_init_starter_rigs_pin_the_workdir(self):
+        for entry in default_config_payload().values():
+            if not isinstance(entry, dict) or "invoke" not in entry:
+                continue
+            assert "{workdir}" in entry["invoke"]
+
+
 class TestContinue:
     def test_only_verified_presets_declare_continue(self):
         # Each of these was verified against the installed CLI's own --help and

@@ -1901,7 +1901,52 @@ class TestRunHarness:
         code, out, _dur, timed_out = run_harness(rig, "x", workdir, env=dict(os.environ))
         assert code == 0 and not timed_out
         assert f"harness cwd: {workdir}" in out
-        assert "harness argv: run --auto --dir . x" in out
+        # The cwd survives the hop, and the workdir also rides the argv, because
+        # opencode reads --dir rather than its own cwd (#273).
+        assert f"harness argv: run --auto --dir {workdir} x" in out
+
+    def _pwd_probe(self, tmp_path):
+        script = tmp_path / "where.py"
+        script.write_text(
+            "import os\nprint('PWD=' + os.environ.get('PWD', ''))\n"
+            "print('CWD=' + os.getcwd())\n",
+            encoding="utf-8",
+        )
+        return script
+
+    def test_workdir_placeholder_becomes_the_turn_directory(self, tmp_path):
+        # opencode takes its working directory as an argument, so the resolved
+        # Workdir has to reach the argv and not only the subprocess cwd (#273).
+        workdir = tmp_path / "agents" / "bob"
+        workdir.mkdir(parents=True)
+        rig = Rig(name="oc", invoke=["printf", "%s\\n", "--dir", "{workdir}", "{prompt}"])
+        code, out, _dur, timed_out = run_harness(rig, "hi", workdir)
+        assert code == 0 and not timed_out
+        assert str(workdir) in out
+        assert "{workdir}" not in out
+
+    def test_pwd_names_the_turn_directory_not_the_caller(self, tmp_path, monkeypatch):
+        # PWD is inherited, never updated for a subprocess cwd, and opencode
+        # resolves a relative --dir against it (#273).
+        monkeypatch.setenv("PWD", str(tmp_path / "invoked-from"))
+        workdir = tmp_path / "agents" / "bob"
+        workdir.mkdir(parents=True)
+        rig = Rig(name="t", invoke=[sys.executable, str(self._pwd_probe(tmp_path)), "{prompt}"])
+        code, out, _dur, _timed = run_harness(rig, "x", workdir)
+        assert code == 0
+        assert f"PWD={workdir}" in out
+        assert "invoked-from" not in out
+
+    def test_pwd_pinned_over_an_explicit_turn_env(self, tmp_path):
+        workdir = tmp_path / "agents" / "bob"
+        workdir.mkdir(parents=True)
+        env = dict(os.environ, PWD=str(tmp_path / "invoked-from"))
+        rig = Rig(name="t", invoke=[sys.executable, str(self._pwd_probe(tmp_path)), "{prompt}"])
+        code, out, _dur, _timed = run_harness(rig, "x", workdir, env=env)
+        assert code == 0
+        assert f"PWD={workdir}" in out
+        # The caller's env dict is the turn's record; run_harness leaves it be.
+        assert env["PWD"] == str(tmp_path / "invoked-from")
 
     def test_agy_model_resolved_live_before_turn(self, tmp_path, monkeypatch):
         # The stored argv carries a {model} placeholder; run_harness resolves it
@@ -2861,6 +2906,27 @@ class TestWorkdir:
         run_one(ctx, "acme:bob", "acme:gerry", "hi", run_fn=self.recording_run(turns))
         prompt, _cwd = turns[0]
         assert "org workplace" not in prompt
+
+    def test_real_turn_hands_the_workdir_to_an_opencode_shaped_rig(
+        self, r4t_home, tmp_path, rig_config, tells
+    ):
+        # The whole path: roster Workdir -> resolve_workdir -> run_harness ->
+        # `--dir <absolute workdir>` in the argv the CLI actually sees (#273).
+        seen = tmp_path / "argv.txt"
+        script = tmp_path / "argv-probe.py"
+        script.write_text(
+            "import sys\n"
+            f"open({str(seen)!r}, 'w').write(' '.join(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        config = json.loads(rig_config.read_text(encoding="utf-8"))
+        config["junior-dev"]["invoke"] = [
+            sys.executable, str(script), "--dir", "{workdir}", "{prompt}",
+        ]
+        rig_config.write_text(json.dumps(config), encoding="utf-8")
+        ctx = self.make_ctx(tmp_path, rig_config, tells, "agents/bob")
+        assert run_one(ctx, "acme:gerry", "acme:bob", "hi") == 1
+        assert f"--dir {ctx.root / 'agents' / 'bob'}" in seen.read_text(encoding="utf-8")
 
 
 HEREDOC_TEACHING = "tell <name> - <<'EOF'"

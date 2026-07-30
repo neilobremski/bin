@@ -77,16 +77,27 @@ because there the refound is meant to carry rolling context forward.
 `- **Workdir:** <path>` in the roster runs a member's turns from its own
 directory (relative paths resolve against the workplace; absolute and `~`
 paths may live outside the repo). r4t sets the harness subprocess cwd to it,
-and the member's prompt names it as the absolute root everything it writes
-belongs under.
+states it in the prompt as the absolute root everything the member writes
+belongs under, and hands it to any harness that takes its working directory as
+an argument — `{workdir}` anywhere in an `invoke` is substituted with the
+member's resolved absolute path (the opencode presets pass it as `--dir`).
 
-**Rigs do not all treat that directory as the project root.** The
-opencode-family presets keep two paths: the working directory and a separate
-*workspace root* discovered by walking up for a `.git` — the enclosing repo.
-Both are shown to the model, and a model that takes the advertised root at its
-word writes there by absolute path. `claude`/`cursor` advertise no competing
-root, so their members stay in the workdir. No opencode flag or env var pins
-the root; `--dir` does not.
+Two knobs, because the cwd alone does not reach every harness. `PWD` is a shell
+convention no kernel maintains, so a spawned process inherits the `PWD` of
+whoever started r4t however its cwd is set, and a harness that resolves paths
+against `PWD` lands outside the workdir. r4t pins `PWD` to the workdir in every
+turn env for that reason; `{workdir}` is the belt to that braces, since an
+absolute path in the argv depends on no environment at all.
+
+**Rigs still do not all treat that directory as the project root.** The
+opencode-family presets keep two paths: the working directory (which their file
+tools anchor on, and which `--dir` pins) and a separate *workspace root*
+discovered by walking up for a `.git` — the enclosing repo. Both are shown to
+the model, and a model that takes the advertised root at its word writes there
+by absolute path. `claude`/`cursor` advertise no competing root, so their
+members stay in the workdir. No opencode flag or env var pins that root:
+`--dir` sets the working directory, and the root is always the git walk-up from
+it.
 
 The `ollama launch`-wrapped presets inherit their parent's behavior and nothing
 worse: the launcher execs the integration in the directory r4t spawned it in,
