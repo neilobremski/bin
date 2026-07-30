@@ -94,7 +94,8 @@ Room slugs: `[a-z0-9_-]+`, case-insensitive, stored lowercase.
 
 - Posting auto-creates the room and auto-joins the poster.
 - Malformed input → `tell` error back to sender.
-- Successful post → stdout ACK + `tell` ACK to sender; other members get truncated notify.
+- Successful post → stdout ACK + `tell` ACK to sender; other members get truncated notify
+  (1000 chars) with a `[truncated]` footer pointing at `tell <node> "/view <room>"`.
 - Attachments: a8s wake appends `ATTACHED FILE:` lines; hall re-`tell --attach`s them to
   other room members (one inbound attach, N outbound copies via a8s).
 

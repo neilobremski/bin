@@ -143,6 +143,47 @@ class TestPost:
         assert "More commands: tell HALL /help" in bob_msgs[0]
         assert "tell HALL /view" not in bob_msgs[0]
 
+    def test_long_post_notify_includes_truncation_footer(self, store, tells):
+        from notify import MAX_NOTIFY_CHARS
+
+        sent, tell_fn = tells
+        meta = store.ensure_room("demopony")
+        meta["members"] = ["ALICE", "BOB"]
+        store.save_meta("demopony", meta)
+        body = "x" * (MAX_NOTIFY_CHARS + 50)
+        dispatch_slash(
+            store,
+            sender="ALICE",
+            node="CHATROOM",
+            message=f"#demopony {body}",
+            tell_fn=tell_fn,
+        )
+        bob = [b for a, b, _ in sent if a == "BOB"][0]
+        assert "[truncated]" in bob
+        assert f"Notify cut at {MAX_NOTIFY_CHARS} characters" in bob
+        assert 'tell CHATROOM "/view demopony"' in bob
+        assert bob.rstrip().endswith('tell CHATROOM "/view demopony"')
+        stored = store.list_messages("demopony")[0]["content"]
+        assert stored == body
+        assert "[truncated]" not in stored
+
+    def test_short_post_notify_has_no_truncation_footer(self, store, tells):
+        sent, tell_fn = tells
+        meta = store.ensure_room("war")
+        meta["members"] = ["ALICE", "BOB"]
+        meta["help_seen"] = ["BOB"]
+        store.save_meta("war", meta)
+        dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message="#war short",
+            tell_fn=tell_fn,
+        )
+        bob = [b for a, b, _ in sent if a == "BOB"][0]
+        assert "[truncated]" not in bob
+        assert "/view war" not in bob
+
     def test_onboard_footer_only_once(self, store, tells):
         sent, tell_fn = tells
         meta = store.ensure_room("war")
