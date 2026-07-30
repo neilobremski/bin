@@ -1,4 +1,4 @@
-"""Incremental markdown rendering via glow — shared by l9m and a8s convo."""
+"""Incremental markdown rendering via glow for l9m."""
 from __future__ import annotations
 
 import os
@@ -195,7 +195,7 @@ class GlowStream:
 
     def finalize(self) -> None:
         self._flush_safe(final=True)
-        # Drop rendered prefix so long-lived streams (a8s convo -f) do not grow
+        # Drop rendered prefix so long-lived follow streams do not grow
         # without bound after each forced per-entry finalize.
         if self._rendered:
             self._buffer = self._buffer[self._rendered :]

@@ -27,6 +27,7 @@ def default_tell(
     body: str,
     attachments: list[Path] | None = None,
 ) -> None:
+    # tell ships with the Ark suite (github.com/witw-llc/ar3); resolved on PATH.
     cmd = ["tell"]
     for path in attachments or []:
         cmd.extend(["--attach", str(path)])

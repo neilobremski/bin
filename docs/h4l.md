@@ -26,7 +26,7 @@ names is optional in commands (`/join #war`). `/part` and `/names` are IRC alias
 ## a8s setup
 
 ```bash
-a8s add chatroom ~/chat-node apps/a8s/connectors/h4l/example-definition.json
+a8s add chatroom ~/chat-node apps/h4l/connector-a8s/example-definition.json
 a8s start chatroom
 ```
 

@@ -12,8 +12,6 @@ place and versions do not fight across per-app venvs.
 | `ai.txt` | all `n0b ai` local inference (image, kokoro speak, whisper) |
 | `dev.txt` | pytest for repo tests |
 | `b3t.txt` | `apps/b3t` |
-| `a8s-test.txt` | `apps/a8s` MQTT transport tests |
-| `r4t.txt` | `apps/r4t` Textual chat TUI |
 | `audio.txt` | `n0b ai audio` (AudioLDM, Bark) |
 
 Add new deps here, not inline `pip install` in app code. If two apps need the
