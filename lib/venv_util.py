@@ -122,14 +122,6 @@ def ensure_b3t() -> Path:
     return ensure_group("b3t", probe="import openpyxl, requests")
 
 
-def ensure_a8s_test() -> Path:
-    return ensure_group("a8s-test", probe="import paho.mqtt")
-
-
-def ensure_r4t() -> Path:
-    return ensure_group("r4t", probe="import textual")
-
-
 def ensure_audio(model: str = "audioldm") -> Path:
     model = (model or "audioldm").lower()
     if model in ("bark", "suno-bark"):
@@ -138,7 +130,7 @@ def ensure_audio(model: str = "audioldm") -> Path:
 
 
 def install_all() -> Path:
-    for group in ("ai", "dev", "b3t", "a8s-test", "r4t", "audio"):
+    for group in ("ai", "dev", "b3t", "audio"):
         ensure_group(group)
     return python_bin()
 

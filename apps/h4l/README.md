@@ -33,8 +33,11 @@ to silence tell entirely (pytest).
 
 ## a8s wiring
 
+a8s ships with the [Ark suite](https://github.com/witw-llc/ar3). The example
+definition below invokes `h4l` on PATH, so it works wherever a8s is installed.
+
 ```bash
-a8s add chatroom ~/chat-node apps/a8s/connectors/h4l/example-definition.json
+a8s add chatroom ~/chat-node apps/h4l/connector-a8s/example-definition.json
 a8s start chatroom
 tell chatroom '#war hello'
 tell chatroom '/list'

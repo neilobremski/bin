@@ -4,20 +4,18 @@ This file provides guidance when working with code in this repository.
 
 ## Repo shape
 
-`~/bin/` is a personal utilities repo plus two substantive sub-projects.
+`~/bin/` is a personal utilities repo plus a handful of sub-projects under
+`apps/`. The Ark suite (a8s, r4t, k7e) lives at
+[github.com/witw-llc/ar3](https://github.com/witw-llc/ar3).
 
-- **Top level** — small single-file CLIs (`tell`, `n0b`, `h`, `NMP.py`, etc.).
+- **Top level** — small single-file CLIs (`n0b`, `h`, `l9m`, `NMP.py`, etc.).
   `install.sh` adds the dir to `$PATH` and links docs/skills.
 - **`apps/n0b/`** — Kitchen-sink CLI namespace (`n0b json`, `n0b az`, `n0b ai`, …).
   Docs in [`apps/n0b/docs/`](apps/n0b/docs/); index at [`apps/n0b/README.md`](apps/n0b/README.md).
-- **`apps/a8s/`** — Agent Infinity System. Filesystem-based message router
-  letting independent CLI agents (Claude, Gemini, Codex, scripts) talk to each
-  other via `tell`. See [`apps/a8s/README.md`](apps/a8s/README.md) for concept
-  and usage, [`apps/a8s/DEVELOPMENT.md`](apps/a8s/DEVELOPMENT.md) for hard
-  constraints and historical decisions.
-- **`apps/k7e/`** — Knowledge accumulation engine. Flat markdown files +
-  SQLite FTS5 + optional ollama embeddings. Zero non-stdlib deps for core.
-  See [`apps/k7e/README.md`](apps/k7e/README.md) for usage and architecture.
+- **`apps/h4l/`** — Hall chat rooms (`h4l dispatch`, slash commands, `.chatrooms/` state).
+  See [`apps/h4l/README.md`](apps/h4l/README.md).
+- **`apps/l9m/`, `apps/q3w/`** — local-LLM prompt CLI and its natural-language
+  shell-command sibling.
 - **`docs/`** — markdown for each top-level command + symlinks for skill install.
 - **`requirements/`** — consolidated pip deps for the shared repo venv (see
   `requirements/README.md`). Per-app `requirements.txt` files point here.
@@ -37,12 +35,12 @@ introduce `#!/bin/bash`.
 
 ### Polyglot bash + PowerShell scripts
 
-Cross-platform CLIs (`a8s`, `tell`) are polyglots — the same file is valid
-bash AND PowerShell. The bash side delegates to Python; the PowerShell side
-finds `python3`/`python`/`py` via `Get-Command`. The pattern uses
+Cross-platform CLIs (`n0b`, `h4l`, `b3t`, `l9m`, `q3w`) are polyglots — the same
+file is valid bash AND PowerShell. The bash side delegates to Python; the
+PowerShell side finds `python3`/`python`/`py` via `Get-Command`. The pattern uses
 `echo \`# <#` >/dev/null` as a no-op for bash that opens a PowerShell
-multi-line comment. `tell` is a thin shim around `a8s tell`; don't add new
-polyglots without reading an existing one (e.g., `~/bin/a8s`) first.
+multi-line comment. Don't add new polyglots without reading an existing one
+(e.g., `~/bin/n0b`) first.
 
 Windows can't run the extensionless polyglot from `PATH`, so the important
 top-level commands also ship a sibling `.ps1` (PowerShell prefers it over the
@@ -54,7 +52,7 @@ repo dir, find python, exec the entry-point `.py`, propagate the exit code.
 `install.sh` is sourced from a shell rc. It adds `~/bin/` to `$PATH`. Pass
 `--skills` to also symlink `docs/*.md` and `apps/n0b/docs/*.md` into `~/.claude/skills/` (when Claude
 Code is present) and `~/.cursor/skills/` for Cursor. That mechanism installs the
-user's own tool docs; a8s installs nothing into a project.
+user's own tool docs.
 
 Adding a new top-level CLI: write the script, write `docs/<name>.md` with YAML
 frontmatter if it should be installable as a Claude skill.
@@ -66,18 +64,10 @@ change goes through a PR. The user squash-merges fast. After a squash, rebase
 follow-up work onto fresh `main` rather than stacking — squash hashes don't
 match the original branch's commits and stacking causes conflicts.
 
-### Pre-v1 / scorch-the-earth (a8s only)
-
-`a8s` is explicitly pre-v1. **Do not write migration code.** When the schema
-changes, the user wipes `~/.a8s/` and re-derives state via `a8s discover` +
-`a8s add`. This applies to registry shape, mailbox layout, definition schema,
-and on-disk pid/log paths. The contract changes only when the user declares v1.
-
 ### Commit style
 
-- Commits prefixed `feat(a8s)` / `fix(a8s)` / `refactor(a8s)` / `test(a8s)` /
-  `docs(a8s)` per Conventional Commits. The `(a8s)` scope appears for a8s
-  changes; smaller top-level scripts use `feat(<script>)` etc.
+- Conventional Commits with the app or script as the scope — `feat(n0b)`,
+  `fix(h4l)`, `refactor(l9m)`, `test(q3w)`, `docs(<script>)`.
 - Body explains the *why* and the design decision, not just the mechanical
   *what*.
 - Co-author trailer for AI-assisted work:
@@ -92,60 +82,28 @@ and on-disk pid/log paths. The contract changes only when the user declares v1.
   fine; abstract on the fourth.
 - Don't add error handling for cases that can't happen. Trust internal
   guarantees; validate at boundaries (CLI input, external APIs, filesystem).
-- Don't add backwards-compat hacks. See pre-v1 above.
 
 ### SKILL.md YAML — quoted scalars only
 
-Codex's YAML parser is strict and fails silently on unquoted descriptions
-containing colons or `FILE:` lines. Always quote `name:` and `description:`
-in skill frontmatter.
-
-## Top-level scripts: `tell`
-
-`~/bin/tell` is a **thin shim** to `a8s tell` (plus `tell.cmd` on Windows).
-Implementation lives in `apps/a8s/tell.py`. Outbox resolution: `TELL_OUTBOX_DIR`
-when set (a8s injects it on wake); otherwise a unique configured outbox matched
-from CWD when `~/.a8s` is readable (desktop filedrop seats — see
-`apps/a8s/docs/filedrop.md`). When the registry is reachable and CWD is inside
-a registered agent, recipient validation, `from` stamping, and agent logging
-apply on top.
-
-The router (`mailbox.py:_process_pending`) force-overwrites `from` based on
-which agent owns the enclosing root — the filesystem is the unforgeable
-identity.
-
-Remote inbox writes emit content-free delivery receipts as normal envelopes
-with an `a8s_control` extension and reserved `to: __a8s_receipt__`. Consume
-control envelopes before participant routing, never place them in an inbox,
-and never generate receipts for them. Older subscribers safely drop the
-reserved destination. `a8s trace <ULID>` reads correlated boundaries from
-`transactions.sqlite3` in the a8s state root.
-
-a8s plants no skill files in an agent's repo: `tell` reads `TELL_OUTBOX_DIR`
-from the environment a8s injects on wake. Top-level doc skills for the user's
-own harness come from `source ~/bin/install.sh --skills`.
+Harness YAML parsers differ: copilot rejects unquoted descriptions
+containing colons outright (skill dropped), and other parsers have their
+own strictness. Always quote `name:` and `description:` in skill
+frontmatter.
 
 ## Common operations
 
 ```bash
-# a8s tests
-python3 -m pytest apps/a8s/tests/
+# PII unit tests
+python3 -m pytest tests/test_pii.py
 
-# k7e tests
-cd apps/k7e && tests/run
+# h4l tests
+python3 -m pytest apps/h4l/tests/
 
-# Start fresh after a schema change (pre-v1 scorch-the-earth)
-rm -rf ~/.a8s/agents/ ~/.a8s/a8s.json
-a8s discover apps/a8s/tests/agents
+# l9m + q3w tests (skip the ones needing a live model)
+python3 -m pytest apps/l9m/tests/ apps/q3w/tests/ -m "not llm"
 
-# Tail per-agent activity
-a8s logs CLAUDE GEMINI -f
-
-# Clear local inbox without invoking
-a8s drain my-agent
-
-# Flush MQTT-queued messages (connect, trash for N seconds, exit)
-a8s run my-agent --drain 5
+# n0b tests
+python3 -m pytest apps/n0b/tests/
 ```
 
 ## Memory note
