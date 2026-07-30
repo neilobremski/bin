@@ -86,3 +86,4 @@ line UI) · `chat_tui.py` (Textual front end) · `notify.py` (doorbell) ·
 `sandbox.py` + `sandbox/` (the end-to-end harness).
 Observability rides on a8s: traffic in the a8s txlog/convo, r4t decision
 lines in the node log via dispatch stdout, r4t-only state via `r4t status`.
+
