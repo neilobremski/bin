@@ -18,6 +18,10 @@ Read `README.md` first for concept and usage.
 - **Per-agent take-over via detach-request (no orphans).** Don't reintroduce
   process-level SIGTERM-and-wait in `acquire`.
 - **Per-agent kill via kill-request + SIGUSR1.** Handler checks at iteration top.
+- **File-proxy delivery is ungated.** `attached_loop` promotes a proxy's
+  envelopes every iteration, including while another handled agent's wake is
+  in flight — the move spawns nothing, and `tells` watches that inbox. Only
+  subprocess wakes queue behind the single in-flight slot.
 - **Agent-directory invariant — `.outbox/` is one-way.** a8s never reads or
   writes sidecars there. Ingest is atomic rename into `pending/`.
 - **Remote routing publishes to all configured remotes.** Receivers dedupe by ULID.
