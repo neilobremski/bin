@@ -30,6 +30,12 @@ ceiling binds every team on the machine that shares the rig; a turn also costs
 `rig_budget_max` is set, `rig_budget_earn_per_hour` must be set too — a real
 plan always declares a refill rate.
 
+`mcp` — inject the a8s MCP server (`a8s mcp serve`) into every turn on this
+rig, using the harness's own per-invocation idiom, and teach the member the
+`a8s_tell` tool instead of the shell command. Default off: the shell teaching
+stays. Presets whose CLI takes MCP config only globally (agy) or has no tools
+at all (bare ollama) refuse the knob.
+
 `echo` — the rig's members never see `tell` or any messaging instructions:
 they are simply prompted with the message content and their cleaned stdout is
 staged as the one reply, through the same release gates every send passes.
@@ -58,6 +64,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -91,6 +98,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         "description": "Claude Code — matches apps/a8s/definitions/claude.json",
         "a8s_definition": "claude.json",
         "headless": "-p",
+        "mcp": "claude-flag",
         "invoke": [
             "claude",
             "--permission-mode",
@@ -114,6 +122,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         "description": "OpenAI Codex CLI — matches apps/a8s/definitions/codex.json",
         "a8s_definition": "codex.json",
         "headless": "exec (positional prompt)",
+        "mcp": "codex-config",
         "invoke": [
             "codex",
             "exec",
@@ -131,6 +140,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         "description": "Cursor Agent CLI (`agent`) — matches apps/a8s/definitions/cursor.json",
         "a8s_definition": "cursor.json",
         "headless": "-p",
+        "mcp": "cursor-file",
         "invoke": [
             "agent",
             "-p",
@@ -156,6 +166,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         ),
         "a8s_definition": "opencode.json",
         "headless": "run --auto (positional prompt)",
+        "mcp": "opencode-env",
         "invoke": [
             "opencode",
             "run",
@@ -176,6 +187,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         ),
         "a8s_definition": "opencode.json",
         "headless": "ollama launch opencode --model MODEL -- run --auto",
+        "mcp": "opencode-env",
         "invoke": [
             "ollama",
             "launch",
@@ -202,6 +214,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         ),
         "a8s_definition": "claude.json",
         "headless": "ollama launch claude --model MODEL -y -- --permission-mode dontAsk -p",
+        "mcp": "claude-flag",
         "invoke": [
             "ollama",
             "launch",
@@ -226,6 +239,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         ),
         "a8s_definition": "codex.json",
         "headless": "ollama launch codex --model MODEL -y -- exec --full-auto",
+        "mcp": "codex-config",
         "invoke": [
             "ollama",
             "launch",
@@ -248,6 +262,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         ),
         "a8s_definition": "copilot.json",
         "headless": "ollama launch copilot --model MODEL -y -- --allow-all-tools -p",
+        "mcp": "copilot-flag",
         "invoke": [
             "ollama",
             "launch",
@@ -310,6 +325,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         "description": "GitHub Copilot CLI — matches apps/a8s/definitions/copilot.json",
         "a8s_definition": "copilot.json",
         "headless": "-p",
+        "mcp": "copilot-flag",
         "invoke": [
             "copilot",
             "--allow-all-tools",
@@ -397,7 +413,15 @@ class Rig:
     preset: str | None = None
     echo: bool = False
     echo_max_chars: int = DEFAULT_ECHO_MAX_CHARS
+    mcp: bool = False
     error: str | None = None
+
+    @property
+    def mcp_idiom(self) -> str | None:
+        """How this rig's preset takes an MCP server for ONE invocation. None
+        means there is no per-turn path (agy configures MCP only in ~/.gemini;
+        bare ollama has no tool use), and the knob refuses to turn on."""
+        return HARNESS_PRESETS.get(self.preset or "", {}).get("mcp")
 
     @property
     def continue_argv(self) -> list[str]:
@@ -527,6 +551,169 @@ def preset_names() -> list[str]:
 def continue_presets() -> list[str]:
     """Presets whose CLI can resume its own conversation."""
     return [n for n in preset_names() if HARNESS_PRESETS[n].get("continue_argv")]
+
+
+# --- the `mcp` knob: one stdio server, five harness idioms -------------------
+#
+# The server definition is MEMBER-AGNOSTIC. A harness spawns its stdio servers
+# as children of the turn process, which already carries the per-turn
+# TELL_OUTBOX_DIR, so one blob serves every member on every node. Where the
+# idiom accepts `env`/`cwd` they are pinned anyway, so the outbox is stated
+# rather than inferred (#289).
+
+A8S_PY = Path(__file__).resolve().parent.parent / "a8s" / "a8s.py"
+
+MCP_SERVER_NAME = "a8s"
+# What claude's permission layer calls the tool the model sees as `a8s_tell`.
+MCP_CLAUDE_TOOL = "mcp__a8s__tell"
+OPENCODE_CONFIG_BASENAME = "mcp-opencode.json"
+
+
+def mcp_presets() -> list[str]:
+    """Presets that can take the MCP server for a single invocation."""
+    return [n for n in preset_names() if HARNESS_PRESETS[n].get("mcp")]
+
+
+def mcp_unsupported_reason(preset: str | None) -> str:
+    if preset == "agy":
+        return "agy reads MCP config only from ~/.gemini, never per invocation"
+    if preset == "ollama":
+        return "bare `ollama run` has no tool use at all"
+    if preset:
+        return f"preset {preset!r} has no per-invocation MCP idiom"
+    return "the rig records no preset, so there is no idiom to inject with"
+
+
+def _mcp_command() -> list[str]:
+    return [sys.executable, str(A8S_PY), "mcp", "serve"]
+
+
+def _mcp_server_env(env: dict) -> dict[str, str]:
+    """What the server needs whatever the client's env policy. Clients differ
+    on how much of their own environment they hand a stdio child, so the outbox
+    it must write into is stated explicitly."""
+    pinned = {k: env.get(k, "") for k in ("TELL_OUTBOX_DIR", "HOME", "A8S_HOME", "A8S_MCP_LOG")}
+    return {k: v for k, v in pinned.items() if v}
+
+
+def _mcp_server_entry(env: dict) -> dict:
+    argv = _mcp_command()
+    return {"command": argv[0], "args": argv[1:], "env": _mcp_server_env(env)}
+
+
+def _mcp_servers_json(env: dict) -> str:
+    """The `mcpServers` object claude, copilot and cursor all read."""
+    return json.dumps({"mcpServers": {MCP_SERVER_NAME: _mcp_server_entry(env)}})
+
+
+def _toml_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _mcp_codex_override(env: dict, cwd: Path) -> str:
+    """codex takes config as `-c key=<TOML value>`, and its server table is the
+    one idiom that also accepts an explicit cwd."""
+    argv = _mcp_command()
+    args = ", ".join(_toml_string(a) for a in argv[1:])
+    pinned = ", ".join(f"{k} = {_toml_string(v)}" for k, v in _mcp_server_env(env).items())
+    return (
+        f"mcp_servers.{MCP_SERVER_NAME}={{"
+        f"command = {_toml_string(argv[0])}, "
+        f"args = [{args}], "
+        f"env = {{{pinned}}}, "
+        f"cwd = {_toml_string(str(cwd))}"
+        "}"
+    )
+
+
+def _mcp_opencode_config(env: dict) -> str:
+    return json.dumps(
+        {
+            "$schema": "https://opencode.ai/config.json",
+            "mcp": {
+                MCP_SERVER_NAME: {
+                    "type": "local",
+                    "command": _mcp_command(),
+                    "enabled": True,
+                    "environment": _mcp_server_env(env),
+                }
+            },
+        },
+        indent=2,
+    )
+
+
+def _write_if_changed(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file() and path.read_text(encoding="utf-8") == text:
+        return
+    path.write_text(text, encoding="utf-8")
+
+
+def _write_cursor_mcp(cwd: Path, env: dict) -> Path:
+    """cursor has no per-invocation flag, so the server rides a file in the
+    effective cwd. Any other server already configured there is preserved."""
+    path = cwd / ".cursor" / "mcp.json"
+    payload: dict = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = None
+        if isinstance(loaded, dict):
+            payload = loaded
+    servers = payload.get("mcpServers")
+    payload["mcpServers"] = {**(servers if isinstance(servers, dict) else {}),
+                             MCP_SERVER_NAME: _mcp_server_entry(env)}
+    _write_if_changed(path, json.dumps(payload, indent=2))
+    return path
+
+
+def _mcp_config_dir(env: dict, cwd: Path) -> Path:
+    """Where a config file the harness reads from disk goes: the member's own
+    r4t state dir (parent of the per-turn staging outbox), so the knob writes
+    nothing into the team repo."""
+    staging = env.get("TELL_OUTBOX_DIR", "")
+    return Path(staging).parent if staging else cwd
+
+
+def _mcp_splice_at(argv: list[str]) -> int:
+    """Where the driven CLI's own flags start: after the `--` that separates
+    `ollama launch` from the tool it wraps, else right after the binary."""
+    return argv.index("--") + 1 if "--" in argv else 1
+
+
+def apply_mcp(rig: Rig, argv: list[str], env: dict, cwd: Path) -> list[str]:
+    """Inject the a8s MCP server into one turn with the harness's own idiom.
+    Returns the argv to run; `env` is updated in place and whatever config file
+    the idiom needs is written."""
+    idiom = rig.mcp_idiom
+    if not idiom:
+        return argv
+    argv = list(argv)
+    at = _mcp_splice_at(argv)
+    if idiom == "claude-flag":
+        argv[at:at] = ["--mcp-config", _mcp_servers_json(env)]
+        # `dontAsk` never prompts, so a tool missing from --allowedTools is
+        # silently denied — the MCP tool has to be named there too.
+        for i, token in enumerate(argv):
+            if token == "--allowedTools" and i + 1 < len(argv):
+                if MCP_CLAUDE_TOOL not in argv[i + 1]:
+                    argv[i + 1] = f"{argv[i + 1]} {MCP_CLAUDE_TOOL}".strip()
+                break
+    elif idiom == "codex-config":
+        argv[at:at] = ["-c", _mcp_codex_override(env, cwd)]
+    elif idiom == "copilot-flag":
+        argv[at:at] = ["--additional-mcp-config", _mcp_servers_json(env)]
+    elif idiom == "opencode-env":
+        path = _mcp_config_dir(env, cwd) / OPENCODE_CONFIG_BASENAME
+        _write_if_changed(path, _mcp_opencode_config(env))
+        # OPENCODE_CONFIG_CONTENT is not an option: `ollama launch` sets it for
+        # provider+model and clobbers anything r4t puts there (measured, #310).
+        env["OPENCODE_CONFIG"] = str(path)
+    elif idiom == "cursor-file":
+        _write_cursor_mcp(cwd, env)
+    return argv
 
 
 def _effective_cwd(member: Member, workplace: Path) -> Path:
@@ -851,7 +1038,7 @@ CONFIGURABLE_INT_KEYS = (
     "echo_max_chars",
 )
 CONFIGURABLE_FLOAT_KEYS = ("rig_budget_max", "rig_budget_earn_per_hour")
-CONFIGURABLE_BOOL_KEYS = ("echo",)
+CONFIGURABLE_BOOL_KEYS = ("echo", "mcp")
 CONFIGURABLE_RIG_KEYS = (
     "concurrency",
     "rig_budget_max",
@@ -862,6 +1049,7 @@ CONFIGURABLE_RIG_KEYS = (
     "model",
     "echo",
     "echo_max_chars",
+    "mcp",
 )
 
 
@@ -931,9 +1119,9 @@ def _resolve_setting(entry: dict, key: str) -> RigSetting:
         if "concurrency" in entry:
             return RigSetting(key, int(entry["concurrency"]), "explicit", True)
         return RigSetting(key, DEFAULT_CONCURRENCY, "built-in default", False)
-    if key == "echo":
-        if "echo" in entry:
-            return RigSetting(key, bool(entry["echo"]), "explicit", True)
+    if key in CONFIGURABLE_BOOL_KEYS:
+        if key in entry:
+            return RigSetting(key, bool(entry[key]), "explicit", True)
         return RigSetting(key, False, "built-in default", False)
     if key == "echo_max_chars":
         if "echo_max_chars" in entry:
@@ -962,6 +1150,19 @@ def rig_setting(path: Path, rig_name: str, key: str) -> RigSetting:
         raise _unknown_setting_error(key)
     _, entry, _ = _rig_entry(path, rig_name)
     return _resolve_setting(entry, key)
+
+
+_BOOL_WORDS = {"true": True, "on": True, "false": False, "off": False}
+
+
+def _parse_setting_bool(key: str, raw: object) -> bool:
+    flag = _BOOL_WORDS.get(str(raw).strip().lower())
+    if flag is None:
+        raise RigError(
+            f"{key} must be true or false, got {raw!r} "
+            f"(try: r4t rig set <rig> {key} true)"
+        )
+    return flag
 
 
 def _parse_setting_number(key: str, raw: object) -> int | float:
@@ -1014,14 +1215,16 @@ def set_rig_value(path: Path, rig_name: str, key: str, value: object) -> RigSett
         set_rig_model(path, rig_key, model)
         return RigSetting("model", model, "explicit", True)
     if key in CONFIGURABLE_BOOL_KEYS:
-        text = str(value).strip().lower()
-        if text not in ("true", "false"):
-            raise RigError(
-                f"{key} must be true or false, got {value!r} "
-                f"(try: r4t rig set <rig> {key} true)"
-            )
-        flag = text == "true"
-        _, entry, payload = _rig_entry(path, rig_name)
+        flag = _parse_setting_bool(key, value)
+        rig_key, entry, payload = _rig_entry(path, rig_name)
+        if key == "mcp" and flag:
+            preset = _entry_preset(entry)
+            if not HARNESS_PRESETS.get(preset or "", {}).get("mcp"):
+                raise RigError(
+                    f"leave mcp off for rig {rig_key!r}: "
+                    f"{mcp_unsupported_reason(preset)} "
+                    f"(try: r4t rig swap {rig_key} <one of: {', '.join(mcp_presets())}>)"
+                )
         entry[key] = flag
         atomic_write_json(path, payload)
         return RigSetting(key, flag, "explicit", True)
@@ -1156,6 +1359,20 @@ def _parse_rig(name: str, raw: object) -> Rig:
     if err:
         problems.append(f"echo_max_chars: {err}")
     rig.echo_max_chars = int(echo_max)
+
+    # A hand-edited `mcp: true` on a preset with no per-invocation idiom fails
+    # the rig closed rather than running turns that quietly have no tool.
+    raw_mcp = raw.get("mcp")
+    if raw_mcp is not None:
+        if not isinstance(raw_mcp, bool):
+            problems.append(f"mcp: expected true or false, got {raw_mcp!r}")
+        elif raw_mcp and not rig.mcp_idiom:
+            problems.append(
+                f"mcp: {mcp_unsupported_reason(rig.preset)} "
+                f"(try: r4t rig swap {rig.name} <one of: {', '.join(mcp_presets())}>)"
+            )
+        else:
+            rig.mcp = raw_mcp
 
     # The rig spend bucket is opt-in: absent leaves both None and the rig gate
     # off. If present, both knobs are required — a real subscription always

@@ -2811,3 +2811,76 @@ class TestWorkdir:
         run_one(ctx, "acme:bob", "acme:gerry", "hi", run_fn=self.recording_run(turns))
         prompt, _cwd = turns[0]
         assert "org workplace" not in prompt
+
+
+HEREDOC_TEACHING = "tell <name> - <<'EOF'"
+
+
+class TestMcpKnob:
+    def _prompt(self, ctx, rig):
+        roster = load_roster(ctx.roster_path)
+        return dispatch.build_prompt(ctx, roster, roster.find("phil"), [], rig)
+
+    def test_knob_off_keeps_the_heredoc_teaching(self, ctx):
+        prompt = self._prompt(ctx, Rig(name="t", preset="opencode"))
+        assert HEREDOC_TEACHING in prompt
+        assert "a8s_tell" not in prompt
+
+    def test_knob_on_names_the_tool_instead(self, ctx):
+        prompt = self._prompt(ctx, Rig(name="t", preset="opencode", mcp=True))
+        assert "`a8s_tell` tool" in prompt
+        assert HEREDOC_TEACHING not in prompt
+        assert "Teammates:" in prompt
+
+    def _echo_env_rig(self, tmp_path, **kwargs):
+        script = tmp_path / "show_env.py"
+        script.write_text(
+            "import os\nprint(os.environ.get('OPENCODE_CONFIG', 'unset'))\n",
+            encoding="utf-8",
+        )
+        return Rig(
+            name="t",
+            invoke=[sys.executable, str(script), "{prompt}"],
+            timeout_seconds=30,
+            **kwargs,
+        )
+
+    def test_turn_env_carries_the_opencode_config_when_on(self, tmp_path):
+        staging = tmp_path / "agents" / "phil" / "staging"
+        staging.mkdir(parents=True)
+        rig = self._echo_env_rig(tmp_path, preset="opencode", mcp=True)
+        env = {**os.environ, "TELL_OUTBOX_DIR": str(staging)}
+
+        code, out, _dur, _timed = run_harness(rig, "x", tmp_path, env=env)
+        assert code == 0
+        config = Path(out.strip())
+        assert config.parent == staging.parent
+        assert json.loads(config.read_text(encoding="utf-8"))["mcp"]["a8s"]["enabled"]
+
+    def test_turn_env_untouched_when_off(self, tmp_path):
+        staging = tmp_path / "agents" / "phil" / "staging"
+        staging.mkdir(parents=True)
+        rig = self._echo_env_rig(tmp_path, preset="opencode")
+        env = {k: v for k, v in os.environ.items() if k != "OPENCODE_CONFIG"}
+        env["TELL_OUTBOX_DIR"] = str(staging)
+
+        code, out, _dur, _timed = run_harness(rig, "x", tmp_path, env=env)
+        assert code == 0
+        assert out.strip() == "unset"
+
+    def test_injection_is_skipped_entirely_when_off(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            dispatch, "apply_mcp", lambda rig, argv, env, cwd: calls.append(rig) or argv
+        )
+        rig = self._echo_env_rig(tmp_path, preset="opencode")
+        run_harness(rig, "x", tmp_path, env=dict(os.environ))
+        assert calls == []
+
+        run_harness(
+            self._echo_env_rig(tmp_path, preset="opencode", mcp=True),
+            "x",
+            tmp_path,
+            env=dict(os.environ),
+        )
+        assert len(calls) == 1

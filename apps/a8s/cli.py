@@ -21,6 +21,7 @@ from commands import (
     cmd_kill,
     cmd_logs,
     cmd_ls,
+    cmd_mcp,
     cmd_ps,
     cmd_namespace,
     cmd_namespaces,
@@ -80,6 +81,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("unremote", "<name>",                    "Remove a configured remote."),
     ("storage",  "[<name> [<url> [--<k> <v> ...]]]",            "List, show, or set a cross-cluster file storage service."),
     ("unstorage","<name>",                    "Remove a configured storage service."),
+    ("mcp",      "serve",                     "Run the MCP server exposing tell as a tool."),
     ("install-client", "[dest] [--bin-dir]", "Copy a8s to dest (default /usr/local/lib/a8s) and install tell."),
     ("health",   "",                          "Test connectivity of remotes and storage services."),
 ]
@@ -156,6 +158,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_convo(args)
     if cmd == "trace":
         return cmd_trace(args)
+    if cmd == "mcp":
+        return cmd_mcp(args)
     if cmd == "install-client":
         return cmd_install_client(args)
     if cmd == "logs":

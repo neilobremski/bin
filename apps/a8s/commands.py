@@ -722,6 +722,16 @@ def _install_a8s_tree(lib_dir: Path) -> Path:
     return entry
 
 
+def cmd_mcp(args: list[str]) -> int:
+    """`a8s mcp serve` — the stdio MCP server harnesses spawn as a child."""
+    if args[:1] == ["serve"] and len(args) == 1:
+        import mcp_server
+
+        return mcp_server.serve()
+    print("usage: a8s mcp serve", file=sys.stderr)
+    return 2
+
+
 def cmd_install_client(args: list[str]) -> int:
     """Install a8s tree + tell wrapper to /usr/local for unprivileged agent users."""
     import argparse
