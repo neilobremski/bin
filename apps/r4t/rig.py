@@ -32,11 +32,14 @@ plan always declares a refill rate.
 
 `mcp` — inject the a8s MCP server (`a8s mcp serve`) into every turn on this
 rig, using the harness's own per-invocation idiom, and teach the member the
-`a8s_tell` tool instead of the shell command. Default off: the shell teaching
-stays. Presets whose CLI takes MCP config only globally (agy) or has no tools
-at all (bare ollama) refuse the knob. Each idiom rides a different channel, so
-`apply_mcp` states what an org's isolation boundary has to carry across
-(`McpPlan`) and the wrapper in isolate.py honours it.
+`a8s_tell` tool instead of the shell command. Tri-state: unset takes the
+preset's default (on wherever the idiom is invisible to the team repo — see
+`MCP_DEFAULT_ON_IDIOMS`, off for cursor and for presets with no idiom at all),
+and an explicit true/false in rigs.json always wins. Presets whose CLI takes
+MCP config only globally (agy) or has no tools at all (bare ollama) refuse an
+explicit on. Each idiom rides a different channel, so `apply_mcp` states what an
+org's isolation boundary has to carry across (`McpPlan`) and the wrapper in
+isolate.py honours it.
 
 `echo` — the rig's members never see `tell` or any messaging instructions:
 they are simply prompted with the message content and their cleaned stdout is
@@ -417,7 +420,7 @@ class Rig:
     preset: str | None = None
     echo: bool = False
     echo_max_chars: int = DEFAULT_ECHO_MAX_CHARS
-    mcp: bool = False
+    mcp: bool | None = None
     error: str | None = None
 
     @property
@@ -426,6 +429,11 @@ class Rig:
         means there is no per-turn path (agy configures MCP only in ~/.gemini;
         bare ollama has no tool use), and the knob refuses to turn on."""
         return HARNESS_PRESETS.get(self.preset or "", {}).get("mcp")
+
+    @property
+    def mcp_on(self) -> bool:
+        """The effective `mcp` knob — what dispatch acts on."""
+        return mcp_enabled(self.mcp, self.preset)
 
     @property
     def continue_argv(self) -> list[str]:
@@ -601,6 +609,34 @@ class McpPlan:
 def mcp_presets() -> list[str]:
     """Presets that can take the MCP server for a single invocation."""
     return [n for n in preset_names() if HARNESS_PRESETS[n].get("mcp")]
+
+
+# Idioms the team repo never sees: a flag, a `-c` override, or a config file
+# under the member's own state dir. Those default the knob ON — the tell-arms
+# experiment measured the tool eliminating the no-send failure class outright
+# (20/20 against 9/20), so an untouched rig has to be the one that sends.
+# `cursor-file` writes `.cursor/mcp.json` into the working tree: writing a file
+# into the user's repo is a different consent level than passing a flag, so
+# cursor stays opt-in.
+MCP_DEFAULT_ON_IDIOMS = frozenset({
+    "claude-flag",
+    "codex-config",
+    "copilot-flag",
+    "opencode-env",
+})
+
+
+def mcp_default(preset: str | None) -> bool:
+    """Whether the knob is on for a preset whose rig says nothing about it."""
+    return HARNESS_PRESETS.get(preset or "", {}).get("mcp") in MCP_DEFAULT_ON_IDIOMS
+
+
+def mcp_enabled(mcp: bool | None, preset: str | None) -> bool:
+    """Where the tri-state resolves, for dispatch and for the CLI's display
+    alike: an explicit true/false in rigs.json wins, unset takes the preset's
+    default. A preset with no idiom resolves off silently — only an explicit on
+    is an error (see `mcp_unsupported_reason`)."""
+    return mcp_default(preset) if mcp is None else mcp
 
 
 def mcp_unsupported_reason(preset: str | None) -> str:
@@ -1205,6 +1241,15 @@ def _resolve_setting(entry: dict, key: str) -> RigSetting:
         if "concurrency" in entry:
             return RigSetting(key, int(entry["concurrency"]), "explicit", True)
         return RigSetting(key, DEFAULT_CONCURRENCY, "built-in default", False)
+    if key == "mcp":
+        if key in entry:
+            return RigSetting(key, bool(entry[key]), "explicit", True)
+        return RigSetting(
+            key,
+            mcp_enabled(None, preset),
+            f"from preset {preset}" if preset else "built-in default",
+            False,
+        )
     if key in CONFIGURABLE_BOOL_KEYS:
         if key in entry:
             return RigSetting(key, bool(entry[key]), "explicit", True)
