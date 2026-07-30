@@ -37,10 +37,15 @@ ENV_CONTAINER = "R4T_CONTAINER"
 ENV_CONTAINER_ARGS = "R4T_CONTAINER_ARGS"
 
 # The bash the wrapped `sudo` runs: env cannot survive sudoers env_reset, so
-# TELL_OUTBOX_DIR rides as $1 and the workplace as $2; `exec "$@"` hands the
+# TELL_OUTBOX_DIR rides as $1 and the workplace as $2; $3 counts the further
+# `NAME=value` positionals to re-export (the `mcp` knob's env idioms), each one
+# a single word so a value with spaces cannot re-split; `exec "$@"` hands the
 # remaining positionals to the harness verbatim — no quoted command string, so
 # quoting bugs are structurally impossible.
-_RUN_AS_BOOTSTRAP = 'export TELL_OUTBOX_DIR="$1"; cd "$2"; shift 2; exec "$@"'
+_RUN_AS_BOOTSTRAP = (
+    'export TELL_OUTBOX_DIR="$1"; cd "$2"; n="$3"; shift 3; '
+    'while [ "$n" -gt 0 ]; do export "$1"; shift; n=$((n - 1)); done; exec "$@"'
+)
 
 # A standard system PATH the container shim prepends the a8s client dir to, so
 # an unmodified `tell` resolves inside the image. Operators can override with a
@@ -113,11 +118,21 @@ def a8s_client_dir() -> Path:
 # ---------- run_as ----------
 
 def wrap_run_as(
-    argv: list[str], user: str, staging_dir: str | Path, workplace: str | Path
+    argv: list[str],
+    user: str,
+    staging_dir: str | Path,
+    workplace: str | Path,
+    *,
+    env_pass: dict[str, str] | None = None,
 ) -> list[str]:
+    """Wrap one harness argv in `sudo -u <user>`. `env_pass` names the extra
+    environment the harness itself needs across the boundary — anything not
+    listed is gone, because sudoers `env_reset` keeps nothing."""
+    pairs = [f"{k}={v}" for k, v in (env_pass or {}).items()]
     return [
         "sudo", "-u", user, "bash", "--login", "-c",
-        _RUN_AS_BOOTSTRAP, "_", str(staging_dir), str(workplace), *argv,
+        _RUN_AS_BOOTSTRAP, "_", str(staging_dir), str(workplace),
+        str(len(pairs)), *pairs, *argv,
     ]
 
 
@@ -163,6 +178,33 @@ def probe_run_as(user: str, workplace: str | Path) -> str | None:
             + (f": {detail}" if detail else "")
             + " (try: give the agent user's group g+ws on the workplace — see "
             "apps/r4t/docs/isolation.md)"
+        )
+    return None
+
+
+def probe_readable_as(user: str, paths: list[str | Path]) -> str | None:
+    """Verify the agent user can read every path a per-turn injection depends on
+    (the `mcp` knob's server script, its interpreter, its config file). Returns
+    None when all pass, else an action-first error naming the first path that
+    does not. A tool the prompt teaches but the boundary cannot start is worse
+    than no tool at all, so this fails the turn instead of degrading it."""
+    if not paths:
+        return None
+    args = [str(p) for p in paths]
+    try:
+        probe = _run_probe([
+            "sudo", "-n", "-u", user, "bash", "--login", "-c",
+            'for p; do [ -r "$p" ] || { echo "$p"; exit 1; }; done', "_", *args,
+        ])
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"cannot probe read access as {user!r}: {e}"
+    if probe.returncode != 0:
+        blocked = (probe.stdout or "").strip().splitlines()
+        first = blocked[-1] if blocked else args[0]
+        return (
+            f"user {user!r} cannot read {first} "
+            f"(try: chmod -R a+rX on the r4t checkout and its python, or turn "
+            f"the rig's mcp knob off — see apps/r4t/docs/isolation.md)"
         )
     return None
 
@@ -225,13 +267,17 @@ def build_container_argv(
     container_args: list[str] | None = None,
     delivered_dir: str | Path | None = None,
     client_dir: str | Path | None = None,
+    extra_env: dict[str, str] | None = None,
+    extra_ro_dirs: list[str | Path] | None = None,
 ) -> list[str]:
     """`docker run --rm` with the workplace bind-mounted rw at the same path and
     used as workdir, the staging dir rw at the same path with TELL_OUTBOX_DIR
     injected (no env_reset inside a container), the a8s client ro with a PATH
-    shim, an optional delivered-files dir ro, then the org's container_args
-    verbatim, then the image and the harness argv. r4t never builds, pulls, or
-    inspects the image — a missing image is an ordinary turn failure."""
+    shim, an optional delivered-files dir ro, `extra_env`/`extra_ro_dirs` for
+    what a per-turn injection needs to see inside (the `mcp` knob), then the
+    org's container_args verbatim, then the image and the harness argv. r4t
+    never builds, pulls, or inspects the image — a missing image is an ordinary
+    turn failure."""
     client = Path(client_dir) if client_dir is not None else a8s_client_dir()
     cmd = [
         "docker", "run", "--rm", "--name", name,
@@ -244,6 +290,12 @@ def build_container_argv(
     ]
     if delivered_dir is not None:
         cmd += ["-v", f"{delivered_dir}:{delivered_dir}:ro"]
+    for d in extra_ro_dirs or []:
+        cmd += ["-v", f"{d}:{d}:ro"]
+    for key, value in (extra_env or {}).items():
+        cmd += ["-e", f"{key}={value}"]
+    # Last flag wins in docker, so the org's own args can still override any of
+    # the above (the option-passthrough principle).
     cmd += list(container_args or [])
     cmd += [image, *argv]
     return cmd

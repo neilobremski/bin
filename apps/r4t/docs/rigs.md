@@ -197,7 +197,9 @@ what the tool buys over the heredoc teaching. Default is off, and off is the
 shell teaching unchanged. Two presets refuse the knob and say so: `agy` reads
 MCP config only from `~/.gemini`, and bare `ollama` has no tool use at all, so
 `rig set` errors with a `(try: r4t rig swap <rig> ...)` hint rather than
-running turns whose tool never appears.
+running turns whose tool never appears. Under an org boundary (`run_as` /
+`container`) r4t carries each harness's idiom across and fails the turn closed
+when it cannot — see [isolation](isolation.md#the-a8s_tell-tool-behind-the-boundary).
 
 ## The economics: budgets, not cuts
 

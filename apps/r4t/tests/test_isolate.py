@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -25,7 +26,14 @@ import state
 from dispatch import DispatchContext, drain, handle_message, run_harness
 from isolate import Isolation
 from org import ORG_CONFIG_NAME, check_org, load_org
-from rig import Rig, load_rig_config
+from rig import (
+    A8S_PY,
+    Rig,
+    add_preset_rig,
+    apply_mcp,
+    load_rig_config,
+    set_rig_value,
+)
 from roster import Member
 
 NODE = "acme"
@@ -47,23 +55,62 @@ def fakebin(tmp_path, monkeypatch):
     return d
 
 
+BOOTSTRAP = (
+    'export TELL_OUTBOX_DIR="$1"; cd "$2"; n="$3"; shift 3; '
+    'while [ "$n" -gt 0 ]; do export "$1"; shift; n=$((n - 1)); done; exec "$@"'
+)
+
+
 class TestWrapRunAs:
     def test_exact_argv(self):
         argv = isolate.wrap_run_as(
             ["claude", "-p", "{hi}"], "agent-x", "/stg/dir", "/work/place"
         )
         assert argv == [
-            "sudo", "-u", "agent-x", "bash", "--login", "-c",
-            'export TELL_OUTBOX_DIR="$1"; cd "$2"; shift 2; exec "$@"',
-            "_", "/stg/dir", "/work/place", "claude", "-p", "{hi}",
+            "sudo", "-u", "agent-x", "bash", "--login", "-c", BOOTSTRAP,
+            "_", "/stg/dir", "/work/place", "0", "claude", "-p", "{hi}",
         ]
 
     def test_env_rides_as_positionals_not_a_command_string(self):
         argv = isolate.wrap_run_as(["h", "a b"], "u", "/s", "/w")
         # The bootstrap is a single -c argument; the harness argv follows as
         # discrete positionals, so a space in an arg can never re-split.
-        assert argv[6] == 'export TELL_OUTBOX_DIR="$1"; cd "$2"; shift 2; exec "$@"'
+        assert argv[6] == BOOTSTRAP
         assert argv[-2:] == ["h", "a b"]
+
+    def test_env_pass_rides_as_counted_positionals(self):
+        argv = isolate.wrap_run_as(
+            ["h", "{p}"], "u", "/s", "/w",
+            env_pass={"OPENCODE_CONFIG": "/state/mcp/c.json", "K": "a b"},
+        )
+        assert argv[7:] == [
+            "_", "/s", "/w", "2",
+            "OPENCODE_CONFIG=/state/mcp/c.json", "K=a b", "h", "{p}",
+        ]
+
+    def test_bootstrap_really_exports_what_it_is_handed(self, tmp_path):
+        # Functional, not shape: run the bootstrap under a real bash (no sudo)
+        # and have the "harness" report the environment it was handed.
+        script = tmp_path / "show.py"
+        script.write_text(
+            "import os\nprint(os.environ.get('OPENCODE_CONFIG', 'unset'))\n"
+            "print(os.environ.get('A8S_MCP_LOG', 'unset'))\n"
+            "print(os.environ['TELL_OUTBOX_DIR'])\nprint(os.getcwd())\n",
+            encoding="utf-8",
+        )
+        argv = isolate.wrap_run_as(
+            [sys.executable, str(script)], "u", tmp_path, tmp_path,
+            # A value with a space is the case a quoted command string mangles.
+            env_pass={"OPENCODE_CONFIG": "/state/mcp/c.json", "A8S_MCP_LOG": "x y"},
+        )
+        out = subprocess.run(
+            ["bash", "-c", *argv[6:]], capture_output=True, text=True,
+            env={"PATH": os.environ["PATH"]},
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.splitlines() == [
+            "/state/mcp/c.json", "x y", str(tmp_path), str(tmp_path),
+        ]
 
 
 class TestBuildContainer:
@@ -368,6 +415,288 @@ class TestContainerTimeoutKill:
         killed = record.read_text(encoding="utf-8").split()
         assert len(killed) == 1
         assert killed[0].startswith("r4t-acme-phil-")
+
+
+# ---------- the `mcp` knob has to cross the boundary too (#314) ----------
+
+
+def _mcp_rig(tmp_path, preset: str) -> Rig:
+    path = tmp_path / f"mcp-rigs-{preset}.json"
+    add_preset_rig(path, "worker", preset, force=True)
+    set_rig_value(path, "worker", "mcp", "on")
+    return load_rig_config(path).rigs["worker"]
+
+
+def _mcp_turn_env(tmp_path, isolation: Isolation) -> tuple[dict, Path, Path]:
+    """A turn env shaped like dispatch's: a per-member staging outbox, a
+    workplace, the router's HOME, and the org's isolation choice."""
+    staging = tmp_path / "state" / "worker" / "staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    workplace = tmp_path / "work"
+    workplace.mkdir(exist_ok=True)
+    env = dict(os.environ)  # keep PATH so the fake sudo/docker resolve
+    env["TELL_OUTBOX_DIR"] = str(staging)
+    env["HOME"] = str(tmp_path / "router-home")
+    env["R4T_NODE"] = NODE
+    env["R4T_MEMBER"] = "worker"
+    env.update(isolation.to_env())
+    return env, workplace, staging
+
+
+def _recording_sudo(fakebin, record: Path, *, unreadable: str = "") -> None:
+    """A `sudo` stub that answers the prereq probes, optionally fails the
+    read-access probe, and records the wrapped invoke instead of running it."""
+    _fake_bin(
+        fakebin, "sudo",
+        f"""
+        import sys
+        a = sys.argv[1:]
+        script = a[a.index("-c") + 1] if "-c" in a else ""
+        if script.startswith("for p;"):
+            if {unreadable!r}:
+                print({unreadable!r})
+                sys.exit(1)
+            sys.exit(0)
+        if script.startswith("export TELL_OUTBOX_DIR"):
+            open({str(record)!r}, "w").write(repr(a))
+        sys.exit(0)
+        """,
+    )
+
+
+def _recording_docker(fakebin, record: Path) -> None:
+    _fake_bin(
+        fakebin, "docker",
+        f"""
+        import sys
+        a = sys.argv[1:]
+        if a and a[0] == "run":
+            open({str(record)!r}, "w").write(repr(a))
+        """,
+    )
+
+
+def _wrapped_argv(record: Path) -> list[str]:
+    return eval(record.read_text(encoding="utf-8"))  # noqa: S307 — test-owned stub
+
+
+def _server_from_flag(argv: list[str], flag: str) -> dict:
+    """The server the wrapped argv carries. codex speaks TOML, and its `-c` has
+    to be told apart from the wrapper's own `bash -c`."""
+    payloads = [
+        argv[i + 1] for i, token in enumerate(argv[:-1])
+        if token == flag and ("a8s" in argv[i + 1])
+    ]
+    assert len(payloads) == 1, f"{flag} payload not carried across: {argv}"
+    if flag == "-c":
+        return {"toml": payloads[0]}
+    return json.loads(payloads[0])["mcpServers"]["a8s"]
+
+
+FLAG_IDIOMS = {
+    "claude": "--mcp-config",
+    "codex": "-c",
+    "copilot": "--additional-mcp-config",
+}
+
+
+class TestMcpCrossesRunAs:
+    """Every idiom the knob supports either reaches the harness behind
+    `sudo`/`env_reset` or fails the turn — a prompt that teaches `a8s_tell`
+    against a server that never started is the one outcome worth refusing."""
+
+    @pytest.mark.parametrize("preset,flag", sorted(FLAG_IDIOMS.items()))
+    def test_flag_idioms_ride_argv_through_the_bootstrap(
+        self, tmp_path, fakebin, preset, flag
+    ):
+        record = tmp_path / f"sudo-{preset}.txt"
+        _recording_sudo(fakebin, record)
+        rig = _mcp_rig(tmp_path, preset)
+        env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
+
+        run_harness(rig, "P", workplace, env=env)
+
+        argv = _wrapped_argv(record)
+        assert argv[:5] == ["-u", "agent-x", "bash", "--login", "-c"]
+        assert flag in argv
+        server = _server_from_flag(argv, flag)
+        # The router's own interpreter: same filesystem on this side of sudo.
+        assert sys.executable in (server.get("command") or server["toml"])
+
+    def test_opencode_env_rides_as_a_re_exported_positional(self, tmp_path, fakebin):
+        record = tmp_path / "sudo-opencode.txt"
+        _recording_sudo(fakebin, record)
+        rig = _mcp_rig(tmp_path, "opencode")
+        env, workplace, staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
+
+        run_harness(rig, "P", workplace, env=env)
+
+        config = staging.parent / "mcp" / "mcp-opencode.json"
+        argv = _wrapped_argv(record)
+        # _ staging workplace <count> <NAME=value>... then the harness argv.
+        assert argv[6:10] == [
+            "_", str(staging), str(workplace), "1"
+        ]
+        assert argv[10] == f"OPENCODE_CONFIG={config}"
+        assert config.is_file()
+
+    def test_config_file_is_readable_by_another_user(self, tmp_path, fakebin):
+        _recording_sudo(fakebin, tmp_path / "sudo.txt")
+        rig = _mcp_rig(tmp_path, "opencode")
+        env, workplace, staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
+        (staging.parent).chmod(0o700)  # a narrow umask, or drift
+
+        run_harness(rig, "P", workplace, env=env)
+
+        config = staging.parent / "mcp" / "mcp-opencode.json"
+        assert stat.S_IMODE(config.stat().st_mode) & 0o044 == 0o044
+        assert stat.S_IMODE(config.parent.stat().st_mode) & 0o055 == 0o055
+
+    def test_cursor_file_lands_in_the_workplace_and_is_readable(self, tmp_path, fakebin):
+        _recording_sudo(fakebin, tmp_path / "sudo.txt")
+        rig = _mcp_rig(tmp_path, "cursor")
+        env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
+
+        run_harness(rig, "P", workplace, env=env)
+
+        # The workplace is the one dir both wrappers already give the harness.
+        config = workplace / ".cursor" / "mcp.json"
+        assert stat.S_IMODE(config.stat().st_mode) & 0o044 == 0o044
+        assert json.loads(config.read_text(encoding="utf-8"))["mcpServers"]["a8s"]
+
+    def test_setgid_on_a_shared_workplace_survives_the_mode_fix(self, tmp_path, fakebin):
+        _recording_sudo(fakebin, tmp_path / "sudo.txt")
+        rig = _mcp_rig(tmp_path, "cursor")
+        env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
+        (workplace / ".cursor").mkdir()
+        (workplace / ".cursor").chmod(0o2770)  # the shared-group workplace
+
+        run_harness(rig, "P", workplace, env=env)
+
+        assert stat.S_IMODE((workplace / ".cursor").stat().st_mode) & 0o2000
+
+    def test_unreadable_server_fails_the_turn_closed(self, tmp_path, fakebin):
+        record = tmp_path / "sudo.txt"
+        _recording_sudo(fakebin, record, unreadable=str(A8S_PY))
+        rig = _mcp_rig(tmp_path, "claude")
+        env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
+
+        code, out, _dur, timed = run_harness(rig, "P", workplace, env=env)
+
+        assert code == 126 and not timed
+        assert "mcp on" in out and "cannot read" in out and str(A8S_PY) in out
+        assert "docs/isolation.md" in out
+        assert not record.exists()  # the harness never ran taught-but-toolless
+
+    def test_router_home_is_not_promised_to_the_server(self, tmp_path, fakebin):
+        record = tmp_path / "sudo.txt"
+        _recording_sudo(fakebin, record)
+        rig = _mcp_rig(tmp_path, "claude")
+        env, workplace, staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
+
+        run_harness(rig, "P", workplace, env=env)
+
+        server = _server_from_flag(_wrapped_argv(record), "--mcp-config")
+        # HOME belongs to the router and is unreachable behind the boundary; the
+        # outbox is what crosses, and `tell` needs nothing else.
+        assert server["env"] == {"TELL_OUTBOX_DIR": str(staging)}
+
+
+class TestMcpCrossesContainer:
+    """A container keeps only what `docker run` is told to carry, and its
+    filesystem is the image's — the injection has to name both."""
+
+    @pytest.mark.parametrize("preset,flag", sorted(FLAG_IDIOMS.items()))
+    def test_flag_idioms_name_the_image_interpreter(self, tmp_path, fakebin, preset, flag):
+        record = tmp_path / f"docker-{preset}.txt"
+        _recording_docker(fakebin, record)
+        rig = _mcp_rig(tmp_path, preset)
+        env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation(container="img"))
+
+        run_harness(rig, "P", workplace, env=env)
+
+        argv = _wrapped_argv(record)
+        assert flag in argv
+        server = _server_from_flag(argv, flag)
+        command = server.get("command") or server["toml"]
+        # The router's interpreter path is not in the image; the a8s client dir
+        # is mounted at the same path, and `python3` resolves from the image.
+        assert sys.executable not in command
+        assert "python3" in command
+        assert str(A8S_PY) in str(server.get("args") or server["toml"])
+
+    def test_opencode_gets_the_env_and_a_mount_of_its_own_dir(self, tmp_path, fakebin):
+        record = tmp_path / "docker-opencode.txt"
+        _recording_docker(fakebin, record)
+        rig = _mcp_rig(tmp_path, "opencode")
+        env, workplace, staging = _mcp_turn_env(tmp_path, Isolation(container="img"))
+
+        run_harness(rig, "P", workplace, env=env)
+
+        config = staging.parent / "mcp" / "mcp-opencode.json"
+        argv = _wrapped_argv(record)
+        assert f"OPENCODE_CONFIG={config}" in argv
+        assert argv[argv.index(f"OPENCODE_CONFIG={config}") - 1] == "-e"
+        mount = f"{config.parent}:{config.parent}:ro"
+        assert mount in argv and argv[argv.index(mount) - 1] == "-v"
+        # The mount carries the config and nothing else — no history, no
+        # transcripts from the member state dir above it.
+        assert f"{staging.parent}:{staging.parent}:ro" not in argv
+        assert list(config.parent.iterdir()) == [config]
+
+    def test_org_container_args_still_win(self, tmp_path, fakebin):
+        record = tmp_path / "docker-args.txt"
+        _recording_docker(fakebin, record)
+        rig = _mcp_rig(tmp_path, "opencode")
+        env, workplace, _staging = _mcp_turn_env(
+            tmp_path,
+            Isolation(container="img", container_args=["-e", "OPENCODE_CONFIG=/theirs"]),
+        )
+
+        run_harness(rig, "P", workplace, env=env)
+
+        argv = _wrapped_argv(record)
+        ours = next(a for a in argv if a.startswith("OPENCODE_CONFIG=") and a != "OPENCODE_CONFIG=/theirs")
+        # docker takes the last value, so the org's own args are still the
+        # override of last resort.
+        assert argv.index(ours) < argv.index("OPENCODE_CONFIG=/theirs") < argv.index("img")
+        assert argv[argv.index("img") - 2:argv.index("img")] == [
+            "-e", "OPENCODE_CONFIG=/theirs"
+        ]
+
+    def test_cursor_file_rides_the_workplace_mount(self, tmp_path, fakebin):
+        record = tmp_path / "docker-cursor.txt"
+        _recording_docker(fakebin, record)
+        rig = _mcp_rig(tmp_path, "cursor")
+        env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation(container="img"))
+
+        run_harness(rig, "P", workplace, env=env)
+
+        assert (workplace / ".cursor" / "mcp.json").is_file()
+        assert f"{workplace}:{workplace}" in _wrapped_argv(record)
+
+
+class TestMcpWithoutIsolation:
+    """A bare org keeps the plain shape: the router's interpreter, its HOME
+    pinned, and nothing extra asked of any wrapper."""
+
+    def test_plain_turn_pins_home_and_the_router_interpreter(self, tmp_path):
+        rig = _mcp_rig(tmp_path, "claude")
+        env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation())
+        plan = apply_mcp(rig, rig.argv("P"), env, workplace, Isolation())
+
+        server = _server_from_flag(plan.argv, "--mcp-config")
+        assert server["command"] == sys.executable
+        assert server["env"]["HOME"] == env["HOME"]
+        assert plan.env_pass == {} and plan.mount_dirs == []
+
+    def test_a_preset_without_an_idiom_asks_nothing_of_the_boundary(self, tmp_path):
+        rig = Rig(name="agy-rig", invoke=["agy", "{prompt}"], preset="agy", mcp=True)
+        env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
+        plan = apply_mcp(rig, rig.argv("P"), env, workplace, Isolation(run_as="agent-x"))
+
+        assert plan.argv == rig.argv("P")
+        assert not plan.env_pass and not plan.mount_dirs and not plan.read_paths
 
 
 class TestStatusRowRendering:

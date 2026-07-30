@@ -1408,7 +1408,7 @@ class TestMcpInjection:
     def test_claude_gets_mcp_config_and_an_allowlisted_tool(self, tmp_path):
         rig = _mcp_rig(tmp_path, "claude")
         env, cwd = self._turn(tmp_path)
-        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
 
         assert argv[1] == "--mcp-config"
         server = json.loads(argv[2])["mcpServers"]["a8s"]
@@ -1421,7 +1421,7 @@ class TestMcpInjection:
     def test_claude_ollama_splices_after_the_launcher_separator(self, tmp_path):
         rig = _mcp_rig(tmp_path, "claude-ollama", model="qwen3.6")
         env, cwd = self._turn(tmp_path)
-        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
 
         assert argv[argv.index("--") + 1] == "--mcp-config"
         assert "mcp__a8s__tell" in argv[argv.index("--allowedTools") + 1]
@@ -1429,7 +1429,7 @@ class TestMcpInjection:
     def test_codex_gets_a_toml_override_with_cwd_pinned(self, tmp_path):
         rig = _mcp_rig(tmp_path, "codex")
         env, cwd = self._turn(tmp_path)
-        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
 
         assert argv[1] == "-c"
         override = argv[2]
@@ -1441,13 +1441,13 @@ class TestMcpInjection:
     def test_codex_ollama_splices_after_the_launcher_separator(self, tmp_path):
         rig = _mcp_rig(tmp_path, "codex-ollama", model="qwen3.6")
         env, cwd = self._turn(tmp_path)
-        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
         assert argv[argv.index("--") + 1] == "-c"
 
     def test_copilot_gets_an_additional_config(self, tmp_path):
         rig = _mcp_rig(tmp_path, "copilot")
         env, cwd = self._turn(tmp_path)
-        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
 
         assert argv[1] == "--additional-mcp-config"
         assert json.loads(argv[2])["mcpServers"]["a8s"]["command"]
@@ -1455,18 +1455,21 @@ class TestMcpInjection:
     def test_copilot_ollama_splices_after_the_launcher_separator(self, tmp_path):
         rig = _mcp_rig(tmp_path, "copilot-ollama", model="qwen3.6")
         env, cwd = self._turn(tmp_path)
-        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
         assert argv[argv.index("--") + 1] == "--additional-mcp-config"
 
     def test_opencode_rides_a_config_file_never_config_content(self, tmp_path):
         rig = _mcp_rig(tmp_path, "opencode")
         env, cwd = self._turn(tmp_path)
-        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
 
         assert argv == rig.argv("PROMPT")
         assert "OPENCODE_CONFIG_CONTENT" not in env
         config = Path(env["OPENCODE_CONFIG"])
-        assert config.parent == Path(env["TELL_OUTBOX_DIR"]).parent
+        # A dir of its own beside the staging outbox: nothing else lives there,
+        # so a container can mount it without exposing the member's transcripts,
+        # and a `.json` here is never mistaken for a staged envelope.
+        assert config.parent == Path(env["TELL_OUTBOX_DIR"]).parent / "mcp"
         assert cwd not in config.parents
         server = json.loads(config.read_text(encoding="utf-8"))["mcp"]["a8s"]
         assert server["type"] == "local"
@@ -1477,7 +1480,7 @@ class TestMcpInjection:
     def test_opencode_ollama_uses_the_same_file_idiom(self, tmp_path):
         rig = _mcp_rig(tmp_path, "opencode-ollama", model="qwen3.6")
         env, cwd = self._turn(tmp_path)
-        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
         assert argv == rig.argv("PROMPT")
         assert Path(env["OPENCODE_CONFIG"]).is_file()
         assert "OPENCODE_CONFIG_CONTENT" not in env
@@ -1491,7 +1494,7 @@ class TestMcpInjection:
             json.dumps({"mcpServers": {"theirs": {"command": "x"}}}), encoding="utf-8"
         )
 
-        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
         assert argv == rig.argv("PROMPT")
         servers = json.loads(existing.read_text(encoding="utf-8"))["mcpServers"]
         assert set(servers) == {"theirs", "a8s"}

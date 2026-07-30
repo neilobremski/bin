@@ -80,8 +80,9 @@ When `run_as` is set, the rig's resolved argv is wrapped:
 
 ```
 sudo -u <user> bash --login -c \
-  'export TELL_OUTBOX_DIR="$1"; cd "$2"; shift 2; exec "$@"' \
-  _ <staging-dir> <workplace> <argv...>
+  'export TELL_OUTBOX_DIR="$1"; cd "$2"; n="$3"; shift 3;
+   while [ "$n" -gt 0 ]; do export "$1"; shift; n=$((n - 1)); done; exec "$@"' \
+  _ <staging-dir> <workplace> <count> <NAME=value...> <argv...>
 ```
 
 - `bash --login` so the agent user's own profile/PATH resolves its own
@@ -91,6 +92,9 @@ sudo -u <user> bash --login -c \
   exported vars from dispatch never survive the boundary. DECIDED: the
   `exec "$@"` form, not a quoted command string — argv passes through
   untouched and quoting bugs are structurally impossible.
+- A per-turn injection that rides the environment (the `mcp` knob's
+  `OPENCODE_CONFIG`) states what it needs; `<count>` `NAME=value` words
+  follow the workplace and the bootstrap re-exports each one.
 - cwd is the org workplace (r4t members work in the shared repo; this
   deliberately differs from the production precedent, whose agent works
   in its own home).

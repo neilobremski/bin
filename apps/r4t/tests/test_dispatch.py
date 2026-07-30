@@ -24,7 +24,7 @@ from dispatch import (
     run_idle,
     split_recipient,
 )
-from rig import Rig, RigError, load_rig_config
+from rig import McpPlan, Rig, RigError, load_rig_config
 from roster import load_roster
 from r4t import main as r4t_main
 from ulid import new as new_ulid
@@ -2854,7 +2854,7 @@ class TestMcpKnob:
         code, out, _dur, _timed = run_harness(rig, "x", tmp_path, env=env)
         assert code == 0
         config = Path(out.strip())
-        assert config.parent == staging.parent
+        assert config.parent == staging.parent / "mcp"
         assert json.loads(config.read_text(encoding="utf-8"))["mcp"]["a8s"]["enabled"]
 
     def test_turn_env_untouched_when_off(self, tmp_path):
@@ -2871,7 +2871,9 @@ class TestMcpKnob:
     def test_injection_is_skipped_entirely_when_off(self, tmp_path, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            dispatch, "apply_mcp", lambda rig, argv, env, cwd: calls.append(rig) or argv
+            dispatch,
+            "apply_mcp",
+            lambda rig, argv, env, cwd, iso: calls.append(rig) or McpPlan(argv=argv),
         )
         rig = self._echo_env_rig(tmp_path, preset="opencode")
         run_harness(rig, "x", tmp_path, env=dict(os.environ))

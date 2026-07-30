@@ -51,7 +51,15 @@ from pathlib import Path
 import isolate
 import state
 import tasks
-from rig import RigConfig, RigError, Rig, apply_mcp, load_rig_config, resolve_agy_model
+from rig import (
+    McpPlan,
+    RigConfig,
+    RigError,
+    Rig,
+    apply_mcp,
+    load_rig_config,
+    resolve_agy_model,
+)
 from notify import TellFn
 from roster import Member, Roster, RosterError, load_roster
 
@@ -626,21 +634,35 @@ def run_harness(
             return 127, f"agy --model {rig.model!r} did not resolve: {e}", 0.0, False
         argv = [resolved if a == "{model}" else a for a in argv]
 
-    # The `mcp` knob: splice the a8s MCP server in with this harness's own
-    # idiom, before any isolation wrapper takes the argv over.
-    if rig.mcp and env is not None:
-        argv = apply_mcp(rig, argv, env, cwd)
-
     staging = (env or {}).get("TELL_OUTBOX_DIR", "")
     isolation = isolate.isolation_from_env(env)
+
+    # The `mcp` knob: splice the a8s MCP server in with this harness's own
+    # idiom, before any isolation wrapper takes the argv over. The idioms ride
+    # different channels — argv survives a boundary, environment and files only
+    # cross when the wrapper is told to carry them — so the injection states its
+    # needs and the wrapper below honours them.
+    mcp = McpPlan(argv=argv)
+    if rig.mcp and env is not None:
+        mcp = apply_mcp(rig, argv, env, cwd, isolation)
+        argv = mcp.argv
+
     kill_container_name: str | None = None
     if isolation.run_as:
         probe_error = isolate.probe_run_as(isolation.run_as, cwd)
         if probe_error:
             return 126, f"run_as {isolation.run_as!r} isolation failed: {probe_error}", 0.0, False
+        # A prompt that teaches `a8s_tell` against a server the boundary's user
+        # cannot start leaves the member with no way to send at all, so an
+        # unreadable server fails the turn rather than degrading it.
+        mcp_error = isolate.probe_readable_as(isolation.run_as, mcp.read_paths)
+        if mcp_error:
+            return 126, f"rig {rig.name!r} has mcp on but {mcp_error}", 0.0, False
         if staging:
             isolate.assert_writable_shared_dir(staging, isolate.agent_gid(isolation.run_as))
-        argv = isolate.wrap_run_as(argv, isolation.run_as, staging, cwd)
+        argv = isolate.wrap_run_as(
+            argv, isolation.run_as, staging, cwd, env_pass=mcp.env_pass
+        )
     elif isolation.container:
         kill_container_name = isolate.container_name(
             (env or {}).get("R4T_NODE", ""), (env or {}).get("R4T_MEMBER", "")
@@ -653,6 +675,8 @@ def run_harness(
             workplace=cwd,
             tell_outbox=staging,
             container_args=isolation.container_args,
+            extra_env=mcp.env_pass,
+            extra_ro_dirs=mcp.mount_dirs,
         )
 
     live_log = (env or {}).get("R4T_LIVE_LOG")
