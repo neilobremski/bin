@@ -45,6 +45,11 @@ Read `README.md` first for concept and usage.
   message (alias fan-out is one row). Inserts do not prune. `a8s update`
   retains `convo_max_rows` (default 50000) during housekeeping. Queried by
   `a8s convo <agent>` — not per-agent storage; `--limit` only controls display.
+- **`transactions.sqlite3` holds routing breadcrumbs, not bodies.** Several rows
+  per message, written concurrently by the router, wake handlers, and receive
+  loops. `txlog.log` never raises; `a8s trace <ULID>` is the only reader and
+  `a8s update` retains `txlog_max_rows`. Both stores share the WAL/busy-retry
+  discipline in `sqlite_store.py`.
 
 ## Per-tool quirks
 

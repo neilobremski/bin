@@ -74,7 +74,15 @@ KNOBS: tuple[Knob, ...] = (
         "machine",
         True,
         "A8S_TXLOG_DETAIL_MAX",
-        "Max chars stored in transactions.tsv detail column (0 = unlimited; still a preview, not full bodies)",
+        "Max chars stored in the transactions.sqlite3 detail column (0 = unlimited; still a preview, not full bodies)",
+    ),
+    Knob(
+        "txlog_max_rows",
+        200_000,
+        "machine",
+        True,
+        "A8S_TXLOG_MAX_ROWS",
+        "Rows retained in transactions.sqlite3 when a8s update runs housekeeping",
     ),
     # --- per-agent definition (a8s define) ---
     Knob("definition.invoke", None, "definition", False, note="Required argv template for message wakes"),
@@ -177,7 +185,13 @@ def save_settings_file(data: dict[str, Any]) -> None:
 
 
 def _coerce(key: str, raw: str) -> Any:
-    if key in ("convo_max_rows", "max_file_bytes", "max_seen_ids", "txlog_detail_max"):
+    if key in (
+        "convo_max_rows",
+        "max_file_bytes",
+        "max_seen_ids",
+        "txlog_detail_max",
+        "txlog_max_rows",
+    ):
         return int(raw)
     if key == "loop_interval":
         return float(raw)
@@ -204,6 +218,11 @@ def _validate(key: str, value: Any) -> Any:
         n = int(value)
         if n < 0:
             raise ValueError("txlog_detail_max must be zero or positive")
+        return n
+    if key == "txlog_max_rows":
+        n = int(value)
+        if n < 1:
+            raise ValueError("txlog_max_rows must be a positive integer")
         return n
     if key == "loop_interval":
         f = float(value)

@@ -66,7 +66,7 @@ class TestPendingAttachmentStatus:
         assert "path field" in reason
 
     def test_upload_logs_specific_reason(self, fake_home, tmp_path):
-        from txlog import _txlog_path
+        from txlog import read_events
 
         a_root = tmp_path / "a"
         a_root.mkdir()
@@ -90,10 +90,13 @@ class TestPendingAttachmentStatus:
         msg = json.loads((pending / "01UPLOAD.json").read_text())
         ok = _upload_files_for_remote(msg, a, [_StubStorage("svc")], sidecar)
         assert ok is False
-        lines = _txlog_path().read_text().splitlines()
-        failed = [ln for ln in lines if "\tFILE_UPLOAD_FAILED\t" in ln]
+        failed = [
+            event
+            for event in read_events("01UPLOAD")
+            if event["event"] == "FILE_UPLOAD_FAILED"
+        ]
         assert len(failed) == 1
-        assert "not found:" in failed[0].split("\t")[-1]
+        assert "not found:" in failed[0]["detail"]
 
 
 def _write_staged(sender_name: str, sender_root: Path, to: str, content: str, *sources: Path) -> Path:

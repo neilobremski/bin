@@ -1404,6 +1404,7 @@ def cmd_update(args: list[str]) -> int:
         return 2
     from convo import ConversationArchiveError, prune_conversations
     from settings import get_int
+    from txlog import TransactionLogError, prune_transactions
 
     try:
         pruned = prune_conversations()
@@ -1413,6 +1414,16 @@ def cmd_update(args: list[str]) -> int:
     max_rows = get_int("convo_max_rows")
     print(
         f"conversation housekeeping: retained up to {max_rows} row(s), "
+        f"pruned {pruned}"
+    )
+    try:
+        pruned = prune_transactions()
+    except TransactionLogError as e:
+        print(f"update: transaction housekeeping failed: {e}", file=sys.stderr)
+        return 1
+    max_rows = get_int("txlog_max_rows")
+    print(
+        f"transaction housekeeping: retained up to {max_rows} row(s), "
         f"pruned {pruned}"
     )
     by_pid = _running_nodes_by_pid()

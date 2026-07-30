@@ -365,6 +365,15 @@ def conversations_path() -> Path:
     return _a8s_dir() / "conversations.sqlite3"
 
 
+def transactions_path() -> Path:
+    """Routing transaction log under the resolved a8s state root.
+
+    Separate from the conversation archive: breadcrumbs arrive several per
+    message and are pruned on their own retention schedule.
+    """
+    return _a8s_dir() / "transactions.sqlite3"
+
+
 def seen_ids_path() -> Path:
     """Single cluster-wide ring file holding the last MAX_SEEN_IDS message
     IDs the receive loops have written into local inboxes. Receive-side dedup
