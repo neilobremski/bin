@@ -12,6 +12,9 @@ honors A8S_HOME).
     ├── agents/<name>/meta.json    last inbound / last completed turn bookkeeping
     ├── agents/<name>/staging/     per-turn $TELL_OUTBOX_DIR — envelopes the agent
     │                              sent this turn, released by dispatch afterwards
+    ├── agents/<name>/mcp/         config the `mcp` knob hands the harness to read
+    │                              (rig.py); readable behind an isolation boundary,
+    │                              and the one dir a container mounts for it
     ├── agents/<name>/live.log     the running turn's harness output, teed live
     │                              (truncated at turn start; a gemba attach tails it)
     ├── agents/<name>/turns/       per-turn capture — one markdown file per turn

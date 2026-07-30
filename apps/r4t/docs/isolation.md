@@ -112,15 +112,18 @@ read, alter, or erase the audit trail.
 
 ```
 sudo -u <user> bash --login -c \
-  'export TELL_OUTBOX_DIR="$1"; cd "$2"; shift 2; exec "$@"' \
-  _ <staging-dir> <workplace> <argv...>
+  'export TELL_OUTBOX_DIR="$1"; cd "$2"; n="$3"; shift 3;
+   while [ "$n" -gt 0 ]; do export "$1"; shift; n=$((n - 1)); done; exec "$@"' \
+  _ <staging-dir> <workplace> <count> <NAME=value...> <argv...>
 ```
 
 `bash --login` so the agent user's own profile resolves its per-user tool
 installs. The environment cannot survive sudoers `env_reset`, so
-`TELL_OUTBOX_DIR` and the workplace ride as positional arguments; `exec "$@"`
-hands the harness argv through untouched, so quoting bugs are impossible. The
-rig's wall-clock timeout wraps the whole `sudo`.
+`TELL_OUTBOX_DIR`, the workplace, and any further variables the turn needs ride
+as positional arguments — `<count>` says how many `NAME=value` words follow, and
+each is one word, so a value with spaces cannot re-split. `exec "$@"` hands the
+harness argv through untouched, so quoting bugs are impossible. The rig's
+wall-clock timeout wraps the whole `sudo`.
 
 ## `container` — prerequisites and contract
 
@@ -165,6 +168,34 @@ Interactive and browser-based auth flows are an explicit non-goal: a harness
 that cannot authenticate headlessly from mounted files does not belong in a
 container rig. On rig-timeout expiry r4t kills the container by its
 deterministic name and lets `--rm` reap it.
+
+## The `a8s_tell` tool behind the boundary
+
+`r4t rig set <rig> mcp on` ([rigs](rigs.md#the-a8s_tell-tool-mcp)) injects the
+a8s MCP server into every turn, and each harness takes it a different way:
+claude, codex and copilot read a flag, so it rides argv through both wrappers
+untouched; opencode reads a file named by `OPENCODE_CONFIG`; cursor reads
+`.cursor/mcp.json` in the workdir. A boundary keeps only what it is told to keep,
+so r4t carries each idiom across:
+
+- **`run_as`** re-exports `OPENCODE_CONFIG` through the wrapper's counted
+  positionals and writes the config into `agents/<member>/mcp/`, beside the
+  staging outbox and readable by the agent user. cursor's file lands in the
+  workplace, which the agent user already has.
+- **`container`** mounts that one config dir read-only, passes the matching
+  `-e`, and names the image's own `python3` for the server — the router's
+  interpreter path is not in the image, while the a8s client dir is mounted at
+  its real path. So the image contract gains one line when the knob is on:
+  `python3` on PATH, which the `tell` shim already wants.
+- **Before a `run_as` turn** r4t probes that the agent user can read the server
+  script, its interpreter, and the config. If it cannot, the turn fails closed
+  with the fix (`chmod -R a+rX` on the checkout, or the knob off). A member whose
+  prompt teaches `a8s_tell` against a server that never starts has no way to send
+  at all, so that outcome is worth refusing rather than degrading into.
+
+Behind either boundary the server is told the outbox and nothing else: the
+router's `HOME` and `A8S_HOME` are another user's home, or absent from the image,
+and `tell` writes the envelope from `TELL_OUTBOX_DIR` alone.
 
 ## What this boundary does not do
 

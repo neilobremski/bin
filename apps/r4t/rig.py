@@ -34,7 +34,9 @@ plan always declares a refill rate.
 rig, using the harness's own per-invocation idiom, and teach the member the
 `a8s_tell` tool instead of the shell command. Default off: the shell teaching
 stays. Presets whose CLI takes MCP config only globally (agy) or has no tools
-at all (bare ollama) refuse the knob.
+at all (bare ollama) refuse the knob. Each idiom rides a different channel, so
+`apply_mcp` states what an org's isolation boundary has to carry across
+(`McpPlan`) and the wrapper in isolate.py honours it.
 
 `echo` — the rig's members never see `tell` or any messaging instructions:
 they are simply prompted with the message content and their cleaned stdout is
@@ -63,11 +65,13 @@ from __future__ import annotations
 
 import json
 import re
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from isolate import Isolation
 from roster import Member, Roster
 from state import atomic_write_json, r4t_home
 
@@ -560,6 +564,12 @@ def continue_presets() -> list[str]:
 # TELL_OUTBOX_DIR, so one blob serves every member on every node. Where the
 # idiom accepts `env`/`cwd` they are pinned anyway, so the outbox is stated
 # rather than inferred (#289).
+#
+# Each idiom rides a different channel, and an OS boundary (isolate.py) keeps
+# only what it is told to keep: argv passes through untouched, environment and
+# files do not. So the injection is boundary-aware — it states what has to cross
+# in an McpPlan the wrapper consumes, and names the image's own interpreter when
+# the turn runs in a container, where the router's is not on the filesystem.
 
 A8S_PY = Path(__file__).resolve().parent.parent / "a8s" / "a8s.py"
 
@@ -567,6 +577,25 @@ MCP_SERVER_NAME = "a8s"
 # What claude's permission layer calls the tool the model sees as `a8s_tell`.
 MCP_CLAUDE_TOOL = "mcp__a8s__tell"
 OPENCODE_CONFIG_BASENAME = "mcp-opencode.json"
+# Per-member dir the file idioms write into: a sibling of the turn's staging
+# outbox rather than the member state dir itself, so a container can mount it
+# read-only without exposing history or turn transcripts, and so a `.json`
+# config is never mistaken for a staged envelope.
+MCP_CONFIG_DIRNAME = "mcp"
+
+
+@dataclass
+class McpPlan:
+    """One turn's injection, plus what it needs from the isolation boundary:
+    `env_pass` are the variables the harness must still have on the far side of
+    an `env_reset`/container, `mount_dirs` what a container has to see, and
+    `read_paths` what the boundary's user must be able to read for the server to
+    start at all."""
+
+    argv: list[str]
+    env_pass: dict[str, str] = field(default_factory=dict)
+    mount_dirs: list[Path] = field(default_factory=list)
+    read_paths: list[Path] = field(default_factory=list)
 
 
 def mcp_presets() -> list[str]:
@@ -584,41 +613,61 @@ def mcp_unsupported_reason(preset: str | None) -> str:
     return "the rig records no preset, so there is no idiom to inject with"
 
 
-def _mcp_command() -> list[str]:
-    return [sys.executable, str(A8S_PY), "mcp", "serve"]
+def _mcp_command(*, in_container: bool = False) -> list[str]:
+    """How to start the server. A container has its own filesystem: the router's
+    interpreter path is not in the image, but the a8s client dir is mounted at
+    the same absolute path and the image already needs a `python3` for the `tell`
+    shim, so inside one the interpreter resolves from the image's PATH."""
+    python = "python3" if in_container else sys.executable
+    return [python, str(A8S_PY), "mcp", "serve"]
 
 
-def _mcp_server_env(env: dict) -> dict[str, str]:
+_MCP_SERVER_ENV_KEYS = ("TELL_OUTBOX_DIR", "HOME", "A8S_HOME", "A8S_MCP_LOG")
+# Behind an OS boundary the router's HOME and A8S_HOME are another user's home or
+# absent from the image: pinning them points the server at paths it cannot read
+# and promises a registry it will not find. The outbox is the one path the
+# boundary does carry across, and `tell` writes the envelope from that alone.
+_MCP_ISOLATED_SERVER_ENV_KEYS = ("TELL_OUTBOX_DIR", "A8S_MCP_LOG")
+
+
+def _mcp_server_env(env: dict, *, isolated: bool = False) -> dict[str, str]:
     """What the server needs whatever the client's env policy. Clients differ
     on how much of their own environment they hand a stdio child, so the outbox
     it must write into is stated explicitly."""
-    pinned = {k: env.get(k, "") for k in ("TELL_OUTBOX_DIR", "HOME", "A8S_HOME", "A8S_MCP_LOG")}
+    keys = _MCP_ISOLATED_SERVER_ENV_KEYS if isolated else _MCP_SERVER_ENV_KEYS
+    pinned = {k: env.get(k, "") for k in keys}
     return {k: v for k, v in pinned.items() if v}
 
 
-def _mcp_server_entry(env: dict) -> dict:
-    argv = _mcp_command()
-    return {"command": argv[0], "args": argv[1:], "env": _mcp_server_env(env)}
+def _mcp_server_entry(env: dict, command: list[str], *, isolated: bool = False) -> dict:
+    return {
+        "command": command[0],
+        "args": command[1:],
+        "env": _mcp_server_env(env, isolated=isolated),
+    }
 
 
-def _mcp_servers_json(env: dict) -> str:
+def _mcp_servers_json(env: dict, command: list[str], *, isolated: bool = False) -> str:
     """The `mcpServers` object claude, copilot and cursor all read."""
-    return json.dumps({"mcpServers": {MCP_SERVER_NAME: _mcp_server_entry(env)}})
+    entry = _mcp_server_entry(env, command, isolated=isolated)
+    return json.dumps({"mcpServers": {MCP_SERVER_NAME: entry}})
 
 
 def _toml_string(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _mcp_codex_override(env: dict, cwd: Path) -> str:
+def _mcp_codex_override(
+    env: dict, cwd: Path, command: list[str], *, isolated: bool = False
+) -> str:
     """codex takes config as `-c key=<TOML value>`, and its server table is the
     one idiom that also accepts an explicit cwd."""
-    argv = _mcp_command()
-    args = ", ".join(_toml_string(a) for a in argv[1:])
-    pinned = ", ".join(f"{k} = {_toml_string(v)}" for k, v in _mcp_server_env(env).items())
+    args = ", ".join(_toml_string(a) for a in command[1:])
+    server_env = _mcp_server_env(env, isolated=isolated)
+    pinned = ", ".join(f"{k} = {_toml_string(v)}" for k, v in server_env.items())
     return (
         f"mcp_servers.{MCP_SERVER_NAME}={{"
-        f"command = {_toml_string(argv[0])}, "
+        f"command = {_toml_string(command[0])}, "
         f"args = [{args}], "
         f"env = {{{pinned}}}, "
         f"cwd = {_toml_string(str(cwd))}"
@@ -626,16 +675,16 @@ def _mcp_codex_override(env: dict, cwd: Path) -> str:
     )
 
 
-def _mcp_opencode_config(env: dict) -> str:
+def _mcp_opencode_config(env: dict, command: list[str], *, isolated: bool = False) -> str:
     return json.dumps(
         {
             "$schema": "https://opencode.ai/config.json",
             "mcp": {
                 MCP_SERVER_NAME: {
                     "type": "local",
-                    "command": _mcp_command(),
+                    "command": command,
                     "enabled": True,
-                    "environment": _mcp_server_env(env),
+                    "environment": _mcp_server_env(env, isolated=isolated),
                 }
             },
         },
@@ -643,14 +692,28 @@ def _mcp_opencode_config(env: dict) -> str:
     )
 
 
+def _add_read_bits(path: Path, extra: int) -> None:
+    """Grant read (and for a dir, traverse) to group and other without touching
+    any other bit the operator set — setgid on a shared workplace survives."""
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode | extra != mode:
+        path.chmod(mode | extra)
+
+
 def _write_if_changed(path: Path, text: str) -> None:
+    """Write a config a harness reads back. The reader may be another Unix user
+    (`run_as`) or root inside a container, so the file does not stay at the
+    router's umask — it carries paths and a command, never a secret."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_file() and path.read_text(encoding="utf-8") == text:
-        return
-    path.write_text(text, encoding="utf-8")
+    _add_read_bits(path.parent, 0o055)
+    if not (path.is_file() and path.read_text(encoding="utf-8") == text):
+        path.write_text(text, encoding="utf-8")
+    _add_read_bits(path, 0o044)
 
 
-def _write_cursor_mcp(cwd: Path, env: dict) -> Path:
+def _write_cursor_mcp(
+    cwd: Path, env: dict, command: list[str], *, isolated: bool = False
+) -> Path:
     """cursor has no per-invocation flag, so the server rides a file in the
     effective cwd. Any other server already configured there is preserved."""
     path = cwd / ".cursor" / "mcp.json"
@@ -663,18 +726,20 @@ def _write_cursor_mcp(cwd: Path, env: dict) -> Path:
         if isinstance(loaded, dict):
             payload = loaded
     servers = payload.get("mcpServers")
-    payload["mcpServers"] = {**(servers if isinstance(servers, dict) else {}),
-                             MCP_SERVER_NAME: _mcp_server_entry(env)}
+    payload["mcpServers"] = {
+        **(servers if isinstance(servers, dict) else {}),
+        MCP_SERVER_NAME: _mcp_server_entry(env, command, isolated=isolated),
+    }
     _write_if_changed(path, json.dumps(payload, indent=2))
     return path
 
 
 def _mcp_config_dir(env: dict, cwd: Path) -> Path:
-    """Where a config file the harness reads from disk goes: the member's own
-    r4t state dir (parent of the per-turn staging outbox), so the knob writes
-    nothing into the team repo."""
+    """Where a config file the harness reads from disk goes: an `mcp` dir beside
+    the member's per-turn staging outbox, so the knob writes nothing into the
+    team repo and a container mounts one dir that holds nothing else."""
     staging = env.get("TELL_OUTBOX_DIR", "")
-    return Path(staging).parent if staging else cwd
+    return Path(staging).parent / MCP_CONFIG_DIRNAME if staging else cwd
 
 
 def _mcp_splice_at(argv: list[str]) -> int:
@@ -683,17 +748,29 @@ def _mcp_splice_at(argv: list[str]) -> int:
     return argv.index("--") + 1 if "--" in argv else 1
 
 
-def apply_mcp(rig: Rig, argv: list[str], env: dict, cwd: Path) -> list[str]:
+def apply_mcp(
+    rig: Rig, argv: list[str], env: dict, cwd: Path, isolation: Isolation | None = None
+) -> McpPlan:
     """Inject the a8s MCP server into one turn with the harness's own idiom.
-    Returns the argv to run; `env` is updated in place and whatever config file
-    the idiom needs is written."""
+    `env` is updated in place and whatever config file the idiom needs is
+    written; the returned plan carries the argv to run plus what the org's
+    isolation boundary has to let through for the server to actually start."""
     idiom = rig.mcp_idiom
     if not idiom:
-        return argv
-    argv = list(argv)
+        return McpPlan(argv=argv)
+    in_container = bool(isolation and isolation.container)
+    isolated = bool(isolation and isolation.active)
+    command = _mcp_command(in_container=in_container)
+    plan = McpPlan(argv=list(argv))
+    argv = plan.argv
+    if not in_container:
+        # Inside a container the interpreter comes from the image and the script
+        # from a mount r4t already makes; outside one, both are the router's own
+        # files and the boundary's user has to be able to read them.
+        plan.read_paths += [Path(command[0]), A8S_PY]
     at = _mcp_splice_at(argv)
     if idiom == "claude-flag":
-        argv[at:at] = ["--mcp-config", _mcp_servers_json(env)]
+        argv[at:at] = ["--mcp-config", _mcp_servers_json(env, command, isolated=isolated)]
         # `dontAsk` never prompts, so a tool missing from --allowedTools is
         # silently denied — the MCP tool has to be named there too.
         for i, token in enumerate(argv):
@@ -702,18 +779,27 @@ def apply_mcp(rig: Rig, argv: list[str], env: dict, cwd: Path) -> list[str]:
                     argv[i + 1] = f"{argv[i + 1]} {MCP_CLAUDE_TOOL}".strip()
                 break
     elif idiom == "codex-config":
-        argv[at:at] = ["-c", _mcp_codex_override(env, cwd)]
+        argv[at:at] = ["-c", _mcp_codex_override(env, cwd, command, isolated=isolated)]
     elif idiom == "copilot-flag":
-        argv[at:at] = ["--additional-mcp-config", _mcp_servers_json(env)]
+        argv[at:at] = [
+            "--additional-mcp-config", _mcp_servers_json(env, command, isolated=isolated)
+        ]
     elif idiom == "opencode-env":
         path = _mcp_config_dir(env, cwd) / OPENCODE_CONFIG_BASENAME
-        _write_if_changed(path, _mcp_opencode_config(env))
+        _write_if_changed(path, _mcp_opencode_config(env, command, isolated=isolated))
         # OPENCODE_CONFIG_CONTENT is not an option: `ollama launch` sets it for
         # provider+model and clobbers anything r4t puts there (measured, #310).
         env["OPENCODE_CONFIG"] = str(path)
+        # The variable is the whole idiom: a boundary that resets the environment
+        # must re-export it, and a container must be able to see the file.
+        plan.env_pass["OPENCODE_CONFIG"] = str(path)
+        plan.mount_dirs.append(path.parent)
+        plan.read_paths.append(path)
     elif idiom == "cursor-file":
-        _write_cursor_mcp(cwd, env)
-    return argv
+        # The file lands in the effective cwd — the workplace, which both
+        # wrappers already give the harness — so only its mode has to hold.
+        plan.read_paths.append(_write_cursor_mcp(cwd, env, command, isolated=isolated))
+    return plan
 
 
 def _effective_cwd(member: Member, workplace: Path) -> Path:
