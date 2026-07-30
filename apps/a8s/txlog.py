@@ -1,19 +1,26 @@
-"""A8S transaction log — structured TSV for tracing messages through the system.
+"""A8S transaction log — routing breadcrumbs for `a8s trace <ULID>`.
 
-Append-only file at ~/.a8s/transactions.tsv. One line per routing event.
-Columns are tab-separated, fixed-order, greppable.
+One row per routing event in WAL SQLite at ``transactions.sqlite3`` under the
+a8s state root. Not a message store: full bodies live in `.inbox` and the
+conversation archive, and `detail` holds only a short preview.
 
 Designed for debugging message flow end-to-end: trace a msg_id from
 sender outbox -> local routing -> file transfer -> remote publish -> remote
-receive -> recipient wake.
+receive -> recipient wake. `a8s trace` is the stable interface; nothing outside
+this module reads the rows.
 """
 from __future__ import annotations
 
+import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Literal
 
-__all__ = ["log", "read_events"]
+import sqlite_store
+from core import transactions_path
+from settings import DEFAULTS, get_int, get_setting
+
+__all__ = ["TransactionLogError", "log", "prune_transactions", "read_events"]
 
 Event = Literal[
     "ROUTED",
@@ -28,7 +35,9 @@ Event = Literal[
     "PROXY_DELIVERED",
 ]
 
-_COLUMNS = [
+# Event dict keys, in trace display order. `from`/`to` are SQL keywords, so
+# the columns are named `sender`/`recipient` and mapped back here.
+FIELDS = (
     "timestamp",    # ISO-8601 UTC with milliseconds
     "event",        # event type (see Event literal above)
     "msg_id",       # envelope ULID
@@ -37,15 +46,37 @@ _COLUMNS = [
     "files",        # comma-separated filenames (or empty)
     "remote",       # remote id involved (or empty)
     "detail",       # short free-text (preview, error, etc.)
-]
+)
 
-HEADER = "\t".join(_COLUMNS)
+_COLUMNS = "timestamp, event, msg_id, sender, recipient, files, remote, detail"
+
+_SCHEMA = (
+    """
+    CREATE TABLE IF NOT EXISTS transactions (
+        seq INTEGER PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        event TEXT NOT NULL,
+        msg_id TEXT NOT NULL COLLATE NOCASE,
+        sender TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        files TEXT NOT NULL,
+        remote TEXT NOT NULL,
+        detail TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS transactions_msg_id
+        ON transactions(msg_id, seq)
+    """,
+)
 
 
-def _txlog_path() -> Path:
-    from core import resolve_a8s_home
+class TransactionLogError(RuntimeError):
+    pass
 
-    return resolve_a8s_home() / "transactions.tsv"
+
+def _connect() -> sqlite3.Connection:
+    return sqlite_store.connect(transactions_path(), _SCHEMA, table="transactions")
 
 
 def _ts() -> str:
@@ -53,9 +84,17 @@ def _ts() -> str:
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
-def _sanitize(val: str) -> str:
-    """Strip tabs/newlines from field values."""
-    return val.replace("\t", " ").replace("\n", " ").replace("\r", "")
+def _one_line(val: str) -> str:
+    """Collapse newlines so each event renders as one `a8s trace` line."""
+    return val.replace("\n", " ").replace("\r", "")
+
+
+def _detail_max() -> int:
+    try:
+        limit = int(get_setting("txlog_detail_max"))
+    except (TypeError, ValueError):
+        return int(DEFAULTS["txlog_detail_max"])
+    return limit if limit >= 0 else int(DEFAULTS["txlog_detail_max"])
 
 
 def log(
@@ -68,55 +107,75 @@ def log(
     remote: str = "",
     detail: str = "",
 ) -> None:
-    """Append one transaction line. Never raises — errors are swallowed."""
-    try:
-        try:
-            from settings import DEFAULTS, get_setting
+    """Append one transaction row. Never raises — errors are swallowed.
 
-            raw = get_setting("txlog_detail_max")
-            detail_max = int(raw)
-            if detail_max < 0:
-                detail_max = int(DEFAULTS["txlog_detail_max"])
-        except Exception:
-            detail_max = 2000
-        files_str = ",".join(files) if files else ""
-        detail_out = detail if detail_max <= 0 else detail[:detail_max]
-        fields = [
+    A breadcrumb that cannot be written must not disturb the delivery path it
+    is describing, and warning per failure would flood the router's output.
+    """
+    try:
+        detail_max = _detail_max()
+        row = (
             _ts(),
             event,
             msg_id,
             sender,
             recipient,
-            files_str,
+            ",".join(files) if files else "",
             remote,
-            detail_out,
-        ]
-        line = "\t".join(_sanitize(f) for f in fields) + "\n"
-        path = _txlog_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            if f.tell() == 0:
-                f.write(HEADER + "\n")
-            f.write(line)
-    except OSError:
+            _one_line(detail if detail_max <= 0 else detail[:detail_max]),
+        )
+
+        def insert() -> None:
+            with closing(_connect()) as conn, conn:
+                conn.execute(
+                    f"INSERT INTO transactions({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    row,
+                )
+
+        sqlite_store.retry_busy(insert)
+    except (OSError, sqlite3.Error):
         pass
 
 
 def read_events(msg_id: str) -> list[dict[str, str]]:
     """Return transaction events correlated to one message ULID."""
-    path = _txlog_path()
-    if not path.is_file():
+    if not transactions_path().is_file():
         return []
-    events: list[dict[str, str]] = []
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                values = line.rstrip("\n").split("\t")
-                if values == _COLUMNS or len(values) != len(_COLUMNS):
-                    continue
-                event = dict(zip(_COLUMNS, values))
-                if event["msg_id"].upper() == msg_id.upper():
-                    events.append(event)
-    except OSError:
+        with closing(_connect()) as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM transactions WHERE msg_id = ? ORDER BY seq",
+                (msg_id,),
+            ).fetchall()
+    except (OSError, sqlite3.Error):
         return []
-    return events
+    return [dict(zip(FIELDS, row)) for row in rows]
+
+
+def prune_transactions(max_rows: int | None = None) -> int:
+    """Retain the newest configured number of rows and return rows removed."""
+    keep = max_rows if max_rows is not None else get_int("txlog_max_rows")
+    if keep < 1:
+        raise ValueError("max_rows must be positive")
+    try:
+        with closing(_connect()) as conn:
+            with conn:
+                before = int(
+                    conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+                )
+                removed = 0
+                if before > keep:
+                    cutoff = conn.execute(
+                        "SELECT seq FROM transactions ORDER BY seq DESC LIMIT 1 OFFSET ?",
+                        (keep - 1,),
+                    ).fetchone()
+                    if cutoff is not None:
+                        conn.execute(
+                            "DELETE FROM transactions WHERE seq < ?", (int(cutoff[0]),)
+                        )
+                        removed = before - keep
+            conn.execute("PRAGMA optimize")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return removed
+    except (OSError, sqlite3.Error) as e:
+        raise TransactionLogError(str(e)) from e

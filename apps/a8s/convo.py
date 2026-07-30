@@ -9,13 +9,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-import threading
 import time
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any
 
+import sqlite_store
 from core import conversations_path, inbound_bundle_dir, out
 from settings import get_int
 
@@ -152,80 +152,10 @@ class ConversationArchiveError(RuntimeError):
     pass
 
 
-_BUSY_TIMEOUT_MS = 5000
-_BUSY_RETRIES = 6
-_BUSY_BACKOFF = 0.05
-
-_INIT_LOCK = threading.Lock()
-
-_T = TypeVar("_T")
-
-
-def _is_busy(err: sqlite3.Error) -> bool:
-    return (err.sqlite_errorcode & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-
-
-def _retry_busy(op: Callable[[], _T]) -> _T:
-    """Run `op`, retrying while SQLite reports contention.
-
-    `busy_timeout` covers statements that wait on a lock, but the WAL/journal
-    transition returns SQLITE_BUSY without ever invoking the busy handler, so
-    the setup path needs an explicit retry to stay durable under concurrent
-    writers.
-    """
-    for attempt in range(_BUSY_RETRIES - 1):
-        try:
-            return op()
-        except sqlite3.Error as e:
-            if not _is_busy(e):
-                raise
-        time.sleep(_BUSY_BACKOFF * (attempt + 1))
-    return op()
-
-
-def _needs_schema(conn: sqlite3.Connection) -> bool:
-    return (
-        conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'"
-        ).fetchone()
-        is None
-    )
-
-
-def _initialize(conn: sqlite3.Connection) -> None:
-    """Create the archive schema so other connections see it all at once.
-
-    The statements run in one explicit transaction rather than through
-    `executescript`, which commits between statements — a concurrent writer
-    could otherwise find `messages` already there and `message_agents` not.
-    """
-    if not _needs_schema(conn):
-        return
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        for statement in _SCHEMA:
-            conn.execute(statement)
-        conn.commit()
-    except sqlite3.Error:
-        conn.rollback()
-        raise
-
-
 def _connect() -> sqlite3.Connection:
-    path = conversations_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=_BUSY_TIMEOUT_MS / 1000)
-    try:
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-        if _needs_schema(conn):
-            with _INIT_LOCK:
-                _retry_busy(lambda: _initialize(conn))
-    except sqlite3.Error:
-        conn.close()
-        raise
-    return conn
+    return sqlite_store.connect(
+        conversations_path(), _SCHEMA, table="messages", foreign_keys=True
+    )
 
 
 def _entry_agents(entry: dict[str, Any]) -> set[str]:
@@ -371,7 +301,7 @@ def record(msg: dict[str, Any], *, recipients: list[str]) -> None:
     entry = entry_from_message(msg, recipients=recipients)
     msg_id = entry.get("id") or None
     try:
-        _retry_busy(lambda: _insert_entry(entry, msg_id))
+        sqlite_store.retry_busy(lambda: _insert_entry(entry, msg_id))
     except (OSError, sqlite3.Error) as e:
         label = msg_id or "without-id"
         out(f"WARN conversation archive failed id={label}: {e}")

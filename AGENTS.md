@@ -119,7 +119,7 @@ with an `a8s_control` extension and reserved `to: __a8s_receipt__`. Consume
 control envelopes before participant routing, never place them in an inbox,
 and never generate receipts for them. Older subscribers safely drop the
 reserved destination. `a8s trace <ULID>` reads correlated boundaries from
-`~/.a8s/transactions.tsv`.
+`transactions.sqlite3` in the a8s state root.
 
 a8s plants no skill files in an agent's repo: `tell` reads `TELL_OUTBOX_DIR`
 from the environment a8s injects on wake. Top-level doc skills for the user's
