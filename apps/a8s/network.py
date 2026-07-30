@@ -572,6 +572,21 @@ def receive_envelope(
         _publish_delivery_receipt(msg, delivered_names, publish_control, remote_id)
 
 
+def _receipt_sender(sender: str, all_agents: list[Participant]) -> Participant | None:
+    """The local agent a receipt belongs to. A node that owns a namespace sends
+    under the bare prefix, so the name on the wire is an address, not an agent —
+    resolve it through the binding before giving up on the confirmation."""
+    by_name = {agent.name.lower(): agent for agent in all_agents}
+    local = by_name.get(sender.lower())
+    if local is not None:
+        return local
+    try:
+        kind, bound = resolve_name(sender)
+    except (KeyError, ValueError):
+        return None
+    return by_name.get(bound[0].lower()) if kind == "namespace" else None
+
+
 def _receive_control_envelope(
     message: dict,
     all_agents: list[Participant],
@@ -586,10 +601,7 @@ def _receive_control_envelope(
             remote_id,
         )
         return
-    local_sender = next(
-        (agent for agent in all_agents if agent.name.lower() == receipt.sender.lower()),
-        None,
-    )
+    local_sender = _receipt_sender(receipt.sender, all_agents)
     if local_sender is None:
         return
     recipients = ",".join(receipt.recipients)

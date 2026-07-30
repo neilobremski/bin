@@ -170,11 +170,23 @@ tell acme:phil "lunch at noon?"      # delivered to acme-node with to = "acme:ph
 tell acme:team:ops "deploy done"     # same node; sub-address opaque to a8s
 ```
 
+A bound prefix is also the node's outward identity. Mail leaving the namespace
+presents `from` as the bare prefix — `acme`, not the `acme-node` registration
+name and not the `acme:phil` sub-sender that wrote it — so a namespace is one
+opaque address on the network whether it fronts one agent, a human, or a whole
+roster, and a reply to that name routes back in through the binding. Mail
+addressed *inside* the prefix keeps sub-sender attribution: an envelope to
+`acme:jane` claiming `from: acme:phil` keeps that `from`, since only the bound
+node writes that outbox and a claim under its own prefix carries its own
+authority. Ownership is still settled by the filesystem, not the JSON: a claim
+the sender's own namespaces don't back is discarded. A node with several
+prefixes bound has no unambiguous outward name, so its agent name stands for
+anything but a claim under one of them.
+
 Prefixes share the agent/alias name grammar (lowercase canonical form,
 case-insensitive match). A prefix may match the name of the agent it binds to
 — a node owning its own namespace, so `s1l` registers as agent `s1l` and binds
-prefix `s1l` to itself, and cross-wall traffic is attributed to `s1l` rather
-than a `s1l-node` stand-in. A prefix still can't collide with an alias or with
+prefix `s1l` to itself. A prefix still can't collide with an alias or with
 a *different* agent's name (a bare `tell <prefix>` resolves to the namespace,
 which would otherwise silently shadow that agent). An unknown prefix behaves
 like any unknown recipient: published to configured remotes (another cluster
@@ -425,7 +437,7 @@ The state root resolves as follows when `A8S_HOME` is unset: use `~/.config/a8s`
 
 The outbox lives in the agent's own dir because some sandboxes (codex `--full-auto`) only let the agent write inside its workspace. Inbox/trash/pending live under `~/.a8s/` where the agent can't see them — and per the agent-directory invariant, a8s never sidecars or rewrites in `.outbox/`. New outbox files are atomically renamed to `pending/` on every routing pass; everything from there (sidecars, retries, trash, remote publishes) happens in `~/.a8s/`.
 
-`from` is force-overwritten at routing time. An agent that hand-writes a JSON with `from: "VICTIM"` doesn't get to spoof — the file's outbox location is the unforgeable identity.
+`from` is force-overwritten at routing time. An agent that hand-writes a JSON with `from: "VICTIM"` doesn't get to spoof — the file's outbox location is the unforgeable identity. A namespace bound to that agent changes what the identity *presents as*, never whose it is: see [Namespaces](#namespaces).
 
 ## Connectors
 

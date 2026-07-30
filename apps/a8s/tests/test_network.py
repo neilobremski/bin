@@ -379,6 +379,20 @@ class TestReceiveEnvelope:
         assert republished == []
         assert all(not inbox_dir(name).exists() for name in ("A", "B"))
 
+    def test_receipt_for_a_bare_namespace_lands_on_the_bound_node(
+        self, two_local_agents, monkeypatch,
+    ):
+        # A node that owns a namespace sends under the bare prefix (#315), so
+        # the name on a returning receipt is an address — resolve it through the
+        # binding or the confirmation never reaches the node that sent.
+        events = []
+        monkeypatch.setattr(network.txlog, "log", lambda event, **fields: events.append((event, fields)))
+        save_namespaces({"crew": "A"})
+        envelope = build_delivery_receipt({"id": new_ulid(), "from": "crew"}, ["B"])
+        receive_envelope(json.dumps(envelope).encode(), two_local_agents)
+        receipts = [fields for event, fields in events if event == "DELIVERY_RECEIPT"]
+        assert [r["sender"] for r in receipts] == ["A"]
+
     def test_receipt_for_nonlocal_sender_is_ignored_without_loop(self, two_local_agents):
         envelope = build_delivery_receipt(
             {"id": new_ulid(), "from": "REMOTE_SENDER"},

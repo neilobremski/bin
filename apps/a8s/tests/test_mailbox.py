@@ -312,21 +312,6 @@ class TestRouteOutboxes:
         # Routing forces from = sender's actual name, regardless of the JSON.
         assert delivered["from"] == "A"
 
-    def test_from_within_owned_namespace_is_preserved(self, two_agents):
-        a, b = two_agents
-        save_namespaces({"crew": "A"})
-        outbox = outbox_dir(a.root)
-        f = outbox / "20260101T000000_A.json"
-        f.write_text(json.dumps({
-            "from": "crew:gerry",  # sub-sender inside A's own namespace
-            "to": "B",
-            "content": "report",
-            "files": [],
-        }))
-        route_outboxes([a, b], all_agents=[a, b])
-        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
-        assert delivered["from"] == "crew:gerry"
-
     def test_from_in_foreign_namespace_is_overwritten(self, two_agents):
         a, b = two_agents
         save_namespaces({"crew": "B"})  # bound to someone else
@@ -471,6 +456,107 @@ class TestNamespaceRouting:
         log = agent_log_path("A").read_text()
         assert "acme:phil" in log
         assert "namespace via NODE" in log
+
+
+class TestNamespaceEgressIdentity:
+    """Issue #315 — a bound prefix is the node's name on the network. Mail
+    leaving the namespace presents `from` as the bare prefix, so whatever the
+    prefix fronts is one opaque address outside it; mail addressed inside the
+    prefix keeps sub-sender attribution. Presentation is all a namespace
+    changes — the enclosing outbox still settles whose message it is."""
+
+    @pytest.fixture
+    def node_and_outsider(self, fake_home, tmp_path):
+        node_root = tmp_path / "node"; node_root.mkdir()
+        outsider_root = tmp_path / "outsider"; outsider_root.mkdir()
+        save_registry({
+            "acme-node": {"root": str(node_root)},
+            "B": {"root": str(outsider_root)},
+        })
+        save_namespaces({"acme": "acme-node"})
+        node = Participant("acme-node", node_root)
+        outsider = Participant("B", outsider_root)
+        ensure_mailboxes(node)
+        ensure_mailboxes(outsider)
+        return node, outsider
+
+    def _stage(self, node: Participant, claimed: str, to: str) -> None:
+        f = outbox_dir(node.root) / "20260101T000000_NODE.json"
+        f.write_text(json.dumps({
+            "from": claimed, "to": to, "content": "status green", "files": [],
+        }))
+
+    def _delivered_from(self, node, outsider) -> str:
+        route_outboxes([node, outsider], all_agents=[node, outsider])
+        return json.loads(next(inbox_dir("B").iterdir()).read_text())["from"]
+
+    def test_member_egress_presents_the_bare_namespace(self, node_and_outsider):
+        node, outsider = node_and_outsider
+        self._stage(node, "acme:lead", "B")
+        assert self._delivered_from(node, outsider) == "acme"
+
+    def test_node_name_egresses_as_its_sole_namespace(self, node_and_outsider):
+        # A plain `tell` from the node root: `acme-node` is the registration
+        # name a prefix can't share, not the node's identity on the network.
+        node, outsider = node_and_outsider
+        self._stage(node, "acme-node", "B")
+        assert self._delivered_from(node, outsider) == "acme"
+
+    def test_presented_prefix_uses_the_registry_spelling(self, node_and_outsider):
+        node, outsider = node_and_outsider
+        save_namespaces({"Acme": "acme-node"})
+        self._stage(node, "ACME:lead", "B")
+        assert self._delivered_from(node, outsider) == "Acme"
+
+    def test_spoofed_claim_is_discarded_not_carried_out(self, node_and_outsider):
+        # The claim buys nothing — the node presents as its own namespace, and
+        # `VICTIM` is gone.
+        node, outsider = node_and_outsider
+        self._stage(node, "VICTIM", "B")
+        assert self._delivered_from(node, outsider) == "acme"
+
+    def test_several_prefixes_leave_the_agent_name_standing(self, node_and_outsider):
+        node, outsider = node_and_outsider
+        save_namespaces({"acme": "acme-node", "ops": "acme-node"})
+        self._stage(node, "acme-node", "B")
+        assert self._delivered_from(node, outsider) == "acme-node"
+
+    def test_several_prefixes_still_honor_a_claim_under_one(self, node_and_outsider):
+        node, outsider = node_and_outsider
+        save_namespaces({"acme": "acme-node", "ops": "acme-node"})
+        self._stage(node, "ops:lead", "B")
+        assert self._delivered_from(node, outsider) == "ops"
+
+    def test_traffic_inside_the_prefix_keeps_the_sub_sender(self, node_and_outsider):
+        # The recipient is the node itself, so there is no local delivery to
+        # read — the remote publish carries the envelope that would go out.
+        node, outsider = node_and_outsider
+        published: list[dict] = []
+
+        def publish(msg, sender_name, succeeded_so_far, attempt_count):
+            published.append(msg)
+            return ["hub"]
+
+        self._stage(node, "acme:phil", "acme:jane")
+        route_outboxes(
+            [node, outsider], all_agents=[node, outsider],
+            publish_remotes=publish, configured_remote_ids=["hub"],
+        )
+        assert [m["from"] for m in published] == ["acme:phil"]
+
+    def test_reply_to_the_bare_namespace_routes_in_through_the_binding(
+        self, node_and_outsider
+    ):
+        # The round trip the presentation depends on: the outsider answers the
+        # name it saw, and the message enters at the bound node with `to` intact
+        # for the node to self-route.
+        node, outsider = node_and_outsider
+        _write_outbox("B", outsider.root, "acme", "thanks", [])
+        n = route_outboxes([node, outsider], all_agents=[node, outsider])
+        assert n == 1
+        delivered = json.loads(next(inbox_dir("acme-node").iterdir()).read_text())
+        assert delivered["to"] == "acme"
+        assert delivered["from"] == "B"
 
 
 class TestAtomicFanout:

@@ -490,6 +490,38 @@ def _download_files_to_recipient(
     return out_msg
 
 
+def _stamp_from(
+    sender_name: str,
+    claimed: str,
+    recipient: str,
+    owned_prefixes: dict[str, str],
+) -> str:
+    """The `from` a routed message carries, keyed by the namespace prefixes bound
+    to the sender (lowercase key -> registry spelling).
+
+    The outbox is agent-writable, so its JSON can lie about `from`. Ownership is
+    settled by the filesystem — a claim the sender's own namespaces don't back is
+    discarded — and a namespace decides only how that owner *presents*: the
+    prefix is one address on the network and the agent behind it is registration
+    plumbing (`acme-node`), so a node with one bound prefix speaks as the prefix.
+    Whatever it fronts (one agent, a human, a whole roster) is one opaque name
+    outside, and a reply to that name routes back in through the binding.
+
+    Inside the prefix, a sub-sender claim stands (`acme:phil` to `acme:jane`):
+    only the bound node writes this outbox, so a claim under its own prefix
+    carries the node's own authority. Several bound prefixes leave the outward
+    name ambiguous for anything but a claim under one of them, so the agent name
+    stands."""
+    prefix = owned_prefixes.get(claimed.partition(":")[0].strip().lower())
+    if prefix is None:
+        if len(owned_prefixes) != 1:
+            return sender_name
+        return next(iter(owned_prefixes.values()))
+    if recipient.partition(":")[0].strip().lower() == prefix.lower():
+        return claimed if ":" in claimed else prefix
+    return prefix
+
+
 def _process_pending(
     sender: Participant,
     by_name: dict[str, Participant],
@@ -508,7 +540,7 @@ def _process_pending(
     if not pending.is_dir():
         return 0
     owned_prefixes = {
-        p.lower() for p, a in load_namespaces().items()
+        p.lower(): p for p, a in load_namespaces().items()
         if a.lower() == sender.name.lower()
     }
     now = datetime.now(timezone.utc)
@@ -534,16 +566,11 @@ def _process_pending(
             _trash_pending(sender, f)
             _drop_sidecar(f)
             continue
-        # Defense: the outbox was agent-writable, so the JSON could lie about
-        # `from`. The unforgeable identity is the enclosing sender — overwrite,
-        # except a sub-sender claim inside a namespace bound to this sender
-        # (`s1l:gerry` from the node bound to `s1l`): only that node writes
-        # this outbox, so the claim carries the node's own authority.
-        claimed = str(msg.get("from") or "").strip()
-        msg["from"] = sender.name
-        if ":" in claimed and claimed.partition(":")[0].strip().lower() in owned_prefixes:
-            msg["from"] = claimed
         recipient_name = (msg.get("to") or "").strip()
+        msg["from"] = _stamp_from(
+            sender.name, str(msg.get("from") or "").strip(),
+            recipient_name, owned_prefixes,
+        )
         preview = _preview(msg.get("content", ""))
         msg_files = [e.get("filename", "") for e in (msg.get("files") or []) if e.get("filename")]
         if not recipient_name:
