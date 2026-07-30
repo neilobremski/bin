@@ -24,6 +24,55 @@ python3 -m pytest apps/r4t/tests/     # from anywhere in ~/bin — the repo
                                       # venv wrapper supplies pytest
 ```
 
+### Failure scenarios
+
+`r4t sandbox --fake --break MEMBER[:SHAPE]` breaks one member on purpose and
+grades the recovery path. Each shape is a way real harnesses fail, and each
+lands somewhere different in dispatch:
+
+| SHAPE | The member | r4t must |
+|---|---|---|
+| `exit` (default) | exits nonzero every turn | requeue the batch, trip the breaker, hold the queue |
+| `hang` | sleeps past its rig timeout | kill the process group at the timeout, requeue, trip the breaker |
+| `silent` | does the work, then answers on stdout without ever calling `tell` | stage the cleaned stdout as one reply to the sender, breaker closed, deliverable intact |
+| `mute` | prints tool chrome, stages nothing, exits 0 | let the quiet sweep nudge the leader so the originator still hears back |
+
+Every shape also checks the turn was charged to the member's budget: a member
+that keeps failing pays for its attempts. Each has a pytest in
+`tests/test_sandbox.py`, and the checks are written so a governance regression
+reads as FAIL rather than a quieter run.
+
+### What the sandbox fakes
+
+Every line here is a place a green sandbox run says nothing about a real
+roster:
+
+- **Roles are scripted.** `fake-agent.py` picks its action from a regex over
+  the prompt, so the pipeline completes however well or badly the prompt
+  teaches. Nothing here tests whether a model would follow it.
+- **Sends bypass `tell`.** Fake and live sandbox agents both write staged
+  envelopes into `$TELL_OUTBOX_DIR` from Python. Staging release, routing and
+  header stamping are the real thing; the member's own `tell` invocation —
+  shell quoting, outbox discovery — is not.
+- **No `a8s_tell` tool.** Sandbox rigs carry no preset, so the `mcp` knob is
+  off in both modes and the per-turn MCP injection never runs.
+- **Live mode still scripts two turns.** `live-agent.py` skips the LLM
+  entirely for the Tester role and for the Lead's post-VERIFIED turn.
+- **Live mode covers for the model.** After every turn it stages the tell the
+  model should have sent, and seeds `battleship.py` when Dev leaves none. A
+  green live report proves the pipeline ran, not that the harness followed
+  protocol.
+- **VERIFIED is a regex.** Both modes read `VERIFIED:` out of the incoming
+  text; a model that phrases its verdict any other way reads as unverified.
+- **Fake turns are instant.** Fake mode drops the cadence gate and every turn
+  returns in milliseconds, so throttling, concurrency and budget resting under
+  real latency go untested.
+- **Broken members break cleanly.** The `--break` shapes are a nonzero exit, a
+  `sleep`, a `print` and chrome-only output. Real harnesses fail messier:
+  partial output, tool loops, a CLI that blocks on stdin.
+- **Nobody continues.** The sandbox roster sets no `Continue:`, so refounds,
+  dump turns and the cold-start retry never run.
+
 ## Layout
 
 `r4t.py` (CLI) · `dispatch.py` (enqueue, batch turns, staging
