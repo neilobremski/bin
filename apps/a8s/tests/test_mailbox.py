@@ -29,7 +29,7 @@ from mailbox import (
     next_inbox_message,
     route_outboxes,
 )
-from registry import participants_from_registry, save_aliases, save_namespaces, save_registry
+from registry import participants_from_registry, save_aliases, save_namespaces, save_registry, save_namespace_options
 
 
 class TestPendingAttachmentStatus:
@@ -462,11 +462,11 @@ class TestNamespaceRouting:
 
 
 class TestNamespaceEgressIdentity:
-    """Issue #315 — a bound prefix is the node's name on the network. Mail
-    leaving the namespace presents `from` as the bare prefix, so whatever the
-    prefix fronts is one opaque address outside it; mail addressed inside the
-    prefix keeps sub-sender attribution. Presentation is all a namespace
-    changes — the enclosing outbox still settles whose message it is."""
+    """A namespace binding presents member attribution outward by default —
+    a sub-sender claim under the node's own prefix stands to any recipient.
+    Binding with `--opaque` conceals instead: mail leaving the prefix presents
+    as the bare prefix, one address outside whatever it fronts. Either way the
+    enclosing outbox settles whose message it is."""
 
     @pytest.fixture
     def node_and_outsider(self, fake_home, tmp_path):
@@ -483,6 +483,9 @@ class TestNamespaceEgressIdentity:
         ensure_mailboxes(outsider)
         return node, outsider
 
+    def _conceal(self, *prefixes: str) -> None:
+        save_namespace_options({p: {"opaque": True} for p in prefixes})
+
     def _stage(self, node: Participant, claimed: str, to: str) -> None:
         f = outbox_dir(node.root) / "20260101T000000_NODE.json"
         f.write_text(json.dumps({
@@ -493,47 +496,80 @@ class TestNamespaceEgressIdentity:
         route_outboxes([node, outsider], all_agents=[node, outsider])
         return json.loads(next(inbox_dir("B").iterdir()).read_text())["from"]
 
+    # --- default: attribution outward ---
+
+    def test_member_claim_stands_to_an_outsider_by_default(self, node_and_outsider):
+        node, outsider = node_and_outsider
+        self._stage(node, "acme:lead", "B")
+        assert self._delivered_from(node, outsider) == "acme:lead"
+
+    def test_node_name_egresses_as_itself_by_default(self, node_and_outsider):
+        node, outsider = node_and_outsider
+        self._stage(node, "acme-node", "B")
+        assert self._delivered_from(node, outsider) == "acme-node"
+
+    def test_spoofed_claim_is_discarded_by_default(self, node_and_outsider):
+        node, outsider = node_and_outsider
+        self._stage(node, "VICTIM", "B")
+        assert self._delivered_from(node, outsider) == "acme-node"
+
+    # --- opaque: the binding conceals ---
+
     def test_member_egress_presents_the_bare_namespace(self, node_and_outsider):
         node, outsider = node_and_outsider
+        self._conceal("acme")
         self._stage(node, "acme:lead", "B")
         assert self._delivered_from(node, outsider) == "acme"
 
-    def test_node_name_egresses_as_its_sole_namespace(self, node_and_outsider):
-        # A plain `tell` from the node root: `acme-node` is the registration
-        # name a prefix can't share, not the node's identity on the network.
+    def test_node_name_egresses_as_its_sole_opaque_namespace(self, node_and_outsider):
         node, outsider = node_and_outsider
+        self._conceal("acme")
         self._stage(node, "acme-node", "B")
         assert self._delivered_from(node, outsider) == "acme"
 
     def test_presented_prefix_uses_the_registry_spelling(self, node_and_outsider):
         node, outsider = node_and_outsider
         save_namespaces({"Acme": "acme-node"})
+        self._conceal("Acme")
         self._stage(node, "ACME:lead", "B")
         assert self._delivered_from(node, outsider) == "Acme"
 
-    def test_spoofed_claim_is_discarded_not_carried_out(self, node_and_outsider):
+    def test_spoofed_claim_presents_as_the_opaque_prefix(self, node_and_outsider):
         # The claim buys nothing — the node presents as its own namespace, and
         # `VICTIM` is gone.
         node, outsider = node_and_outsider
+        self._conceal("acme")
         self._stage(node, "VICTIM", "B")
         assert self._delivered_from(node, outsider) == "acme"
 
-    def test_several_prefixes_leave_the_agent_name_standing(self, node_and_outsider):
+    def test_several_opaque_prefixes_leave_the_agent_name_standing(self, node_and_outsider):
         node, outsider = node_and_outsider
         save_namespaces({"acme": "acme-node", "ops": "acme-node"})
+        self._conceal("acme", "ops")
         self._stage(node, "acme-node", "B")
         assert self._delivered_from(node, outsider) == "acme-node"
 
-    def test_several_prefixes_still_honor_a_claim_under_one(self, node_and_outsider):
+    def test_several_opaque_prefixes_still_honor_a_claim_under_one(self, node_and_outsider):
         node, outsider = node_and_outsider
         save_namespaces({"acme": "acme-node", "ops": "acme-node"})
+        self._conceal("acme", "ops")
         self._stage(node, "ops:lead", "B")
         assert self._delivered_from(node, outsider) == "ops"
 
-    def test_traffic_inside_the_prefix_keeps_the_sub_sender(self, node_and_outsider):
+    def test_opacity_is_per_prefix(self, node_and_outsider):
+        # A claim under the node's non-opaque prefix keeps attribution even
+        # though a sibling prefix conceals.
+        node, outsider = node_and_outsider
+        save_namespaces({"acme": "acme-node", "ops": "acme-node"})
+        self._conceal("acme")
+        self._stage(node, "ops:lead", "B")
+        assert self._delivered_from(node, outsider) == "ops:lead"
+
+    def test_traffic_inside_the_opaque_prefix_keeps_the_sub_sender(self, node_and_outsider):
         # The recipient is the node itself, so there is no local delivery to
         # read — the remote publish carries the envelope that would go out.
         node, outsider = node_and_outsider
+        self._conceal("acme")
         published: list[dict] = []
 
         def publish(msg, sender_name, succeeded_so_far, attempt_count):
@@ -550,16 +586,33 @@ class TestNamespaceEgressIdentity:
     def test_reply_to_the_bare_namespace_routes_in_through_the_binding(
         self, node_and_outsider
     ):
-        # The round trip the presentation depends on: the outsider answers the
-        # name it saw, and the message enters at the bound node with `to` intact
-        # for the node to self-route.
+        # The round trip opacity depends on: the outsider answers the name it
+        # saw, and the message enters at the bound node with `to` intact for
+        # the node to self-route. Routing is opacity-independent.
         node, outsider = node_and_outsider
+        self._conceal("acme")
         _write_outbox("B", outsider.root, "acme", "thanks", [])
         n = route_outboxes([node, outsider], all_agents=[node, outsider])
         assert n == 1
         delivered = json.loads(next(inbox_dir("acme-node").iterdir()).read_text())
         assert delivered["to"] == "acme"
         assert delivered["from"] == "B"
+
+    def test_unnamespace_clears_the_opacity_option(self, node_and_outsider, capsys):
+        from commands import cmd_namespace, cmd_unnamespace
+        assert cmd_namespace(["acme", "acme-node", "--opaque"]) == 0
+        assert "opaque" in capsys.readouterr().out
+        assert cmd_unnamespace(["acme"]) == 0
+        from registry import load_namespace_options
+        assert load_namespace_options() == {}
+
+    def test_rebind_without_the_flag_clears_opacity(self, node_and_outsider, capsys):
+        from commands import cmd_namespace
+        from registry import opaque_prefixes
+        assert cmd_namespace(["acme", "acme-node", "--opaque"]) == 0
+        assert opaque_prefixes() == {"acme"}
+        assert cmd_namespace(["acme", "acme-node"]) == 0
+        assert opaque_prefixes() == set()
 
 
 class TestEnvelopeMeta:
@@ -616,6 +669,7 @@ class TestEnvelopeMeta:
             "B": {"root": str(outsider_root)},
         })
         save_namespaces({"acme": "acme-node"})
+        save_namespace_options({"acme": {"opaque": True}})
         node = Participant("acme-node", node_root)
         outsider = Participant("B", outsider_root)
         ensure_mailboxes(node)

@@ -65,7 +65,7 @@ from core import (
     unique_path,
 )
 from network import seen_id_append
-from registry import load_namespaces, resolve_name
+from registry import load_namespaces, resolve_name, opaque_prefixes
 from services import StorageError, StorageService
 import txlog
 from ulid import new as new_ulid
@@ -495,28 +495,28 @@ def _stamp_from(
     claimed: str,
     recipient: str,
     owned_prefixes: dict[str, str],
+    opaque: set[str],
 ) -> str:
-    """The `from` a routed message carries, keyed by the namespace prefixes bound
-    to the sender (lowercase key -> registry spelling).
+    """The `from` a routed message carries, keyed by the namespace prefixes
+    bound to the sender (lowercase key -> registry spelling) and their opacity.
 
-    The outbox is agent-writable, so its JSON can lie about `from`. Ownership is
-    settled by the filesystem — a claim the sender's own namespaces don't back is
-    discarded — and a namespace decides only how that owner *presents*: the
-    prefix is one address on the network and the agent behind it is registration
-    plumbing (`acme-node`), so a node with one bound prefix speaks as the prefix.
-    Whatever it fronts (one agent, a human, a whole roster) is one opaque name
-    outside, and a reply to that name routes back in through the binding.
+    Ownership is settled by the filesystem — a claim the sender's own
+    namespaces don't back is discarded. By default a namespace changes nothing
+    about presentation: a sub-sender claim under the node's own prefix stands
+    to any recipient (`crew:gerry` arrives as `crew:gerry`), because
+    attribution is the default and only the bound node writes this outbox.
 
-    Inside the prefix, a sub-sender claim stands (`acme:phil` to `acme:jane`):
-    only the bound node writes this outbox, so a claim under its own prefix
-    carries the node's own authority. Several bound prefixes leave the outward
-    name ambiguous for anything but a claim under one of them, so the agent name
-    stands."""
+    A binding made with `--opaque` conceals instead: mail leaving that prefix
+    presents as the bare prefix — one address outside, whatever it fronts —
+    while mail addressed inside the prefix keeps the sub-sender. A node-name
+    or unbacked claim presents as the node's single opaque prefix when it has
+    exactly one; anything else falls back to the agent name."""
     prefix = owned_prefixes.get(claimed.partition(":")[0].strip().lower())
+    if prefix is not None and prefix.lower() not in opaque:
+        return claimed if ":" in claimed else sender_name
     if prefix is None:
-        if len(owned_prefixes) != 1:
-            return sender_name
-        return next(iter(owned_prefixes.values()))
+        concealed = [p for p in owned_prefixes.values() if p.lower() in opaque]
+        return concealed[0] if len(concealed) == 1 else sender_name
     if recipient.partition(":")[0].strip().lower() == prefix.lower():
         return claimed if ":" in claimed else prefix
     return prefix
@@ -543,6 +543,7 @@ def _process_pending(
         p.lower(): p for p, a in load_namespaces().items()
         if a.lower() == sender.name.lower()
     }
+    opaque = opaque_prefixes()
     now = datetime.now(timezone.utc)
     files = sorted(
         f for f in pending.iterdir()
@@ -569,7 +570,7 @@ def _process_pending(
         recipient_name = (msg.get("to") or "").strip()
         msg["from"] = _stamp_from(
             sender.name, str(msg.get("from") or "").strip(),
-            recipient_name, owned_prefixes,
+            recipient_name, owned_prefixes, opaque,
         )
         preview = _preview(msg.get("content", ""))
         msg_files = [e.get("filename", "") for e in (msg.get("files") or []) if e.get("filename")]

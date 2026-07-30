@@ -116,7 +116,7 @@ config without a `repo` key is an in-repo org that just wants settings.
 |---|---|---|
 | `comms` | `open` | `open` delivers a tell to any valid member (learned addresses); `closed` reroutes non-adjacent tells through the sender's lead |
 | `leader_sees_lateral` | `false` | when `true`, a lateral (peer) delivery lands a read-only copy in the lead's history — no turn burned |
-| `egress` | `true` | only the topmost leader may message outside the garden; a non-top member's external tell redirects up to it. `false` keeps the org silent outward. What leaves is stamped with the bare namespace prefix, so the org is one name outside its walls (see [message-flow.md](message-flow.md)) |
+| `egress` | `true` | only the topmost leader may message outside the garden; a non-top member's external tell redirects up to it. `false` keeps the org silent outward. Bind the org's namespace `--opaque` and what leaves is stamped with the bare prefix — one name outside the walls; the default binding keeps member attribution (see [message-flow.md](message-flow.md)) |
 | `doorbell_check` | *absent* | a shell command that gates every ring of an absent human's doorbell (see [verification.md](verification.md)); absent or empty means no gate |
 | `run_as` | *absent* | OS-level isolation: wrap every member turn in `sudo -u <username>`. One user serves the whole roster (see [isolation.md](isolation.md)) |
 | `container` | *absent* | OS-level isolation: run every member turn under `docker run --rm <image>`; mutually exclusive with `run_as` (see [isolation.md](isolation.md)) |

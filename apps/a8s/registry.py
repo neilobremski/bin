@@ -36,7 +36,7 @@ from core import (
 
 # ---------- registry I/O ----------
 
-_REGISTRY_SECTIONS = ("agents", "aliases", "namespaces")
+_REGISTRY_SECTIONS = ("agents", "aliases", "namespaces", "namespace_options")
 
 
 def _empty_registry() -> dict:
@@ -95,6 +95,27 @@ def save_namespaces(namespaces: dict) -> None:
     raw = _load_raw_registry()
     raw["namespaces"] = namespaces
     _save_raw_registry(raw)
+
+
+def load_namespace_options() -> dict:
+    return _load_raw_registry()["namespace_options"]
+
+
+def save_namespace_options(options: dict) -> None:
+    raw = _load_raw_registry()
+    raw["namespace_options"] = options
+    _save_raw_registry(raw)
+
+
+def opaque_prefixes() -> set[str]:
+    """Lowercased prefixes bound with `--opaque` — presentation policy, kept
+    beside the routing map rather than inside it so every consumer of
+    `namespaces` keeps reading `{prefix: agent}`."""
+    return {
+        p.lower()
+        for p, opts in load_namespace_options().items()
+        if isinstance(opts, dict) and opts.get("opaque")
+    }
 
 
 # ---------- lookups ----------

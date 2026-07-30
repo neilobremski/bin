@@ -99,11 +99,12 @@ a report someone is waiting on, so the quiet-thread sweep leaves it alone. That
 is what keeps two federated rosters from reading each other's polite
 status updates as fresh human attention and nudging each other awake forever.
 
-The sender the outside sees is the bare namespace. Dispatch releases with
-`from: <node>:<member>`, and the a8s router — which owns `from`, because the
-outbox is agent-writable — presents that as the bound prefix on the way out:
-mail from the org arrives as `acme`, never `acme:lead` or `acme-node`. So the
-org speaks with one mouth (only the topmost leader originates external mail)
-under one name, and a reply to `acme` re-enters at the top lead. Inside the
-walls attribution stays member-level; the collapse is presentation at the wall,
-not a loss of who said what.
+What the outside sees is the org owner's choice. Dispatch releases with
+`from: <node>:<member>`, and by default that attribution stands — external
+mail arrives as `acme:lead`. Bind the namespace with `a8s namespace acme
+<node> --opaque` and the a8s router — which owns `from`, because the outbox is
+agent-writable — presents egress as the bound prefix instead: mail from the
+org arrives as `acme`, never `acme:lead` or `acme-node`, so the org speaks
+with one mouth under one name and a reply to `acme` re-enters at the top lead.
+Inside the walls attribution stays member-level either way; opacity is
+presentation at the wall, not a loss of who said what.

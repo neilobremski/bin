@@ -58,7 +58,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("alias",    "[<name> [<member>]]",       "Group agents under an alias name; show one with `<name>`."),
     ("unalias",  "<alias> [<member>]",        "Remove a member from an alias, or the whole alias."),
     ("aliases",  "",                          "List aliases and their members."),
-    ("namespace", "[<prefix> [<agent>]]",     "Bind an address prefix to one agent (`tell <prefix>:<sub> ...`); show one with `<prefix>`."),
+    ("namespace", "[<prefix> [<agent>] [--opaque]]", "Bind an address prefix to one agent (`tell <prefix>:<sub> ...`); `--opaque` conceals member attribution outward."),
     ("unnamespace", "<prefix>",               "Remove a namespace binding."),
     ("namespaces", "",                        "List namespace prefixes and their bound agents."),
     ("start",    "<name>",                    "Run an agent in the background."),
