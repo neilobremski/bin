@@ -86,8 +86,8 @@ Two knobs, because the cwd alone does not reach every harness. `PWD` is a shell
 convention no kernel maintains, so a spawned process inherits the `PWD` of
 whoever started r4t however its cwd is set, and a harness that resolves paths
 against `PWD` lands outside the workdir. r4t pins `PWD` to the workdir in every
-turn env for that reason; `{workdir}` is the belt to that braces, since an
-absolute path in the argv depends on no environment at all.
+turn env for that reason; `{workdir}` is the second pin, an absolute path in
+the argv that depends on no environment at all.
 
 **Rigs still do not all treat that directory as the project root.** The
 opencode-family presets keep two paths: the working directory (which their file
