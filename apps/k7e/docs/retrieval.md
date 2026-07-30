@@ -49,8 +49,10 @@ Each fused score is multiplied by:
 - **Use-count boost** — `1 + log10(1 + use_count) × use_count_weight`
   (~1.2× at 10 uses, ~1.4× at 100). Facts you keep retrieving stay near the top.
 
-Entries earn freshness when returned by `recall()` or read by `get()`. Because
-`last_used_at`/`use_count` are index-only, this signal resets on `reindex`.
+Entries earn freshness when consumed: synthesized by `recall` or read by
+`k7e get`. Appearing in a `search` listing does not count — the caller may
+never open the entry. Because `last_used_at`/`use_count` are index-only, this
+signal resets on `reindex`.
 
 ### 4. LLM reranker (optional)
 
