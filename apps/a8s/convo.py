@@ -9,11 +9,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import threading
 import time
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from core import conversations_path, inbound_bundle_dir, out
 from settings import get_int
@@ -120,38 +121,107 @@ def _name_key(name: str) -> str:
     return (name or "").strip().lower()
 
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS messages (
-    seq INTEGER PRIMARY KEY,
-    message_id TEXT,
-    entry_json TEXT NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS messages_message_id
-    ON messages(message_id)
-    WHERE message_id IS NOT NULL;
-CREATE TABLE IF NOT EXISTS message_agents (
-    seq INTEGER NOT NULL REFERENCES messages(seq) ON DELETE CASCADE,
-    agent_key TEXT NOT NULL,
-    PRIMARY KEY (seq, agent_key)
-);
-CREATE INDEX IF NOT EXISTS message_agents_agent_seq
-    ON message_agents(agent_key, seq);
-"""
+_SCHEMA = (
+    """
+    CREATE TABLE IF NOT EXISTS messages (
+        seq INTEGER PRIMARY KEY,
+        message_id TEXT,
+        entry_json TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS messages_message_id
+        ON messages(message_id)
+        WHERE message_id IS NOT NULL
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS message_agents (
+        seq INTEGER NOT NULL REFERENCES messages(seq) ON DELETE CASCADE,
+        agent_key TEXT NOT NULL,
+        PRIMARY KEY (seq, agent_key)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS message_agents_agent_seq
+        ON message_agents(agent_key, seq)
+    """,
+)
 
 
 class ConversationArchiveError(RuntimeError):
     pass
 
 
+_BUSY_TIMEOUT_MS = 5000
+_BUSY_RETRIES = 6
+_BUSY_BACKOFF = 0.05
+
+_INIT_LOCK = threading.Lock()
+
+_T = TypeVar("_T")
+
+
+def _is_busy(err: sqlite3.Error) -> bool:
+    return (err.sqlite_errorcode & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+
+
+def _retry_busy(op: Callable[[], _T]) -> _T:
+    """Run `op`, retrying while SQLite reports contention.
+
+    `busy_timeout` covers statements that wait on a lock, but the WAL/journal
+    transition returns SQLITE_BUSY without ever invoking the busy handler, so
+    the setup path needs an explicit retry to stay durable under concurrent
+    writers.
+    """
+    for attempt in range(_BUSY_RETRIES - 1):
+        try:
+            return op()
+        except sqlite3.Error as e:
+            if not _is_busy(e):
+                raise
+        time.sleep(_BUSY_BACKOFF * (attempt + 1))
+    return op()
+
+
+def _needs_schema(conn: sqlite3.Connection) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'"
+        ).fetchone()
+        is None
+    )
+
+
+def _initialize(conn: sqlite3.Connection) -> None:
+    """Create the archive schema so other connections see it all at once.
+
+    The statements run in one explicit transaction rather than through
+    `executescript`, which commits between statements — a concurrent writer
+    could otherwise find `messages` already there and `message_agents` not.
+    """
+    if not _needs_schema(conn):
+        return
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for statement in _SCHEMA:
+            conn.execute(statement)
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
 def _connect() -> sqlite3.Connection:
     path = conversations_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=5.0)
+    conn = sqlite3.connect(path, timeout=_BUSY_TIMEOUT_MS / 1000)
     try:
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA busy_timeout = 5000")
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.executescript(_SCHEMA)
+        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        if _needs_schema(conn):
+            with _INIT_LOCK:
+                _retry_busy(lambda: _initialize(conn))
     except sqlite3.Error:
         conn.close()
         raise
@@ -275,6 +345,21 @@ def load_agent_entries(agent: str, *, limit: int) -> list[dict[str, Any]]:
         return []
 
 
+def _insert_entry(entry: dict[str, Any], msg_id: str | None) -> None:
+    with closing(_connect()) as conn, conn:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO messages(message_id, entry_json) VALUES (?, ?)",
+            (msg_id, json.dumps(entry, ensure_ascii=False)),
+        )
+        if cursor.rowcount == 0:
+            return
+        seq = int(cursor.lastrowid)
+        conn.executemany(
+            "INSERT INTO message_agents(seq, agent_key) VALUES (?, ?)",
+            [(seq, key) for key in sorted(_entry_agents(entry))],
+        )
+
+
 def record(msg: dict[str, Any], *, recipients: list[str]) -> None:
     """Append one logical message when delivery completes (local inbox, remote
     receive, or outbound remote publish). `recipients` lists local deliverees
@@ -286,18 +371,7 @@ def record(msg: dict[str, Any], *, recipients: list[str]) -> None:
     entry = entry_from_message(msg, recipients=recipients)
     msg_id = entry.get("id") or None
     try:
-        with closing(_connect()) as conn, conn:
-            cursor = conn.execute(
-                "INSERT OR IGNORE INTO messages(message_id, entry_json) VALUES (?, ?)",
-                (msg_id, json.dumps(entry, ensure_ascii=False)),
-            )
-            if cursor.rowcount == 0:
-                return
-            seq = int(cursor.lastrowid)
-            conn.executemany(
-                "INSERT INTO message_agents(seq, agent_key) VALUES (?, ?)",
-                [(seq, key) for key in sorted(_entry_agents(entry))],
-            )
+        _retry_busy(lambda: _insert_entry(entry, msg_id))
     except (OSError, sqlite3.Error) as e:
         label = msg_id or "without-id"
         out(f"WARN conversation archive failed id={label}: {e}")
