@@ -91,7 +91,7 @@ in production too. Full flow: [docs/message-flow.md](docs/message-flow.md).
 - [Message flow](docs/message-flow.md) — threads, queues, the stdout fallback
 - [Operations](docs/operations.md) — `status`, `logs`, `chat`, the human seat
 - [Org design](docs/org.md) — cells and leads, `MISSION.md`, portable orgs
-- [Verification](docs/verification.md) — `r4t check`, checklists, doorbell gate, the post-hoc judge
+- [Verification](docs/verification.md) — `r4t check`, checklists, doorbell gate, the post-hoc judge, `r4t task trace`
 - [Governance](docs/governance.md) — why each layer exists, with prior art
 - [Security model](docs/security.md) — what a repo edit can never change
 - [Isolation](docs/isolation.md) — run an org behind a Unix user or a container
