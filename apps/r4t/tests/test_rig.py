@@ -82,6 +82,7 @@ class TestLoading:
         assert config.breaker_cap == 5
         assert config.breaker_cooldown_seconds == 600.0
         assert config.quiet_task_seconds == 1800.0
+        assert config.log_retention_days == 14
 
     def test_explicit_limits(self, tmp_path):
         config = load_rig_config(
@@ -114,6 +115,7 @@ class TestLoading:
                     "breaker_cap": 2,
                     "breaker_cooldown_seconds": 30,
                     "quiet_task_seconds": 60,
+                    "log_retention_days": 3,
                 },
             )
         )
@@ -124,6 +126,25 @@ class TestLoading:
         assert config.breaker_cap == 2
         assert config.breaker_cooldown_seconds == 30
         assert config.quiet_task_seconds == 60
+        assert config.log_retention_days == 3
+
+    def test_log_retention_zero_means_keep_forever(self, tmp_path):
+        config = load_rig_config(
+            write_config(
+                tmp_path,
+                {"t": {"invoke": ["x", "{prompt}"]}, "log_retention_days": 0},
+            )
+        )
+        assert config.log_retention_days == 0
+
+    def test_negative_log_retention_raises(self, tmp_path):
+        with pytest.raises(RigError):
+            load_rig_config(
+                write_config(
+                    tmp_path,
+                    {"t": {"invoke": ["x", "{prompt}"]}, "log_retention_days": -1},
+                )
+            )
 
     def test_bad_governance_values_raise(self, tmp_path):
         for key, value in (
@@ -1620,3 +1641,171 @@ class TestMcpInjection:
         apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
         config = json.loads(Path(env["OPENCODE_CONFIG"]).read_text(encoding="utf-8"))
         assert config["mcp"]["a8s"]["environment"]["A8S_MCP_LOG"] == env["A8S_MCP_LOG"]
+
+
+class TestRigEnvMap:
+    """The `env` map: static harness knobs on the rig (issue #284). Frugal by
+    doctrine, and never a way to reach r4t's own turn variables."""
+
+    def test_absent_by_default_and_keyless_in_the_file(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        assert load_rig_config(path).rigs["worker"].env == {}
+        assert "env" not in json.loads(path.read_text(encoding="utf-8"))["worker"]
+
+    def test_set_get_unset_round_trip(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        s = set_rig_value(path, "worker", "env.ENABLE_PROMPT_CACHING_1H", "1")
+        assert (s.key, s.value, s.explicit, s.display()) == (
+            "env.ENABLE_PROMPT_CACHING_1H", "1", True, "1"
+        )
+        raw = json.loads(path.read_text(encoding="utf-8"))["worker"]
+        assert raw["env"] == {"ENABLE_PROMPT_CACHING_1H": "1"}
+        assert load_rig_config(path).rigs["worker"].env == {
+            "ENABLE_PROMPT_CACHING_1H": "1"
+        }
+        got = rig_setting(path, "worker", "env.ENABLE_PROMPT_CACHING_1H")
+        assert (got.value, got.source) == ("1", "explicit")
+        assert unset_rig_value(path, "worker", "env.ENABLE_PROMPT_CACHING_1H") is True
+        # An empty map is no map — nothing is inherited for it to shadow.
+        assert "env" not in json.loads(path.read_text(encoding="utf-8"))["worker"]
+
+    def test_unset_of_an_unset_name_is_a_noop(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        assert unset_rig_value(path, "worker", "env.NOPE") is False
+        set_rig_value(path, "worker", "env.KEEP", "1")
+        assert unset_rig_value(path, "worker", "env.NOPE") is False
+        assert json.loads(path.read_text(encoding="utf-8"))["worker"]["env"] == {
+            "KEEP": "1"
+        }
+
+    def test_second_entry_joins_rather_than_replaces(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        set_rig_value(path, "worker", "env.ENABLE_PROMPT_CACHING_1H", "1")
+        set_rig_value(path, "worker", "env.MAX_THINKING_TOKENS", "8000")
+        assert load_rig_config(path).rigs["worker"].env == {
+            "ENABLE_PROMPT_CACHING_1H": "1",
+            "MAX_THINKING_TOKENS": "8000",
+        }
+
+    def test_names_keep_their_case_the_prefix_does_not(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        set_rig_value(path, "worker", "ENV.MixedCase_1", "v")
+        assert load_rig_config(path).rigs["worker"].env == {"MixedCase_1": "v"}
+        assert rig_setting(path, "worker", "env.MixedCase_1").value == "v"
+        assert rig_setting(path, "worker", "env.MIXEDCASE_1").value is None
+
+    def test_unset_name_reports_not_set(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        s = rig_setting(path, "worker", "env.ENABLE_PROMPT_CACHING_1H")
+        assert (s.value, s.explicit, s.source, s.display()) == (
+            None, False, "not set", "unset"
+        )
+
+    @pytest.mark.parametrize(
+        "name", ["TELL_OUTBOX_DIR", "PWD", "R4T_CONTINUE", "R4T_NODE", "R4T_ANYTHING"]
+    )
+    def test_turn_owned_names_are_refused_not_silently_overridden(self, tmp_path, name):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        with pytest.raises(RigError) as excinfo:
+            set_rig_value(path, "worker", f"env.{name}", "x")
+        message = str(excinfo.value)
+        assert message.startswith(f"{name} belongs to the turn")
+        assert "(try: r4t rig set <rig> env." in message
+        assert "env" not in json.loads(path.read_text(encoding="utf-8"))["worker"]
+
+    def test_hand_edited_turn_owned_name_fails_the_rig_closed(self, tmp_path):
+        path = write_config(tmp_path, {
+            "worker": {
+                "invoke": ["x", "{prompt}"],
+                "env": {"TELL_OUTBOX_DIR": "/nowhere/theirs"},
+            },
+        })
+        rig = load_rig_config(path).rigs["worker"]
+        assert rig.error and "TELL_OUTBOX_DIR belongs to the turn" in rig.error
+        assert rig.env == {}
+        assert load_rig_config(path).rig_for(member(rig="worker"))[0] is None
+
+    @pytest.mark.parametrize("name", ["", "1BAD", "HAS SPACE", "HAS-DASH", "a=b"])
+    def test_unusable_variable_names_are_refused(self, tmp_path, name):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        with pytest.raises(RigError, match="not a usable environment variable name"):
+            set_rig_value(path, "worker", f"env.{name}", "x")
+
+    def test_parse_rejects_a_non_string_value(self, tmp_path):
+        path = write_config(tmp_path, {
+            "worker": {"invoke": ["x", "{prompt}"], "env": {"CACHE": 1}},
+        })
+        rig = load_rig_config(path).rigs["worker"]
+        assert "env.CACHE: expected a string, got 1" in rig.error
+
+    def test_parse_rejects_a_non_object_map(self, tmp_path):
+        path = write_config(tmp_path, {
+            "worker": {"invoke": ["x", "{prompt}"], "env": ["CACHE=1"]},
+        })
+        assert "env: expected an object" in load_rig_config(path).rigs["worker"].error
+
+    def test_a_set_value_is_always_a_string(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        set_rig_value(path, "worker", "env.CACHE", 1)
+        assert json.loads(path.read_text(encoding="utf-8"))["worker"]["env"] == {
+            "CACHE": "1"
+        }
+
+    def test_get_lists_only_the_entries_the_rig_carries(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        assert [s.key for s in rig_settings(path, "worker")] == list(
+            CONFIGURABLE_RIG_KEYS
+        )
+        set_rig_value(path, "worker", "env.ZED", "2")
+        set_rig_value(path, "worker", "env.ABLE", "1")
+        rows = rig_settings(path, "worker")
+        assert [s.key for s in rows[len(CONFIGURABLE_RIG_KEYS):]] == [
+            "env.ABLE", "env.ZED"
+        ]
+
+    def test_unknown_setting_error_advertises_the_env_shape(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        with pytest.raises(RigError, match=r"env\.<NAME>"):
+            set_rig_value(path, "worker", "env", "1")
+
+    def test_cli_set_get_unset(self, tmp_path, capsys):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        args = ["--rig-config", str(path)]
+        assert r4t_main(
+            ["rig", "set", "worker", "env.ENABLE_PROMPT_CACHING_1H", "1", *args]
+        ) == 0
+        assert "set worker env.ENABLE_PROMPT_CACHING_1H = 1" in capsys.readouterr().out
+        assert r4t_main(
+            ["rig", "get", "worker", "env.ENABLE_PROMPT_CACHING_1H", *args]
+        ) == 0
+        captured = capsys.readouterr()
+        assert captured.out.strip() == "1"
+        assert captured.err.strip() == "(explicit)"
+        assert r4t_main(["rig", "get", "worker", *args]) == 0
+        assert "env.ENABLE_PROMPT_CACHING_1H  1  (explicit)" in capsys.readouterr().out
+        assert r4t_main(
+            ["rig", "unset", "worker", "env.ENABLE_PROMPT_CACHING_1H", *args]
+        ) == 0
+        assert "unset worker env.ENABLE_PROMPT_CACHING_1H" in capsys.readouterr().out
+        assert "env" not in json.loads(path.read_text(encoding="utf-8"))["worker"]
+
+    def test_cli_refuses_a_turn_owned_name_action_first(self, tmp_path, capsys):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        assert r4t_main(
+            ["rig", "set", "worker", "env.R4T_NODE", "x", "--rig-config", str(path)]
+        ) == 1
+        err = capsys.readouterr().err
+        assert err.startswith("R4T_NODE belongs to the turn") and "(try:" in err

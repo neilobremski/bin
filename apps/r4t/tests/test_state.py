@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timedelta, timezone
 
 import state
 from state import (
@@ -195,6 +196,78 @@ class TestVelocity:
         )
         lines = (team_dir(NODE) / "velocity.csv").read_text().splitlines()
         assert '"we,""ird"' in lines[1]
+
+
+class TestLogRetention:
+    def _days(self, offsets: list[int]) -> list[str]:
+        today = datetime.now(timezone.utc)
+        log_dir = team_dir(NODE) / "log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        names = []
+        for offset in offsets:
+            day = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
+            (log_dir / f"{day}.md").write_text("turn\n", encoding="utf-8")
+            names.append(day)
+        return names
+
+    def test_keeps_the_window_and_drops_older_days(self, r4t_home):
+        today, yesterday, old, older = self._days([0, 1, 2, 30])
+        assert state.prune_day_logs(NODE, 2) == [older, old]
+        kept = sorted(p.stem for p in (team_dir(NODE) / "log").glob("*.md"))
+        assert kept == sorted([yesterday, today])
+
+    def test_zero_keeps_everything(self, r4t_home):
+        self._days([0, 400])
+        assert state.prune_day_logs(NODE, 0) == []
+        assert len(list((team_dir(NODE) / "log").glob("*.md"))) == 2
+
+    def test_non_day_files_are_left_alone(self, r4t_home):
+        self._days([90])
+        (team_dir(NODE) / "log" / "notes.md").write_text("keep me", encoding="utf-8")
+        assert len(state.prune_day_logs(NODE, 1)) == 1
+        assert (team_dir(NODE) / "log" / "notes.md").is_file()
+
+    def test_no_log_dir_is_a_no_op(self, r4t_home):
+        assert state.prune_day_logs(NODE, 14) == []
+
+
+class TestVelocityRotation:
+    def _rows(self, stamps: list[str]) -> None:
+        path = team_dir(NODE) / "velocity.csv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = "".join(f"{s},phil,junior-dev,01ABC,0,1.00,0\n" for s in stamps)
+        path.write_text(state.VELOCITY_HEADER + rows, encoding="utf-8")
+
+    def _now_month(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m")
+
+    def test_finished_months_move_out_current_month_stays(self, r4t_home):
+        live = f"{self._now_month()}-01T00:00:00Z"
+        self._rows(["2020-01-05T00:00:00Z", "2020-02-05T00:00:00Z", live])
+        assert state.rotate_velocity(NODE) == ["2020-01", "2020-02"]
+        remaining = (team_dir(NODE) / "velocity.csv").read_text().splitlines()
+        assert remaining[0] == state.VELOCITY_HEADER.strip()
+        assert len(remaining) == 2 and live in remaining[1]
+        archived = (team_dir(NODE) / "velocity-2020-01.csv").read_text().splitlines()
+        assert archived[0] == state.VELOCITY_HEADER.strip()
+        assert len(archived) == 2 and "2020-01-05" in archived[1]
+
+    def test_appends_to_an_existing_archive(self, r4t_home):
+        self._rows(["2020-01-05T00:00:00Z"])
+        state.rotate_velocity(NODE)
+        self._rows(["2020-01-09T00:00:00Z"])
+        assert state.rotate_velocity(NODE) == ["2020-01"]
+        archived = (team_dir(NODE) / "velocity-2020-01.csv").read_text().splitlines()
+        assert len(archived) == 3
+
+    def test_current_month_only_is_a_no_op(self, r4t_home):
+        self._rows([f"{self._now_month()}-01T00:00:00Z"])
+        before = (team_dir(NODE) / "velocity.csv").read_text()
+        assert state.rotate_velocity(NODE) == []
+        assert (team_dir(NODE) / "velocity.csv").read_text() == before
+
+    def test_no_file_is_a_no_op(self, r4t_home):
+        assert state.rotate_velocity(NODE) == []
 
 
 class TestDeadLetters:

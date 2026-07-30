@@ -5,6 +5,7 @@ This module owns the runtime engine:
 - `run_with_prefix` spawns the wake subprocess in its own session group so
   SIGKILL can target the whole tree.
 - `wake_once` processes one inbox message (with read-time wipe for CLEAR).
+- `_settle_wake` acks (exit 0) or requeues-with-backoff every other outcome.
 - `attached_loop` is the daemon body — handles 1+ agents in one process.
 
 Module-level mutable state used by signal handlers:
@@ -29,13 +30,15 @@ import sys
 import threading
 import time as _time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import core
 from core import (
+    MAX_WAKE_ATTEMPTS,
     Participant,
     TELL_OUTBOX_DIR_ENV,
+    WAKE_RETRY_SCHEDULE,
     _pid_alive,
     _preview,
     agent_dir,
@@ -45,12 +48,15 @@ from core import (
     out_agent,
     pid_path,
     clear_inbox_waiting_since,
+    clear_wake_retry,
     read_inbox_waiting_since,
     read_last_active,
+    read_wake_retry,
     touch_inbox_waiting_since,
     touch_last_active,
     trash_dir,
     unique_path,
+    write_wake_retry,
 )
 from definitions import (
     BatchEntry,
@@ -91,7 +97,7 @@ _CURRENT_WAKE_PROC: subprocess.Popen | None = None
 _CURRENT_WAKE_NAME: str | None = None
 _WAKE_STARTED_MONO: float | None = None
 _WAKE_MAX_SECONDS: float | None = None
-_WAKE_ON_COMPLETE: Callable[[], None] | None = None
+_WAKE_ON_COMPLETE: Callable[[int | None], None] | None = None
 
 
 def _wake_in_flight() -> bool:
@@ -99,7 +105,7 @@ def _wake_in_flight() -> bool:
     return proc is not None and proc.poll() is None
 
 
-def _clear_wake_state() -> None:
+def _clear_wake_state(rc: int | None = None) -> None:
     global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME
     global _WAKE_STARTED_MONO, _WAKE_MAX_SECONDS, _WAKE_ON_COMPLETE
     _CURRENT_WAKE_PROC = None
@@ -109,7 +115,7 @@ def _clear_wake_state() -> None:
     on_complete = _WAKE_ON_COMPLETE
     _WAKE_ON_COMPLETE = None
     if on_complete is not None:
-        on_complete()
+        on_complete(rc)
 
 
 def _log_wake_line(name: str, line: str) -> None:
@@ -177,7 +183,7 @@ def _finish_wake_if_done() -> None:
         proc.wait(timeout=0)
     except subprocess.TimeoutExpired:
         pass
-    _clear_wake_state()
+    _clear_wake_state(rc)
 
 
 def _service_in_flight_wake() -> None:
@@ -195,9 +201,13 @@ def _start_wake_subprocess(
     *,
     env: dict[str, str] | None = None,
     max_seconds: float | None = None,
-    on_complete: Callable[[], None] | None = None,
+    on_complete: Callable[[int | None], None] | None = None,
 ) -> bool:
-    """Start a wake subprocess. Returns True iff the process was spawned."""
+    """Start a wake subprocess. Returns True iff the process was spawned.
+
+    `on_complete` fires from `_clear_wake_state` with the subprocess exit code
+    once the wake finishes. It does NOT fire when the spawn itself fails —
+    callers see that as a False return and settle the delivery themselves."""
     global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME
     global _WAKE_STARTED_MONO, _WAKE_MAX_SECONDS, _WAKE_ON_COMPLETE
     if _wake_in_flight():
@@ -236,18 +246,22 @@ def run_with_prefix(
     *,
     env: dict[str, str] | None = None,
     max_seconds: float | None = None,
+    on_complete: Callable[[int | None], None] | None = None,
 ) -> int:
     """Run the wake subprocess in its own session so SIGKILL can target the
     whole process group (LLM CLI + any helpers it spawns). Tracks the live
     process in `_CURRENT_WAKE_PROC` and the agent in `_CURRENT_WAKE_NAME` so
     signal handlers can identify which agent's wake is in-flight."""
     if not _start_wake_subprocess(
-        name, cmd, cwd, env=env, max_seconds=max_seconds
+        name, cmd, cwd, env=env, max_seconds=max_seconds, on_complete=on_complete
     ):
+        if on_complete is not None:
+            on_complete(None)
         return 127
     proc = _CURRENT_WAKE_PROC
     assert proc is not None and proc.stdout is not None
     started = _WAKE_STARTED_MONO or _time.monotonic()
+    exited: int | None = None
     try:
         while True:
             if max_seconds is not None and _time.monotonic() - started >= max_seconds:
@@ -265,6 +279,7 @@ def run_with_prefix(
                 if rc != 0:
                     ts = datetime.now().strftime("%H:%M:%S")
                     out_agent(name, f"{name}> [{ts}] (exit {rc})")
+                exited = rc
                 return rc
             try:
                 ready, _, _ = select.select([proc.stdout], [], [], 0.05)
@@ -276,7 +291,7 @@ def run_with_prefix(
                     _log_wake_line(name, line)
     finally:
         if _CURRENT_WAKE_PROC is not None:
-            _clear_wake_state()
+            _clear_wake_state(exited)
 
 
 def _tell_outbox_env(p: Participant) -> dict[str, str]:
@@ -330,6 +345,97 @@ def _pause_ready_for_wake(
     return True
 
 
+def _settle_wake(
+    p: Participant,
+    envelopes: list[Path],
+    rc: int | None,
+    *,
+    reason: str | None = None,
+) -> None:
+    """Ack or requeue the envelopes a wake consumed (issue #152).
+
+    Exit 0 is the only ack: the envelopes stay in trash and the agent's retry
+    record clears. Any other outcome — nonzero exit, timeout kill, failed spawn,
+    unexpanded vars — moves them back into the inbox and arms a per-agent
+    backoff so the next attempt waits instead of hot-looping. Once
+    MAX_WAKE_ATTEMPTS attempts have failed they stay in trash as dead letters,
+    logged and recorded in the transaction log, so a poison envelope can't block
+    the inbox forever."""
+    if rc == 0:
+        clear_wake_retry(p.name)
+        return
+    if reason is None:
+        reason = "spawn failed" if rc is None else f"exit {rc}"
+    unit = sorted(f.name for f in envelopes)
+    record = read_wake_retry(p.name) or {}
+    attempts = (record.get("attempts", 0) if record.get("unit") == unit else 0) + 1
+
+    if attempts >= MAX_WAKE_ATTEMPTS:
+        clear_wake_retry(p.name)
+        for f in envelopes:
+            out_agent(
+                p.name,
+                f"[{p.name}] dead letter after {attempts} failed wakes "
+                f"({reason}): {f.name} left in trash",
+            )
+            txlog.log(
+                "DROPPED",
+                msg_id=f.stem,
+                recipient=p.name,
+                detail=f"wake failed {attempts}x ({reason}); envelope left in trash",
+            )
+        return
+
+    inbox = inbox_dir(p.name)
+    inbox.mkdir(parents=True, exist_ok=True)
+    requeued = 0
+    for f in envelopes:
+        try:
+            f.rename(inbox / f.name)
+        except OSError as e:
+            out_agent(p.name, f"[{p.name}] requeue failed for {f.name}: {e}")
+            continue
+        requeued += 1
+    if not requeued:
+        return
+    delay = WAKE_RETRY_SCHEDULE[attempts - 1]
+    write_wake_retry(
+        p.name, unit, attempts, datetime.now(timezone.utc) + timedelta(seconds=delay)
+    )
+    out_agent(
+        p.name,
+        f"[{p.name}] wake failed ({reason}) — requeued {requeued}; "
+        f"retry in {delay}s (attempt {attempts + 1}/{MAX_WAKE_ATTEMPTS})",
+    )
+
+
+def _wake_retry_ready(name: str, *, now: datetime | None = None) -> bool:
+    """False while a failed wake's backoff is still running. An unreadable or
+    unparseable record reads as ready — a corrupt sidecar must not wedge an
+    agent's inbox shut."""
+    record = read_wake_retry(name)
+    if not record:
+        return True
+    raw = record.get("next_at")
+    if not isinstance(raw, str):
+        return True
+    try:
+        next_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return (now or datetime.now(timezone.utc)) >= next_at
+
+
+def _wake_completion(
+    p: Participant, envelopes: list[Path]
+) -> Callable[[int | None], None]:
+    def complete(rc: int | None) -> None:
+        touch_last_active(p.name)
+        _settle_wake(p, envelopes, rc)
+
+    return complete
+
+
 def wake_once(p: Participant, msg_path: Path, *, async_wake: bool = False) -> bool:
     # Mark activity before any work — covers the parse-error / load-error
     # exits below too. Without this, a bad inbox file in the only handled
@@ -371,22 +477,31 @@ def wake_once(p: Participant, msg_path: Path, *, async_wake: bool = False) -> bo
         )
     except UndefinedVarsError as e:
         out_agent(p.name, f"[{p.name}] wake aborted: {e}")
+        _settle_wake(p, [trashed], None, reason=str(e))
         return False
     out_agent(p.name, f"[{p.name}] exec: {shlex.join(cmd)}")
     max_sec = max_wake_seconds(definition)
+    complete = _wake_completion(p, [trashed])
     if async_wake:
-        return _start_wake_subprocess(
+        started = _start_wake_subprocess(
             p.name,
             cmd,
             p.root,
             env=_tell_outbox_env(p),
             max_seconds=max_sec,
-            on_complete=lambda: touch_last_active(p.name),
+            on_complete=complete,
         )
+        if not started:
+            complete(None)
+        return started
     run_with_prefix(
-        p.name, cmd, p.root, env=_tell_outbox_env(p), max_seconds=max_sec
+        p.name,
+        cmd,
+        p.root,
+        env=_tell_outbox_env(p),
+        max_seconds=max_sec,
+        on_complete=complete,
     )
-    touch_last_active(p.name)
     return False
 
 
@@ -437,22 +552,31 @@ def wake_batch(
         )
     except UndefinedVarsError as e:
         out_agent(p.name, f"[{p.name}] batch wake aborted: {e}")
+        _settle_wake(p, trashed, None, reason=str(e))
         return False
     out_agent(p.name, f"[{p.name}] batch exec: {shlex.join(cmd)}")
     max_sec = max_wake_seconds(definition)
+    complete = _wake_completion(p, trashed)
     if async_wake:
-        return _start_wake_subprocess(
+        started = _start_wake_subprocess(
             p.name,
             cmd,
             p.root,
             env=_tell_outbox_env(p),
             max_seconds=max_sec,
-            on_complete=lambda: touch_last_active(p.name),
+            on_complete=complete,
         )
+        if not started:
+            complete(None)
+        return started
     run_with_prefix(
-        p.name, cmd, p.root, env=_tell_outbox_env(p), max_seconds=max_sec
+        p.name,
+        cmd,
+        p.root,
+        env=_tell_outbox_env(p),
+        max_seconds=max_sec,
+        on_complete=complete,
     )
-    touch_last_active(p.name)
     return False
 
 
@@ -545,7 +669,7 @@ def maybe_run_idle(p: Participant, *, async_wake: bool = False) -> bool:
                 p.root,
                 env=_tell_outbox_env(p),
                 max_seconds=max_sec,
-                on_complete=lambda: touch_last_active(p.name),
+                on_complete=lambda _rc: touch_last_active(p.name),
             )
         run_with_prefix(
             p.name, cmd, p.root, env=_tell_outbox_env(p), max_seconds=max_sec
@@ -853,6 +977,9 @@ def _dispatch_agent(p: Participant, definition: dict, *, async_wake: bool) -> bo
         wake_once(p, msg, async_wake=False)
         return False
 
+    if not _wake_retry_ready(p.name):
+        return False
+
     if not _pause_ready_for_wake(p.name, pause_seconds(definition)):
         return False
 
@@ -1030,6 +1157,8 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                                 if async_wake:
                                     break
                                 if not peek_inbox_messages(p, 1):
+                                    break
+                                if not _wake_retry_ready(p.name):
                                     break
                                 if not _pause_ready_for_wake(
                                     p.name, pause_seconds(definition)

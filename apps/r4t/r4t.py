@@ -47,6 +47,7 @@ from rig import (
     rig_setting,
     rig_settings,
     set_rig_value,
+    setting_label,
     swap_preset_rig,
     unset_rig_value,
 )
@@ -138,6 +139,12 @@ COMMAND_HELP = [
                 "check",
                 "Sweep a team's work for the patterns you forbid",
                 "check",
+            ),
+            Command(
+                "task trace <id>",
+                "Who told whom on one task, hop by hop",
+                None,
+                "r4t task list",
             ),
         ],
     ),
@@ -532,8 +539,20 @@ def cmd_clear(args: argparse.Namespace) -> int:
         f"expired {len(expired)} thread(s)"
         + (f" ({', '.join(expired)})" if expired else "")
         + f"; drained {summary['drained']} queued turn(s)"
+        + _retention_line(summary)
     )
     return 0
+
+
+def _retention_line(summary: dict) -> str:
+    days = summary["log_days_pruned"]
+    months = summary["velocity_months_rotated"]
+    parts = []
+    if days:
+        parts.append(f"pruned {len(days)} day log(s) ({days[0]}..{days[-1]})")
+    if months:
+        parts.append(f"rotated velocity for {', '.join(months)}")
+    return ("; " + "; ".join(parts)) if parts else ""
 
 
 def _flush_line(result: dict) -> str:
@@ -614,6 +633,7 @@ def cmd_idle(args: argparse.Namespace) -> int:
         f"pruned {clear_summary['locks_pruned']} stale lock(s); "
         f"expired {len(expired)} thread(s); "
         f"drained {clear_summary['drained']} more queued turn(s)"
+        + _retention_line(clear_summary)
     )
     return 0
 
@@ -1414,13 +1434,11 @@ def cmd_rig_unset(args: argparse.Namespace) -> int:
             print(str(e), file=sys.stderr)
             rc = 1
             continue
+        label = setting_label(key)
         if removed:
-            print(f"unset {rig_key} {key.strip().lower()} in {config_path}")
+            print(f"unset {rig_key} {label} in {config_path}")
         else:
-            print(
-                f"{rig_key} {key.strip().lower()} was not explicitly set; "
-                f"nothing to unset"
-            )
+            print(f"{rig_key} {label} was not explicitly set; nothing to unset")
     return rc
 
 
@@ -1441,8 +1459,12 @@ def cmd_task(args: argparse.Namespace) -> int:
             )
         return 0
     if not args.id:
-        print("task show: <id> is required", file=sys.stderr)
+        print(f"task {args.action}: <id> is required", file=sys.stderr)
         return 2
+    if args.action == "trace":
+        import tasktrace
+
+        return tasktrace.run(node, args.id.strip().upper(), json_mode=args.json)
     task = tasks.load_task(node, args.id.strip().upper())
     if task is None:
         print(f"task not found: {args.id}", file=sys.stderr)
@@ -1917,10 +1939,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_tell_flags(flush_p)
     flush_p.set_defaults(func=cmd_flush)
 
-    task_p = sub.add_parser("task", help=_cmd_help("task"))
-    task_p.add_argument("action", choices=["list", "show"])
+    task_p = sub.add_parser(
+        "task",
+        help=_cmd_help("task"),
+        description="Conversation threads: list them, show one ledger, or trace "
+        "one task's delegation tree from recorded state.",
+    )
+    task_p.add_argument("action", choices=["list", "show", "trace"])
     task_p.add_argument("id", nargs="?", help="Task ULID.")
     task_p.add_argument("--node", help="Team node name (default: sole ~/.config/r4t team).")
+    task_p.add_argument(
+        "--json", action="store_true",
+        help="With trace: the reconstruction as JSON instead of the panel.",
+    )
     task_p.set_defaults(func=cmd_task)
 
     check_p = sub.add_parser(
@@ -1965,7 +1996,11 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch_p.set_defaults(func=cmd_dispatch)
 
     clear_p = sub.add_parser(
-        "clear", description="Maintenance: prune stale locks, expire tasks, drain."
+        "clear",
+        description=(
+            "Maintenance: prune stale locks, expire tasks, drain, and apply "
+            "log retention."
+        ),
     )
     _add_common(clear_p, with_node=True)
     _add_older_than(clear_p)
@@ -2028,9 +2063,10 @@ def build_parser() -> argparse.ArgumentParser:
     sandbox_p.add_argument(
         "--break",
         dest="break_member",
-        metavar="MEMBER",
-        help="Pin MEMBER (e.g. dev) to an always-failing rig to exercise "
-        "the failure breaker; checks expect the trip and a synthesized answer.",
+        metavar="MEMBER[:SHAPE]",
+        help="Break one member on purpose and check the recovery path. SHAPE is "
+        "exit (default, always fails), hang (times out), silent (answers on "
+        "stdout, never tells) or mute (one turn stages nothing).",
     )
     sandbox_p.add_argument("--timeout", type=float, default=1800, metavar="SECS")
     sandbox_p.set_defaults(func=cmd_sandbox)

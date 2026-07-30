@@ -11,6 +11,7 @@ Mutable module-level state:
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -252,6 +253,51 @@ def clear_inbox_waiting_since(name: str) -> None:
         pass
 
 
+def wake_retry_path(name: str) -> Path:
+    """Per-agent wake-delivery retry record, written when a wake fails and its
+    envelopes go back into the inbox. JSON: `{"unit": [<inbox filenames>],
+    "attempts": N, "next_at": "<ISO-8601 UTC>"}`. `unit` identifies which
+    delivery the attempt count belongs to — a different message (or batch)
+    starts the count over. Cleared the moment a wake exits 0. Persists across
+    handler restarts so a restart can't reset the backoff and spin a
+    permanently broken CLI."""
+    return agent_dir(name) / "wake-retry"
+
+
+def read_wake_retry(name: str) -> dict | None:
+    p = wake_retry_path(name)
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_wake_retry(
+    name: str, unit: list[str], attempts: int, next_at: datetime
+) -> None:
+    p = wake_retry_path(name)
+    body = json.dumps({
+        "unit": sorted(unit),
+        "attempts": attempts,
+        "next_at": next_at.isoformat().replace("+00:00", "Z"),
+    })
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def clear_wake_retry(name: str) -> None:
+    try:
+        wake_retry_path(name).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def pending_dir(name: str) -> Path:
     """Ingested-but-not-yet-fully-routed messages. `route_outboxes` atomically
     moves each new file from `<root>/.outbox/` into here on every pass before
@@ -392,6 +438,14 @@ MAX_SEEN_IDS = 10000
 # with a "discarded after backoff exhausted" log line.
 BACKOFF_SCHEDULE = [30, 60, 120, 300, 900, 1800, 3600, 21600, 86400]
 MAX_ATTEMPTS = len(BACKOFF_SCHEDULE)
+
+# Wake-delivery retry backoff. Index = number of failed wakes so far for the
+# same delivery. Deliberately shorter and shallower than BACKOFF_SCHEDULE: a
+# redelivered envelope costs an LLM turn, so duplicates are expensive and a
+# poison envelope must stop blocking the inbox quickly. MAX_WAKE_ATTEMPTS
+# counts the first attempt too, so the schedule holds the retry delays only.
+WAKE_RETRY_SCHEDULE = [30, 120, 600]
+MAX_WAKE_ATTEMPTS = len(WAKE_RETRY_SCHEDULE) + 1
 
 
 # ---------- general helpers ----------

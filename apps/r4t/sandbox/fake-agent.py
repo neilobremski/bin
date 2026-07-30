@@ -5,6 +5,15 @@ Parses the r4t prompt it is invoked with, plays its roster role (Lead
 delegates and answers, Dev writes battleship.py, Tester runs it), and sends
 messages by writing tell-shaped envelopes into $TELL_OUTBOX_DIR — the same
 staging contract a real `tell` uses, with zero LLM calls.
+
+`r4t sandbox --break MEMBER:SHAPE` pins one member to a rig that adds one of
+these argv flags, replaying a failure shape real harnesses produce:
+
+- `--silent` — do the role's work, then answer on stdout instead of calling
+  `tell`. The measured weak-harness shape: the reply exists but never leaves.
+- `--mute` — first turn only: emit harness chrome and nothing else, stage
+  nothing, exit 0. The turn looks fine and says nothing. Later turns behave
+  normally, the way a member that swallowed one answer keeps working.
 """
 from __future__ import annotations
 
@@ -53,8 +62,35 @@ VERIFIED_RE = re.compile(r"VERIFIED:", re.I)
 
 TEAM = {"lead", "dev", "tester", "owner"}
 
+FLAGS = set(sys.argv[2:])
+SILENT = "--silent" in FLAGS
+MUTE = "--mute" in FLAGS
+
+# Tool-trace glyph lines: real chrome that r4t's transcript cleaner strips, so
+# a turn printing only these said nothing at all.
+CHROME = (
+    "● Read(GOAL.md)\n"
+    "● Read(ROSTER.md)\n"
+    "● Bash(python3 -c 'import sys; print(sys.version)')\n"
+    "● TodoWrite(3 items)\n"
+    "● Read(WORKSPACE.md)\n"
+)
+
+
+def _first_mute_turn(name: str) -> bool:
+    """A member goes quiet for one turn, then recovers — the marker in the
+    workdir is what makes the second turn a normal one."""
+    marker = Path(f".fake-mute-{name}")
+    if marker.exists():
+        return False
+    marker.write_text("", encoding="utf-8")
+    return True
+
 
 def send(to: str, content: str) -> None:
+    if SILENT:
+        print(f"To {to}: {content}")
+        return
     outbox = Path(os.environ["TELL_OUTBOX_DIR"])
     outbox.mkdir(parents=True, exist_ok=True)
     msg_id = f"{time.time_ns():026d}"
@@ -75,6 +111,9 @@ def first_external_sender(prompt: str) -> str:
 def main() -> int:
     prompt = sys.argv[1]
     name = re.search(r"You are (\w+),", prompt).group(1).lower()
+    if MUTE and _first_mute_turn(name):
+        sys.stdout.write(CHROME)
+        return 0
     incoming = prompt.split("## Messages since your last turn", 1)[-1].split(
         "## How to work", 1
     )[0]
@@ -83,7 +122,7 @@ def main() -> int:
     print(f"fake-agent: {name} woken by {sender}")
 
     if name == "lead":
-        if (VERIFIED_RE.search(incoming) and "tester" in incoming.lower()) or "gone quiet" in incoming:
+        if VERIFIED_RE.search(incoming) and "tester" in incoming.lower():
             originator = first_external_sender(prompt)
             send(
                 originator,
@@ -91,8 +130,24 @@ def main() -> int:
                 "5x5 game with 3 ships and Tester confirmed a winning "
                 "playthrough exits 0. Play it with: python3 battleship.py",
             )
+        elif "gone quiet" in incoming:
+            # What the nudge asks for: report current state, not a claim the
+            # work finished.
+            send(
+                first_external_sender(prompt),
+                "Status: nothing is verified yet — the thread went quiet before "
+                "Dev reported back. Next step is to re-delegate the build.",
+            )
         elif "FAILED" in incoming:
             send("dev", "Tester reports the game FAILED — please fix battleship.py.")
+        elif sender.lower().split(":")[-1] == "dev":
+            # ROSTER turn 2. Dev normally hands off to Tester itself; the Lead
+            # hears from Dev when r4t relays what a silent Dev said on stdout.
+            send(
+                "tester",
+                "Dev reports battleship.py is written — run it and report "
+                "VERIFIED or FAILED to me.",
+            )
         else:
             # Ack the human AND delegate in the same turn — the real leader
             # pattern that must not close the task and kill the delegation.

@@ -18,9 +18,34 @@ registered team.
 - `r4t chat` — the human, interactively (below).
 - `r4t seat` — an orchestrating agent, programmatically (below).
 
+These four watch a team as it works. For one task after the fact — who told
+whom, and what each hop cost — see
+[`r4t task trace`](verification.md#tracing-one-task).
+
 The first dispatch stamps the repo root into team state, so `--node` works
 from any directory — and from inside a team repo the `--node` flag itself
 is optional. (`a8s logs <node> -f` still shows the cross-wall view.)
+
+## What the team keeps, and for how long
+
+Everything above reads out of `~/.config/r4t/teams/<node>/`, which grows with
+every turn. Maintenance passes (`r4t idle`, and `r4t clear` on its own) hold
+it to a shape a team can run for months on:
+
+- **Day logs** (`log/<date>.md`, the stream behind `r4t logs`) are kept for
+  `log_retention_days` UTC days — 14 by default, `0` to keep every day
+  forever. Older days are deleted whole, so a surviving day is exactly what
+  was written, and the pass records one `r4t: PRUNED ...` line naming what
+  went.
+- **Turn economics** (`velocity.csv`, one row per turn) is never pruned:
+  finished months rotate out into `velocity-<month>.csv` beside it, which is
+  what keeps the live file small.
+- **Captured turns** (`agents/<member>/turns/`) keep the most recent 50 per
+  member; the newest turn always displaces the oldest.
+- **Dead letters** wait for a human. Nothing prunes them.
+
+The retention window is a governance knob in the rig config, alongside the
+budgets and the breaker: see the table in [rigs.md](rigs.md#governance-knobs).
 
 ## The seat: being the human in the roster
 
