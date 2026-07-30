@@ -4,6 +4,12 @@ Operator documentation for how `tell` works under the hood. Agent-facing usage
 lives in [`skills/tell/SKILL.md`](../skills/tell/SKILL.md) (send-only). Desktop /
 filedrop setup: [filedrop.md](filedrop.md).
 
+Bodies ride in on stdin — `tell <name> - <<'EOF' … EOF` with the delimiter
+quoted, or `tell <name> - < body.md`. That is what every teaching surface shows,
+because the shell never touches the text: `$`, backticks, and backslashes land
+byte-exact. The trailing-argv form covers short plain bodies; inside double
+quotes the shell expands `$…` and runs backticks before `tell` is reached.
+
 ## Surface
 
 | Entry | Path |

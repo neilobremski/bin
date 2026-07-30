@@ -48,7 +48,9 @@ default. Otherwise outbound mail is stamped from the wrong seat (classic
 ```bash
 export TELL_OUTBOX_DIR=~/filedrops/cursor-drop/.outbox
 tells -f          # background OK; .inbox still fills when this is down
-tell neil-macbook "done with the refactor"
+tell neil-macbook - <<'EOF'
+done with the refactor
+EOF
 ```
 
 When CWD is inside a unique registered filedrop root, `tell` / `tells` can

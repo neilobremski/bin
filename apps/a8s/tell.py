@@ -466,7 +466,7 @@ class TellHelp(Exception):
     pass
 
 
-_USAGE = "usage: tell [--attach PATH ...] [--split] <name> [<message...>]"
+_USAGE = "usage: tell [--attach PATH ...] [--split] <name> [<message...>|-]"
 
 
 def _print_usage() -> None:
@@ -474,6 +474,7 @@ def _print_usage() -> None:
     print("       --attach/--file may repeat; multiple paths after one flag OK if they exist", file=sys.stderr)
     print("       --split: chunk attachments over the size limit into .partNNNofMMM files", file=sys.stderr)
     print(f"       size limit: {TELL_FILE_MAX_ENV} (bytes or 50m), else max_file_bytes / 50MiB", file=sys.stderr)
+    print("       body on stdin keeps the shell out of it: - <<'EOF' … EOF, or - < body.md", file=sys.stderr)
     print("       message may be `-` to read stdin; stdin is used when piped", file=sys.stderr)
 
 
