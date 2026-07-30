@@ -69,8 +69,8 @@ ssh -L 8080:target:80 bastion — forwards local:8080 to target:80 via bastion
 The `nodes` table in `.index.db` mirrors the frontmatter plus two
 **index-only** ranking columns that are *not* written back to markdown:
 
-- `last_used_at` — last time the entry was returned by `recall()` or read by
-  `get()`.
+- `last_used_at` — last time the entry was consumed: synthesized by `recall`
+  or read by `k7e get`. A `search` listing does not count.
 - `use_count` — how many times it has been used.
 
 These reset on `reindex` by design: ranking is *re-earned from usage*, not
