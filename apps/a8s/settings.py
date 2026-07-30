@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from core import BACKOFF_SCHEDULE, _a8s_dir
+from core import BACKOFF_SCHEDULE, MAX_WAKE_ATTEMPTS, WAKE_RETRY_SCHEDULE, _a8s_dir
 
 Group = Literal["machine", "definition", "registry", "network", "env", "constant"]
 
@@ -107,6 +107,16 @@ KNOBS: tuple[Knob, ...] = (
         "constant",
         False,
         note="Remote publish retry delays in seconds (fixed schedule)",
+    ),
+    Knob(
+        "wake.retry_schedule",
+        list(WAKE_RETRY_SCHEDULE),
+        "constant",
+        False,
+        note=(
+            "Delays in seconds before redelivering after a failed wake; "
+            f"{MAX_WAKE_ATTEMPTS} attempts then the envelope stays in trash as a dead letter"
+        ),
     ),
 )
 

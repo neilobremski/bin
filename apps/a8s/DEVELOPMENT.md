@@ -36,6 +36,15 @@ Read `README.md` first for concept and usage.
 - **`publish` waits for readiness event before raising.** Don't drop the
   disconnect handler.
 - **Per-message backoff retry.** BACKOFF_SCHEDULE drives `.retry` sidecars.
+- **Exit 0 is the only delivery ack.** Any other wake outcome — nonzero exit,
+  timeout kill, failed spawn, unexpanded vars — moves the envelopes back into
+  the inbox and arms the agent's `wake-retry` record, and after
+  MAX_WAKE_ATTEMPTS they stay in trash as logged dead letters.
+  `_wake_retry_ready` gates dispatch, so a permanently broken CLI backs off
+  instead of spinning the handler. Delivery is at-least-once: a wake command
+  must tolerate the same envelope twice. r4t dispatch already does — it
+  enqueues durably and returns 0 before any turn runs, so a8s retries
+  delivery without re-running turns.
 - **Local routing claims the ULID in `seen-ids`** to prevent MQTT round-trip dupes.
 - **`settings.json` is the stable operator config.** `a8s config set` persists
   machine-wide keys; `a8s config` (no args) catalogs every knob including

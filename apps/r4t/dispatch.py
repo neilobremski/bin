@@ -28,10 +28,13 @@ structured fields, per-turn send quota, then either the node's real outbox
 recipient member's queue (intra-team, no header, no round-trip). A reply is
 attributed to the thread of the message it answers.
 
-Requeueing note: a8s trashes the inbox message BEFORE spawning the wake
-subprocess and only logs its exit code (daemon.wake_once), so exiting nonzero
-does NOT redeliver. That is fine — the message is already durably queued
-before any turn runs.
+Requeueing note: a8s treats exit 0 as the only delivery ack and redelivers the
+envelope (with backoff) when a wake exits nonzero. `handle_message` therefore
+acks early — it enqueues durably, then returns 0 whatever the turn does — so a
+failed turn is retried by r4t's own quota-aware machinery rather than by a8s
+handing the same message to the queue again. Redelivery only happens when
+dispatch itself dies, and `state.enqueue`'s duplicate collapse absorbs it as
+long as the queue hasn't drained yet.
 """
 from __future__ import annotations
 
