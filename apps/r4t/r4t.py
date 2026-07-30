@@ -138,6 +138,12 @@ COMMAND_HELP = [
                 "Sweep a team's work for the patterns you forbid",
                 "check",
             ),
+            Command(
+                "task trace <id>",
+                "Who told whom on one task, hop by hop",
+                None,
+                "r4t task list",
+            ),
         ],
     ),
 ]
@@ -1438,8 +1444,12 @@ def cmd_task(args: argparse.Namespace) -> int:
             )
         return 0
     if not args.id:
-        print("task show: <id> is required", file=sys.stderr)
+        print(f"task {args.action}: <id> is required", file=sys.stderr)
         return 2
+    if args.action == "trace":
+        import tasktrace
+
+        return tasktrace.run(node, args.id.strip().upper(), json_mode=args.json)
     task = tasks.load_task(node, args.id.strip().upper())
     if task is None:
         print(f"task not found: {args.id}", file=sys.stderr)
@@ -1914,10 +1924,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_tell_flags(flush_p)
     flush_p.set_defaults(func=cmd_flush)
 
-    task_p = sub.add_parser("task", help=_cmd_help("task"))
-    task_p.add_argument("action", choices=["list", "show"])
+    task_p = sub.add_parser(
+        "task",
+        help=_cmd_help("task"),
+        description="Conversation threads: list them, show one ledger, or trace "
+        "one task's delegation tree from recorded state.",
+    )
+    task_p.add_argument("action", choices=["list", "show", "trace"])
     task_p.add_argument("id", nargs="?", help="Task ULID.")
     task_p.add_argument("--node", help="Team node name (default: sole ~/.config/r4t team).")
+    task_p.add_argument(
+        "--json", action="store_true",
+        help="With trace: the reconstruction as JSON instead of the panel.",
+    )
     task_p.set_defaults(func=cmd_task)
 
     check_p = sub.add_parser(

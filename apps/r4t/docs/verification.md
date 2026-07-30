@@ -52,3 +52,33 @@ an agent that could read its own grade would learn to game it. Reports land
 under the team dir's `judge/` — a surface no roster agent ever reads — never
 inside the workplace repo. Pass `--json` instead of the sectioned panel to
 derive an experiment-ledger column.
+
+## Tracing one task
+
+The judge grades a run; `r4t task trace <id>` reconstructs a single task. It
+answers "what actually happened here?" in one screen: the delegation tree, hop
+by hop — who received the task, who they passed it to, what came back — plus
+every turn the thread cost with its exit code and duration, dead letters
+inline, and whatever is still in flight.
+
+```
+Delegation
+  boss -> gerry        hop 0  "ship the parser by friday"
+    gerry -> phil      hop 1  "take the tokenizer and land it behind the flag"
+      phil -> neil     hop 2
+      phil -> gerry    hop 2  "tokenizer landed, PR is up"
+        gerry -> boss  hop 3  (out of the walls)  (closes the thread)
+```
+
+Nothing new is written for it, and no new transport is involved: the whole
+trace is read back out of state the team already keeps. The day log is the
+spine — append-only, never pruned, and every delivery and turn boundary lands
+in it carrying the thread id — while the thread ledger, the dead-letter dir,
+the members' queues and any in-flight turn supply the originator, what never
+got delivered, and what is still moving. A thread whose ledger has already
+expired still traces: the panel says so, and reads the originator and the
+closure back out of the log.
+
+`--json` gives the same reconstruction as a structure, so an acceptance check
+can assert on trace shape (`delegation`, `turns`, `dead_letters`) instead of
+grepping logs.
