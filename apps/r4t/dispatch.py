@@ -771,6 +771,24 @@ def _throttle_block(ctx: DispatchContext, config: RigConfig) -> str | None:
 
 # ---------- ingress (enqueue only; never runs a turn) ----------
 
+def class_from_meta(raw: str) -> str:
+    """The class an external peer stamped on the a8s envelope's `meta` (#167).
+
+    Wire metadata is advisory for governance and never for identity: a peer may
+    downgrade its OWN traffic to machine relay (`auto`), and anything else —
+    absent, unparseable, a word this version does not know — is deliberate
+    attention. Thread and hop stay garden-internal whatever the wire says."""
+    if not raw.strip():
+        return "human"
+    try:
+        meta = json.loads(raw)
+    except ValueError:
+        return "human"
+    if not isinstance(meta, dict):
+        return "human"
+    return "auto" if str(meta.get("class", "")).strip().lower() == "auto" else "human"
+
+
 def _ingest(
     ctx: DispatchContext,
     sender: str,
@@ -885,7 +903,9 @@ def _ingest(
     if thread is None:
         thread = tasks.new_thread_id()
         hop = 0
-    tasks.ensure_task(ctx.node, thread, sender)
+    tasks.ensure_task(
+        ctx.node, thread, sender, relay=not internal and klass == "auto"
+    )
 
     state.enqueue(
         ctx.node,
@@ -960,7 +980,7 @@ def _release_one(
     # must not need to know whether a name is one agent, a human, a device, or
     # a whole roster — class marking survives as envelope metadata only.
     envelope["content"] = body
-    envelope["x_r4t_class"] = "auto"
+    envelope["meta"] = {"class": "auto"}
     envelope["from"] = sender_addr
     outbox.mkdir(parents=True, exist_ok=True)
     msg_id = str(envelope.get("id", "")) or tasks.new_thread_id()
@@ -1748,12 +1768,13 @@ def handle_message(
     to: str,
     message: str,
     *,
+    klass: str = "human",
     run_fn=run_harness,
     drain_after: bool = True,
 ) -> int:
     _ingest(
         ctx, sender, to, (message or "").strip(),
-        klass="human", internal=_is_internal(ctx.node, sender),
+        klass=klass, internal=_is_internal(ctx.node, sender),
     )
     if drain_after:
         drain_until_quiet(ctx, run_fn=run_fn)
@@ -1864,7 +1885,12 @@ def _quiet_task_sweep(
     member's turn succeeds while staging no reply, or a chain stalls. When an
     open thread with an unanswered originator sees no ledger activity for
     `quiet_task_seconds`, wake the leader with a nudge to report current state
-    (NOT to force-finish the work). Returns the threads nudged."""
+    (NOT to force-finish the work). Returns the threads nudged.
+
+    A relay thread is skipped: its originator is another cluster's machinery
+    (#167), so a status report to it is not attention owed — it is one more
+    inbound that peer must class and answer, which is how two rosters keep each
+    other awake forever. The nudge exists for whoever is actually waiting."""
     if config.quiet_task_seconds <= 0:
         return []
     if state.live_locks(ctx.node):
@@ -1876,6 +1902,8 @@ def _quiet_task_sweep(
     nudged: list[str] = []
     for task in tasks.list_tasks(ctx.node):
         if task.get("status") != tasks.STATUS_OPEN or task.get("answered"):
+            continue
+        if task.get("relay"):
             continue
         if tasks.last_activity(task) > cutoff:
             continue

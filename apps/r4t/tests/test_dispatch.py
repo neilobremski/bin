@@ -329,7 +329,7 @@ class TestStagingRelease:
         assert len(envelopes) == 1
         envelope = envelopes[0]
         assert envelope["to"] == "outsider"
-        assert envelope["x_r4t_class"] == "auto"
+        assert envelope["meta"] == {"class": "auto"}
         assert envelope["content"] == "the fix is deployed"
         assert not envelope["content"].startswith("[r4t")
         assert not state.staging_dir(NODE, "gerry").exists()
@@ -1192,7 +1192,7 @@ class TestStdoutFallback:
         envelopes = outbox_envelopes(repo)
         assert [e["to"] for e in envelopes] == ["boss"]
         assert envelopes[0]["content"] == ANSWER.strip()
-        assert envelopes[0]["x_r4t_class"] == "auto"
+        assert envelopes[0]["meta"] == {"class": "auto"}
         assert "[r4t" not in envelopes[0]["content"]
         assert "r4t: STDOUT-REPLY gerry" in read_log()
 
@@ -1727,6 +1727,81 @@ class TestAttachmentRelease:
         assert bundle.is_dir()
         assert (outbox / "message-4" / "report.txt").is_file()
         assert (outbox / "message-4.json").is_file()
+
+
+class TestExternalClassIngress:
+    """Issue #167 — a peer cluster stamps `meta.class` on the a8s envelope and
+    the wake hands it over as `$META`. Machine-classed inbound is relay, not
+    attention: it delivers like any other message and opens a thread, but the
+    thread owes nobody a status report, which is what keeps two federated
+    rosters from nudging each other awake forever."""
+
+    def test_unmarked_external_mail_is_deliberate(self):
+        assert dispatch.class_from_meta("") == "human"
+
+    def test_auto_marking_is_honored(self):
+        assert dispatch.class_from_meta('{"class":"auto"}') == "auto"
+
+    @pytest.mark.parametrize("raw", [
+        '{"class":"human"}',
+        '{"class":"whatever-2027-invents"}',
+        '{"other":"auto"}',
+        "not json at all",
+        '"auto"',
+        "[]",
+    ])
+    def test_anything_else_stays_deliberate(self, raw):
+        # A peer may only downgrade its own traffic; an unknown word must never
+        # silently acquire meaning.
+        assert dispatch.class_from_meta(raw) == "human"
+
+    def test_relay_mail_queues_as_auto_and_opens_a_relay_thread(self, ctx, r4t_home):
+        handle_message(ctx, "beta", "acme", "roster sync", klass="auto", drain_after=False)
+        queued = state.read_queue(NODE, "gerry")
+        assert [e["class"] for e in queued] == ["auto"]
+        assert tasks.list_tasks(NODE)[0]["relay"] is True
+
+    def test_deliberate_mail_opens_a_thread_that_owes_a_report(self, ctx, r4t_home):
+        handle_message(ctx, "boss", "acme", "ship it", drain_after=False)
+        assert [e["class"] for e in state.read_queue(NODE, "gerry")] == ["human"]
+        assert tasks.list_tasks(NODE)[0]["relay"] is False
+
+    def test_relay_thread_is_never_nudged(self, ctx, fake_harness):
+        handle_message(ctx, "beta", "acme", "roster sync", klass="auto", drain_after=False)
+        task = tasks.list_tasks(NODE)[0]
+        task["updated_at"] = "2020-01-01T00:00:00Z"
+        state.atomic_write_json(tasks.task_path(NODE, task["id"]), task)
+        assert run_idle(ctx)["quiet_nudged"] == []
+
+    def test_a_thread_the_human_opened_still_gets_nudged(self, ctx, fake_harness):
+        handle_message(ctx, "boss", "acme", "ship it", drain_after=False)
+        task = tasks.list_tasks(NODE)[0]
+        task["updated_at"] = "2020-01-01T00:00:00Z"
+        state.atomic_write_json(tasks.task_path(NODE, task["id"]), task)
+        assert run_idle(ctx)["quiet_nudged"] == [task["id"]]
+
+    def test_status_marks_the_relay_thread(self, ctx, repo, rig_config, r4t_home, capsys):
+        # Why a thread is never nudged has to be visible to whoever is reading
+        # the surface at 2am.
+        handle_message(ctx, "beta", "acme", "roster sync", klass="auto", drain_after=False)
+        r4t_main([
+            "status", "--root", str(repo), "--node", NODE,
+            "--rig-config", str(rig_config), "--no-notify",
+        ])
+        out = capsys.readouterr().out
+        assert "creator=beta" in out and "relay" in out
+
+    def test_internal_relay_keeps_the_originating_thread_owed(self, ctx, r4t_home):
+        # The class means the same thing inside the walls (member mail is relay
+        # too), but an intra-team message rides an existing thread — the
+        # human's — and must not turn it into a relay thread.
+        handle_message(ctx, "boss", "acme", "ship it", drain_after=False)
+        thread_id = tasks.list_tasks(NODE)[0]["id"]
+        dispatch._ingest(
+            ctx, f"{NODE}:gerry", f"{NODE}:phil", "your turn",
+            klass="auto", internal=True, thread=thread_id, hop=1,
+        )
+        assert tasks.load_task(NODE, thread_id)["relay"] is False
 
 
 class TestQuietSweep:
@@ -2327,6 +2402,29 @@ class TestCli:
         )
         assert rc == 0
         assert len(harness_calls(fake_harness)) == 1
+
+    def test_dispatch_carries_the_envelope_class(self, r4t_home, repo, rig_config, fake_harness):
+        # The whole ingress half of #167: a8s expands `$META` into this flag and
+        # the thread it opens is relay, owed no report.
+        rc = self.run(
+            "dispatch", "--root", str(repo), "--from", "beta",
+            "--to", "acme", "--message", "roster sync",
+            "--meta", '{"class":"auto"}',
+            "--rig-config", str(rig_config), "--no-notify", "--no-drain",
+        )
+        assert rc == 0
+        assert [e["class"] for e in state.read_queue(NODE, "gerry")] == ["auto"]
+        assert tasks.list_tasks(NODE)[0]["relay"] is True
+
+    def test_dispatch_without_meta_is_deliberate(self, r4t_home, repo, rig_config, fake_harness):
+        rc = self.run(
+            "dispatch", "--root", str(repo), "--from", "boss",
+            "--to", "acme", "--message", "ship it",
+            "--rig-config", str(rig_config), "--no-notify", "--no-drain",
+        )
+        assert rc == 0
+        assert [e["class"] for e in state.read_queue(NODE, "gerry")] == ["human"]
+        assert tasks.list_tasks(NODE)[0]["relay"] is False
 
     def test_dispatch_batches_queued_with_live(self, r4t_home, repo, rig_config, fake_harness):
         state.enqueue(

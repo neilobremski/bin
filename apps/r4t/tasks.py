@@ -6,6 +6,11 @@ be attributed to the exchange it answers, so the originator can be tracked
 its originator hearing back can wake the leader. It never gates delivery:
 every inbound message enqueues regardless of a thread's status.
 
+A `relay` thread was opened by machine-classed external mail (`meta.class`
+`auto` on the wire, #167) — an originator that is another cluster's relay, not
+someone waiting on an answer. It carries a label like any other thread; what it
+does not carry is owed attention, so the quiet sweep leaves it alone.
+
 The thread id + hop travel as structured fields on the r4t-message
 (`dispatch.py`), never as a text header — there is no serialize/parse step
 inside the walls. Hop counts are stamped for telemetry (and the tree) but
@@ -54,7 +59,7 @@ def save_task(node: str, task: dict) -> None:
     atomic_write_json(task_path(node, task["id"]), task)
 
 
-def new_task(task_id: str, creator: str) -> dict:
+def new_task(task_id: str, creator: str, *, relay: bool = False) -> dict:
     now = utc_now()
     return {
         "id": task_id,
@@ -63,13 +68,14 @@ def new_task(task_id: str, creator: str) -> dict:
         "updated_at": now,
         "status": STATUS_OPEN,
         "answered": False,
+        "relay": relay,
     }
 
 
-def ensure_task(node: str, task_id: str, creator: str) -> dict:
+def ensure_task(node: str, task_id: str, creator: str, *, relay: bool = False) -> dict:
     task = load_task(node, task_id)
     if task is None:
-        task = new_task(task_id, creator)
+        task = new_task(task_id, creator, relay=relay)
         save_task(node, task)
     return task
 
