@@ -23,6 +23,7 @@ import tasks
 import verdict
 from dispatch import (
     DispatchContext,
+    class_from_meta,
     handle_message,
     run_clear,
     run_flush,
@@ -521,6 +522,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     state.stamp_root(ctx.node, ctx.root)
     return handle_message(
         ctx, args.from_agent, args.to, args.message,
+        klass=class_from_meta(args.meta),
         drain_after=not args.no_drain,
     )
 
@@ -809,7 +811,8 @@ def _activity_rows(node: str) -> list[tuple[bool | None, str, str, str | None]]:
             None, "thread",
             f"{task['id']}  creator={task.get('creator', '?')}  "
             f"status={task.get('status', '?')}"
-            + ("  answered" if task.get("answered") else ""),
+            + ("  answered" if task.get("answered") else "")
+            + ("  relay" if task.get("relay") else ""),
             None,
         ))
     if not open_tasks:
@@ -1978,6 +1981,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Full recipient as delivered ($RECIPIENT): <node> or <node>:<member>.",
     )
     dispatch_p.add_argument("--message", required=True)
+    dispatch_p.add_argument(
+        "--meta",
+        default="",
+        help="Envelope metadata as JSON ($META): the sending cluster's "
+        "protocol fields, of which r4t reads `class`.",
+    )
     dispatch_p.add_argument(
         "--no-drain",
         action="store_true",

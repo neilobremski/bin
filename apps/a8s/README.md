@@ -341,11 +341,12 @@ Argv elements run through built-in substitutions plus any per-node **a8s vars**:
 - `$MESSAGE` → the message body (`content`, with any `ATTACHED FILE: <path>` lines appended for inbound attachments).
 - `$TIMESTAMP` → ISO 8601 UTC timestamp the message was queued (e.g. `2026-04-28T14:30:00.123456Z`). Useful when you want a stable machine-readable time.
 - `$AGE` → human-readable age relative to now (e.g. `5 minutes ago`). Computed at wake time, so a long backlog gets accurate values per message. Pick this OR `$TIMESTAMP` per definition based on which the LLM will read more naturally.
+- `$META` → the envelope's `meta` object as compact JSON (`{"class":"auto"}`), empty when the message carries none. Protocol metadata one node stamps for another; a8s carries and hands it over without reading a key, so the vocabulary belongs to the nodes at the edges (r4t's message class is the first user).
 - `$A8S_DIR` → `apps/a8s/` itself, so definitions can point at bundled scripts (`default.json` uses this for `dummy-cli`).
 - `$DEFINITION_PATH` → resolved path of this agent's definition file.
 - `$KEY` → any key from `a8s vars <name> set KEY value` (registry `vars` map). **Not** OS environment — no correlation with process env. If the definition references `$KEY` and that var is unset, wake fails closed.
 
-`$TIMESTAMP` and `$AGE` are empty for any message without a `date` field (defensive — every `_write_outbox` stamps one).
+`$TIMESTAMP` and `$AGE` are empty for any message without a `date` field (defensive — every `_write_outbox` stamps one). `$META` is empty unless the sending node stamped a `meta` object.
 
 ```bash
 a8s add bob ./ ollama-opencode --model=qwen3.6

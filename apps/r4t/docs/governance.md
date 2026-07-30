@@ -136,6 +136,13 @@ an open thread whose originator is unanswered sees no activity for
 state — NOT to force-finish the work. The human, or the leader, decides what
 "done" means; r4t only makes sure the originator is not left in silence.
 
+A thread opened by relayed mail — an inbound the sending cluster marked
+`meta.class: auto` (see [message-flow.md](message-flow.md#class-across-the-wall))
+— is skipped. Its originator is another cluster's machinery, so a status report
+to it is not attention owed; it is one more inbound that peer must answer, which
+is how two rosters keep each other awake forever. The nudge exists for whoever
+is actually waiting.
+
 Prior art: Erlang/OTP supervision — a bounded, rate-limited recovery action
 rather than an unbounded retry loop.
 

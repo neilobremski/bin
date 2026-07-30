@@ -13,7 +13,9 @@
     "--to",
     "$RECIPIENT",
     "--message",
-    "$MESSAGE"
+    "$MESSAGE",
+    "--meta",
+    "$META"
   ],
   "max_wake_seconds": 2700,
   "idle": {

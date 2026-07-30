@@ -34,7 +34,7 @@ member's queue and back out. For governance rationale see
    applies, outbound messages land in the sender's history, and the message goes
    straight onto the recipient member's queue (intra-team, no header, no
    round-trip) or is converted to an a8s envelope at the wall (external — the
-   only place a wire header exists, carrying `class` as `x_r4t_class`).
+   only place a wire header exists, carrying `class` in the envelope's `meta`).
    Inside the team, agents address each other by bare first name
    (`tell gerry`) — the namespace prefix is the *outside* address of the
    walled garden, and roster agents never see it. Release canonicalizes
@@ -78,11 +78,26 @@ r4t-message whose fields (`thread` label, telemetry `hop` that never cuts a
 message, and a `class` of `human`/`auto`/`error`) travel end to end, stamped by
 dispatch and never written or parsed as prose. The only wire header is at
 egress, where an external release is converted to an a8s envelope carrying the
-bare body and `class` as `x_r4t_class` metadata — other a8s nodes must not need
-to know whether a name is one agent, a human, a device, or a whole roster.
+bare body and `class` in the envelope's `meta` object — other a8s nodes must not
+need to know whether a name is one agent, a human, a device, or a whole roster.
 Symmetrically, external ingress is untrusted: a sub-address can't pick a member
 and nothing is parsed out of the body — everything from outside enters at the
 top lead on a fresh thread. One ingress point means one thing to reason about.
+
+## Class across the wall
+
+`meta.class` is the one protocol field that crosses the wall in both
+directions. Releases carry `auto`, because everything a member sends is machine
+traffic; inbound mail is deliberate attention unless the sender marked it
+`auto`, so a human, a phone, or a peer that says nothing is heard as a person.
+
+Metadata is advisory for governance and never for identity. A peer can only
+downgrade its own traffic, an unknown word means deliberate, and thread and hop
+stay garden-internal — nothing on the wire can claim a thread. What a relayed
+inbound changes is what the garden owes it: the thread it opens is a label, not
+a report someone is waiting on, so the quiet-thread sweep leaves it alone. That
+is what keeps two federated rosters from reading each other's polite
+status updates as fresh human attention and nudging each other awake forever.
 
 The sender the outside sees is the bare namespace. Dispatch releases with
 `from: <node>:<member>`, and the a8s router — which owns `from`, because the

@@ -2,11 +2,17 @@
 
 Each agent has a definition JSON (built-in or custom) that encodes one argv
 under the `invoke` key. `build_command` substitutes `$SENDER` / `$RECIPIENT`
-/ `$MESSAGE` / `$TIMESTAMP` / `$AGE` / `$A8S_DIR` / `$DEFINITION_PATH` into it,
-plus any per-node a8s vars (`a8s vars <name> set KEY value`) as `$KEY`.
+/ `$MESSAGE` / `$TIMESTAMP` / `$AGE` / `$META` / `$A8S_DIR` /
+`$DEFINITION_PATH` into it, plus any per-node a8s vars
+(`a8s vars <name> set KEY value`) as `$KEY`.
 `$DEFINITION_PATH` is the resolved path of the agent's own definition file, so
 a self-contained node (e.g. r4t) can read its own definition for settings the
 wire does not carry.
+
+`$META` is the envelope's `meta` object as verbatim JSON — protocol metadata
+one node stamps for another (r4t's message class, #167). a8s carries it and
+hands it to the wake; it never reads inside, so the vocabulary belongs to the
+nodes at the edges and a8s learns nothing about any node's protocol.
 
 A8s vars are NOT process environment variables — they live on the agent in
 the registry and expand only through this interpolator. A `$NAME` that is
@@ -46,6 +52,7 @@ BUILTIN_PLACEHOLDERS = frozenset({
     "MESSAGE",
     "TIMESTAMP",
     "AGE",
+    "META",
     "A8S_DIR",
     "DEFINITION_PATH",
 })
@@ -339,6 +346,18 @@ def _format_age(date_str: str, *, now: datetime | None = None) -> str:
     return f"{n} {unit}{plural} ago"
 
 
+def envelope_meta(msg: dict) -> str:
+    """The envelope's `meta` object as compact JSON — the `$META` value.
+
+    Opaque protocol metadata between nodes: a8s copies it along the wire and
+    hands it to the wake verbatim, never reading a key. A missing or non-object
+    `meta` expands empty, exactly as `$SENDER` does on a senderless wake."""
+    meta = msg.get("meta")
+    if not isinstance(meta, dict) or not meta:
+        return ""
+    return json.dumps(meta, sort_keys=True, separators=(",", ":"))
+
+
 def _expand_argv(
     argv: list[str],
     sender: str,
@@ -348,6 +367,7 @@ def _expand_argv(
     age: str = "",
     definition_path: str = "",
     vars: dict[str, str] | None = None,
+    meta: str = "",
 ) -> list[str]:
     """Expand placeholders in argv.
 
@@ -357,6 +377,7 @@ def _expand_argv(
       - `$MESSAGE`    content + any ATTACHED FILE: lines
       - `$TIMESTAMP`  ISO 8601 UTC time the message was queued
       - `$AGE`        human-readable age relative to now
+      - `$META`       the envelope's `meta` object as JSON (empty when absent)
       - `$A8S_DIR`    the apps/a8s/ directory
       - `$DEFINITION_PATH`  this agent's definition file path
 
@@ -379,6 +400,7 @@ def _expand_argv(
         "MESSAGE": message,
         "TIMESTAMP": timestamp,
         "AGE": age,
+        "META": meta,
         "A8S_DIR": str(SCRIPT_DIR),
         "DEFINITION_PATH": definition_path,
     }
@@ -421,6 +443,7 @@ def build_command(
         age,
         definition_path,
         vars=vars,
+        meta=envelope_meta(msg),
     )
 
 

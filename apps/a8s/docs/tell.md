@@ -43,6 +43,12 @@ Envelope shape:
 }
 ```
 
+A node that speaks a protocol with its peers may add a `meta` object
+(`"meta": {"class": "auto"}`). a8s carries it across every hop — local routing,
+alias fan-out, remote publish and receive — and expands it into the wake as
+`$META` without reading a key; the vocabulary belongs to the nodes at the edges.
+`tell` writes no `meta` itself.
+
 On disk alongside the JSON:
 
 ```
