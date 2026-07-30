@@ -532,8 +532,14 @@ def build_batch_prompt(recipient: str, entries: list[BatchEntry]) -> str:
     silently broke batch delivery. Composing the prompt here means there is
     only one place in the pipeline that understands the envelope schema."""
     header = (
-        f"You are receiving messages as '{recipient}'. Use bash CLI "
-        "`tell [--attach /path/to/file] <recipient> <message>` to send asynchronously."
+        f"You are receiving messages as '{recipient}'. Send with the bash CLI "
+        "`tell`, body on stdin with the delimiter quoted so nothing expands "
+        "($ ` \\ arrive byte-exact):\n"
+        "    tell <recipient> - <<'EOF'\n"
+        "    <your message>\n"
+        "    EOF\n"
+        "Attach files with `tell --attach /path/to/file <recipient> -`. "
+        "Delivery is asynchronous; do not wait for a reply."
     )
     blocks = [header]
     for entry in entries:

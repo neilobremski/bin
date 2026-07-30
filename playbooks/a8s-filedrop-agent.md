@@ -95,7 +95,9 @@ After send, check for a new ULID `.json` under `$TELL_OUTBOX_DIR` (and a
 sibling directory when using `--attach`):
 
 ```bash
-tell someone "ping"
+tell someone - <<'EOF'
+ping
+EOF
 ls -1 "$TELL_OUTBOX_DIR" | tail -3
 ```
 
@@ -129,21 +131,26 @@ One-shot check without follow: `tells` (waits ~5s for a burst, then exits).
 ## Send
 
 ```bash
-tell --attach /abs/path/detail.md <recipient> "Headline. Ask: <one line>."
+tell --attach /abs/path/detail.md <recipient> - <<'EOF'
+Headline. Ask: <one line>.
+EOF
 ```
 
+- **Body on stdin, delimiter quoted.** `<<'EOF'` (quotes on the delimiter) stops
+  every expansion, so `$`, backticks, and backslashes reach the recipient
+  byte-exact. A body written to a file works the same way:
+  `tell <recipient> - < /abs/path/body.md`.
+- A trailing `"quoted message"` argument suits a short plain body only. Inside
+  double quotes bash eats `$…` and runs backticks — `"$1.25 fix"` arrives as
+  `.25 fix`.
 - Short body: headlines + the ask. Detail in `--attach` / `--file` (repeatable).
-- If content is long enough to need a file, **attach it** — do not use stdin
-  `-` as a way to sneak a long body past the shell.
-- **Shell metacharacters:** bash expands `$…` and backticks inside double quotes
-  (an unescaped `$value` vanishes from the body). Prefer single quotes, escape,
-  or pipe a **short** body on stdin so the shell never sees the text:
-  `printf '%s\n' '…' | tell <recipient> -`
+- If content is long enough to need a file, **attach it** — stdin carries the
+  headline and the ask, not a smuggled essay.
 - Prefer absolute paths (or a short variable). Avoid `cd … && tell …` compounds
   when your host's command classifier is strict.
 - Delivery may take **minutes**. Arm the monitor and continue other work.
 
-Flag reference: [tell.md](tell.md).
+Flag reference: [`apps/a8s/skills/tell/SKILL.md`](../apps/a8s/skills/tell/SKILL.md).
 
 ## Opaque peers and trust
 
@@ -178,8 +185,10 @@ When sending substantial work to a peer:
 ```bash
 export TELL_OUTBOX_DIR=<root>/.outbox
 
-# Send — short body, detail attached; then verify landing
-tell --attach /abs/a.md <recipient> "headline + ask"
+# Send — body on stdin, detail attached; then verify landing
+tell --attach /abs/a.md <recipient> - <<'EOF'
+headline + ask
+EOF
 ls -1 "$TELL_OUTBOX_DIR" | tail -3
 
 # Follow (CLI) or watch <root>/.inbox/*.json (files only)

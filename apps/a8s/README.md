@@ -99,9 +99,12 @@ a8s ps
 # Send messages. Woken agents get `TELL_OUTBOX_DIR` from a8s. Manual / desktop
 # tell uses that env var, or a unique CWD-matched configured outbox
 # (see docs/filedrop.md / docs/tell.md).
+# Body on stdin with a quoted delimiter: $, backticks, and backslashes survive.
 cd ~/projects/code-review
-tell GEMINI "look at lines 40-80 of foo.py"
-tell devs   "stand-up at 3pm"
+tell GEMINI - <<'EOF'
+look at lines 40-80 of foo.py
+EOF
+tell devs "stand-up at 3pm"   # trailing argument: short plain bodies only
 
 # Read what each agent is doing.
 a8s logs CLAUDE GEMINI --tail 20
@@ -202,8 +205,8 @@ any prefixes pointing at it.
 
 |                                                                             |                                                                                                                                                                                                                                                                                                                           |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `a8s tell <name> <msg>`                                                     | Routed message via `_write_outbox` into the sender's configured outbox. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose root encloses CWD; router force-stamps `from` from outbox ownership.                                                                                           |
-| `tell <name> <msg>` (top-level shim, `[~/bin/tell](/Users/neilo/bin/tell)`) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Outbox: `TELL_OUTBOX_DIR` if set, else a unique configured outbox matched from CWD when `~/.a8s` is readable (see [filedrop.md](docs/filedrop.md)). Drops a JSON envelope. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: `[docs/tell.md](docs/tell.md)`. |
+| `a8s tell <name> [<msg>\|-]`                                                | Routed message via `_write_outbox` into the sender's configured outbox. `-` reads the body from stdin (`- <<'EOF'` / `- < file.md`), which keeps shell expansion out of it. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose root encloses CWD; router force-stamps `from` from outbox ownership.                                                                                           |
+| `tell <name> [<msg>\|-]` (top-level shim, `[~/bin/tell](/Users/neilo/bin/tell)`) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Outbox: `TELL_OUTBOX_DIR` if set, else a unique configured outbox matched from CWD when `~/.a8s` is readable (see [filedrop.md](docs/filedrop.md)). Drops a JSON envelope. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: `[docs/tell.md](docs/tell.md)`. |
 | `tells [-f] [--timeout SEC] [--body-max N] [--glow [theme]]` (shim `[~/bin/tells](/Users/neilo/bin/tells)`) | Receive-side complement of `tell` (`apps/a8s/tells.py`). Same outbox resolution as `tell`; watches `.inbox` beside it. Default: wait up to 5s for a burst. `-f` / `--timeout 0`: follow until Ctrl+C. Bodies over `--body-max` / `TELLS_BODY_MAX` (default 16000; `0` = unlimited) print a `python3 -c` recovery command for the inbox JSON. `--glow` / headings share convo's markdown formatting. Non-destructive. Prefer over `convo -f` for filedrop inbound-only loops. |
 | `a8s logs <name>... [--tail N] [-f]`                                        | Read per-agent log files; one agent in append order, multiple merge by ISO timestamp. `-f` follows.                                                                                                                                                                                                                       |
 | `a8s convo <name> [--limit N] [-f] [--glow [theme]]`                        | Markdown history of messages to or from an agent. Default `--limit 10`; this controls display only. `-f` follows sequence-numbered rows in `conversations.sqlite3` (shows outbound too — use `tells -f` for filedrop inbound-only). `a8s update` retains `convo_max_rows` rows (default 50000). |
