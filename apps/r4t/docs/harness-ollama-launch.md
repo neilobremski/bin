@@ -24,6 +24,12 @@ ollama launch <integration> --model <tag> -y -- <the harness's own headless argv
 - `-y` auto-answers the launcher's own confirmation prompts. Required for
   unattended dispatch: a first-run or install confirmation would otherwise
   hang the turn.
+- The launcher execs the integration in its own working directory, so the cwd
+  r4t sets for a member's turn reaches the harness. Measured on ollama 0.32.5
+  by spawning each wrapped integration with a cwd of its own and reading the
+  OS-reported cwd of every descendant: launcher, harness, and the node/codex
+  helpers underneath all sat in the spawn directory. That is what makes
+  `Workdir:` work on the `*-ollama` presets (issue #289).
 
 ## What the launcher persists, per integration
 

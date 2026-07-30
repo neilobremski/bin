@@ -24,7 +24,7 @@ from dispatch import (
     run_idle,
     split_recipient,
 )
-from rig import McpPlan, Rig, RigError, load_rig_config
+from rig import McpPlan, Rig, RigError, build_preset_invoke, load_rig_config
 from roster import load_roster
 from r4t import main as r4t_main
 from ulid import new as new_ulid
@@ -1852,6 +1852,56 @@ class TestRunHarness:
         assert code == 127
         assert "failed to spawn" in out
         assert not timed_out
+
+    def test_turn_cwd_reaches_a_launcher_wrapped_harness(self, tmp_path, monkeypatch):
+        """The `*-ollama` presets put `ollama launch <tool> -- <argv>` in front of
+        the harness. The turn's workdir has to survive that hop, or every relative
+        path a member writes lands wherever r4t itself was invoked (#289). Fake
+        launcher, fake harness: the wrapper execs the tool the way the real one
+        does, and the tool reports the directory it actually got."""
+        fakebin = tmp_path / "fakebin"
+        fakebin.mkdir()
+        launcher = fakebin / "ollama"
+        launcher.write_text(
+            f"#!{sys.executable}\n"
+            + textwrap.dedent(
+                """
+                import os, sys
+                argv = sys.argv[1:]
+                tool = argv[1]
+                passthrough = argv[argv.index("--") + 1:]
+                os.execvp(tool, [tool, *passthrough])
+                """
+            ),
+            encoding="utf-8",
+        )
+        launcher.chmod(0o755)
+        harness = fakebin / "opencode"
+        harness.write_text(
+            f"#!{sys.executable}\n"
+            + textwrap.dedent(
+                """
+                import os, sys
+                print("harness cwd:", os.getcwd())
+                print("harness argv:", " ".join(sys.argv[1:]))
+                """
+            ),
+            encoding="utf-8",
+        )
+        harness.chmod(0o755)
+        monkeypatch.setenv("PATH", str(fakebin) + os.pathsep + os.environ["PATH"])
+        workdir = tmp_path / "agents" / "bob"
+        workdir.mkdir(parents=True)
+        rig = Rig(
+            name="local",
+            preset="opencode-ollama",
+            invoke=build_preset_invoke("opencode-ollama", model="qwen3.6:latest"),
+            timeout_seconds=30,
+        )
+        code, out, _dur, timed_out = run_harness(rig, "x", workdir, env=dict(os.environ))
+        assert code == 0 and not timed_out
+        assert f"harness cwd: {workdir}" in out
+        assert "harness argv: run --auto --dir . x" in out
 
     def test_agy_model_resolved_live_before_turn(self, tmp_path, monkeypatch):
         # The stored argv carries a {model} placeholder; run_harness resolves it

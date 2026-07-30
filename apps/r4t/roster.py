@@ -33,12 +33,12 @@ An optional `- **Workdir:** <path>` gives the member its own working
 directory for turns. Relative paths resolve against the org workplace
 (`agents/bob/`, `.bob/`); absolute and `~` paths are allowed and may live
 outside the repo entirely. Absent means the member runs from the workplace
-root, as before. The directory is created on demand at the start of a turn.
-It sets the turn's cwd and the prompt names it as the member's root, but no
-harness is obliged to honor it: opencode-family rigs also advertise the
-enclosing git root to the model as a "workspace root", and the `ollama
-launch` wrappers do not carry the cwd through at all. A workdir nested in a
-repo can therefore still attract writes to the repo root (issue #273; see
+root. The directory is created on demand at the start of a turn.
+It sets the turn's cwd — which every rig receives, `ollama launch` wrappers
+included — and the prompt names it as the member's root, but no harness is
+obliged to treat it as the project root: opencode-family rigs also advertise
+the enclosing git root to the model as a "workspace root". A workdir nested in
+a repo can therefore still attract writes to the repo root (issue #273; see
 docs/rigs.md).
 """
 from __future__ import annotations

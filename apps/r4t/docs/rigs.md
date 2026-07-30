@@ -88,11 +88,13 @@ word writes there by absolute path. `claude`/`cursor` advertise no competing
 root, so their members stay in the workdir. No opencode flag or env var pins
 the root; `--dir` does not.
 
-The `ollama launch`-wrapped presets are worse: the wrapper does not carry the
-subprocess cwd through, so the harness runs in whatever directory invoked r4t
-(under a8s, the agent root) and never sees the workdir at all. A relative path
-from one of those members lands there, not in the workdir — measured, not
-inferred.
+The `ollama launch`-wrapped presets inherit their parent's behavior and nothing
+worse: the launcher execs the integration in the directory r4t spawned it in,
+so an `*-ollama` member's harness runs in the workdir (measured on ollama
+0.32.5 against all four wrapped integrations — the launcher, the harness, and
+every descendant report the workdir as their cwd). `opencode-ollama` therefore
+carries the same advertised-root caveat as `opencode`, and `claude-ollama` /
+`codex-ollama` / `copilot-ollama` stay in the workdir like their parents.
 
 So the prompt is the portable mitigation, and the only one that reaches every
 rig: the intro states the member's absolute working directory, tells it to
