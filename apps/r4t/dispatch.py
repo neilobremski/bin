@@ -622,6 +622,9 @@ def run_harness(
     that fails closed returns a nonzero exit like any other failed turn — the
     batch stays queued and the breaker counts it.
 
+    The rig's `env` map rides the turn environment on top of r4t's own controls,
+    and is named to the isolation wrapper so it survives the boundary.
+
     `R4T_CONTINUE` in the env (set for a member with `Continue: on`) appends the
     rig's continue tokens so the CLI resumes the conversation it already has in
     `cwd`. It rides the env for the same reason isolation does: the run_fn
@@ -643,6 +646,13 @@ def run_harness(
             return 127, f"agy --model {rig.model!r} did not resolve: {e}", 0.0, False
         argv = [resolved if a == "{model}" else a for a in argv]
 
+    # The rig's `env` map (docs/rigs.md): static harness knobs on every turn.
+    # It goes on before r4t's own per-turn injections below (the mcp idiom's
+    # variables, the PWD pin) so those still win, and a name the turn owns fails
+    # the rig closed at parse time, so this cannot shadow one.
+    if env is not None:
+        env.update(rig.env)
+
     staging = (env or {}).get("TELL_OUTBOX_DIR", "")
     isolation = isolate.isolation_from_env(env)
 
@@ -655,6 +665,11 @@ def run_harness(
     if rig.mcp_on and env is not None:
         mcp = apply_mcp(rig, argv, env, cwd, isolation)
         argv = mcp.argv
+
+    # An `env_reset`/container keeps only what the wrapper is told to carry, so
+    # the rig map has to be named to it the same way the mcp idiom's env is.
+    # The idiom wins a collision — it is r4t's own per-turn injection.
+    boundary_env = {**rig.env, **mcp.env_pass}
 
     kill_container_name: str | None = None
     if isolation.run_as:
@@ -670,7 +685,7 @@ def run_harness(
         if staging:
             isolate.assert_writable_shared_dir(staging, isolate.agent_gid(isolation.run_as))
         argv = isolate.wrap_run_as(
-            argv, isolation.run_as, staging, cwd, env_pass=mcp.env_pass
+            argv, isolation.run_as, staging, cwd, env_pass=boundary_env
         )
     elif isolation.container:
         kill_container_name = isolate.container_name(
@@ -684,7 +699,7 @@ def run_harness(
             workplace=cwd,
             tell_outbox=staging,
             container_args=isolation.container_args,
-            extra_env=mcp.env_pass,
+            extra_env=boundary_env,
             extra_ro_dirs=mcp.mount_dirs,
         )
 

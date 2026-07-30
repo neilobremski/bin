@@ -46,6 +46,7 @@ from rig import (
     rig_setting,
     rig_settings,
     set_rig_value,
+    setting_label,
     swap_preset_rig,
     unset_rig_value,
 )
@@ -1411,13 +1412,11 @@ def cmd_rig_unset(args: argparse.Namespace) -> int:
             print(str(e), file=sys.stderr)
             rc = 1
             continue
+        label = setting_label(key)
         if removed:
-            print(f"unset {rig_key} {key.strip().lower()} in {config_path}")
+            print(f"unset {rig_key} {label} in {config_path}")
         else:
-            print(
-                f"{rig_key} {key.strip().lower()} was not explicitly set; "
-                f"nothing to unset"
-            )
+            print(f"{rig_key} {label} was not explicitly set; nothing to unset")
     return rc
 
 

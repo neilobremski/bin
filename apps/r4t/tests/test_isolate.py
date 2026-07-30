@@ -699,6 +699,120 @@ class TestMcpWithoutIsolation:
         assert not plan.env_pass and not plan.mount_dirs and not plan.read_paths
 
 
+# ---------- the rig's `env` map has to cross the boundary too (#284) ----------
+
+
+def _env_rig(env_map: dict[str, str], invoke: list[str] | None = None) -> Rig:
+    return Rig(name="worker", invoke=invoke or ["claude", "-p", "{prompt}"], env=env_map)
+
+
+class TestRigEnvReachesTheHarness:
+    """A rig env entry is worthless if it stops at the isolation wrapper, so the
+    same three shapes the `mcp` idioms are asserted through carry it too."""
+
+    def test_plain_turn_hands_it_to_the_harness_process(self, tmp_path):
+        script = tmp_path / "show-env.py"
+        script.write_text(
+            "import os\nprint(os.environ.get('ENABLE_PROMPT_CACHING_1H', 'unset'))\n",
+            encoding="utf-8",
+        )
+        rig = _env_rig(
+            {"ENABLE_PROMPT_CACHING_1H": "1"},
+            invoke=[sys.executable, str(script), "{prompt}"],
+        )
+        env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation())
+
+        code, out, _dur, timed = run_harness(rig, "P", workplace, env=env)
+
+        assert (code, timed) == (0, False)
+        assert out.strip() == "1"
+
+    def test_the_workdir_pin_still_wins(self, tmp_path):
+        script = tmp_path / "show-pwd.py"
+        script.write_text("import os\nprint(os.environ['PWD'])\n", encoding="utf-8")
+        # A rig carrying PWD fails closed at parse time (test_rig), so the only
+        # way here is in-memory — and the pin holds whatever a Rig object says.
+        rig = _env_rig(
+            {"PWD": "/nowhere"}, invoke=[sys.executable, str(script), "{prompt}"]
+        )
+        env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation())
+
+        _code, out, _dur, _timed = run_harness(rig, "P", workplace, env=env)
+
+        assert out.strip() == str(workplace)
+
+    def test_run_as_re_exports_it_past_env_reset(self, tmp_path, fakebin):
+        record = tmp_path / "sudo.txt"
+        _recording_sudo(fakebin, record)
+        rig = _env_rig({"ENABLE_PROMPT_CACHING_1H": "1", "NOTE": "a b"})
+        env, workplace, staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
+
+        run_harness(rig, "P", workplace, env=env)
+
+        argv = _wrapped_argv(record)
+        assert argv[6:12] == [
+            "_", str(staging), str(workplace), "2",
+            "ENABLE_PROMPT_CACHING_1H=1", "NOTE=a b",
+        ]
+        assert argv[12:] == ["claude", "-p", "P"]
+
+    def test_container_gets_it_as_a_dash_e_before_the_image(self, tmp_path, fakebin):
+        record = tmp_path / "docker.txt"
+        _recording_docker(fakebin, record)
+        rig = _env_rig({"ENABLE_PROMPT_CACHING_1H": "1"})
+        env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation(container="img"))
+
+        run_harness(rig, "P", workplace, env=env)
+
+        argv = _wrapped_argv(record)
+        at = argv.index("ENABLE_PROMPT_CACHING_1H=1")
+        assert argv[at - 1] == "-e"
+        assert at < argv.index("img")
+
+    def test_it_rides_alongside_the_mcp_idiom_env(self, tmp_path, fakebin):
+        record = tmp_path / "sudo-both.txt"
+        _recording_sudo(fakebin, record)
+        rig = _mcp_rig(tmp_path, "opencode")
+        rig.env = {"ENABLE_PROMPT_CACHING_1H": "1"}
+        env, workplace, staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
+
+        run_harness(rig, "P", workplace, env=env)
+
+        config = staging.parent / "mcp" / "mcp-opencode.json"
+        argv = _wrapped_argv(record)
+        assert argv[9] == "2"
+        assert set(argv[10:12]) == {
+            "ENABLE_PROMPT_CACHING_1H=1", f"OPENCODE_CONFIG={config}"
+        }
+
+    def test_the_mcp_idiom_wins_its_own_variable(self, tmp_path, fakebin):
+        record = tmp_path / "sudo-clash.txt"
+        _recording_sudo(fakebin, record)
+        rig = _mcp_rig(tmp_path, "opencode")
+        rig.env = {"OPENCODE_CONFIG": "/theirs"}
+        env, workplace, staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
+
+        run_harness(rig, "P", workplace, env=env)
+
+        config = staging.parent / "mcp" / "mcp-opencode.json"
+        argv = _wrapped_argv(record)
+        # r4t's own per-turn injection is not something a rig knob can unseat.
+        assert argv[9] == "1"
+        assert argv[10] == f"OPENCODE_CONFIG={config}"
+        assert env["OPENCODE_CONFIG"] == str(config)
+
+    def test_a_bare_rig_asks_the_wrapper_for_nothing(self, tmp_path, fakebin):
+        record = tmp_path / "sudo-bare.txt"
+        _recording_sudo(fakebin, record)
+        env, workplace, staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
+
+        run_harness(_env_rig({}), "P", workplace, env=env)
+
+        assert _wrapped_argv(record)[6:] == [
+            "_", str(staging), str(workplace), "0", "claude", "-p", "P",
+        ]
+
+
 class TestStatusRowRendering:
     def test_isolation_tag(self):
         from r4t import _isolation_tag
