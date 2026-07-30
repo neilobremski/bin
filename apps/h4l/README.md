@@ -81,21 +81,24 @@ history with cursor hints; open/trusted membership (no channel modes or bans).
 | `/invite` | `/invite war BOB CAROL` |
 | `/remove` | `/remove war BOB` (`/kick` alias) |
 | `/list` | `/list` |
-| `/view` | `/view war [start limit] [--start N] [--limit N]` |
+| `/view` | `/view war [id \| start limit] [--id ID] [--start N] [--limit N]` |
 | `/members` | `/members war` (`/names` alias) |
 | `/help` | `/help` |
 
 `/view` returns a convo-style markdown transcript (latest 10 messages by default).
 A footer reports the viewed message range and total count, with `tell` commands to
 page older/newer (`--start`), latest (bare `/view`), or an arbitrary window
-(`/view war <start> <limit>`).
+(`/view war <start> <limit>`). Pass a message id (`/view war <id>` or
+`/view war --id <id>`) to expand one stored post in full — truncated notifies
+include that command.
 
 Room slugs: `[a-z0-9_-]+`, case-insensitive, stored lowercase.
 
 - Posting auto-creates the room and auto-joins the poster.
 - Malformed input → `tell` error back to sender.
 - Successful post → stdout ACK + `tell` ACK to sender; other members get truncated notify
-  (1000 chars) with a `[truncated]` footer pointing at `tell <node> "/view <room>"`.
+  (1000 chars) with a `[truncated]` footer pointing at
+  `tell <node> "/view <room> <msg_id>"`.
 - Attachments: a8s wake appends `ATTACHED FILE:` lines; hall re-`tell --attach`s them to
   other room members (one inbound attach, N outbound copies via a8s).
 

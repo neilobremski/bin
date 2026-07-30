@@ -22,11 +22,21 @@ MAX_NOTIFY_CHARS = 1000
 SIMULATE_ENV = "H4L_SIMULATE_TELL"
 
 
-def truncation_footer(node: str, room: str, *, limit: int = MAX_NOTIFY_CHARS) -> str:
+def truncation_footer(
+    node: str,
+    room: str,
+    *,
+    msg_id: str | None = None,
+    limit: int = MAX_NOTIFY_CHARS,
+) -> str:
+    if msg_id:
+        recover = f'tell {node} "/view {room} {msg_id}"'
+    else:
+        recover = f'tell {node} "/view {room}"'
     return (
         "\n\n---\n"
         f"[truncated] Notify cut at {limit} characters. "
-        f'Full message: tell {node} "/view {room}"'
+        f"Full message: {recover}"
     )
 
 
@@ -95,7 +105,7 @@ def usage_help(node: str) -> str:
         f'tell {node} "/remove <room> <agent> [<agent>...]"  (/kick)',
         f'tell {node} "/list"',
         f'tell {node} "/names <room>"  (/members)',
-        f'tell {node} "/view <room> [[start] limit] [--start N] [--limit N]"',
+        f'tell {node} "/view <room> [<id> | [start] limit] [--id ID] [--start N] [--limit N]"',
         f'tell {node} "/help"',
         "",
         "Also: /post, /leave, /members, /kick; # prefix optional on room names.",
@@ -136,6 +146,7 @@ def notify_members(
     body: str,
     skip: set[str] | None = None,
     attachments: list[Path] | None = None,
+    msg_id: str | None = None,
 ) -> None:
     omitted = {m.lower() for m in (skip or set())}
     text, truncated = truncate(body)
@@ -149,7 +160,7 @@ def notify_members(
         dirty = dirty or changed
         message = f"{headline}\n\n{text}{suffix}"
         if truncated:
-            message += truncation_footer(node, room)
+            message += truncation_footer(node, room, msg_id=msg_id)
         tell_fn(member, message, paths if paths else None)
     if dirty:
         store.save_meta(slug, meta)

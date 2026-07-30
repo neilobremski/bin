@@ -1,9 +1,26 @@
 from __future__ import annotations
 
+import re
+from typing import NamedTuple
+
 DEFAULT_VIEW_LIMIT = 10
 
 HEADING_OUT = "## from {from} to {to} at {timestamp}"
 HEADING_IN = "### from {from} to {to} at {timestamp}"
+
+# Crockford base32 ULID (26 chars); h4l message ids are ULIDs.
+_MSG_ID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$", re.IGNORECASE)
+
+
+class ViewArgs(NamedTuple):
+    slug: str
+    limit: int = DEFAULT_VIEW_LIMIT
+    start_n: int | None = None
+    msg_id: str | None = None
+
+
+def is_message_id(token: str) -> bool:
+    return bool(_MSG_ID_RE.match(token.strip()))
 
 
 def _attachment_lines(entry: dict) -> list[str]:
@@ -30,6 +47,24 @@ def _format_heading(template: str, entry: dict, room: str) -> str:
             "date": ts,
         }
     )
+
+
+def _format_entry(entry: dict, room: str, viewer_key: str) -> str:
+    sent = (entry.get("from") or "").strip().lower() == viewer_key
+    heading = _format_heading(
+        HEADING_OUT if sent else HEADING_IN,
+        entry,
+        room,
+    )
+    content = entry.get("content", "")
+    file_lines = _attachment_lines(entry)
+    body_parts: list[str] = []
+    if content:
+        body_parts.append(content)
+    body_parts.extend(file_lines)
+    if body_parts:
+        return f"{heading}\n\n" + "\n".join(body_parts)
+    return heading
 
 
 def select_messages(
@@ -86,6 +121,22 @@ def _format_view_footer(
     return "\n".join(lines)
 
 
+def format_message_view(
+    room: str,
+    entry: dict,
+    viewer: str,
+    *,
+    node: str | None = None,
+) -> str:
+    """Full single-message transcript (no notify truncation)."""
+    viewer_key = (viewer or "").strip().lower()
+    block = _format_entry(entry, room, viewer_key)
+    if node:
+        msg_id = (entry.get("id") or "").strip()
+        block += f"\n\n---\n#{room}: message {msg_id}"
+    return block
+
+
 def format_room_view(
     room: str,
     messages: list[dict],
@@ -108,25 +159,7 @@ def format_room_view(
         return header
 
     viewer_key = (viewer or "").strip().lower()
-    parts: list[str] = []
-
-    for entry in window:
-        sent = (entry.get("from") or "").strip().lower() == viewer_key
-        heading = _format_heading(
-            HEADING_OUT if sent else HEADING_IN,
-            entry,
-            room,
-        )
-        content = entry.get("content", "")
-        file_lines = _attachment_lines(entry)
-        block = heading
-        body_parts: list[str] = []
-        if content:
-            body_parts.append(content)
-        body_parts.extend(file_lines)
-        if body_parts:
-            block = f"{heading}\n\n" + "\n".join(body_parts)
-        parts.append(block)
+    parts: list[str] = [_format_entry(entry, room, viewer_key) for entry in window]
 
     if node:
         if window:
@@ -149,8 +182,8 @@ def format_room_view(
     return "\n\n".join(parts)
 
 
-def parse_view_args(args: list[str]) -> tuple[str, int, int | None]:
-    """Parse `/view <room> [[start] limit] [--start N] [--limit N]`."""
+def parse_view_args(args: list[str]) -> ViewArgs:
+    """Parse `/view <room> [<id> | [start] limit] [--id ID] [--start N] [--limit N]`."""
     if not args:
         raise ValueError("/view requires <room>")
     from rooms import normalize_slug
@@ -158,15 +191,23 @@ def parse_view_args(args: list[str]) -> tuple[str, int, int | None]:
     slug = normalize_slug(args[0])
     limit = DEFAULT_VIEW_LIMIT
     start_n: int | None = None
+    msg_id: str | None = None
     i = 1
-    if i < len(args) and args[i].isdigit():
-        if i + 1 < len(args) and args[i + 1].isdigit():
-            start_n = int(args[i])
-            limit = int(args[i + 1])
-            i += 2
-        else:
-            limit = int(args[i])
+    if i < len(args) and not args[i].startswith("-"):
+        token = args[i]
+        if token.isdigit():
+            if i + 1 < len(args) and args[i + 1].isdigit():
+                start_n = int(token)
+                limit = int(args[i + 1])
+                i += 2
+            else:
+                limit = int(token)
+                i += 1
+        elif is_message_id(token):
+            msg_id = token.strip().upper()
             i += 1
+        else:
+            raise ValueError(f"unknown /view argument: {token}")
     while i < len(args):
         token = args[i]
         if token == "--limit":
@@ -191,7 +232,18 @@ def parse_view_args(args: list[str]) -> tuple[str, int, int | None]:
                 raise ValueError("--start must be at least 1")
             i += 2
             continue
+        if token == "--id":
+            if i + 1 >= len(args):
+                raise ValueError("--id requires a message id")
+            raw = args[i + 1].strip()
+            if not is_message_id(raw):
+                raise ValueError(f"invalid message id: {raw}")
+            msg_id = raw.upper()
+            i += 2
+            continue
         raise ValueError(f"unknown /view argument: {token}")
     if limit < 1:
         raise ValueError("--limit must be at least 1")
-    return slug, limit, start_n
+    if msg_id is not None and start_n is not None:
+        raise ValueError("/view <id> cannot be combined with --start / window args")
+    return ViewArgs(slug=slug, limit=limit, start_n=start_n, msg_id=msg_id)

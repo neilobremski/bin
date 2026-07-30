@@ -4,6 +4,8 @@ import pytest
 
 from format import (
     DEFAULT_VIEW_LIMIT,
+    ViewArgs,
+    format_message_view,
     format_room_view,
     parse_view_args,
     select_messages,
@@ -106,23 +108,50 @@ class TestFormatRoomView:
         text = format_room_view("war", [], "ALICE", node="HALL")
         assert text == '#war: no messages\n\ntell HALL "#war <message>"'
 
+    def test_single_message_view(self):
+        entry = {
+            "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "date": "2026-01-01T12:00:00.000000Z",
+            "from": "BOB",
+            "content": "entire body",
+        }
+        text = format_message_view("war", entry, "ALICE", node="HALL")
+        assert "entire body" in text
+        assert "### from BOB to #war at" in text
+        assert "#war: message 01ARZ3NDEKTSV4RRFFQ69G5FAV" in text
+
 
 class TestParseViewArgs:
     def test_room_only(self):
-        assert parse_view_args(["war"]) == ("war", DEFAULT_VIEW_LIMIT, None)
+        assert parse_view_args(["war"]) == ViewArgs("war", DEFAULT_VIEW_LIMIT, None, None)
 
     def test_positional_limit(self):
-        assert parse_view_args(["war", "5"]) == ("war", 5, None)
+        assert parse_view_args(["war", "5"]) == ViewArgs("war", 5, None, None)
 
     def test_positional_start_and_limit(self):
-        assert parse_view_args(["war", "5", "10"]) == ("war", 10, 5)
+        assert parse_view_args(["war", "5", "10"]) == ViewArgs("war", 10, 5, None)
 
     def test_named_flags(self):
-        assert parse_view_args(["war", "--start", "5", "--limit", "3"]) == (
-            "war",
-            3,
-            5,
+        assert parse_view_args(["war", "--start", "5", "--limit", "3"]) == ViewArgs(
+            "war", 3, 5, None
         )
+
+    def test_positional_message_id(self):
+        mid = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        assert parse_view_args(["war", mid.lower()]) == ViewArgs(
+            "war", DEFAULT_VIEW_LIMIT, None, mid
+        )
+
+    def test_id_flag(self):
+        mid = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        assert parse_view_args(["war", "--id", mid]) == ViewArgs(
+            "war", DEFAULT_VIEW_LIMIT, None, mid
+        )
+
+    def test_id_rejects_start(self):
+        mid = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        with pytest.raises(ValueError, match="cannot be combined"):
+            parse_view_args(["war", mid, "--start", "1"])
 
     def test_requires_room(self):
         with pytest.raises(ValueError, match="requires <room>"):

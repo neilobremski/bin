@@ -161,8 +161,10 @@ class TestPost:
         bob = [b for a, b, _ in sent if a == "BOB"][0]
         assert "[truncated]" in bob
         assert f"Notify cut at {MAX_NOTIFY_CHARS} characters" in bob
-        assert 'tell CHATROOM "/view demopony"' in bob
-        assert bob.rstrip().endswith('tell CHATROOM "/view demopony"')
+        msg_id = store.list_messages("demopony")[0]["id"]
+        recover = f'tell CHATROOM "/view demopony {msg_id}"'
+        assert recover in bob
+        assert bob.rstrip().endswith(recover)
         stored = store.list_messages("demopony")[0]["content"]
         assert stored == body
         assert "[truncated]" not in stored
@@ -369,7 +371,63 @@ class TestView:
         assert "hi back" in ack
         assert "viewed messages 1–2 of 2" in ack
 
+    def test_view_specific_message_by_id(self, store, tells):
+        from notify import MAX_NOTIFY_CHARS
 
+        sent, tell_fn = tells
+        store.ensure_room("war")
+        long_body = "full-" + ("y" * (MAX_NOTIFY_CHARS + 20))
+        first = store.append_message("war", sender="ALICE", content="old")
+        target = store.append_message("war", sender="BOB", content=long_body)
+        store.append_message("war", sender="CAROL", content="newer")
+        assert first["id"] != target["id"]
+
+        dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message=f"/view war {target['id']}",
+            tell_fn=tell_fn,
+        )
+        ack = [b for a, b, _ in sent if a == "ALICE"][-1]
+        assert long_body in ack
+        assert "old" not in ack
+        assert "newer" not in ack
+        assert f"#war: message {target['id']}" in ack
+        assert "viewed messages" not in ack
+
+    def test_view_specific_message_via_id_flag(self, store, tells):
+        sent, tell_fn = tells
+        store.ensure_room("war")
+        msg = store.append_message("war", sender="BOB", content="only me")
+        dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message=f"/view war --id {msg['id'].lower()}",
+            tell_fn=tell_fn,
+        )
+        ack = [b for a, b, _ in sent if a == "ALICE"][-1]
+        assert "only me" in ack
+        assert f"#war: message {msg['id']}" in ack
+
+    def test_view_missing_message_id_errors(self, store, tells):
+        sent, tell_fn = tells
+        store.ensure_room("war")
+        fake = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        rc = dispatch_slash(
+            store,
+            sender="ALICE",
+            node="HALL",
+            message=f"/view war {fake}",
+            tell_fn=tell_fn,
+        )
+        assert rc == 1
+        err = [b for a, b, _ in sent if a == "ALICE"][-1]
+        assert "message not found" in err
+
+
+class TestList:
     def test_lists_all_rooms_and_members(self, store, tells):
         sent, tell_fn = tells
         m1 = store.ensure_room("war")
