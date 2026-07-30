@@ -402,6 +402,12 @@ Agents that can process multiple tells in one subprocess can declare a `batch` b
 
 Debounce mechanics: on the first inbox message, a8s stamps `~/.a8s/agents/<NAME>/inbox-waiting-since` and skips waking until `pause` seconds elapse. Each loop iteration re-routes outboxes, so messages that arrive during the wait window join the inbox before the wake decision. The stamp clears when the inbox drains or a wake fires.
 
+### Delivery ack and retry
+
+**Exit 0 is the only ack.** A wake that exits nonzero, gets killed for exceeding `max_wake_seconds`, fails to spawn, or aborts on an unset var puts its envelopes back in the agent's inbox and waits before trying again — 30s, then 2m, then 10m. After the 4th failed attempt the envelopes stay in trash as dead letters, logged in the agent log and recorded as `DROPPED` in `transactions.tsv`, so one poison message can't wedge the inbox shut. The backoff is per agent (`~/.a8s/agents/<NAME>/wake-retry`) and survives handler restarts, so a broken CLI backs off instead of burning a wake per loop iteration.
+
+Delivery is therefore at-least-once: **a wake command must tolerate seeing the same envelope twice.** The cheap way to guarantee that is to ack early — record the message durably, exit 0, and do the slow work afterwards. Reserve nonzero exits for "I did not receive this."
+
 ### Recipient transparency
 
 The default definitions follow the opacity rule — `$SENDER tells $RECIPIENT: $MESSAGE` works equally well whether `$RECIPIENT` is an LLM session, a Python script, or (someday) an SMS gateway. Customize at your own risk.
@@ -432,6 +438,8 @@ The state root resolves as follows when `A8S_HOME` is unset: use `~/.config/a8s`
         ├── log.txt            per-agent log (wakes, routing, subprocess output)
         ├── last-active        ISO timestamp; touched at wake start/end and
         │                     after every idle invoke (gates `idle.invoke`)
+        ├── wake-retry         backoff record after a failed wake: which
+        │                     envelopes, how many attempts, when to retry
         └── pid                handler attachment
 
 <agent-root>/
