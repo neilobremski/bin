@@ -77,6 +77,8 @@ from registry import (
     save_aliases,
     save_namespaces,
     save_registry,
+    load_namespace_options,
+    save_namespace_options,
 )
 from txlog import read_events
 from ulid import is_ulid
@@ -997,14 +999,16 @@ def cmd_namespace(args: list[str]) -> int:
     canonical form). A prefix may match the name of the agent it binds to (a
     node owning its own namespace, #175) but must not collide with an alias or
     with any other agent."""
-    if len(args) == 0:
+    opaque = "--opaque" in args
+    args = [a for a in args if a != "--opaque"]
+    if len(args) == 0 and not opaque:
         return cmd_namespaces()
-    if len(args) == 1:
+    if len(args) == 1 and not opaque:
         return _cmd_namespace_show(args[0])
     if len(args) != 2:
-        print("usage: a8s namespace <prefix> <agent>   # bind or rebind", file=sys.stderr)
-        print("       a8s namespace <prefix>           # show one", file=sys.stderr)
-        print("       a8s namespace                    # list", file=sys.stderr)
+        print("usage: a8s namespace <prefix> <agent> [--opaque]   # bind or rebind", file=sys.stderr)
+        print("       a8s namespace <prefix>                      # show one", file=sys.stderr)
+        print("       a8s namespace                               # list", file=sys.stderr)
         return 2
     raw_prefix, raw_target = args
     try:
@@ -1046,10 +1050,19 @@ def cmd_namespace(args: list[str]) -> int:
     previous = namespaces.get(prefix)
     namespaces[prefix] = target_resolved
     save_namespaces(namespaces)
-    if previous is not None and str(previous).lower() != target_resolved.lower():
-        print(f"rebound {prefix}: -> {target_resolved} (was {previous})")
+    # Rebinding is how opacity flips: the flag's absence clears it, so the
+    # stored option always mirrors the latest bind.
+    options = load_namespace_options()
+    if opaque:
+        options[prefix] = {"opaque": True}
     else:
-        print(f"bound {prefix}: -> {target_resolved}")
+        options.pop(prefix, None)
+    save_namespace_options(options)
+    tail = " (opaque)" if opaque else ""
+    if previous is not None and str(previous).lower() != target_resolved.lower():
+        print(f"rebound {prefix}: -> {target_resolved}{tail} (was {previous})")
+    else:
+        print(f"bound {prefix}: -> {target_resolved}{tail}")
     return 0
 
 
@@ -1068,6 +1081,9 @@ def cmd_unnamespace(args: list[str]) -> int:
         return 1
     del namespaces[canonical]
     save_namespaces(namespaces)
+    options = load_namespace_options()
+    if options.pop(canonical, None) is not None:
+        save_namespace_options(options)
     print(f"removed namespace {canonical}")
     return 0
 
@@ -1090,7 +1106,13 @@ def _cmd_namespace_show(name: str) -> int:
         print(f"no namespace named {name!r}", file=sys.stderr)
         return 1
     bound = namespaces[canonical]
-    print(f"{canonical}: -> {bound}{_namespace_binding_tail(bound)}")
+    options = load_namespace_options()
+    is_opaque = any(
+        k.lower() == canonical.lower() and (o or {}).get("opaque")
+        for k, o in options.items()
+    )
+    mark = "  [opaque]" if is_opaque else ""
+    print(f"{canonical}: -> {bound}{mark}{_namespace_binding_tail(bound)}")
     return 0
 
 
@@ -1101,9 +1123,12 @@ def cmd_namespaces() -> int:
         print("(no namespaces — use `a8s namespace <prefix> <agent>` to bind one)")
         return 0
     width = max(len(p) for p in namespaces)
+    options = load_namespace_options()
+    opaque = {k.lower() for k, o in options.items() if (o or {}).get("opaque")}
     for prefix in sorted(namespaces, key=str.lower):
         bound = namespaces[prefix]
-        print(f"  {prefix.ljust(width)}  -> {bound}{_namespace_binding_tail(bound)}")
+        mark = "  [opaque]" if prefix.lower() in opaque else ""
+        print(f"  {prefix.ljust(width)}  -> {bound}{mark}{_namespace_binding_tail(bound)}")
     return 0
 
 

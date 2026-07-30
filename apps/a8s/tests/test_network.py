@@ -31,7 +31,7 @@ from network import (
     start_remotes,
     stop_remotes,
 )
-from registry import save_aliases, save_namespaces, save_registry
+from registry import save_aliases, save_namespaces, save_registry, save_namespace_options
 from transports import Transport, TransportError
 from ulid import new as new_ulid
 from delivery_receipt import build_delivery_receipt, parse_delivery_receipt
@@ -400,6 +400,7 @@ class TestReceiveEnvelope:
         events = []
         monkeypatch.setattr(network.txlog, "log", lambda event, **fields: events.append((event, fields)))
         save_namespaces({"crew": "A"})
+        save_namespace_options({"crew": {"opaque": True}})
         envelope = build_delivery_receipt({"id": new_ulid(), "from": "crew"}, ["B"])
         receive_envelope(json.dumps(envelope).encode(), two_local_agents)
         receipts = [fields for event, fields in events if event == "DELIVERY_RECEIPT"]

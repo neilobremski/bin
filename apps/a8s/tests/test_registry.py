@@ -77,7 +77,7 @@ class TestCanonicalName:
 class TestRegistryIO:
     def test_empty_registry_returns_zero_sections(self, fake_home):
         raw = _load_raw_registry()
-        assert raw == {"agents": {}, "aliases": {}, "namespaces": {}}
+        assert raw == {"agents": {}, "aliases": {}, "namespaces": {}, "namespace_options": {}}
 
     def test_save_and_load_agents(self, fake_home):
         save_registry({"CLAUDE": {"root": "/tmp/x", "definition": "/tmp/d.json"}})
@@ -113,11 +113,11 @@ class TestRegistryIO:
 
     def test_corrupt_file_returns_empty(self, fake_home):
         registry_path().write_text("not json")
-        assert _load_raw_registry() == {"agents": {}, "aliases": {}, "namespaces": {}}
+        assert _load_raw_registry() == {"agents": {}, "aliases": {}, "namespaces": {}, "namespace_options": {}}
 
     def test_non_dict_top_level_returns_empty(self, fake_home):
         registry_path().write_text("[1, 2, 3]")
-        assert _load_raw_registry() == {"agents": {}, "aliases": {}, "namespaces": {}}
+        assert _load_raw_registry() == {"agents": {}, "aliases": {}, "namespaces": {}, "namespace_options": {}}
 
     def test_missing_sections_default_empty(self, fake_home):
         # No migration code (pre-v1): a registry written before namespaces
