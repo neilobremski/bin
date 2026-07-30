@@ -2,6 +2,7 @@
 and auto-discovery."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -158,6 +159,44 @@ class TestBuildCommand:
         defn = {"invoke": ["r4t", "$DEFINITION_PATH", "$MESSAGE"]}
         argv = build_command(defn, {"from": "A", "to": "B", "content": "hi"}, agent_root)
         assert argv == ["r4t", "", "hi"]
+
+    def test_meta_expands_to_compact_json(self, agent_root):
+        # #167: protocol metadata between nodes. a8s carries the object and
+        # hands it over verbatim — the vocabulary is the nodes' business.
+        defn = {"invoke": ["r4t", "--meta", "$META", "-p", "$MESSAGE"]}
+        msg = {"from": "A", "to": "B", "content": "hi", "meta": {"class": "auto"}}
+        argv = build_command(defn, msg, agent_root)
+        assert argv == ["r4t", "--meta", '{"class":"auto"}', "-p", "hi"]
+
+    def test_meta_absent_expands_empty(self, agent_root):
+        defn = {"invoke": ["r4t", "--meta", "$META"]}
+        argv = build_command(defn, {"from": "A", "to": "B", "content": "hi"}, agent_root)
+        assert argv == ["r4t", "--meta", ""]
+
+    def test_meta_non_object_expands_empty(self, agent_root):
+        # A remote cluster wrote the envelope; a scalar `meta` is that
+        # boundary's problem, not a crash in the wake.
+        defn = {"invoke": ["r4t", "--meta", "$META"]}
+        msg = {"from": "A", "to": "B", "content": "hi", "meta": "auto"}
+        argv = build_command(defn, msg, agent_root)
+        assert argv == ["r4t", "--meta", ""]
+
+    def test_meta_value_is_not_reinterpolated(self, agent_root):
+        defn = {"invoke": ["r4t", "--meta", "$META"]}
+        msg = {"from": "A", "to": "B", "content": "hi", "meta": {"note": "$SENDER \\ x"}}
+        argv = build_command(defn, msg, agent_root)
+        assert argv[2] == '{"note":"$SENDER \\\\ x"}'
+
+    def test_bundled_r4t_node_receives_the_class_on_its_argv(self, agent_root):
+        # The seam itself: the shipped r4t definition forwards `$META`, so a
+        # peer cluster's class reaches `r4t dispatch` without a8s reading it.
+        defn = json.loads(default_definition_path("r4t").read_text(encoding="utf-8"))
+        msg = {
+            "from": "beta", "to": "acme", "content": "roster sync",
+            "meta": {"class": "auto"},
+        }
+        argv = build_command(defn, msg, agent_root)
+        assert argv[argv.index("--meta") + 1] == '{"class":"auto"}'
 
     def test_does_not_mutate_original_argv(self, agent_root):
         defn = {"invoke": ["claude", "-p", "$MESSAGE"]}

@@ -562,6 +562,71 @@ class TestNamespaceEgressIdentity:
         assert delivered["from"] == "B"
 
 
+class TestEnvelopeMeta:
+    """Issue #167 — the envelope carries an opaque `meta` object so one node can
+    hand another its protocol metadata (r4t's message class). a8s is the
+    courier: it copies the object across every hop it owns and never reads a
+    key of it."""
+
+    def _stage(self, sender: Participant, name: str, to: str, meta: dict) -> None:
+        f = outbox_dir(sender.root) / "20260101T000000_A.json"
+        f.write_text(json.dumps({
+            "from": name, "to": to, "content": "status green",
+            "files": [], "meta": meta,
+        }))
+
+    def test_local_routing_carries_meta(self, two_agents):
+        a, b = two_agents
+        self._stage(a, "A", "B", {"class": "auto"})
+        route_outboxes([a, b], all_agents=[a, b])
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert delivered["meta"] == {"class": "auto"}
+
+    def test_alias_fanout_carries_meta_to_every_recipient(self, three_agents):
+        a, b, c = three_agents
+        save_aliases({"devs": ["B", "C"]})
+        self._stage(a, "A", "devs", {"class": "auto"})
+        route_outboxes([a, b, c], all_agents=[a, b, c])
+        for n in ("B", "C"):
+            m = json.loads(next(inbox_dir(n).iterdir()).read_text())
+            assert m["meta"] == {"class": "auto"}
+
+    def test_remote_publish_carries_meta(self, two_agents):
+        a, b = two_agents
+        published: list[dict] = []
+
+        def publish(msg, sender_name, succeeded_so_far, attempt_count):
+            published.append(msg)
+            return ["hub"]
+
+        self._stage(a, "A", "B", {"class": "auto"})
+        route_outboxes(
+            [a, b], all_agents=[a, b],
+            publish_remotes=publish, configured_remote_ids=["hub"],
+        )
+        assert [m["meta"] for m in published] == [{"class": "auto"}]
+
+    def test_namespace_egress_stamping_leaves_meta_alone(self, fake_home, tmp_path):
+        # The stamp rewrites how the sender presents (#315). Metadata rides
+        # through untouched — the two decisions are independent.
+        node_root = tmp_path / "node"; node_root.mkdir()
+        outsider_root = tmp_path / "outsider"; outsider_root.mkdir()
+        save_registry({
+            "acme-node": {"root": str(node_root)},
+            "B": {"root": str(outsider_root)},
+        })
+        save_namespaces({"acme": "acme-node"})
+        node = Participant("acme-node", node_root)
+        outsider = Participant("B", outsider_root)
+        ensure_mailboxes(node)
+        ensure_mailboxes(outsider)
+        self._stage(node, "acme:lead", "B", {"class": "auto"})
+        route_outboxes([node, outsider], all_agents=[node, outsider])
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert delivered["from"] == "acme"
+        assert delivered["meta"] == {"class": "auto"}
+
+
 class TestAtomicFanout:
     """Issue #67 — `route_outboxes` stages routed copies under each recipient's
     `inbox.tmp/<source-name>` and only renames them into `inbox/` after every

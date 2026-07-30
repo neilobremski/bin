@@ -260,6 +260,18 @@ class TestReceiveEnvelope:
         assert body["from"] == "REMOTE_X"
         assert body["content"] == "hello via remote"
 
+    def test_meta_survives_the_wire(self, two_local_agents):
+        # #167: the receiving cluster writes the sender's `meta` into the inbox
+        # untouched, so the wake can hand it to the node that speaks it.
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "acme", "to": "B",
+            "content": "status green", "files": [], "meta": {"class": "auto"},
+        }).encode()
+        receive_envelope(envelope, two_local_agents)
+        body = json.loads((inbox_dir("B") / f"{msg_id}.json").read_text())
+        assert body["meta"] == {"class": "auto"}
+
     def test_unknown_recipient_records_rate_limited_diagnostic(
         self, two_local_agents, monkeypatch,
     ):
