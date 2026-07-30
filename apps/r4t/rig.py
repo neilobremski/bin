@@ -79,6 +79,10 @@ from roster import Member, Roster
 from state import atomic_write_json, r4t_home
 
 PROMPT_PLACEHOLDER = "{prompt}"
+# The directory the turn runs from, for harnesses that take it as an argument
+# rather than reading their own cwd. dispatch.run_harness fills it with the
+# member's resolved `Workdir:`.
+WORKDIR_PLACEHOLDER = "{workdir}"
 
 RESERVED_CONFIG_KEYS = frozenset({
     "pins",
@@ -174,12 +178,17 @@ HARNESS_PRESETS: dict[str, dict] = {
         "a8s_definition": "opencode.json",
         "headless": "run --auto (positional prompt)",
         "mcp": "opencode-env",
+        # --dir takes the workdir as an ABSOLUTE path. opencode resolves a
+        # relative --dir against $PWD, falling back to its real cwd only when
+        # PWD is unset, and a spawned process inherits the PWD of whoever
+        # started r4t — so `--dir .` anchored the file tools wherever r4t was
+        # invoked from, not the member's `Workdir:` (#273).
         "invoke": [
             "opencode",
             "run",
             "--auto",
             "--dir",
-            ".",
+            "{workdir}",
             "{prompt}",
         ],
         "model_argv": ["-m", "{model}"],
@@ -205,7 +214,7 @@ HARNESS_PRESETS: dict[str, dict] = {
             "run",
             "--auto",
             "--dir",
-            ".",
+            "{workdir}",
             "{prompt}",
         ],
         # `ollama launch` passes the appended flag through to opencode, whose
@@ -490,10 +499,20 @@ class Rig:
         return len(self.pool())
 
     def argv(
-        self, prompt: str, index: int = 0, *, continue_conversation: bool = False
+        self,
+        prompt: str,
+        index: int = 0,
+        *,
+        continue_conversation: bool = False,
+        workdir: str | Path | None = None,
     ) -> list[str]:
         pool = self.pool()
         chosen = pool[index % len(pool)]
+        # {workdir} goes in first: the prompt carries message text, so
+        # substituting it last keeps a `{workdir}` a teammate typed from being
+        # read as a placeholder.
+        if workdir is not None:
+            chosen = [a.replace(WORKDIR_PLACEHOLDER, str(workdir)) for a in chosen]
         argv = [a.replace(PROMPT_PLACEHOLDER, prompt) for a in chosen]
         if continue_conversation and self.continue_argv:
             anchor = self.continue_anchor
@@ -1617,9 +1636,9 @@ def default_config_payload() -> dict:
             "All governance knobs default sanely; see apps/r4t/docs/rigs.md.",
         ],
         "leader": {
-            "invoke": ["opencode", "run", "--auto", "--dir", ".", "{prompt}"],
+            "invoke": ["opencode", "run", "--auto", "--dir", "{workdir}", "{prompt}"],
         },
         "member": {
-            "invoke": ["opencode", "run", "--auto", "--dir", ".", "{prompt}"],
+            "invoke": ["opencode", "run", "--auto", "--dir", "{workdir}", "{prompt}"],
         },
     }

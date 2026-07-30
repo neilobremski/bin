@@ -45,7 +45,7 @@ r4t init
 - **`ROSTER.md`** — a Human owner, an AI Lead on rig `leader`, an AI Dev on
   rig `member`
 - **`~/.config/r4t/rigs.json`** — matching `leader` and `member` rig
-  definitions (default invoke: `opencode run --auto --dir .`)
+  definitions (default invoke: `opencode run --auto --dir {workdir}`)
 
 It then prints the exact **a8s registration** sequence for your repo name:
 

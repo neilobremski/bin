@@ -605,10 +605,13 @@ def run_harness(
     variant: int = 0,
 ) -> tuple[int, str, float, bool]:
     """Run the rig's argv (pool variant `variant`) with {prompt} substituted
-    as a single argv element — never a shell. Returns (exit_code, output,
-    duration_seconds, timed_out). When the env carries `R4T_LIVE_LOG`, the
-    harness output is teed there line by line as it arrives, so a gemba attach
-    can tail the turn live; the full output is still returned for staging.
+    as a single argv element — never a shell — and {workdir} with `cwd`, for a
+    harness that takes its working directory as an argument. Returns
+    (exit_code, output, duration_seconds, timed_out). `PWD` in the turn env is
+    pinned to `cwd`, because a spawned process otherwise inherits the caller's.
+    When the env carries `R4T_LIVE_LOG`, the harness output is teed there line
+    by line as it arrives, so a gemba attach can tail the turn live; the full
+    output is still returned for staging.
 
     When the org sets `run_as` or `container` (org.py; plans/ISOLATE-SPEC.md)
     the choice rides in via the turn env and the argv is wrapped in the OS-level
@@ -621,7 +624,10 @@ def run_harness(
     `cwd`. It rides the env for the same reason isolation does: the run_fn
     contract stays narrow."""
     argv = rig.argv(
-        prompt, variant, continue_conversation=(env or {}).get("R4T_CONTINUE") == "1"
+        prompt,
+        variant,
+        continue_conversation=(env or {}).get("R4T_CONTINUE") == "1",
+        workdir=cwd,
     )
     if rig.model_resolver == "agy-live":
         # Resolve the friendly --model against the live `agy models` list before
@@ -680,6 +686,11 @@ def run_harness(
         )
 
     live_log = (env or {}).get("R4T_LIVE_LOG")
+    # PWD is a shell convention no kernel maintains, so a spawned harness
+    # inherits the PWD of whoever started r4t however `cwd` is set. A harness
+    # that resolves its own paths against it (opencode does, for --dir) would
+    # anchor them outside the member's workdir (#273).
+    turn_env = dict(env if env is not None else os.environ, PWD=str(cwd))
     start = time.monotonic()
     try:
         proc = subprocess.Popen(
@@ -689,7 +700,7 @@ def run_harness(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            env=env,
+            env=turn_env,
             start_new_session=True,
         )
     except OSError as e:

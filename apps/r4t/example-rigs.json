@@ -5,6 +5,8 @@
     "defined here can run. A roster Harness naming a rig absent from this file fails",
     "closed. Keys starting with _ are ignored everywhere.",
     "{prompt} is replaced with the built prompt as a single argv element — never a shell.",
+    "{workdir} is replaced with the member's absolute working directory, for a CLI that",
+    "takes one as an argument (opencode: --dir {workdir}).",
     "Every key below is optional; the values shown for the governance knobs are the",
     "defaults. See README.md for the knob table and docs/governance.md for why."
   ],
@@ -31,8 +33,8 @@
   "junior-dev": {
     "_notes": "Cheap worker rig — OpenCode with whatever model the repo's opencode.json picks. A local model runs almost freely, so a generous budget. invoke may also be a POOL (list of argvs) rotated round-robin per turn — agents never know which variant ran them.",
     "invoke": [
-      ["opencode", "run", "--auto", "{prompt}"],
-      ["opencode", "run", "--auto", "--model", "ollama/gpt-oss:20b", "{prompt}"]
+      ["opencode", "run", "--auto", "--dir", "{workdir}", "{prompt}"],
+      ["opencode", "run", "--auto", "--dir", "{workdir}", "--model", "ollama/gpt-oss:20b", "{prompt}"]
     ],
     "timeout_seconds": 900,
     "budget_max": 40,
