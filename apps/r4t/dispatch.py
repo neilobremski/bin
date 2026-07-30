@@ -51,7 +51,7 @@ from pathlib import Path
 import isolate
 import state
 import tasks
-from rig import RigConfig, RigError, Rig, load_rig_config, resolve_agy_model
+from rig import RigConfig, RigError, Rig, apply_mcp, load_rig_config, resolve_agy_model
 from notify import TellFn
 from roster import Member, Roster, RosterError, load_roster
 
@@ -97,6 +97,15 @@ PROMPT_DEFAULTS: dict[str, str] = {
         "        EOF\n"
         "    Or write the body with your file tool: tell <name> - < msg.md. "
         "<name> is whoever asked, or a teammate. Teammates:"
+    ),
+    # Used in place of `work_tell` on a rig with the `mcp` knob on. It names the
+    # tool verbatim: a tool described generically goes unused on small models,
+    # while the named one was called 20/20 (#310).
+    "work_tell_mcp": (
+        "- Send messages by calling the `a8s_tell` tool (call the tool — "
+        "printing text sends nothing). Pass `recipient` (the name) and `body` "
+        "(your message). The body is delivered byte-exact; there is no shell. "
+        "`recipient` is whoever asked, or a teammate. Teammates:"
     ),
     "work_direct": (
         "- Speak to teammates directly and one at a time — do not post to "
@@ -569,7 +578,7 @@ def build_prompt(
         "## How to work",
         ctx.prompt("work_batch"),
         ctx.prompt("work_never_wait"),
-        ctx.prompt("work_tell"),
+        ctx.prompt("work_tell_mcp" if rig.mcp else "work_tell"),
         *(teammates or ["    - (none)"]),
         ctx.prompt("work_direct"),
         ctx.prompt("work_no_ack"),
@@ -616,6 +625,11 @@ def run_harness(
         except RigError as e:
             return 127, f"agy --model {rig.model!r} did not resolve: {e}", 0.0, False
         argv = [resolved if a == "{model}" else a for a in argv]
+
+    # The `mcp` knob: splice the a8s MCP server in with this harness's own
+    # idiom, before any isolation wrapper takes the argv over.
+    if rig.mcp and env is not None:
+        argv = apply_mcp(rig, argv, env, cwd)
 
     staging = (env or {}).get("TELL_OUTBOX_DIR", "")
     isolation = isolate.isolation_from_env(env)

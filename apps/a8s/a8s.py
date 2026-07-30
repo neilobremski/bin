@@ -12,6 +12,7 @@ This file is the script entry point; functionality lives in sibling modules:
   daemon.py       wake subprocess, pid attachment, signal handling
   tell.py          outbox drop + CLI parsing (stdin, --attach)
   tells.py         wait for the next inbound message (receive-side of tell)
+  mcp_server.py   stdio MCP server exposing tell as a tool
   commands.py     every cmd_* function
   cli.py          COMMANDS table, dispatch, main
 
@@ -22,6 +23,7 @@ Surface (CLI):
   start / run / step          handler attachment (1+ agents per process)
   stop / kill / exit / ls     handler control
   tell / tells                send a message / wait for the next one
+  mcp serve                   stdio MCP server: tell as a tool (a8s_tell)
   install-client              install standalone tell to /usr/local
   logs <name>... [--tail N] [-f]   per-agent log readout (merge-sorted)
 

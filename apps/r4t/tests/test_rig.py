@@ -20,6 +20,7 @@ from rig import (
     HARNESS_PRESETS,
     RigError,
     add_preset_rig,
+    apply_mcp,
     build_preset_invoke,
     continue_collisions,
     continue_presets,
@@ -27,6 +28,7 @@ from rig import (
     format_preset_invoke,
     fuzzy_match_model,
     load_rig_config,
+    mcp_presets,
     preset_names,
     remove_rig,
     resolve_agy_model,
@@ -1280,3 +1282,234 @@ class TestRigConfigureCLI:
         path = write_config(tmp_path, {"other": {"invoke": ["x", "{prompt}"]}})
         assert r4t_main(["rig", "configure", "ghost", "--rig-config", str(path)]) == 1
         assert "no rig 'ghost'" in capsys.readouterr().err
+
+
+def _mcp_rig(tmp_path, preset, model=None):
+    path = tmp_path / "rigs.json"
+    add_preset_rig(path, "worker", preset, model=model, force=True)
+    set_rig_value(path, "worker", "mcp", "on")
+    return load_rig_config(path).rigs["worker"]
+
+
+class TestMcpSetting:
+    def test_default_off_everywhere(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        rig = load_rig_config(path).rigs["worker"]
+        assert rig.mcp is False
+        s = rig_setting(path, "worker", "mcp")
+        assert (s.value, s.explicit, s.source, s.display()) == (
+            False, False, "built-in default", "false"
+        )
+
+    def test_set_get_unset_round_trip(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        set_rig_value(path, "worker", "mcp", "on")
+        assert json.loads(path.read_text(encoding="utf-8"))["worker"]["mcp"] is True
+        assert load_rig_config(path).rigs["worker"].mcp is True
+        set_rig_value(path, "worker", "mcp", "off")
+        assert load_rig_config(path).rigs["worker"].mcp is False
+        assert unset_rig_value(path, "worker", "mcp") is True
+        assert "mcp" not in json.loads(path.read_text(encoding="utf-8"))["worker"]
+
+    def test_true_and_false_still_accepted(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        set_rig_value(path, "worker", "mcp", "true")
+        assert load_rig_config(path).rigs["worker"].mcp is True
+        set_rig_value(path, "worker", "mcp", "false")
+        assert load_rig_config(path).rigs["worker"].mcp is False
+
+    def test_set_rejects_non_boolean(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        with pytest.raises(RigError, match="must be true or false"):
+            set_rig_value(path, "worker", "mcp", "maybe")
+
+    def test_mcp_presets_exclude_agy_and_bare_ollama(self):
+        names = mcp_presets()
+        assert "agy" not in names and "ollama" not in names
+        assert {"claude", "codex", "copilot", "cursor", "opencode"} <= set(names)
+        for name in names:
+            assert HARNESS_PRESETS[name].get("mcp")
+
+    def test_agy_refuses_the_knob_with_a_try_hint(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "agy")
+        with pytest.raises(RigError) as excinfo:
+            set_rig_value(path, "worker", "mcp", "on")
+        message = str(excinfo.value)
+        assert message.startswith("leave mcp off for rig 'worker'")
+        assert "~/.gemini" in message
+        assert "(try: r4t rig swap worker" in message
+        assert "mcp" not in json.loads(path.read_text(encoding="utf-8"))["worker"]
+
+    def test_bare_ollama_refuses_the_knob(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "ollama", model="tiny")
+        with pytest.raises(RigError, match="no tool use at all"):
+            set_rig_value(path, "worker", "mcp", "on")
+
+    def test_presetless_rig_refuses_the_knob(self, tmp_path):
+        path = write_config(tmp_path, {"worker": {"invoke": ["x", "{prompt}"]}})
+        with pytest.raises(RigError, match="records no preset"):
+            set_rig_value(path, "worker", "mcp", "on")
+
+    def test_turning_it_off_is_always_allowed(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "agy")
+        set_rig_value(path, "worker", "mcp", "off")
+        assert load_rig_config(path).rigs["worker"].mcp is False
+
+    def test_hand_edited_true_on_agy_fails_the_rig_closed(self, tmp_path):
+        path = write_config(
+            tmp_path,
+            {"worker": {"preset": "agy", "invoke": ["agy", "{prompt}"], "mcp": True}},
+        )
+        rig = load_rig_config(path).rigs["worker"]
+        assert rig.error and "~/.gemini" in rig.error
+        assert rig.mcp is False
+        assert load_rig_config(path).rig_for(member(rig="worker"))[0] is None
+
+    def test_parse_rejects_non_boolean_json(self, tmp_path):
+        path = write_config(
+            tmp_path, {"worker": {"invoke": ["x", "{prompt}"], "mcp": "true"}}
+        )
+        assert "mcp: expected true or false" in load_rig_config(path).rigs["worker"].error
+
+    def test_set_via_cli(self, tmp_path, capsys):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "opencode")
+        assert r4t_main(
+            ["rig", "set", "worker", "mcp", "on", "--rig-config", str(path)]
+        ) == 0
+        assert "set worker mcp = true" in capsys.readouterr().out
+
+    def test_agy_via_cli_returns_1_action_first(self, tmp_path, capsys):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "agy")
+        assert r4t_main(
+            ["rig", "set", "worker", "mcp", "on", "--rig-config", str(path)]
+        ) == 1
+        err = capsys.readouterr().err
+        assert err.startswith("leave mcp off")
+        assert "(try:" in err
+
+
+class TestMcpInjection:
+    def _turn(self, tmp_path):
+        staging = tmp_path / "state" / "worker" / "staging"
+        staging.mkdir(parents=True)
+        cwd = tmp_path / "repo"
+        cwd.mkdir()
+        return {"TELL_OUTBOX_DIR": str(staging), "HOME": str(tmp_path)}, cwd
+
+    def test_claude_gets_mcp_config_and_an_allowlisted_tool(self, tmp_path):
+        rig = _mcp_rig(tmp_path, "claude")
+        env, cwd = self._turn(tmp_path)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+
+        assert argv[1] == "--mcp-config"
+        server = json.loads(argv[2])["mcpServers"]["a8s"]
+        assert server["args"][-2:] == ["mcp", "serve"]
+        assert server["env"]["TELL_OUTBOX_DIR"] == env["TELL_OUTBOX_DIR"]
+        allowed = argv[argv.index("--allowedTools") + 1]
+        assert "mcp__a8s__tell" in allowed
+        assert "Bash(tell:*)" in allowed
+
+    def test_claude_ollama_splices_after_the_launcher_separator(self, tmp_path):
+        rig = _mcp_rig(tmp_path, "claude-ollama", model="qwen3.6")
+        env, cwd = self._turn(tmp_path)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+
+        assert argv[argv.index("--") + 1] == "--mcp-config"
+        assert "mcp__a8s__tell" in argv[argv.index("--allowedTools") + 1]
+
+    def test_codex_gets_a_toml_override_with_cwd_pinned(self, tmp_path):
+        rig = _mcp_rig(tmp_path, "codex")
+        env, cwd = self._turn(tmp_path)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+
+        assert argv[1] == "-c"
+        override = argv[2]
+        assert override.startswith("mcp_servers.a8s={")
+        assert '"mcp", "serve"' in override
+        assert f'cwd = "{cwd}"' in override
+        assert f'TELL_OUTBOX_DIR = "{env["TELL_OUTBOX_DIR"]}"' in override
+
+    def test_codex_ollama_splices_after_the_launcher_separator(self, tmp_path):
+        rig = _mcp_rig(tmp_path, "codex-ollama", model="qwen3.6")
+        env, cwd = self._turn(tmp_path)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        assert argv[argv.index("--") + 1] == "-c"
+
+    def test_copilot_gets_an_additional_config(self, tmp_path):
+        rig = _mcp_rig(tmp_path, "copilot")
+        env, cwd = self._turn(tmp_path)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+
+        assert argv[1] == "--additional-mcp-config"
+        assert json.loads(argv[2])["mcpServers"]["a8s"]["command"]
+
+    def test_copilot_ollama_splices_after_the_launcher_separator(self, tmp_path):
+        rig = _mcp_rig(tmp_path, "copilot-ollama", model="qwen3.6")
+        env, cwd = self._turn(tmp_path)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        assert argv[argv.index("--") + 1] == "--additional-mcp-config"
+
+    def test_opencode_rides_a_config_file_never_config_content(self, tmp_path):
+        rig = _mcp_rig(tmp_path, "opencode")
+        env, cwd = self._turn(tmp_path)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+
+        assert argv == rig.argv("PROMPT")
+        assert "OPENCODE_CONFIG_CONTENT" not in env
+        config = Path(env["OPENCODE_CONFIG"])
+        assert config.parent == Path(env["TELL_OUTBOX_DIR"]).parent
+        assert cwd not in config.parents
+        server = json.loads(config.read_text(encoding="utf-8"))["mcp"]["a8s"]
+        assert server["type"] == "local"
+        assert server["enabled"] is True
+        assert server["command"][-2:] == ["mcp", "serve"]
+        assert server["environment"]["TELL_OUTBOX_DIR"] == env["TELL_OUTBOX_DIR"]
+
+    def test_opencode_ollama_uses_the_same_file_idiom(self, tmp_path):
+        rig = _mcp_rig(tmp_path, "opencode-ollama", model="qwen3.6")
+        env, cwd = self._turn(tmp_path)
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        assert argv == rig.argv("PROMPT")
+        assert Path(env["OPENCODE_CONFIG"]).is_file()
+        assert "OPENCODE_CONFIG_CONTENT" not in env
+
+    def test_cursor_drops_a_file_and_keeps_other_servers(self, tmp_path):
+        rig = _mcp_rig(tmp_path, "cursor")
+        env, cwd = self._turn(tmp_path)
+        existing = cwd / ".cursor" / "mcp.json"
+        existing.parent.mkdir()
+        existing.write_text(
+            json.dumps({"mcpServers": {"theirs": {"command": "x"}}}), encoding="utf-8"
+        )
+
+        argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        assert argv == rig.argv("PROMPT")
+        servers = json.loads(existing.read_text(encoding="utf-8"))["mcpServers"]
+        assert set(servers) == {"theirs", "a8s"}
+        assert servers["a8s"]["env"]["TELL_OUTBOX_DIR"] == env["TELL_OUTBOX_DIR"]
+
+    def test_cursor_write_is_idempotent(self, tmp_path):
+        rig = _mcp_rig(tmp_path, "cursor")
+        env, cwd = self._turn(tmp_path)
+        apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        path = cwd / ".cursor" / "mcp.json"
+        stamp = path.stat().st_mtime_ns
+        apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        assert path.stat().st_mtime_ns == stamp
+
+    def test_a8s_mcp_log_is_pinned_when_set(self, tmp_path):
+        rig = _mcp_rig(tmp_path, "opencode")
+        env, cwd = self._turn(tmp_path)
+        env["A8S_MCP_LOG"] = str(tmp_path / "calls.jsonl")
+        apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
+        config = json.loads(Path(env["OPENCODE_CONFIG"]).read_text(encoding="utf-8"))
+        assert config["mcp"]["a8s"]["environment"]["A8S_MCP_LOG"] == env["A8S_MCP_LOG"]
