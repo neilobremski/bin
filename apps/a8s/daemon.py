@@ -879,7 +879,8 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
         issue #68): release just the requested agent and keep serving the rest
       - reload registry (so newly-added agents become routable recipients)
       - drop any agent whose pid file no longer points at us (defense)
-      - route each handled agent's outbox; drain each handled agent's inbox
+      - route each handled agent's outbox; deliver every file proxy's inbox;
+        then wake one non-proxy agent if the wake slot is free
 
     On 1st signal: detach all currently-handled agents (graceful — finish the
     in-flight wake first). On 2nd signal: SIGTERM-then-SIGKILL the wake
@@ -997,34 +998,43 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                                 clear_inbox_waiting_since(p.name)
                                 break
                             _drain_one(p, msg)
-                elif not _wake_in_flight():
+                else:
+                    defined: list[tuple[Participant, dict]] = []
                     for p in handled:
-                        if _wake_in_flight():
-                            break
                         try:
-                            definition = load_definition(p.name)
+                            defined.append((p, load_definition(p.name)))
                         except (FileNotFoundError, RuntimeError) as e:
                             out_agent(p.name, f"[{p.name}] {e}")
-                            continue
-                        while not _STOP_EVENT.is_set():
+                    # A file proxy's delivery is a file move that spawns
+                    # nothing, so it has no reason to queue behind the single
+                    # wake slot (issue #163). Gating it froze proxy inboxes —
+                    # and `tells`, which watches them — for as long as some
+                    # other handled agent's turn ran, up to max_wake_seconds.
+                    for p, definition in defined:
+                        if is_file_proxy(definition):
+                            _dispatch_agent(p, definition, async_wake=False)
+                    if not _wake_in_flight():
+                        for p, definition in defined:
                             if _wake_in_flight():
                                 break
-                            started = _dispatch_agent(
-                                p, definition, async_wake=async_wake
-                            )
-                            if started:
-                                break
-                            if async_wake:
-                                break
-                            if not peek_inbox_messages(p, 1):
-                                break
-                            if (
-                                not is_file_proxy(definition)
-                                and not _pause_ready_for_wake(
-                                    p.name, pause_seconds(definition)
+                            if is_file_proxy(definition):
+                                continue
+                            while not _STOP_EVENT.is_set():
+                                if _wake_in_flight():
+                                    break
+                                started = _dispatch_agent(
+                                    p, definition, async_wake=async_wake
                                 )
-                            ):
-                                break
+                                if started:
+                                    break
+                                if async_wake:
+                                    break
+                                if not peek_inbox_messages(p, 1):
+                                    break
+                                if not _pause_ready_for_wake(
+                                    p.name, pause_seconds(definition)
+                                ):
+                                    break
                 if (
                     not _STOP_EVENT.is_set()
                     and drain_seconds == 0

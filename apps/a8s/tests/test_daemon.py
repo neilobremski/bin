@@ -1079,3 +1079,105 @@ class TestAsyncAttachedLoop:
         log = _read_log("A")
         assert "max wake time" in log
         assert "0.25" in log
+
+
+class TestSharedHandlerStarvation:
+    """Issue #163 — one agent's in-flight wake must not freeze delivery to the
+    other agents a shared handler serves."""
+
+    def _queue(self, name: str, content: str) -> str:
+        from ulid import new as new_ulid
+
+        msg_id = new_ulid()
+        (inbox_dir(name) / f"{msg_id}.json").write_text(
+            json.dumps({
+                "id": msg_id,
+                "date": "2026-04-29T12:00:00Z",
+                "from": "Y",
+                "to": name,
+                "content": content,
+                "files": [],
+            })
+        )
+        return msg_id
+
+    def _setup(self, tmp_path, fixtures_dir, sibling_def: Path) -> Path:
+        for sub in ("a", "b"):
+            (tmp_path / sub).mkdir()
+        save_registry({
+            "A": {
+                "root": str(tmp_path / "a"),
+                "definition": str(fixtures_dir / "mock-slow.json"),
+            },
+            "B": {
+                "root": str(tmp_path / "b"),
+                "definition": str(sibling_def),
+            },
+        })
+        ensure_mailboxes(Participant("A", tmp_path / "a"))
+        ensure_mailboxes(Participant("B", tmp_path / "b"))
+        self._queue("A", "slow-wake")
+        return tmp_path / "b" / ".inbox"
+
+    def test_file_proxy_delivery_runs_during_in_flight_wake(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        import daemon as daemon_mod
+
+        monkeypatch.setenv("MOCK_SLEEP", "3")
+        defp = tmp_path / "proxy.json"
+        defp.write_text(json.dumps({"proxy": "file", "idle": {"timeout": 30}}))
+        proxy_inbox = self._setup(tmp_path, fixtures_dir, defp)
+
+        in_flight_at_delivery: list[bool] = []
+        sent = False
+        wait_calls = 0
+
+        def stop_when_delivered(self, timeout=None):
+            nonlocal sent, wait_calls
+            wait_calls += 1
+            if not sent:
+                if daemon_mod._wake_in_flight():
+                    _write_outbox("A", tmp_path / "a", "B", "mid-wake", [])
+                    sent = True
+            elif not in_flight_at_delivery and list(proxy_inbox.glob("*.json")):
+                in_flight_at_delivery.append(daemon_mod._wake_in_flight())
+                daemon_mod._STOP_EVENT.set()
+            if wait_calls >= 500:
+                daemon_mod._STOP_EVENT.set()
+            return True
+
+        monkeypatch.setattr(threading.Event, "wait", stop_when_delivered)
+        attached_loop(["A", "B"], 0.05, single_pass=False)
+
+        assert "exec:" in _read_log("A")
+        assert in_flight_at_delivery == [True]
+        bodies = [json.loads(f.read_text())["content"] for f in proxy_inbox.glob("*.json")]
+        assert bodies == ["mid-wake"]
+
+    def test_sibling_wake_still_waits_for_the_single_wake_slot(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        import daemon as daemon_mod
+
+        monkeypatch.setenv("MOCK_SLEEP", "3")
+        self._setup(tmp_path, fixtures_dir, fixtures_dir / "mock.json")
+        self._queue("B", "for-sibling")
+
+        saw_in_flight = False
+        wait_calls = 0
+
+        def stop_once_wake_started(self, timeout=None):
+            nonlocal saw_in_flight, wait_calls
+            wait_calls += 1
+            if daemon_mod._wake_in_flight():
+                saw_in_flight = True
+            if (saw_in_flight and wait_calls >= 5) or wait_calls >= 60:
+                daemon_mod._STOP_EVENT.set()
+            return True
+
+        monkeypatch.setattr(threading.Event, "wait", stop_once_wake_started)
+        attached_loop(["A", "B"], 0.05, single_pass=False)
+
+        assert saw_in_flight
+        assert "exec:" not in _read_log("B")
