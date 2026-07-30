@@ -7,8 +7,9 @@ already paid and thrown away. r4t exists to end both — the plan you pay for
 stays earning, and no team can ever blow it. The spend underneath both is
 attention: every sharp edge a model mishandles pulls you out of the vision
 seat and into the trenches, so the rule here is that the harness holds the
-edges — defaults do the right thing, prompts remind, skills instruct — and
-neither you nor the model is trusted to be careful.
+edges — defaults do the right thing, prompts remind, tools put the safe
+path in the model's hand — and neither you nor the model is trusted to be
+careful.
 
 AI CLI agents — Claude Code, Codex, OpenCode, Copilot, Antigravity, local
 Ollama models — already message each other over [a8s](../a8s/README.md).
@@ -21,56 +22,47 @@ waits on a human. Even a roster of ONE pays off: a single agent behind r4t
 gets spend budgets, one-command rig swaps, quota-aware retries, and a
 durable queue that never drops a message.
 
-## Quick start
+## Quick start — a small ark
 
-Prove the pipeline first — no LLM, no API keys, all state in a throwaway dir:
-
-```bash
-r4t sandbox --fake
-```
-
-Three scripted agents build and test a tiny game; a report lands on stdout
-(`Program runs and exits 0 | PASS`, dead letters 0, ...).
-
-Now a real team on your repo:
+Five minutes to a governed team you can speak to. In your repo:
 
 ```bash
 cd ~/your-repo
-r4t init          # writes ROSTER.md (owner + Lead + Dev) and rigs.json
+r4t init          # writes ROSTER.md (Owner + Lead + Dev) and rigs.json
 r4t roster check  # -> ".../ROSTER.md: OK (3 member(s), leader Lead)"
-r4t rig ls        # each rig's model, limits, and roster resolution
 ```
 
 The roster names members and symbolic rigs; `~/.config/r4t/rigs.json` maps
-rigs to CLIs (default: OpenCode). Swap any rig in one command —
-`r4t rig swap leader claude` — see `r4t rig presets` for the full list.
-
-Register the team on a8s (`r4t init` prints these with your paths):
+rigs to real CLIs (default: OpenCode; `r4t rig presets` lists the rest, and
+`r4t rig swap leader claude` moves a member in one command). Register the
+team on a8s — `r4t init` prints these with your paths — and give the sends
+a tool small models never fumble:
 
 ```bash
 a8s add your-repo-node ~/your-repo r4t
 a8s namespace your-repo your-repo-node
 a8s start your-repo-node
+r4t rig set leader mcp on
 ```
 
-Give yourself an address and say hello:
+You already have a seat — the roster's `Owner` is you. Speak from it:
 
 ```bash
-a8s add me ~/a8s-me && a8s start me
-export TELL_OUTBOX_DIR=~/a8s-me/.outbox
-tell your-repo "Introduce yourselves."
+r4t seat send --node your-repo "In one sentence: who are you and what is your job on this team?"
+r4t seat inbox --node your-repo
 ```
 
-Watch it work (from inside the repo):
-
-```bash
-r4t status   # health verdicts, member budgets, queues, open threads
-r4t logs -f  # every governance decision and turn as it happens
+```
+── from your-repo:lead
+I'm Lead, the team coordinator who delegates implementation work and
+synthesizes answers for whoever asks.
 ```
 
-The team's reply arrives in `a8s convo me`. Full walkthrough, including
-what fails closed when the roster and rig config disagree:
-[docs/tutorial.md](docs/tutorial.md).
+That answer crossed the whole machine: queued, budgeted, dispatched to a
+real CLI, and parked at your seat — `r4t status` shows the budget it spent,
+`r4t logs -f` shows every decision as it happens. Raise the rest of the ark
+from here with [The Ark Raising](../../guides/README.md); the step-by-step
+with fail-closed rules is [docs/tutorial.md](docs/tutorial.md).
 
 ## How it works
 
