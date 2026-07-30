@@ -150,7 +150,8 @@ other r4t preset, agy is trusted with normal filesystem permissions.
 Rig settings never need hand-edited JSON. The configurable keys are
 `concurrency`, `rig_budget_max`, `rig_budget_earn_per_hour`, the context knobs
 `history_max_bytes` / `history_body_max` / `prompt_body_max`, `model`, `mcp`,
-and the echo keys `echo` / `echo_max_chars`
+the echo keys `echo` / `echo_max_chars`, and `env.<NAME>` for a
+[harness env knob](#harness-env-knobs-env)
 (each detailed in the [knob table](#governance-knobs) below).
 
 ```bash
@@ -170,7 +171,8 @@ becomes an explicit value. Piped stdin works (one answer per line, EOF keeps
 the rest), so an agent can drive it non-interactively.
 
 `get` annotates each value's source: `explicit`, `from preset <name>` (a
-context knob inheriting the preset's text tier), or `built-in default`. With a
+context knob inheriting the preset's text tier), `built-in default`, or
+`not set` (an `env.<NAME>` the rig does not carry). With a
 key it prints the bare value on stdout and the source on stderr, so
 `conc=$(r4t rig get specialist concurrency)` captures cleanly.
 
@@ -223,6 +225,41 @@ appears. Under an org boundary (`run_as` / `container`) r4t carries each
 harness's idiom across and fails the turn closed when it cannot — see
 [isolation](isolation.md#the-a8s_tell-tool-behind-the-boundary).
 
+## Harness env knobs (`env`)
+
+A rig may carry static `NAME=value` pairs handed to its harness on every turn.
+**Use it frugally.** Every entry earns its place with a documented reason: this
+is the one rig key whose effect r4t cannot see, so a dumping ground here is a
+team whose behaviour nobody can explain from the config.
+
+```bash
+r4t rig set brain env.ENABLE_PROMPT_CACHING_1H 1  # the 1-hour prompt-cache tier
+r4t rig get brain env.ENABLE_PROMPT_CACHING_1H    # bare value, source on stderr
+r4t rig unset brain env.ENABLE_PROMPT_CACHING_1H
+```
+
+The proven case is Claude Code's prompt-cache TTL. On API-key auth the CLI
+writes the 5-minute cache tier, so a member woken ten minutes after its last
+turn re-reads its whole context at full price; `ENABLE_PROMPT_CACHING_1H=1`
+opts into the 1-hour tier, which is the highest-leverage cost knob there is for
+scheduled wakes minutes to tens of minutes apart. On subscription auth the
+1-hour tier already applies and the variable is a no-op, so it is safe on any
+claude rig.
+
+Values are literal strings — no `{prompt}`-style substitution, nothing
+expanded, no shell. Names are validated where they are written: r4t's own turn
+variables (`TELL_OUTBOX_DIR`, `PWD`, and the `R4T_*` family, which carry the
+member's staging outbox, its pinned workdir, and node / member / isolation /
+continue state) are refused by `rig set` and fail a hand-edited rig closed at
+`rig get` / `roster check` / the first turn. The turn owns those, and a rig that
+could quietly redirect them would steer dispatch from a config file. r4t's
+per-turn `mcp` injection likewise wins any variable it sets (`OPENCODE_CONFIG`).
+
+Under an org boundary the map is named to the wrapper the same way the `mcp`
+idiom's env is — re-exported past sudoers `env_reset`, passed as `docker run -e`
+— so an isolated org's rig env still arrives (see
+[isolation](isolation.md)).
+
 ## The economics: budgets, not cuts
 
 A member runs while its own spend bucket, the shared cell bucket, and (if the
@@ -262,6 +299,7 @@ invoke lines is a fully governed team. Rationale and prior art per layer:
 | `history_max_bytes` / `history_body_max` / `prompt_body_max` (rig) | by preset tier — big (agy/codex/claude) 50k/12k/24k · moderate (cursor/opencode/copilot) 25k/6k/12k · small (ollama variants, or no preset) 8192/2000/4000 | Context sizing on the rig: rolling-history budget, per-entry history clip, and per-message prompt clip. `rig add`/`swap` record the preset; explicit values override the tier | A weak rig drowning in context, or a strong one starved of it |
 | `echo` / `echo_max_chars` (rig) | false / 1500 | Stdout-only members (see [Echo rigs](#echo-rigs)): no messaging scaffolding in the prompt, cleaned stdout staged as the one reply, bodies past the cap truncated with the full text attached | A model that misuses `tell`, looping "I did it" messages instead of answering |
 | `mcp` (rig) | by preset — **on** for claude/codex/copilot/opencode and their `ollama launch` variants; **off** for cursor (its idiom writes `.cursor/mcp.json` into your repo) and for agy / bare ollama (no per-turn idiom) | Members send with the `a8s_tell` tool instead of the `tell` shell command (see [The `a8s_tell` tool](#the-a8s_tell-tool-mcp)): `a8s mcp serve` is injected per turn through the harness's own idiom and the prompt names the tool. `mcp off` is the escape hatch anywhere; `mcp on` errors on agy and bare ollama | Shell quoting mangling a body, and a member that describes a message instead of sending one |
+| `env` (rig) | empty | Static `NAME=value` pairs handed to the harness every turn — harness knobs r4t has no flag for (see [Harness env knobs](#harness-env-knobs-env)); set one at a time with `r4t rig set <rig> env.<NAME> <value>`. Frugal by doctrine; r4t's own turn variables are refused | Money burned on a harness default you cannot reach any other way — the first case is `ENABLE_PROMPT_CACHING_1H=1` on claude, the 1-hour prompt-cache tier for wakes minutes apart |
 | `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed | Hung harnesses |
 | `concurrency` (rig) | 1 | Live turns within one rig | Rig-wide pile-ups |
 | `cell_budget_max` / `cell_budget_earn_per_hour` | 16 / 8 | Shared cell spend bucket; a turn also costs 1 cell unit. When empty, everyone rests | Whole-cell money burn |

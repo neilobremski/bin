@@ -434,6 +434,7 @@ class Rig:
     echo: bool = False
     echo_max_chars: int = DEFAULT_ECHO_MAX_CHARS
     mcp: bool | None = None
+    env: dict[str, str] = field(default_factory=dict)
     error: str | None = None
 
     @property
@@ -1176,6 +1177,44 @@ def remove_rig(path: Path, rig_name: str) -> str:
     return rig_key
 
 
+# --- the `env` map: harness knobs that ride the turn environment -------------
+#
+# A rig may carry static NAME=value pairs handed to its harness on every turn —
+# the harness CLIs expose real knobs there (the first case is claude's
+# ENABLE_PROMPT_CACHING_1H). Doctrine is FRUGAL: an entry earns its place with a
+# documented reason, because this is the one rig key whose effect r4t cannot see.
+#
+# The turn environment is r4t's own channel: TELL_OUTBOX_DIR points at the
+# member's staging outbox, PWD is pinned to the member's workdir, and the R4T_*
+# family carries node, member, isolation and continue state. A rig naming one of
+# those would steer dispatch from a config file, so the name is refused where it
+# is written rather than silently losing to the turn.
+TURN_OWNED_ENV = ("TELL_OUTBOX_DIR", "PWD")
+TURN_OWNED_ENV_PREFIX = "R4T_"
+ENV_SETTING_PREFIX = "env."
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _env_name_problem(name: str) -> str | None:
+    """Why `name` cannot be a rig env entry, or None if it can."""
+    if not _ENV_NAME_RE.match(name):
+        return f"{name!r} is not a usable environment variable name"
+    if name in TURN_OWNED_ENV or name.startswith(TURN_OWNED_ENV_PREFIX):
+        return (
+            f"{name} belongs to the turn, not the rig — r4t sets it per member "
+            f"and a rig may not override it"
+        )
+    return None
+
+
+def _split_env_key(key: str) -> str | None:
+    """The variable name in an `env.<NAME>` setting key, else None. Only the
+    prefix case-folds; environment variable names are case-sensitive."""
+    if key[: len(ENV_SETTING_PREFIX)].lower() != ENV_SETTING_PREFIX:
+        return None
+    return key[len(ENV_SETTING_PREFIX):].strip()
+
+
 CONFIGURABLE_INT_KEYS = (
     "concurrency",
     "history_max_bytes",
@@ -1227,11 +1266,42 @@ def resolve_config_path(raw: str | None) -> Path:
 
 
 def _unknown_setting_error(key: str) -> RigError:
-    valid = ", ".join(CONFIGURABLE_RIG_KEYS)
+    valid = ", ".join(CONFIGURABLE_RIG_KEYS) + ", env.<NAME>"
     return RigError(
         f"unknown rig setting {key!r} "
         f"(try: r4t rig set <rig> <key> <value> with one of: {valid})"
     )
+
+
+def _normalize_setting_key(key: str) -> tuple[str, str | None]:
+    """(canonical setting key, env variable name or None). Raises for a key no
+    rig has."""
+    key = key.strip()
+    name = _split_env_key(key)
+    if name is not None:
+        problem = _env_name_problem(name)
+        if problem:
+            raise RigError(
+                f"{problem} "
+                f"(try: r4t rig set <rig> env.ENABLE_PROMPT_CACHING_1H 1)"
+            )
+        return f"{ENV_SETTING_PREFIX}{name}", name
+    key = key.lower()
+    if key not in CONFIGURABLE_RIG_KEYS:
+        raise _unknown_setting_error(key)
+    return key, None
+
+
+def setting_label(key: str) -> str:
+    """The canonical spelling of a setting key, for CLI messages. Scalar keys
+    case-fold; an `env.<NAME>` key keeps NAME as written."""
+    return _normalize_setting_key(key)[0]
+
+
+def _entry_env(entry: dict) -> dict:
+    """The rig entry's live env map, or an empty stand-in when it has none."""
+    raw = entry.get("env")
+    return raw if isinstance(raw, dict) else {}
 
 
 def _rig_entry(path: Path, rig_name: str) -> tuple[str, dict, dict]:
@@ -1294,16 +1364,26 @@ def _resolve_setting(entry: dict, key: str) -> RigSetting:
 
 
 def rig_settings(path: Path, rig_name: str) -> list[RigSetting]:
-    """Every configurable setting for a rig, effective value + source."""
+    """Every configurable setting for a rig, effective value + source. The
+    `env` map has no defaults to inherit, so only the pairs the rig carries
+    show up."""
     _, entry, _ = _rig_entry(path, rig_name)
-    return [_resolve_setting(entry, key) for key in CONFIGURABLE_RIG_KEYS]
+    rows = [_resolve_setting(entry, key) for key in CONFIGURABLE_RIG_KEYS]
+    rows += [
+        RigSetting(f"{ENV_SETTING_PREFIX}{name}", str(value), "explicit", True)
+        for name, value in sorted(_entry_env(entry).items())
+    ]
+    return rows
 
 
 def rig_setting(path: Path, rig_name: str, key: str) -> RigSetting:
-    key = key.strip().lower()
-    if key not in CONFIGURABLE_RIG_KEYS:
-        raise _unknown_setting_error(key)
+    key, env_name = _normalize_setting_key(key)
     _, entry, _ = _rig_entry(path, rig_name)
+    if env_name is not None:
+        env_map = _entry_env(entry)
+        if env_name in env_map:
+            return RigSetting(key, str(env_map[env_name]), "explicit", True)
+        return RigSetting(key, None, "not set", False)
     return _resolve_setting(entry, key)
 
 
@@ -1360,10 +1440,15 @@ def set_rig_model(path: Path, rig_name: str, model: str) -> None:
 
 def set_rig_value(path: Path, rig_name: str, key: str, value: object) -> RigSetting:
     """Write one explicit rig setting. Numeric keys validate as numbers; `model`
-    re-resolves the invoke through the preset. Returns the resulting setting."""
-    key = key.strip().lower()
-    if key not in CONFIGURABLE_RIG_KEYS:
-        raise _unknown_setting_error(key)
+    re-resolves the invoke through the preset; `env.<NAME>` writes one static
+    harness variable. Returns the resulting setting."""
+    key, env_name = _normalize_setting_key(key)
+    if env_name is not None:
+        text = str(value)
+        _, entry, payload = _rig_entry(path, rig_name)
+        entry["env"] = {**_entry_env(entry), env_name: text}
+        atomic_write_json(path, payload)
+        return RigSetting(key, text, "explicit", True)
     rig_key = _validate_rig_name(rig_name)
     if key == "model":
         model = str(value).strip()
@@ -1395,10 +1480,19 @@ def unset_rig_value(path: Path, rig_name: str, key: str) -> bool:
     default. Returns True if something was removed, False if it was not
     explicitly set (a friendly no-op). `model` re-resolves the invoke to the
     preset's base."""
-    key = key.strip().lower()
-    if key not in CONFIGURABLE_RIG_KEYS:
-        raise _unknown_setting_error(key)
+    key, env_name = _normalize_setting_key(key)
     rig_key, entry, payload = _rig_entry(path, rig_name)
+    if env_name is not None:
+        env_map = _entry_env(entry)
+        if env_name not in env_map:
+            return False
+        del env_map[env_name]
+        # An empty map is no map: nothing is inherited, so the key would only
+        # sit in rigs.json saying nothing.
+        if not env_map:
+            del entry["env"]
+        atomic_write_json(path, payload)
+        return True
     if key == "model":
         preset = _entry_preset(entry)
         if preset is None:
@@ -1528,6 +1622,23 @@ def _parse_rig(name: str, raw: object) -> Rig:
             )
         else:
             rig.mcp = raw_mcp
+
+    # A rig env entry the turn owns, or a value that is not a plain string,
+    # fails the rig closed here — the operator hears about it at `rig get` /
+    # `roster check` / the first turn rather than losing the entry silently.
+    raw_env = raw.get("env")
+    if raw_env is not None:
+        if not isinstance(raw_env, dict):
+            problems.append('env: expected an object of "NAME": "value" pairs')
+        else:
+            for name, value in raw_env.items():
+                problem = _env_name_problem(str(name))
+                if problem:
+                    problems.append(f"env: {problem}")
+                elif not isinstance(value, str):
+                    problems.append(f"env.{name}: expected a string, got {value!r}")
+                else:
+                    rig.env[str(name)] = value
 
     # The rig spend bucket is opt-in: absent leaves both None and the rig gate
     # off. If present, both knobs are required — a real subscription always
