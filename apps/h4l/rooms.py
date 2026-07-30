@@ -152,6 +152,24 @@ class RoomStore:
         self._atomic_write(path, payload)
         return payload
 
+    def get_message(self, slug: str, msg_id: str) -> dict:
+        slug = normalize_slug(slug)
+        key = (msg_id or "").strip()
+        if not key:
+            raise KeyError(msg_id)
+        msg_dir = self.messages_dir(slug)
+        for candidate in (key, key.upper(), key.lower()):
+            path = msg_dir / f"{candidate}.json"
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict):
+                return data
+        raise KeyError(msg_id)
+
     def list_messages(self, slug: str) -> list[dict]:
         slug = normalize_slug(slug)
         msg_dir = self.messages_dir(slug)

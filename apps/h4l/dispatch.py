@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from attachments import split_attached_files
-from format import format_room_view, parse_view_args
+from format import format_message_view, format_room_view, parse_view_args
 from notify import TellFn, ack, error, notify_agent, notify_members, usage_help
 from rooms import RoomStore, normalize_agent, normalize_slug
 
@@ -254,7 +254,7 @@ def _do_post(
     store.save_meta(slug, meta)
 
     paths = list(attachments or [])
-    store.append_message(
+    posted = store.append_message(
         slug,
         sender=sender,
         content=content,
@@ -274,6 +274,7 @@ def _do_post(
         body=content,
         skip={sender},
         attachments=paths,
+        msg_id=posted.get("id"),
     )
     return 0
 
@@ -488,34 +489,54 @@ def _cmd_view(
     tell_fn: TellFn,
 ) -> int:
     try:
-        slug, limit, start_n = parse_view_args(args)
+        view = parse_view_args(args)
     except ValueError as exc:
         error(
             tell_fn,
             sender,
             node,
             str(exc),
-            hint="/view <room> [[start] limit] [--start N] [--limit N]",
+            hint='/view <room> [<id> | [start] limit] [--id ID] [--start N] [--limit N]',
         )
         return 1
     try:
-        store.load_meta(slug)
+        store.load_meta(view.slug)
     except KeyError:
         error(
             tell_fn,
             sender,
             node,
-            f"room not found: {slug}",
+            f"room not found: {view.slug}",
             hint="/list",
         )
         return 1
-    messages = store.list_messages(slug)
+    if view.msg_id is not None:
+        try:
+            entry = store.get_message(view.slug, view.msg_id)
+        except KeyError:
+            error(
+                tell_fn,
+                sender,
+                node,
+                f"message not found: {view.msg_id}",
+                hint=f'/view {view.slug}',
+            )
+            return 1
+        text = format_message_view(
+            view.slug,
+            entry,
+            sender,
+            node=node,
+        )
+        ack(tell_fn, sender, text)
+        return 0
+    messages = store.list_messages(view.slug)
     text = format_room_view(
-        slug,
+        view.slug,
         messages,
         sender,
-        limit=limit,
-        start_n=start_n,
+        limit=view.limit,
+        start_n=view.start_n,
         node=node,
     )
     ack(tell_fn, sender, text)
