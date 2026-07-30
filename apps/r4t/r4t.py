@@ -2019,9 +2019,10 @@ def build_parser() -> argparse.ArgumentParser:
     sandbox_p.add_argument(
         "--break",
         dest="break_member",
-        metavar="MEMBER",
-        help="Pin MEMBER (e.g. dev) to an always-failing rig to exercise "
-        "the failure breaker; checks expect the trip and a synthesized answer.",
+        metavar="MEMBER[:SHAPE]",
+        help="Break one member on purpose and check the recovery path. SHAPE is "
+        "exit (default, always fails), hang (times out), silent (answers on "
+        "stdout, never tells) or mute (one turn stages nothing).",
     )
     sandbox_p.add_argument("--timeout", type=float, default=1800, metavar="SECS")
     sandbox_p.set_defaults(func=cmd_sandbox)
