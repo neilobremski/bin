@@ -115,7 +115,9 @@ apply on top.
 
 The router (`mailbox.py:_process_pending`) force-overwrites `from` based on
 which agent owns the enclosing root — the filesystem is the unforgeable
-identity.
+identity. A namespace bound to that agent changes only how the identity
+presents: mail leaving the namespace goes out as the bare prefix, mail inside
+it keeps `<prefix>:<sub-sender>`.
 
 a8s plants no skill files in an agent's repo: `tell` reads `TELL_OUTBOX_DIR`
 from the environment a8s injects on wake. Top-level doc skills for the user's

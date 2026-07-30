@@ -52,7 +52,7 @@ On disk alongside the JSON:
     avatar.jpg
 ```
 
-`from` is omitted when registry is unreachable; the router **force-overwrites** `from` based on which agent owns the outbox directory.
+`from` is omitted when registry is unreachable; the router **force-overwrites** `from` based on which agent owns the outbox directory. When a namespace is bound to that agent, mail leaving the namespace presents as the bare prefix (`acme`) and mail inside it keeps `acme:<sub-sender>`.
 
 4. **Ingest** — move `<msg_id>.json` and `<outbox>/<msg_id>/` together into `~/.a8s/agents/<SENDER>/pending/`.
 5. **Route** — copy pending bundle bytes into each recipient's `<files_dir>/<msg_id>/` (default `.files`). Inbox JSON keeps filename-only `files`. Wake `$MESSAGE` appends absolute `ATTACHED FILE:` lines.

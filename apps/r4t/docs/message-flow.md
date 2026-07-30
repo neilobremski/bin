@@ -83,3 +83,12 @@ to know whether a name is one agent, a human, a device, or a whole roster.
 Symmetrically, external ingress is untrusted: a sub-address can't pick a member
 and nothing is parsed out of the body — everything from outside enters at the
 top lead on a fresh thread. One ingress point means one thing to reason about.
+
+The sender the outside sees is the bare namespace. Dispatch releases with
+`from: <node>:<member>`, and the a8s router — which owns `from`, because the
+outbox is agent-writable — presents that as the bound prefix on the way out:
+mail from the org arrives as `acme`, never `acme:lead` or `acme-node`. So the
+org speaks with one mouth (only the topmost leader originates external mail)
+under one name, and a reply to `acme` re-enters at the top lead. Inside the
+walls attribution stays member-level; the collapse is presentation at the wall,
+not a loss of who said what.

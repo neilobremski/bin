@@ -172,7 +172,10 @@ def _agent_messages(a8s_home: Path, agent: str) -> list[dict]:
 def _final_answer(a8s_home: Path) -> dict | None:
     for msg in _agent_messages(a8s_home, "human"):
         sender = str(msg.get("from", ""))
-        if sender != NODE and not sender.startswith(f"{TEAM}:"):
+        # The human seat is outside the walls, so the router presents the org's
+        # answer as the bare prefix; NODE and `TEAM:member` are the shapes a
+        # message takes before it crosses.
+        if sender not in (TEAM, NODE) and not sender.startswith(f"{TEAM}:"):
             continue
         if str(msg.get("content", "")).strip():
             return msg
