@@ -159,7 +159,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     ai_p = sub.add_parser("ai", help="AI generation and research")
     ai_sub = ai_p.add_subparsers(dest="ai_kind", required=True)
-    ai_research = ai_sub.add_parser("research", help="Deep research via gpt-5.6-sol")
+    ai_research = ai_sub.add_parser(
+        "research",
+        help="Deep research via gpt-5.6-sol",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "OpenAI deep research (gpt-5.6-sol + web_search_preview). "
+            "Default is a single background job. --fanout N decomposes the "
+            "prompt into N complementary sub-questions, runs them in parallel, "
+            "and writes a merged brief under .files/research/fanout-<hash>/."
+        ),
+        epilog=(
+            "examples:\n"
+            "  n0b ai research what is X\n"
+            "  n0b ai research --fanout 3 what is X\n"
+            "\n"
+            "Put --fanout before the prompt (prompt is argparse REMAINDER). "
+            "Fanout costs roughly N times a single run — see apps/n0b/docs/research.md."
+        ),
+    )
+    ai_research.add_argument(
+        "--fanout",
+        type=int,
+        metavar="N",
+        help="Decompose into N complementary research jobs and merge (prototype)",
+    )
     ai_research.add_argument("prompt", nargs=argparse.REMAINDER)
     ai_speak = ai_sub.add_parser(
         "speak",
@@ -389,7 +413,7 @@ def dispatch(args: argparse.Namespace) -> int:
             return cmd_sub(rest)
     if group == "ai":
         if args.ai_kind == "research":
-            return cmd_research(args.prompt)
+            return cmd_research(args.prompt, fanout=args.fanout)
         if args.ai_kind == "speak":
             return cmd_speak(
                 args.text,
