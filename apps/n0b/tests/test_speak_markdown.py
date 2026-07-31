@@ -33,9 +33,18 @@ def test_parse_inline_spans_styles_and_misaki():
         SpeakSpan("bold", "strong"),
         SpeakSpan(" and ", "plain"),
         SpeakSpan("code", "code"),
-        SpeakSpan(" plus ", "plain"),
-        SpeakSpan("[Pay-i](/pˈeɪ ˈaɪ/)", "plain"),
-        SpeakSpan(" link docs", "plain"),
+        SpeakSpan(" plus [Pay-i](/pˈeɪ ˈaɪ/) link docs", "plain"),
+    )
+
+
+def test_parse_inline_spans_keeps_snake_case_and_root_links():
+    spans = parse_inline_spans(
+        "Set API_KEY via snake_case and _italic_ then [install](/docs/install)"
+    )
+    assert spans == (
+        SpeakSpan("Set API_KEY via snake_case and ", "plain"),
+        SpeakSpan("italic", "strong"),
+        SpeakSpan(" then install", "plain"),
     )
 
 

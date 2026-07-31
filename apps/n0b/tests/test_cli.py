@@ -621,6 +621,11 @@ def test_speakable_keeps_phoneme_overrides():
     assert speakable(md) == "See [Pay-i](/pˈeɪ ˈaɪ/) and docs."
 
 
+def test_speakable_strips_root_relative_links():
+    md = "Open [install](/docs/install) next."
+    assert speakable(md) == "Open install next."
+
+
 def test_speakable_drops_fences_and_tables():
     md = "# Title\n\n| a | b |\n|---|---|\n\nHello\n\n```py\nx=1\n```\n"
     assert speakable(md) == " Title\n\n\nHello\n"

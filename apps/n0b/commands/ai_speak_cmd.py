@@ -59,10 +59,20 @@ if not chunks:
 sf.write(out_path, np.concatenate(chunks), sr)
 """
 
-_MD_URL_LINK_RE = re.compile(r"\[([^\]]+)\]\((?!/)[^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _MD_NOISE_RE = re.compile(r"[*_`#>|]+")
 _MISAKI_PHONEME_RE = re.compile(r"\[([^\]]+)\]\(/[^/]+/\)")
+_MISAKI_KEEP_RE = re.compile(r"\[[^\]]+\]\(/[^/]+/\)")
 _KOKORO_VOICE_RE = re.compile(r"^[abdefhpijzm][fm]_")
+
+
+def _strip_md_links_keep_misaki(text: str) -> str:
+    def repl(m: re.Match[str]) -> str:
+        if _MISAKI_KEEP_RE.fullmatch(m.group(0)):
+            return m.group(0)
+        return m.group(1)
+
+    return _MD_LINK_RE.sub(repl, text)
 
 
 def speakable(markdown: str) -> str:
@@ -75,7 +85,7 @@ def speakable(markdown: str) -> str:
             continue
         if fenced or s.startswith("|"):
             continue
-        line = _MD_URL_LINK_RE.sub(r"\1", line)
+        line = _strip_md_links_keep_misaki(line)
         line = _MD_NOISE_RE.sub("", line)
         out.append(line)
     return "\n".join(out)

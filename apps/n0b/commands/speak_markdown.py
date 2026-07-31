@@ -20,7 +20,7 @@ _MD_HINT_RE = re.compile(
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _LIST_RE = re.compile(r"^(\s{0,3})([-*+]|\d+\.)\s+(.*)$")
 _HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
-_URL_LINK_RE = re.compile(r"\[([^\]]+)\]\((?!/)[^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _MISAKI_RE = re.compile(r"\[[^\]]+\]\(/[^/]+/\)")
 
 
@@ -52,14 +52,31 @@ def looks_like_markdown(text: str) -> bool:
     return bool(_MD_HINT_RE.search(text))
 
 
+def _word_edge(text: str, i: int) -> bool:
+    return i <= 0 or i >= len(text) or not text[i].isalnum()
+
+
+def _strip_md_links(text: str) -> str:
+    def repl(m: re.Match[str]) -> str:
+        if _MISAKI_RE.fullmatch(m.group(0)):
+            return m.group(0)
+        return m.group(1)
+
+    return _MD_LINK_RE.sub(repl, text)
+
+
 def parse_inline_spans(text: str) -> tuple[SpeakSpan, ...]:
-    text = _URL_LINK_RE.sub(r"\1", text)
+    text = _strip_md_links(text)
     spans: list[SpeakSpan] = []
     i = 0
     n = len(text)
 
     def push(raw: str, style: Style) -> None:
-        if raw:
+        if not raw:
+            return
+        if spans and style == "plain" and spans[-1].style == "plain":
+            spans[-1] = SpeakSpan(spans[-1].text + raw, "plain")
+        else:
             spans.append(SpeakSpan(raw, style))
 
     while i < n:
@@ -74,9 +91,9 @@ def parse_inline_spans(text: str) -> tuple[SpeakSpan, ...]:
                 push(text[i + 2 : end], "strong")
                 i = end + 2
                 continue
-        if text.startswith("__", i):
+        if text.startswith("__", i) and _word_edge(text, i - 1):
             end = text.find("__", i + 2)
-            if end != -1:
+            if end != -1 and _word_edge(text, end + 2):
                 push(text[i + 2 : end], "strong")
                 i = end + 2
                 continue
@@ -86,10 +103,15 @@ def parse_inline_spans(text: str) -> tuple[SpeakSpan, ...]:
                 push(text[i + 1 : end], "code")
                 i = end + 1
                 continue
-        if text[i] in "*_":
-            marker = text[i]
-            end = text.find(marker, i + 1)
+        if text[i] == "*":
+            end = text.find("*", i + 1)
             if end != -1 and end > i + 1:
+                push(text[i + 1 : end], "strong")
+                i = end + 1
+                continue
+        if text[i] == "_" and _word_edge(text, i - 1):
+            end = text.find("_", i + 1)
+            if end != -1 and end > i + 1 and _word_edge(text, end + 1):
                 push(text[i + 1 : end], "strong")
                 i = end + 1
                 continue
