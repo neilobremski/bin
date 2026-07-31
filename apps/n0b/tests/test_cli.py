@@ -29,11 +29,19 @@ from commands.ai_speak_cmd import (
 )
 from commands.ai_transcribe_cmd import (
     apply_replacements,
+    calc_fps,
     cmd_transcribe,
+    format_timed_speech,
     read_replacements,
+    resolve_flavor,
     save_replacements,
     HINTS_FILE,
     REPLACEMENTS_FILE,
+)
+from commands.ai_ollama import (
+    OllamaError,
+    ensure_vision_model,
+    resolve_vision_model,
 )
 from commands.ai_audio_cmd import cmd_audio  # noqa: E402
 from commands.ai_video_cmd import cmd_video, parse_video_args  # noqa: E402
@@ -406,7 +414,7 @@ def test_transcribe_applies_replacements(tmp_path, capsys):
     ):
         run.return_value.returncode = 0
         run.return_value.stdout = "Jerry said hi.\n"
-        rc = cmd_transcribe(str(audio), [], "en", "base")
+        rc = cmd_transcribe(str(audio), [], "en", "base", flavor="plain")
     assert rc == 0
     out, err = capsys.readouterr()
     assert out == "Jerry (possible transcribe error, might be 'Gerry') said hi.\n"
@@ -425,7 +433,7 @@ def test_transcribe_invokes_whisper_venv(tmp_path):
     ):
         run.return_value.returncode = 0
         run.return_value.stdout = "hello\n"
-        rc = cmd_transcribe(str(audio), ["Pay-i"], "en", "base")
+        rc = cmd_transcribe(str(audio), ["Pay-i"], "en", "base", flavor="plain")
         assert rc == 0
         argv = run.call_args[0][0]
         assert argv[0] == str(fake_python)
@@ -438,7 +446,160 @@ def test_transcribe_help():
     assert proc.returncode == 0
     assert "--hint" in proc.stdout
     assert "--language" in proc.stdout
+    assert "--flavor" in proc.stdout
+    assert "--vision-model" in proc.stdout
 
+
+def test_resolve_flavor_overrides():
+    path = Path("/tmp/x")
+    assert resolve_flavor("plain", path) == "plain"
+    assert resolve_flavor("fancy", path) == "fancy"
+
+
+def test_resolve_flavor_auto_uses_video_detect(tmp_path):
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"x")
+    with patch("commands.ai_transcribe_cmd.has_video_stream", return_value=True):
+        assert resolve_flavor("auto", media) == "fancy"
+    with patch("commands.ai_transcribe_cmd.has_video_stream", return_value=False):
+        assert resolve_flavor("auto", media) == "plain"
+
+
+def test_format_timed_speech():
+    text = format_timed_speech(
+        {
+            "language": "en",
+            "text": "Hello world",
+            "segments": [
+                {"start": 0.0, "end": 1.25, "text": "Hello"},
+                {"start": 1.25, "end": 2.0, "text": "world"},
+            ],
+        }
+    )
+    assert "Language: en" in text
+    assert "Full Speech Transcript: Hello world" in text
+    assert "[Speech Transcript from 0.0 to 1.25 seconds]" in text
+    assert "Hello" in text
+
+
+def test_calc_fps_caps_and_spreads(tmp_path):
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"x")
+    with patch("commands.ai_transcribe_cmd.probe_duration_seconds", return_value=10.0):
+        assert calc_fps(media) == 1.0
+    with patch("commands.ai_transcribe_cmd.probe_duration_seconds", return_value=100.0):
+        assert calc_fps(media) == 0.5
+    with patch("commands.ai_transcribe_cmd.probe_duration_seconds", return_value=None):
+        assert calc_fps(media) == 1.0
+
+
+def test_transcribe_fancy_requires_video(tmp_path, capsys):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"RIFF")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    with (
+        patch("commands.ai_transcribe_cmd.ensure_whisper", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
+        patch("commands.ai_transcribe_cmd.has_video_stream", return_value=False),
+    ):
+        rc = cmd_transcribe(str(audio), [], None, "base", flavor="fancy")
+    assert rc == 2
+    assert "requires a video stream" in capsys.readouterr().err
+
+
+def test_transcribe_fancy_vision_model_lacks_vision(tmp_path, capsys):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"x")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    with (
+        patch("commands.ai_transcribe_cmd.ensure_whisper", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
+        patch("commands.ai_transcribe_cmd.has_video_stream", return_value=True),
+        patch(
+            "commands.ai_transcribe_cmd.ensure_vision_model",
+            side_effect=OllamaError(
+                "model 'qwen3:4b' has no vision support; try: ollama pull qwen3.6"
+            ),
+        ),
+    ):
+        rc = cmd_transcribe(
+            str(video), [], None, "base", flavor="fancy", vision_model="qwen3:4b"
+        )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "no vision support" in err
+    assert "ollama pull qwen3.6" in err
+
+
+def test_transcribe_auto_picks_fancy_for_video(tmp_path, capsys):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"x")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    timed = json.dumps(
+        {
+            "language": "en",
+            "text": "hi",
+            "segments": [{"start": 0, "end": 1, "text": "hi"}],
+        }
+    )
+    frame = tmp_path / "0001.png"
+    frame.write_bytes(b"\x89PNG\r\n\x1a\n")
+    with (
+        patch("commands.ai_transcribe_cmd.ensure_whisper", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
+        patch("commands.ai_transcribe_cmd.has_video_stream", return_value=True),
+        patch("commands.ai_transcribe_cmd.ensure_vision_model"),
+        patch("commands.ai_transcribe_cmd.calc_fps", return_value=0.5),
+        patch("commands.ai_transcribe_cmd.extract_frames", return_value=[frame]),
+        patch(
+            "commands.ai_transcribe_cmd.chat_with_images",
+            return_value="Synopsis: a clip.",
+        ) as chat,
+        patch("commands.ai_transcribe_cmd._run_whisper", return_value=(0, timed)),
+    ):
+        rc = cmd_transcribe(str(video), [], "en", "base", flavor="auto")
+    assert rc == 0
+    out, err = capsys.readouterr()
+    assert out == "Synopsis: a clip.\n"
+    assert "flavor: fancy" in err
+    chat.assert_called_once()
+    assert chat.call_args[0][0] == "qwen3.6"
+
+
+def test_resolve_vision_model_precedence(monkeypatch):
+    monkeypatch.delenv("N0B_TRANSCRIBE_VISION_MODEL", raising=False)
+    assert resolve_vision_model(None) == "qwen3.6"
+    monkeypatch.setenv("N0B_TRANSCRIBE_VISION_MODEL", "qwen3.5:4b")
+    assert resolve_vision_model(None) == "qwen3.5:4b"
+    assert resolve_vision_model("custom-vl") == "custom-vl"
+
+
+def test_ensure_vision_model_rejects_text_only(monkeypatch):
+    monkeypatch.setattr(
+        "commands.ai_ollama.ensure_ollama_running", lambda: None
+    )
+    monkeypatch.setattr(
+        "commands.ai_ollama.model_capabilities",
+        lambda model: ["completion", "tools"],
+    )
+    with pytest.raises(OllamaError, match="no vision support"):
+        ensure_vision_model("qwen3:4b")
+
+
+def test_ensure_vision_model_missing(monkeypatch):
+    monkeypatch.setattr(
+        "commands.ai_ollama.ensure_ollama_running", lambda: None
+    )
+
+    def boom(model: str):
+        raise OllamaError("HTTP 404 from Ollama /api/show: model not found")
+
+    monkeypatch.setattr("commands.ai_ollama.model_capabilities", boom)
+    with pytest.raises(OllamaError, match="ollama pull qwen3.6"):
+        ensure_vision_model("missing-vl")
 
 def test_speakable_keeps_phoneme_overrides():
     md = "See [Pay-i](/pˈeɪ ˈaɪ/) and [docs](https://example.com/x)."
