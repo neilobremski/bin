@@ -23,9 +23,6 @@ from commands.ai_speak_cmd import (
     resolve_speak_voice,
     save_sticky_voice,
     speakable,
-    SPEAK_REPLACEMENTS_FILE,
-    SPEAK_PRONUNCIATIONS_FILE,
-    SPEAK_VOICE_FILE,
 )
 from commands.ai_transcribe_cmd import (
     apply_replacements,
@@ -624,6 +621,11 @@ def test_speakable_keeps_phoneme_overrides():
     assert speakable(md) == "See [Pay-i](/pˈeɪ ˈaɪ/) and docs."
 
 
+def test_speakable_strips_root_relative_links():
+    md = "Open [install](/docs/install) next."
+    assert speakable(md) == "Open install next."
+
+
 def test_speakable_drops_fences_and_tables():
     md = "# Title\n\n| a | b |\n|---|---|\n\nHello\n\n```py\nx=1\n```\n"
     assert speakable(md) == " Title\n\n\nHello\n"
@@ -707,32 +709,40 @@ def test_speak_applies_teachings_before_kokoro(tmp_path, capsys):
     repl = tmp_path / "speak-replacements.txt"
     repl.write_text("\\ba8s\\b => A eight S\n")
     fake_python = tmp_path / "venv" / "bin" / "python3"
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
     with (
         patch("commands.ai_speak_cmd.ensure_kokoro", return_value=fake_python),
         patch("commands.ai_speak_cmd.SPEAK_REPLACEMENTS_FILE", repl),
         patch("commands.ai_speak_cmd.SPEAK_PRONUNCIATIONS_FILE", tmp_path / "missing.txt"),
         patch("commands.ai_speak_cmd.SPEAK_VOICE_FILE", tmp_path / "missing-voice.txt"),
-        patch("commands.ai_transcribe_cmd.subprocess.run") as run,
+        patch("commands.ai_speak_cmd.subprocess.run") as run,
     ):
         def capture_run(cmd, **kwargs):
-            captured["text"] = Path(cmd[3]).read_text(encoding="utf-8")
-            run.return_value.returncode = 0
-            return run.return_value
+            import json
+
+            captured["pieces"] = json.loads(
+                Path(cmd[3]).read_text(encoding="utf-8")
+            )
+            return subprocess.CompletedProcess(cmd, 0)
 
         run.side_effect = capture_run
         rc = cmd_speak(
             [str(src)], str(tmp_path / "out.wav"), None, 1.0, engine="kokoro"
         )
     assert rc == 0
-    assert captured["text"] == "A eight S ready"
+    assert captured["pieces"] == [
+        {"text": "A eight S ready", "speed": 1.0, "silence_after": 0.0}
+    ]
     err = capsys.readouterr().err
     assert "replacements applied" in err
 
 
 def test_speak_say_play_inline(tmp_path):
-    with patch("commands.ai_speak_cmd.resolve_speak_engine", return_value="say"), \
-            patch("commands.ai_speak_cmd.subprocess.run") as run:
+    with (
+        patch("commands.ai_speak_cmd.resolve_speak_engine", return_value="say"),
+        patch("commands.ai_speak_cmd.shutil.which", return_value="/usr/bin/say"),
+        patch("commands.ai_speak_cmd.subprocess.run") as run,
+    ):
         run.return_value.returncode = 0
         rc = cmd_speak(["hello"], None, None, 1.0, engine="say")
     assert rc == 0
@@ -742,12 +752,183 @@ def test_speak_say_play_inline(tmp_path):
     assert "-o" not in argv
 
 
+def test_speak_markdown_say_uses_section_pauses(tmp_path):
+    src = tmp_path / "notes.md"
+    src.write_text("# Alpha\n\nHello.\n\n## Beta\n\nWorld.\n")
+    spoken: dict[str, str] = {}
+    with (
+        patch("commands.ai_speak_cmd.resolve_speak_engine", return_value="say"),
+        patch("commands.ai_speak_cmd.shutil.which", return_value="/usr/bin/say"),
+        patch("commands.ai_speak_cmd.subprocess.run") as run,
+    ):
+        def capture(cmd, **kwargs):
+            spoken["text"] = Path(cmd[cmd.index("-f") + 1]).read_text(
+                encoding="utf-8"
+            )
+            return subprocess.CompletedProcess(cmd, 0)
+
+        run.side_effect = capture
+        rc = cmd_speak([str(src)], None, None, 1.0, engine="say")
+    assert rc == 0
+    assert "[[slnc 2000]]" in spoken["text"]
+    assert "Alpha" in spoken["text"]
+    assert "Beta" in spoken["text"]
+
+
+def test_speak_markdown_flat_skips_section_pauses(tmp_path):
+    src = tmp_path / "notes.md"
+    src.write_text("# Alpha\n\nHello.\n\n## Beta\n")
+    spoken: dict[str, str] = {}
+    with (
+        patch("commands.ai_speak_cmd.resolve_speak_engine", return_value="say"),
+        patch("commands.ai_speak_cmd.shutil.which", return_value="/usr/bin/say"),
+        patch("commands.ai_speak_cmd.subprocess.run") as run,
+    ):
+        def capture(cmd, **kwargs):
+            spoken["text"] = Path(cmd[cmd.index("-f") + 1]).read_text(
+                encoding="utf-8"
+            )
+            return subprocess.CompletedProcess(cmd, 0)
+
+        run.side_effect = capture
+        rc = cmd_speak([str(src)], None, None, 1.0, engine="say", flat=True)
+    assert rc == 0
+    assert "[[slnc" not in spoken["text"]
+
+
+def test_speak_markdown_pause_overrides(tmp_path):
+    src = tmp_path / "notes.md"
+    src.write_text("# Alpha\n\nHello.\n\n## Beta\n\n### Gamma\n")
+    spoken: dict[str, str] = {}
+    with (
+        patch("commands.ai_speak_cmd.resolve_speak_engine", return_value="say"),
+        patch("commands.ai_speak_cmd.shutil.which", return_value="/usr/bin/say"),
+        patch("commands.ai_speak_cmd.subprocess.run") as run,
+    ):
+        def capture(cmd, **kwargs):
+            spoken["text"] = Path(cmd[cmd.index("-f") + 1]).read_text(
+                encoding="utf-8"
+            )
+            return subprocess.CompletedProcess(cmd, 0)
+
+        run.side_effect = capture
+        rc = cmd_speak(
+            [str(src)],
+            None,
+            None,
+            1.0,
+            engine="say",
+            pause_major=1.5,
+            pause_minor=0.8,
+            pause_para=0.2,
+        )
+    assert rc == 0
+    assert "[[slnc 1500]]" in spoken["text"]
+    assert "[[slnc 800]]" in spoken["text"]
+    assert "[[slnc 200]]" in spoken["text"]
+    assert "[[slnc 2000]]" not in spoken["text"]
+
+
+def test_speak_markdown_no_emphasis(tmp_path, capsys):
+    src = tmp_path / "notes.md"
+    src.write_text("# Title\n\nUse **care** with `x`.\n\n## Next\n")
+    spoken: dict[str, str] = {}
+    with (
+        patch("commands.ai_speak_cmd.resolve_speak_engine", return_value="say"),
+        patch("commands.ai_speak_cmd.shutil.which", return_value="/usr/bin/say"),
+        patch("commands.ai_speak_cmd.subprocess.run") as run,
+    ):
+        def capture(cmd, **kwargs):
+            spoken["text"] = Path(cmd[cmd.index("-f") + 1]).read_text(
+                encoding="utf-8"
+            )
+            return subprocess.CompletedProcess(cmd, 0)
+
+        run.side_effect = capture
+        rc = cmd_speak(
+            [str(src)], None, None, 1.0, engine="say", emphasis=False
+        )
+    assert rc == 0
+    assert "[[emph +]]" not in spoken["text"]
+    assert "[[slnc 2000]]" in spoken["text"]
+    assert "care" in spoken["text"]
+    assert "emphasis=off" in capsys.readouterr().err
+
+
+def test_speak_markdown_kokoro_manifest(tmp_path, capsys):
+    src = tmp_path / "notes.md"
+    src.write_text("# Alpha\n\n**bold** and `code`\n\n## Beta\n")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    captured: dict[str, object] = {}
+    with (
+        patch("commands.ai_speak_cmd.ensure_kokoro", return_value=fake_python),
+        patch("commands.ai_speak_cmd.SPEAK_REPLACEMENTS_FILE", tmp_path / "r.txt"),
+        patch("commands.ai_speak_cmd.SPEAK_PRONUNCIATIONS_FILE", tmp_path / "p.txt"),
+        patch("commands.ai_speak_cmd.SPEAK_VOICE_FILE", tmp_path / "v.txt"),
+        patch("commands.ai_speak_cmd.subprocess.run") as run,
+    ):
+        def capture_run(cmd, **kwargs):
+            captured["pieces"] = json.loads(
+                Path(cmd[3]).read_text(encoding="utf-8")
+            )
+            return subprocess.CompletedProcess(cmd, 0)
+
+        run.side_effect = capture_run
+        rc = cmd_speak(
+            [str(src)], str(tmp_path / "out.wav"), None, 1.0, engine="kokoro"
+        )
+    assert rc == 0
+    pieces = captured["pieces"]
+    assert isinstance(pieces, list)
+    assert len(pieces) > 1
+    texts = [p["text"] for p in pieces if p["text"].strip()]
+    assert any("Alpha" in t for t in texts)
+    assert any("bold" in t for t in texts)
+    assert any("code" in t for t in texts)
+    assert any(p["silence_after"] >= 2.0 for p in pieces)
+    assert any(p["speed"] < 1.0 for p in pieces)
+    err = capsys.readouterr().err
+    assert "markdown:" in err
+    assert "emphasis=on" in err
+
+
+def test_speak_markdown_only_fences_returns_nothing(tmp_path, capsys):
+    src = tmp_path / "notes.md"
+    src.write_text("```\nsecret()\n```\n")
+    with (
+        patch("commands.ai_speak_cmd.resolve_speak_engine", return_value="say"),
+        patch("commands.ai_speak_cmd.shutil.which", return_value="/usr/bin/say"),
+        patch("commands.ai_speak_cmd.subprocess.run") as run,
+    ):
+        rc = cmd_speak([str(src)], None, None, 1.0, engine="say")
+    assert rc == 2
+    run.assert_not_called()
+    assert "nothing to say" in capsys.readouterr().err
+
+
+def test_speak_markdown_empty_input_returns_nothing(tmp_path, capsys):
+    with (
+        patch("commands.ai_speak_cmd.resolve_speak_engine", return_value="say"),
+        patch("commands.ai_speak_cmd.shutil.which", return_value="/usr/bin/say"),
+        patch("commands.ai_speak_cmd.subprocess.run") as run,
+    ):
+        rc = cmd_speak([""], None, None, 1.0, engine="say")
+    assert rc == 2
+    run.assert_not_called()
+    assert "nothing to say" in capsys.readouterr().err
+
+
 def test_speak_help():
     proc = run_n0b("ai", "speak", "--help")
     assert proc.returncode == 0
     assert "--pronounce" in proc.stdout
     assert "--save" in proc.stdout
     assert "--engine" in proc.stdout
+    assert "--pause-major" in proc.stdout
+    assert "--pause-minor" in proc.stdout
+    assert "--pause-para" in proc.stdout
+    assert "--flat" in proc.stdout
+    assert "--no-emphasis" in proc.stdout
     assert "play on speakers" in proc.stdout
 
 

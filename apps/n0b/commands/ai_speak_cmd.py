@@ -1,6 +1,7 @@
 """n0b ai speak — macOS say and Kokoro TTS."""
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -10,6 +11,17 @@ from pathlib import Path
 
 from ai_venv import ensure_kokoro
 from commands.ai_common import parse_cli_pairs, read_pair_file, save_pair_file
+from commands.speak_markdown import (
+    DEFAULT_PAUSE_MAJOR,
+    DEFAULT_PAUSE_MINOR,
+    DEFAULT_PAUSE_PARA,
+    PauseConfig,
+    looks_like_markdown,
+    map_span_text,
+    parse_markdown_blocks,
+    render_kokoro_pieces,
+    render_say_text,
+)
 
 SPEAK_REPLACEMENTS_FILE = Path.home() / ".config" / "n0b" / "speak-replacements.txt"
 SPEAK_PRONUNCIATIONS_FILE = Path.home() / ".config" / "n0b" / "speak-pronunciations.txt"
@@ -17,30 +29,50 @@ SPEAK_VOICE_FILE = Path.home() / ".config" / "n0b" / "speak-voice.txt"
 DEFAULT_SPEAK_VOICE = "af_heart"
 
 _KOKORO_SNIPPET = """\
+import json
 import sys
 
 import numpy as np
 import soundfile as sf
 from kokoro import KPipeline
 
-text_path, out_path, voice, speed = sys.argv[1:5]
-text = open(text_path, encoding="utf-8").read()
+manifest_path, out_path, voice = sys.argv[1:4]
+pieces = json.loads(open(manifest_path, encoding="utf-8").read())
 pipeline = KPipeline(lang_code=voice[0])
 chunks = []
-for i, result in enumerate(pipeline(text, voice=voice, speed=float(speed))):
-    audio = result[2]
-    chunks.append(audio.numpy() if hasattr(audio, "numpy") else audio)
-    print(f"  segment {i + 1}", file=sys.stderr)
+sr = 24000
+for i, piece in enumerate(pieces):
+    text = piece.get("text") or ""
+    speed = float(piece.get("speed", 1.0))
+    silence_after = float(piece.get("silence_after", 0.0))
+    if text.strip():
+        for j, result in enumerate(pipeline(text, voice=voice, speed=speed)):
+            audio = result[2]
+            chunks.append(audio.numpy() if hasattr(audio, "numpy") else audio)
+            print(f"  piece {i + 1}.{j + 1}", file=sys.stderr)
+    if silence_after > 0:
+        chunks.append(np.zeros(int(sr * silence_after), dtype=np.float32))
+        print(f"  silence {silence_after:.2f}s", file=sys.stderr)
 if not chunks:
     print("no audio produced", file=sys.stderr)
     sys.exit(1)
-sf.write(out_path, np.concatenate(chunks), 24000)
+sf.write(out_path, np.concatenate(chunks), sr)
 """
 
-_MD_URL_LINK_RE = re.compile(r"\[([^\]]+)\]\((?!/)[^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _MD_NOISE_RE = re.compile(r"[*_`#>|]+")
 _MISAKI_PHONEME_RE = re.compile(r"\[([^\]]+)\]\(/[^/]+/\)")
+_MISAKI_KEEP_RE = re.compile(r"\[[^\]]+\]\(/[^/]+/\)")
 _KOKORO_VOICE_RE = re.compile(r"^[abdefhpijzm][fm]_")
+
+
+def _strip_md_links_keep_misaki(text: str) -> str:
+    def repl(m: re.Match[str]) -> str:
+        if _MISAKI_KEEP_RE.fullmatch(m.group(0)):
+            return m.group(0)
+        return m.group(1)
+
+    return _MD_LINK_RE.sub(repl, text)
 
 
 def speakable(markdown: str) -> str:
@@ -53,7 +85,7 @@ def speakable(markdown: str) -> str:
             continue
         if fenced or s.startswith("|"):
             continue
-        line = _MD_URL_LINK_RE.sub(r"\1", line)
+        line = _strip_md_links_keep_misaki(line)
         line = _MD_NOISE_RE.sub("", line)
         out.append(line)
     return "\n".join(out)
@@ -242,9 +274,8 @@ def _speak_say(
 
 
 def _speak_kokoro(
-    text: str,
+    pieces: list[dict],
     voice: str,
-    speed: float,
     out: Path | None,
 ) -> int:
     play = out is None
@@ -275,14 +306,20 @@ def _speak_kokoro(
         return 1
     wav_path = out_path.with_suffix(".tmp.wav") if convert else out_path
     with tempfile.NamedTemporaryFile(
-        "w", suffix=".txt", encoding="utf-8", delete=False
+        "w", suffix=".json", encoding="utf-8", delete=False
     ) as f:
-        f.write(text)
-        text_file = Path(f.name)
+        json.dump(pieces, f)
+        manifest_file = Path(f.name)
     try:
         proc = subprocess.run(
-            [str(python), "-c", _KOKORO_SNIPPET, str(text_file), str(wav_path),
-             voice, str(speed)],
+            [
+                str(python),
+                "-c",
+                _KOKORO_SNIPPET,
+                str(manifest_file),
+                str(wav_path),
+                voice,
+            ],
         )
         if proc.returncode != 0:
             return proc.returncode
@@ -295,7 +332,7 @@ def _speak_kokoro(
             if conv.returncode != 0:
                 return conv.returncode
     finally:
-        text_file.unlink(missing_ok=True)
+        manifest_file.unlink(missing_ok=True)
     if play:
         try:
             return play_audio(wav_path)
@@ -305,16 +342,61 @@ def _speak_kokoro(
     return 0
 
 
+def _apply_pairs_to_text(
+    text: str,
+    *,
+    engine_name: str,
+    replace_pairs: list[tuple[str, str]],
+    pronounce_pairs: list[tuple[str, str]],
+    file_replaces: list[tuple[str, str]],
+    cli_replaces: list[tuple[str, str]],
+    file_pronounces: list[tuple[str, str]],
+    cli_pronounces: list[tuple[str, str]],
+) -> str:
+    if pronounce_pairs and engine_name == "kokoro":
+        print(
+            f"pronunciations: {len(pronounce_pairs)} pattern(s) loaded "
+            f"({len(file_pronounces)} from {SPEAK_PRONUNCIATIONS_FILE}, "
+            f"{len(cli_pronounces)} from --pronounce)",
+            file=sys.stderr,
+        )
+        text, applied = apply_pronunciations(text, pronounce_pairs)
+        note = "; ".join(applied) if applied else "none matched"
+        print(f"pronunciations applied: {note}", file=sys.stderr)
+    elif pronounce_pairs:
+        print(
+            "n0b ai speak: pronunciations ignored for say engine "
+            "(use --engine kokoro)",
+            file=sys.stderr,
+        )
+    if replace_pairs:
+        print(
+            f"replacements: {len(replace_pairs)} pattern(s) loaded "
+            f"({len(file_replaces)} from {SPEAK_REPLACEMENTS_FILE}, "
+            f"{len(cli_replaces)} from --replace)",
+            file=sys.stderr,
+        )
+        text, applied = apply_speak_replacements(text, replace_pairs)
+        note = "; ".join(applied) if applied else "none matched"
+        print(f"replacements applied: {note}", file=sys.stderr)
+    return text
+
+
 def cmd_speak(
     source: list[str] | None,
     out: str | None,
     voice: str | None,
     speed: float,
     raw: bool = False,
+    flat: bool = False,
     replaces: list[str] | None = None,
     pronounces: list[str] | None = None,
     save: bool = False,
     engine: str | None = None,
+    pause_major: float = DEFAULT_PAUSE_MAJOR,
+    pause_minor: float = DEFAULT_PAUSE_MINOR,
+    pause_para: float = DEFAULT_PAUSE_PARA,
+    emphasis: bool = True,
 ) -> int:
     replaces = replaces or []
     pronounces = pronounces or []
@@ -342,46 +424,113 @@ def cmd_speak(
     print(f"engine: {engine_name}", file=sys.stderr)
     print(f"voice: {voice or 'default'} ({voice_src})", file=sys.stderr)
     text = load_speak_text(source or [])
-    if not raw:
-        text = speakable(text)
     file_replaces = read_pair_file(SPEAK_REPLACEMENTS_FILE, "n0b ai speak")
     cli_replaces = parse_cli_pairs(replaces, "n0b ai speak")
     replace_pairs = file_replaces + cli_replaces
     file_pronounces = read_pair_file(SPEAK_PRONUNCIATIONS_FILE, "n0b ai speak")
     cli_pronounces = parse_cli_pairs(pronounces, "n0b ai speak")
     pronounce_pairs = file_pronounces + cli_pronounces
-    if pronounce_pairs and engine_name == "kokoro":
+    out_path = Path(out).expanduser() if out else None
+    structured = (
+        not raw
+        and not flat
+        and looks_like_markdown(text)
+    )
+    if structured:
+        pauses = PauseConfig(pause_major, pause_minor, pause_para)
+        blocks = parse_markdown_blocks(text, pauses)
+        use_ipa = bool(pronounce_pairs) and engine_name == "kokoro"
+        if pronounce_pairs and not use_ipa:
+            print(
+                "n0b ai speak: pronunciations ignored for say engine "
+                "(use --engine kokoro)",
+                file=sys.stderr,
+            )
+        if use_ipa:
+            print(
+                f"pronunciations: {len(pronounce_pairs)} pattern(s) loaded "
+                f"({len(file_pronounces)} from {SPEAK_PRONUNCIATIONS_FILE}, "
+                f"{len(cli_pronounces)} from --pronounce)",
+                file=sys.stderr,
+            )
+        if replace_pairs:
+            print(
+                f"replacements: {len(replace_pairs)} pattern(s) loaded "
+                f"({len(file_replaces)} from {SPEAK_REPLACEMENTS_FILE}, "
+                f"{len(cli_replaces)} from --replace)",
+                file=sys.stderr,
+            )
+        ipa_notes: list[str] = []
+        repl_notes: list[str] = []
+
+        def transform(span_text: str) -> str:
+            out_text = span_text
+            if use_ipa:
+                out_text, applied = apply_pronunciations(out_text, pronounce_pairs)
+                ipa_notes.extend(applied)
+            if replace_pairs:
+                out_text, applied = apply_speak_replacements(out_text, replace_pairs)
+                repl_notes.extend(applied)
+            return out_text
+
+        blocks = map_span_text(blocks, transform)
+        if use_ipa:
+            note = "; ".join(ipa_notes) if ipa_notes else "none matched"
+            print(f"pronunciations applied: {note}", file=sys.stderr)
+        if replace_pairs:
+            note = "; ".join(repl_notes) if repl_notes else "none matched"
+            print(f"replacements applied: {note}", file=sys.stderr)
+        if not blocks:
+            print("n0b ai speak: nothing to say after cleanup", file=sys.stderr)
+            return 2
         print(
-            f"pronunciations: {len(pronounce_pairs)} pattern(s) loaded "
-            f"({len(file_pronounces)} from {SPEAK_PRONUNCIATIONS_FILE}, "
-            f"{len(cli_pronounces)} from --pronounce)",
+            f"markdown: {len(blocks)} block(s); "
+            f"pauses major={pauses.major}s minor={pauses.minor}s "
+            f"para={pauses.para}s; emphasis={'on' if emphasis else 'off'}",
             file=sys.stderr,
         )
-        text, applied = apply_pronunciations(text, pronounce_pairs)
-        note = "; ".join(applied) if applied else "none matched"
-        print(f"pronunciations applied: {note}", file=sys.stderr)
-    elif pronounce_pairs:
-        print(
-            "n0b ai speak: pronunciations ignored for say engine "
-            "(use --engine kokoro)",
-            file=sys.stderr,
-        )
-    if replace_pairs:
-        print(
-            f"replacements: {len(replace_pairs)} pattern(s) loaded "
-            f"({len(file_replaces)} from {SPEAK_REPLACEMENTS_FILE}, "
-            f"{len(cli_replaces)} from --replace)",
-            file=sys.stderr,
-        )
-        text, applied = apply_speak_replacements(text, replace_pairs)
-        note = "; ".join(applied) if applied else "none matched"
-        print(f"replacements applied: {note}", file=sys.stderr)
+        if engine_name == "say":
+            say_text = plain_for_say(render_say_text(blocks, emphasis=emphasis))
+            return _speak_say(say_text, voice, speed, out_path)
+        if voice is None:
+            voice = DEFAULT_SPEAK_VOICE
+        pieces = [
+            {
+                "text": p.text,
+                "speed": p.speed,
+                "silence_after": p.silence_after,
+            }
+            for p in render_kokoro_pieces(
+                blocks, base_speed=speed, emphasis=emphasis
+            )
+            if p.text.strip() or p.silence_after > 0
+        ]
+        if not any(p["text"].strip() for p in pieces):
+            print("n0b ai speak: nothing to say after cleanup", file=sys.stderr)
+            return 2
+        return _speak_kokoro(pieces, voice, out_path)
+
+    if not raw:
+        text = speakable(text)
+    text = _apply_pairs_to_text(
+        text,
+        engine_name=engine_name,
+        replace_pairs=replace_pairs,
+        pronounce_pairs=pronounce_pairs,
+        file_replaces=file_replaces,
+        cli_replaces=cli_replaces,
+        file_pronounces=file_pronounces,
+        cli_pronounces=cli_pronounces,
+    )
     if not text.strip():
         print("n0b ai speak: nothing to say after cleanup", file=sys.stderr)
         return 2
-    out_path = Path(out).expanduser() if out else None
     if engine_name == "say":
         return _speak_say(plain_for_say(text), voice, speed, out_path)
     if voice is None:
         voice = DEFAULT_SPEAK_VOICE
-    return _speak_kokoro(text, voice, speed, out_path)
+    return _speak_kokoro(
+        [{"text": text, "speed": speed, "silence_after": 0.0}],
+        voice,
+        out_path,
+    )

@@ -19,6 +19,8 @@ n0b ai speak notes.md -o notes.m4a        # save file (no playback)
 n0b ai speak -v Samantha "hi" --save      # sticky macOS voice
 
 n0b ai speak notes.md --engine kokoro -o out.wav   # offline neural
+n0b ai speak notes.md --pause-major 1.5 --pause-minor 0.8
+n0b ai speak notes.md --flat              # old single-pass cleanup
 n0b ai speak --replace '\ba8s\b => A eight S' --save
 n0b ai speak --pronounce 'Pay-i => pˈeɪ ˈaɪ' --save   # kokoro only
 ```
@@ -41,10 +43,31 @@ n0b ai speak --pronounce 'Pay-i => pˈeɪ ˈaɪ' --save   # kokoro only
 
 ## Input
 
-Cleaned for listening by default: code fences and table rows dropped, URL
-links unwrapped, emphasis stripped. Misaki `[word](/ipa/)` overrides are
-kept for kokoro and flattened to the word for say. Pass `--raw` to skip
-cleanup.
+Plain text is spoken as-is (after optional replacements). Markdown is
+detected automatically and spoken in sections:
+
+- **Headings** — synthesized as their own unit; silence inserted before
+  each non-first heading (defaults below)
+- **Paragraphs / list items** — shorter inter-block pauses
+- **Bold / italic** — light emphasis (`[[emph +]]` on say; slightly
+  slower speed on kokoro)
+- **Inline code** — micro-pauses around the token; slower on kokoro
+- Code fences and table rows are skipped (same as before)
+
+Defaults (SSML-style section breathing, tuned for listening to docs):
+
+| Boundary | Flag | Default |
+|----------|------|---------|
+| Before H1 / H2 | `--pause-major` | `2.0` s |
+| Before H3–H6 | `--pause-minor` | `1.0` s |
+| Between paragraphs | `--pause-para` | `0.4` s |
+
+Use `--flat` for the previous single-pass `speakable()` cleanup (no
+section pauses). `--raw` skips cleanup entirely. `--no-emphasis` keeps
+section pauses but disables bold/code prosody tweaks.
+
+Misaki `[word](/ipa/)` overrides are kept for kokoro and flattened to the
+word for say.
 
 Inline text, a file path, `-`, or omitted (stdin) all work:
 

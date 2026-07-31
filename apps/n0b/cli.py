@@ -220,12 +220,14 @@ def build_parser() -> argparse.ArgumentParser:
             "  n0b ai speak notes.md -o notes.m4a    save file (no playback)\n"
             "  n0b ai speak -v Samantha \"hi\" --save sticky macOS voice\n"
             "  n0b ai speak doc.md --engine kokoro -o out.wav  offline/file\n"
+            "  n0b ai speak notes.md --pause-major 1.5 --pause-minor 0.8\n"
             "  n0b ai speak --replace '\\ba8s\\b => A eight S' --save\n"
             "\n"
-            "Without -o/--out, audio goes to speakers. With -o, only a file "
-            "is written (useful for tell --attach). Replacements and "
-            "pronunciations live in ~/.config/n0b/speak-*.txt; see "
-            "apps/n0b/docs/ai-speak.md."
+            "Markdown is detected automatically: headings get section pauses "
+            "(default 2s major / 1s minor) and bold/code get light emphasis. "
+            "Use --flat for the old single-pass cleanup. Without -o/--out, "
+            "audio goes to speakers. With -o, only a file is written (useful "
+            "for tell --attach). See apps/n0b/docs/ai-speak.md."
         ),
     )
     ai_speak.add_argument(
@@ -257,6 +259,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ai_speak.add_argument(
         "--raw", action="store_true", help="Skip markdown-to-prose cleanup"
+    )
+    ai_speak.add_argument(
+        "--flat",
+        action="store_true",
+        help="Force single-pass speakable() cleanup (no section pauses)",
+    )
+    ai_speak.add_argument(
+        "--pause-major",
+        type=float,
+        default=2.0,
+        metavar="SEC",
+        help="Silence before H1/H2 sections in seconds (default: 2.0)",
+    )
+    ai_speak.add_argument(
+        "--pause-minor",
+        type=float,
+        default=1.0,
+        metavar="SEC",
+        help="Silence before H3–H6 sections in seconds (default: 1.0)",
+    )
+    ai_speak.add_argument(
+        "--pause-para",
+        type=float,
+        default=0.4,
+        metavar="SEC",
+        help="Silence between paragraphs in seconds (default: 0.4)",
+    )
+    ai_speak.add_argument(
+        "--no-emphasis",
+        action="store_true",
+        help="Disable bold/code emphasis (speed/slnc tweaks)",
     )
     ai_speak.add_argument(
         "--replace",
@@ -483,10 +516,15 @@ def dispatch(args: argparse.Namespace) -> int:
                 args.voice,
                 args.speed,
                 raw=args.raw,
+                flat=args.flat,
                 replaces=args.replaces,
                 pronounces=args.pronounces,
                 save=args.save,
                 engine=args.engine,
+                pause_major=args.pause_major,
+                pause_minor=args.pause_minor,
+                pause_para=args.pause_para,
+                emphasis=not args.no_emphasis,
             )
         if args.ai_kind == "transcribe":
             return cmd_transcribe(
