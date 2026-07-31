@@ -11,6 +11,7 @@ BlockKind = Literal["heading", "paragraph", "list_item"]
 DEFAULT_PAUSE_MAJOR = 2.0
 DEFAULT_PAUSE_MINOR = 1.0
 DEFAULT_PAUSE_PARA = 0.4
+LIST_PAUSE_CAP = 0.25
 
 _MD_HINT_RE = re.compile(
     r"(?m)"
@@ -137,7 +138,7 @@ def _pause_for(
     if kind == "heading":
         return pauses.before_heading(level)
     if kind == "list_item":
-        return min(pauses.para, 0.25)
+        return min(pauses.para, LIST_PAUSE_CAP)
     return pauses.para
 
 
@@ -171,6 +172,9 @@ def iter_markdown_blocks(
             fenced = not fenced
             continue
         if fenced or stripped.startswith("|") or _HR_RE.match(line):
+            continue
+        if re.match(r"^#{1,6}\s*$", stripped):
+            yield from flush_para()
             continue
         heading = _HEADING_RE.match(stripped)
         if heading:
@@ -226,6 +230,17 @@ def map_span_text(
     return out
 
 
+def _say_strong(text: str) -> str:
+    parts: list[str] = []
+    for token in re.finditer(r"\S+|\s+", text):
+        chunk = token.group(0)
+        if chunk.isspace():
+            parts.append(chunk)
+        else:
+            parts.append(f"[[emph +]]{chunk}")
+    return "".join(parts)
+
+
 def render_say_text(blocks: list[SpeakBlock], *, emphasis: bool = True) -> str:
     parts: list[str] = []
     for block in blocks:
@@ -234,18 +249,17 @@ def render_say_text(blocks: list[SpeakBlock], *, emphasis: bool = True) -> str:
             parts.append(f"[[slnc {ms}]]")
         chunk: list[str] = []
         for span in block.spans:
-            text = span.text.strip()
+            text = span.text
             if not text:
                 continue
             if not emphasis or span.style == "plain":
                 chunk.append(text)
                 continue
             if span.style == "code":
-                chunk.append(f"[[slnc 120]] {text} [[slnc 120]]")
+                chunk.append(f"[[slnc 120]]{text}[[slnc 120]]")
                 continue
-            words = text.split()
-            chunk.append(" ".join(f"[[emph +]]{w}" for w in words))
-        spoken = " ".join(chunk).strip()
+            chunk.append(_say_strong(text))
+        spoken = "".join(chunk).strip()
         if spoken:
             parts.append(spoken)
     return "\n".join(parts)
@@ -266,14 +280,8 @@ def render_kokoro_pieces(
 ) -> list[KokoroPiece]:
     pieces: list[KokoroPiece] = []
     for block in blocks:
-        if block.pause_before > 0 and pieces:
-            last = pieces[-1]
-            pieces[-1] = KokoroPiece(
-                last.text, last.speed, last.silence_after + block.pause_before
-            )
-        elif block.pause_before > 0:
+        if block.pause_before > 0:
             pieces.append(KokoroPiece("", base_speed, block.pause_before))
-
         spans = [s for s in block.spans if s.text.strip()]
         for i, span in enumerate(spans):
             text = span.text.strip()
@@ -286,11 +294,8 @@ def render_kokoro_pieces(
             else:
                 speed = base_speed
                 silence_before = 0.0
-            if silence_before and pieces:
-                last = pieces[-1]
-                pieces[-1] = KokoroPiece(
-                    last.text, last.speed, last.silence_after + silence_before
-                )
+            if silence_before:
+                pieces.append(KokoroPiece("", speed, silence_before))
             trailing = 0.12 if span.style == "code" and emphasis else 0.0
             if i < len(spans) - 1 and trailing == 0.0:
                 trailing = 0.05 if span.style != "plain" else 0.0

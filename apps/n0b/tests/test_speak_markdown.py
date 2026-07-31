@@ -202,3 +202,30 @@ def test_looks_like_markdown_lists_quotes_and_fences():
 def test_render_kokoro_pieces_empty_blocks():
     assert render_kokoro_pieces([]) == []
     assert render_say_text([]) == ""
+
+
+def test_render_say_preserves_mid_word_markup():
+    spans = parse_inline_spans("a**b**c")
+    assert "".join(s.text for s in spans) == "abc"
+    blocks = parse_markdown_blocks("a**b**c\n")
+    rendered = render_say_text(blocks)
+    assert "a[[emph +]]b c" not in rendered
+    assert "a[[emph +]]bc" in rendered.replace("\n", "")
+
+
+def test_empty_heading_markers_are_skipped():
+    blocks = parse_markdown_blocks("#\n\nHi\n\n## \n\nBye\n")
+    texts = ["".join(s.text for s in b.spans) for b in blocks]
+    assert texts == ["Hi", "Bye"]
+
+
+def test_kokoro_section_pause_not_stacked_with_emphasis():
+    blocks = parse_markdown_blocks("# A\n\n`code`\n\n## B\n")
+    pieces = render_kokoro_pieces(blocks)
+    section = [p for p in pieces if p.silence_after == 2.0 and not p.text.strip()]
+    assert section, pieces
+    assert all(
+        abs(p.silence_after - 2.0) < 1e-9 or p.silence_after < 0.2
+        for p in pieces
+        if p.silence_after
+    )
