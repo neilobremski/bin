@@ -26,7 +26,7 @@ Detailed docs live in [`docs/`](docs/):
 | [secrets.md](docs/secrets.md) | `n0b secrets` | Get/set secrets — env, `~/lib`, Keychain, dotenv |
 | [ai-speak.md](docs/ai-speak.md) | `n0b ai speak` | Text-to-speech — macOS `say` or offline Kokoro |
 | [z-image.md](docs/z-image.md) | `n0b ai image` | Z-Image-Turbo text-to-image and `--ref` img2img |
-| [transcribe.md](docs/transcribe.md) | `n0b ai transcribe` | Local Whisper STT; fancy video narrative via Ollama vision |
+| [video.md](docs/video.md) | `n0b video` | Video utilities: last-frame, gif (Surfey-style palette) |
 | [quota.md](docs/quota.md) | `n0b quota` | Live AI tool rate limits (Antigravity / `agy`) |
 
 ### Quick reference (no separate doc yet)
@@ -38,7 +38,7 @@ Detailed docs live in [`docs/`](docs/):
 | `gpu` | `cuda`, `mps`, `mlx`, `mb-free` | GPU / MLX checks; free MiB |
 | `mqtt` | `pub`, `sub` | `mosquitto_*` with `MQTT_HOST`, `MQTT_PORT`, `MQTT_USER`, `MQTT_PASS` |
 | `ai` | `image`, `video`, `audio`, `research`, `speak`, `transcribe` | See [ltx-video.md](docs/ltx-video.md) for video; [research.md](docs/research.md) for deep research; [ai-speak.md](docs/ai-speak.md) for text-to-speech; [transcribe.md](docs/transcribe.md) for speech-to-text |
-| `video` | `last-frame` | Extract last frame with `ffmpeg` |
+| `video` | `last-frame`, `gif` | Extract last frame; convert video to palette GIF |
 | `quota` | `[agy]` | Live AI tool quotas (`agy` = Antigravity language-server API) |
 
 ### AI model defaults
