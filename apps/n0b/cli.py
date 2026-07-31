@@ -17,7 +17,7 @@ from commands.mqtt_cmd import cmd_pub, cmd_sub
 from commands.ports_cmd import cmd_free, cmd_listen
 from commands.quota_cmd import cmd_quota
 from commands.secrets_cmd import cmd_get, cmd_set
-from commands.video_cmd import cmd_last_frame
+from commands.video_cmd import cmd_gif, cmd_last_frame
 
 
 def _add_image_args(p: argparse.ArgumentParser) -> None:
@@ -387,6 +387,29 @@ def build_parser() -> argparse.ArgumentParser:
     last_frame = video_sub.add_parser("last-frame", help="Extract last frame with ffmpeg")
     last_frame.add_argument("video")
     last_frame.add_argument("-o", "--output")
+    gif_p = video_sub.add_parser(
+        "gif",
+        help="Convert a video to an animated GIF (Surfey-style palette)",
+    )
+    gif_p.add_argument("video", help="Input video file")
+    gif_p.add_argument("-o", "--output", help="Output GIF path (default: <stem>.gif)")
+    gif_p.add_argument(
+        "--preset",
+        choices=("thumb", "small"),
+        default="thumb",
+        help=(
+            "thumb: adaptive ≤1 FPS / ≤50 frames, 320px, 64 colors (default); "
+            "small: 8 FPS, 800px, 32 colors"
+        ),
+    )
+    gif_p.add_argument("--fps", type=float, help="Override GIF frame rate")
+    gif_p.add_argument("--width", type=int, help="Override GIF max width in pixels")
+    gif_p.add_argument("--colors", type=int, help="Override palette max colors")
+    gif_p.add_argument(
+        "--max-frames",
+        type=int,
+        help="Override max frames for thumb adaptive FPS (default: 50)",
+    )
 
     quota_p = sub.add_parser("quota", help="Check AI tool usage quotas")
     quota_p.add_argument(
@@ -506,6 +529,16 @@ def dispatch(args: argparse.Namespace) -> int:
     if group == "video":
         if args.video_cmd == "last-frame":
             return cmd_last_frame(args.video, args.output)
+        if args.video_cmd == "gif":
+            return cmd_gif(
+                args.video,
+                args.output,
+                preset=args.preset,
+                fps=args.fps,
+                width=args.width,
+                colors=args.colors,
+                max_frames=args.max_frames,
+            )
     if group == "quota":
         return cmd_quota(args.tools, as_json=args.json, raw=args.raw)
     print(f"n0b: unhandled command group {group!r}", file=sys.stderr)

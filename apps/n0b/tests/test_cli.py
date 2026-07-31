@@ -47,6 +47,7 @@ from commands.ai_ollama import (
 from commands.ai_audio_cmd import cmd_audio  # noqa: E402
 from commands.ai_video_cmd import cmd_video, parse_video_args  # noqa: E402
 from commands.secrets_cmd import cmd_set, resolve  # noqa: E402
+from commands.video_cmd import cmd_gif, cmd_last_frame, resolve_gif_settings  # noqa: E402
 from cli import parse_audio_argv, parse_image_argv  # noqa: E402
 
 
@@ -748,3 +749,98 @@ def test_speak_help():
     assert "--save" in proc.stdout
     assert "--engine" in proc.stdout
     assert "play on speakers" in proc.stdout
+
+
+def test_video_gif_help():
+    proc = run_n0b("video", "gif", "--help")
+    assert proc.returncode == 0
+    assert "--preset" in proc.stdout
+    assert "--fps" in proc.stdout
+    assert "--width" in proc.stdout
+
+
+def test_resolve_gif_settings_presets_and_overrides():
+    thumb = resolve_gif_settings("thumb")
+    assert thumb["adaptive"] is True
+    assert thumb["width"] == 320
+    assert thumb["colors"] == 64
+    small = resolve_gif_settings("small")
+    assert small["adaptive"] is False
+    assert small["fps"] == 8.0
+    assert small["width"] == 800
+    assert small["colors"] == 32
+    overridden = resolve_gif_settings("thumb", fps=5.0, width=400, colors=128)
+    assert overridden["adaptive"] is False
+    assert overridden["fps"] == 5.0
+    assert overridden["width"] == 400
+    assert overridden["colors"] == 128
+
+
+def test_cmd_gif_missing_file(tmp_path, capsys):
+    rc = cmd_gif(str(tmp_path / "missing.mp4"))
+    assert rc == 1
+    assert "no such file" in capsys.readouterr().err
+
+
+def test_cmd_gif_small_preset_invokes_ffmpeg(tmp_path, capsys):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake")
+    out = tmp_path / "out.gif"
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if "palettegen" in " ".join(argv):
+            Path(argv[-1]).write_bytes(b"pal")
+        else:
+            Path(argv[-1]).write_bytes(b"GIF89a")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    with patch("commands.video_cmd.subprocess.run", side_effect=fake_run):
+        rc = cmd_gif(str(video), str(out), preset="small")
+    assert rc == 0
+    assert out.is_file()
+    assert len(calls) == 2
+    assert "palettegen" in " ".join(calls[0])
+    assert "paletteuse=dither=sierra2_4a" in " ".join(calls[1])
+    assert "fps=8" in " ".join(calls[0])
+    assert "scale=800:-1:flags=lanczos" in " ".join(calls[1])
+    assert f"GIF saved to: {out}" in capsys.readouterr().out
+
+
+def test_cmd_gif_thumb_preset_extracts_frames(tmp_path, capsys):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake")
+    out = tmp_path / "thumb.gif"
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        joined = " ".join(argv)
+        if "%04d.png" in joined:
+            frames_dir = Path(argv[-1]).parent
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            (frames_dir / "0001.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        elif "palettegen" in joined:
+            Path(argv[-1]).write_bytes(b"pal")
+        else:
+            Path(argv[-1]).write_bytes(b"GIF89a")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    with (
+        patch("commands.video_cmd.subprocess.run", side_effect=fake_run),
+        patch("commands.video_cmd.calc_gif_fps", return_value=0.5),
+    ):
+        rc = cmd_gif(str(video), str(out), preset="thumb")
+    assert rc == 0
+    assert any("%04d.png" in " ".join(c) for c in calls)
+    assert any("palettegen" in " ".join(c) for c in calls)
+    assert any("paletteuse=dither=sierra2_4a" in " ".join(c) for c in calls)
+    assert "scale=320:-1:flags=lanczos" in " ".join(calls[-1])
+    assert f"GIF saved to: {out}" in capsys.readouterr().out
+
+
+def test_cmd_last_frame_missing(tmp_path, capsys):
+    rc = cmd_last_frame(str(tmp_path / "nope.mp4"), None)
+    assert rc == 1
+    assert "not found" in capsys.readouterr().err.lower()
