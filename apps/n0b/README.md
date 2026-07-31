@@ -26,7 +26,7 @@ Detailed docs live in [`docs/`](docs/):
 | [secrets.md](docs/secrets.md) | `n0b secrets` | Get/set secrets — env, `~/lib`, Keychain, dotenv |
 | [ai-speak.md](docs/ai-speak.md) | `n0b ai speak` | Text-to-speech — macOS `say` or offline Kokoro |
 | [z-image.md](docs/z-image.md) | `n0b ai image` | Z-Image-Turbo text-to-image and `--ref` img2img |
-| [transcribe.md](docs/transcribe.md) | `n0b ai transcribe` | Local Whisper speech-to-text, hints + replacement files |
+| [transcribe.md](docs/transcribe.md) | `n0b ai transcribe` | Local Whisper STT; fancy video narrative via Ollama vision |
 | [quota.md](docs/quota.md) | `n0b quota` | Live AI tool rate limits (Antigravity / `agy`) |
 
 ### Quick reference (no separate doc yet)
@@ -50,7 +50,7 @@ Detailed docs live in [`docs/`](docs/):
 | `n0b ai video` | LTX-Video 1/2, MLX on Apple Silicon | `--install`, `--install-ltx1`, `-1`, `-2` |
 | `n0b ai audio` | AudioLDM / Bark (`<bin>/.venv`) | `--model bark`, `-o`, `--install` |
 | `n0b ai speak` | macOS `say` (auto), Kokoro offline (`<bin>/.venv`) | `--engine`, `--voice`, `-o` |
-| `n0b ai transcribe` | Whisper `turbo` (local, `<bin>/.venv`) | `--model tiny|base|small|medium|large` |
+| `n0b ai transcribe` | Whisper `turbo` (local); fancy video → Ollama `qwen3.6` | `--flavor`, `--model`, `--vision-model` |
 
 ## Layout
 

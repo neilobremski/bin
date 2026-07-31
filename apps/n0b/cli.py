@@ -289,10 +289,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     ai_transcribe = ai_sub.add_parser(
-        "transcribe", help="Transcribe an audio file locally with Whisper"
+        "transcribe",
+        help="Transcribe audio/video locally (Whisper; fancy video via Ollama vision)",
     )
     ai_transcribe.add_argument(
-        "audio", nargs="?", help="Audio file (anything ffmpeg reads)"
+        "audio", nargs="?", help="Audio or video file (anything ffmpeg reads)"
     )
     ai_transcribe.add_argument(
         "--hint",
@@ -310,6 +311,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ai_transcribe.add_argument(
         "--model", default="turbo", help="Whisper model (default: turbo)"
+    )
+    ai_transcribe.add_argument(
+        "--flavor",
+        choices=("auto", "plain", "fancy"),
+        default="auto",
+        help=(
+            "Output style: auto uses fancy for video streams else plain; "
+            "plain/fancy override detection (default: auto)"
+        ),
+    )
+    ai_transcribe.add_argument(
+        "--vision-model",
+        default=None,
+        help=(
+            "Ollama vision model for --flavor fancy "
+            "(default: N0B_TRANSCRIBE_VISION_MODEL or qwen3.6)"
+        ),
     )
     ai_transcribe.add_argument(
         "--replace",
@@ -455,6 +473,8 @@ def dispatch(args: argparse.Namespace) -> int:
                 args.model,
                 save=args.save,
                 replaces=args.replaces,
+                flavor=args.flavor,
+                vision_model=args.vision_model,
             )
         if args.ai_kind == "image":
             return cmd_image(
