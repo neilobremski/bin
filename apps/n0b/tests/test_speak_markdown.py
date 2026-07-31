@@ -224,8 +224,12 @@ def test_kokoro_section_pause_not_stacked_with_emphasis():
     pieces = render_kokoro_pieces(blocks)
     section = [p for p in pieces if p.silence_after == 2.0 and not p.text.strip()]
     assert section, pieces
+    configured = (2.0, 1.0, 0.4)
     assert all(
-        abs(p.silence_after - 2.0) < 1e-9 or p.silence_after < 0.2
+        any(abs(p.silence_after - c) < 1e-9 for c in configured)
+        or p.silence_after < 0.2
         for p in pieces
         if p.silence_after
     )
+    silent = [not p.text.strip() for p in pieces]
+    assert not any(a and b for a, b in zip(silent, silent[1:]))

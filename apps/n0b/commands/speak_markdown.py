@@ -294,7 +294,8 @@ def render_kokoro_pieces(
             else:
                 speed = base_speed
                 silence_before = 0.0
-            if silence_before:
+            already_paused = pieces and not pieces[-1].text.strip()
+            if silence_before and not already_paused:
                 pieces.append(KokoroPiece("", speed, silence_before))
             trailing = 0.12 if span.style == "code" and emphasis else 0.0
             if i < len(spans) - 1 and trailing == 0.0:
