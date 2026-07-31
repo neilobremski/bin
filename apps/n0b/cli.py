@@ -165,24 +165,42 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "OpenAI deep research (gpt-5.6-sol + web_search_preview). "
-            "Default is a single background job. --fanout N decomposes the "
-            "prompt into N complementary sub-questions, runs them in parallel, "
-            "and writes a merged brief under .files/research/fanout-<hash>/."
+            "Default (--fanout absent or 1) is a single background job. "
+            "--fanout [N] plans complementary angles (brief + MMR), runs N "
+            "background jobs (default N=4, clamped 1-8), and writes a merged "
+            "brief under .files/research/fanout-<hash>/."
         ),
         epilog=(
             "examples:\n"
             "  n0b ai research what is X\n"
-            "  n0b ai research --fanout 3 what is X\n"
+            "  n0b ai research --fanout 1 what is X\n"
+            "  n0b ai research --fanout what is X\n"
+            "  n0b ai research --fanout 4 what is X\n"
+            "  n0b ai research --fanout 4 --plan-only what is X\n"
             "\n"
-            "Put --fanout before the prompt (prompt is argparse REMAINDER). "
-            "Fanout costs roughly N times a single run — see apps/n0b/docs/research.md."
+            "Put flags before the prompt (prompt is argparse REMAINDER). "
+            "--fanout with no value defaults to 4. --plan-only prints the "
+            "brief and selected sub-questions without submitting research "
+            "jobs. Fanout costs roughly N times a single run — see "
+            "apps/n0b/docs/research.md."
         ),
     )
     ai_research.add_argument(
         "--fanout",
+        nargs="?",
+        const=4,
+        default=None,
         type=int,
         metavar="N",
-        help="Decompose into N complementary research jobs and merge (prototype)",
+        help=(
+            "Fan out into N research jobs (default 4 if flag present without "
+            "value; 1 or omitted = single-shot; clamped 1-8)"
+        ),
+    )
+    ai_research.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Plan brief + MMR selection and exit without submitting research jobs",
     )
     ai_research.add_argument("prompt", nargs=argparse.REMAINDER)
     ai_speak = ai_sub.add_parser(
@@ -413,7 +431,9 @@ def dispatch(args: argparse.Namespace) -> int:
             return cmd_sub(rest)
     if group == "ai":
         if args.ai_kind == "research":
-            return cmd_research(args.prompt, fanout=args.fanout)
+            return cmd_research(
+                args.prompt, fanout=args.fanout, plan_only=args.plan_only
+            )
         if args.ai_kind == "speak":
             return cmd_speak(
                 args.text,
@@ -471,6 +491,31 @@ def dispatch(args: argparse.Namespace) -> int:
     return 2
 
 
+def _inject_bare_fanout_default(argv: list[str]) -> list[str]:
+    """Turn bare ``--fanout`` into ``--fanout 4`` so the prompt is not eaten."""
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--fanout":
+            out.append(a)
+            nxt = argv[i + 1] if i + 1 < len(argv) else None
+            if nxt is not None and not nxt.startswith("-"):
+                try:
+                    int(nxt)
+                except ValueError:
+                    out.append("4")
+                else:
+                    out.append(nxt)
+                    i += 1
+            else:
+                out.append("4")
+        else:
+            out.append(a)
+        i += 1
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) >= 2 and argv[0] == "ai" and "-h" not in argv and "--help" not in argv:
@@ -498,6 +543,8 @@ def main(argv: list[str] | None = None) -> int:
             if a.out:
                 rest.extend(["-o", a.out])
             return cmd_audio(a.model, rest)
+    if len(argv) >= 2 and argv[0] == "ai" and argv[1] == "research":
+        argv = _inject_bare_fanout_default(argv)
     parser = build_parser()
     args = parser.parse_args(argv)
     return dispatch(args)
