@@ -47,6 +47,8 @@ And finally at the end I'd like a summary of the entire video given all of the s
 """
 
 _WHISPER_SNIPPET = """\
+import contextlib
+import io
 import sys
 import whisper
 
@@ -54,17 +56,21 @@ audio, model_name, language, prompt = sys.argv[1:5]
 print(f"loading model {model_name}...", file=sys.stderr)
 model = whisper.load_model(model_name)
 print(f"transcribing (language: {language or 'auto-detect'})...", file=sys.stderr)
-result = model.transcribe(
-    audio,
-    language=language or None,
-    initial_prompt=prompt or None,
-    fp16=False,
-    verbose=False,
-)
+# whisper prints "Detected language: ..." to stdout even with verbose=False
+with contextlib.redirect_stdout(io.StringIO()):
+    result = model.transcribe(
+        audio,
+        language=language or None,
+        initial_prompt=prompt or None,
+        fp16=False,
+        verbose=False,
+    )
 print(result["text"].strip())
 """
 
 _WHISPER_TIMED_SNIPPET = """\
+import contextlib
+import io
 import json
 import sys
 import whisper
@@ -73,13 +79,15 @@ audio, model_name, language, prompt = sys.argv[1:5]
 print(f"loading model {model_name}...", file=sys.stderr)
 model = whisper.load_model(model_name)
 print(f"transcribing (language: {language or 'auto-detect'})...", file=sys.stderr)
-result = model.transcribe(
-    audio,
-    language=language or None,
-    initial_prompt=prompt or None,
-    fp16=False,
-    verbose=False,
-)
+# whisper prints "Detected language: ..." to stdout even with verbose=False
+with contextlib.redirect_stdout(io.StringIO()):
+    result = model.transcribe(
+        audio,
+        language=language or None,
+        initial_prompt=prompt or None,
+        fp16=False,
+        verbose=False,
+    )
 out = {
     "language": result.get("language") or "",
     "text": (result.get("text") or "").strip(),
@@ -94,6 +102,30 @@ out = {
 }
 print(json.dumps(out))
 """
+
+
+def parse_whisper_timed_stdout(stdout: str) -> dict:
+    """Parse timed Whisper JSON; tolerate stray non-JSON lines on stdout."""
+    text = stdout.strip()
+    if not text:
+        raise ValueError("empty Whisper timed output")
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            return payload
+    except json.JSONDecodeError:
+        pass
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise ValueError("Whisper timed output was not JSON")
 
 
 def read_replacements(replacements_file: Path) -> list[tuple[str, str]]:
@@ -325,12 +357,9 @@ def _fancy_transcribe(
     if rc != 0:
         return rc
     try:
-        payload = json.loads(stdout)
-    except json.JSONDecodeError:
-        print(
-            "n0b ai transcribe: Whisper timed output was not JSON",
-            file=sys.stderr,
-        )
+        payload = parse_whisper_timed_stdout(stdout)
+    except ValueError as exc:
+        print(f"n0b ai transcribe: {exc}", file=sys.stderr)
         return 1
 
     speech = format_timed_speech(payload)

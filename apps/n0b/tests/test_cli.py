@@ -32,6 +32,7 @@ from commands.ai_transcribe_cmd import (
     calc_fps,
     cmd_transcribe,
     format_timed_speech,
+    parse_whisper_timed_stdout,
     read_replacements,
     resolve_flavor,
     save_replacements,
@@ -480,6 +481,22 @@ def test_format_timed_speech():
     assert "Full Speech Transcript: Hello world" in text
     assert "[Speech Transcript from 0.0 to 1.25 seconds]" in text
     assert "Hello" in text
+
+
+def test_parse_whisper_timed_stdout_tolerates_detected_language():
+    payload = {
+        "language": "en",
+        "text": "hello",
+        "segments": [{"start": 0, "end": 1, "text": "hello"}],
+    }
+    contaminated = "Detected language: English\n" + json.dumps(payload) + "\n"
+    assert parse_whisper_timed_stdout(contaminated) == payload
+    assert parse_whisper_timed_stdout(json.dumps(payload)) == payload
+
+
+def test_parse_whisper_timed_stdout_rejects_garbage():
+    with pytest.raises(ValueError, match="not JSON"):
+        parse_whisper_timed_stdout("Detected language: English\nhello\n")
 
 
 def test_calc_fps_caps_and_spreads(tmp_path):
