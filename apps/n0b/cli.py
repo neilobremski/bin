@@ -166,9 +166,10 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "OpenAI deep research (gpt-5.6-sol + web_search_preview). "
             "Default (--fanout absent or 1) is a single background job. "
-            "--fanout [N] plans complementary angles (brief + MMR), runs N "
-            "background jobs (default N=4, clamped 1-8), and writes a merged "
-            "brief under .files/research/fanout-<hash>/."
+            "--fanout [N] plans complementary angles (brief + MMR + reserved "
+            "adversarial), runs N background jobs (bare --fanout uses Stage 0 "
+            "recommended_fanout; clamped 1-8), and writes a merged brief under "
+            ".files/research/fanout-<hash>/."
         ),
         epilog=(
             "examples:\n"
@@ -179,22 +180,22 @@ def build_parser() -> argparse.ArgumentParser:
             "  n0b ai research --fanout 4 --plan-only what is X\n"
             "\n"
             "Put flags before the prompt (prompt is argparse REMAINDER). "
-            "--fanout with no value defaults to 4. --plan-only prints the "
-            "brief and selected sub-questions without submitting research "
-            "jobs. Fanout costs roughly N times a single run — see "
-            "apps/n0b/docs/research.md."
+            "Bare --fanout asks Stage 0 for recommended_fanout (may be 1). "
+            "Explicit --fanout N always wins. --plan-only prints the brief "
+            "and selected sub-questions without submitting research jobs. "
+            "See apps/n0b/docs/research.md."
         ),
     )
     ai_research.add_argument(
         "--fanout",
         nargs="?",
-        const=4,
+        const=0,
         default=None,
         type=int,
         metavar="N",
         help=(
-            "Fan out into N research jobs (default 4 if flag present without "
-            "value; 1 or omitted = single-shot; clamped 1-8)"
+            "Fan out into N research jobs (bare flag = Stage 0 "
+            "recommended_fanout; 1 or omitted = single-shot; clamped 1-8)"
         ),
     )
     ai_research.add_argument(
@@ -492,7 +493,10 @@ def dispatch(args: argparse.Namespace) -> int:
 
 
 def _inject_bare_fanout_default(argv: list[str]) -> list[str]:
-    """Turn bare ``--fanout`` into ``--fanout 4`` so the prompt is not eaten."""
+    """Turn bare ``--fanout`` into ``--fanout 0`` (auto) so the prompt is not eaten.
+
+    ``0`` means Stage 0 picks ``recommended_fanout``; an explicit N always wins.
+    """
     out: list[str] = []
     i = 0
     while i < len(argv):
@@ -504,12 +508,12 @@ def _inject_bare_fanout_default(argv: list[str]) -> list[str]:
                 try:
                     int(nxt)
                 except ValueError:
-                    out.append("4")
+                    out.append("0")
                 else:
                     out.append(nxt)
                     i += 1
             else:
-                out.append("4")
+                out.append("0")
         else:
             out.append(a)
         i += 1

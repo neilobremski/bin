@@ -18,10 +18,14 @@ def cmd_research(
             file=sys.stderr,
         )
         return 2
-    # --fanout absent or 1 → single-shot path unchanged.
+    # --fanout absent or explicit 1 → single-shot path unchanged.
     if fanout is None or fanout == 1:
         if plan_only:
-            print('{"error": "--plan-only requires --fanout N with N>=2"}')
+            print(
+                '{"error": "--plan-only requires --fanout '
+                '(bare or N>=2)"}'
+            )
             return 1
         return run_research(args)
+    # fanout == FANOUT_AUTO (bare --fanout) → Stage 0 picks N.
     return run_research_fanout(args, fanout, plan_only=plan_only)
