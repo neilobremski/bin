@@ -1,4 +1,4 @@
-"""n0b ai transcribe — local Whisper, optional fancy video via Ollama vision."""
+"""n0b ai transcribe — local STT (Whisper / mlx-whisper / parakeet), optional fancy video."""
 from __future__ import annotations
 
 import json
@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from ai_venv import ensure_whisper
+from ai_venv import ensure_mlx_whisper, ensure_parakeet, ensure_whisper
 from commands.ai_common import (
     parse_cli_pairs,
     read_hints,
@@ -24,6 +24,7 @@ from commands.ai_ollama import (
     ensure_vision_model,
     resolve_vision_model,
 )
+from commands.gpu_cmd import mlx_available
 
 HINTS_FILE = Path.home() / ".config" / "n0b" / "transcribe-hints.txt"
 REPLACEMENTS_FILE = Path.home() / ".config" / "n0b" / "transcribe-replacements.txt"
@@ -31,6 +32,19 @@ REPLACEMENTS_FILE = Path.home() / ".config" / "n0b" / "transcribe-replacements.t
 MAX_FRAMES = 50
 MAX_FPS = 1.0
 FRAME_SCALE = 512
+
+DEFAULT_PARAKEET_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
+
+_MLX_WHISPER_MODELS = {
+    "tiny": "mlx-community/whisper-tiny",
+    "base": "mlx-community/whisper-base",
+    "small": "mlx-community/whisper-small",
+    "medium": "mlx-community/whisper-medium",
+    "large": "mlx-community/whisper-large-v3",
+    "large-v2": "mlx-community/whisper-large-v2",
+    "large-v3": "mlx-community/whisper-large-v3",
+    "turbo": "mlx-community/whisper-large-v3-turbo",
+}
 
 _FANCY_SYSTEM = "You are my very helpful videographer analyst"
 
@@ -52,7 +66,7 @@ import io
 import sys
 import whisper
 
-audio, model_name, language, prompt = sys.argv[1:5]
+audio, model_name, language, prompt, condition = sys.argv[1:6]
 print(f"loading model {model_name}...", file=sys.stderr)
 model = whisper.load_model(model_name)
 print(f"transcribing (language: {language or 'auto-detect'})...", file=sys.stderr)
@@ -62,6 +76,7 @@ with contextlib.redirect_stdout(io.StringIO()):
         audio,
         language=language or None,
         initial_prompt=prompt or None,
+        condition_on_previous_text=condition == "1",
         fp16=False,
         verbose=False,
     )
@@ -75,7 +90,7 @@ import json
 import sys
 import whisper
 
-audio, model_name, language, prompt = sys.argv[1:5]
+audio, model_name, language, prompt, condition = sys.argv[1:6]
 print(f"loading model {model_name}...", file=sys.stderr)
 model = whisper.load_model(model_name)
 print(f"transcribing (language: {language or 'auto-detect'})...", file=sys.stderr)
@@ -85,6 +100,7 @@ with contextlib.redirect_stdout(io.StringIO()):
         audio,
         language=language or None,
         initial_prompt=prompt or None,
+        condition_on_previous_text=condition == "1",
         fp16=False,
         verbose=False,
     )
@@ -102,6 +118,132 @@ out = {
 }
 print(json.dumps(out))
 """
+
+_MLX_WHISPER_SNIPPET = """\
+import sys
+import mlx_whisper
+
+audio, model_name, language, prompt, condition = sys.argv[1:6]
+print(f"loading mlx-whisper {model_name}...", file=sys.stderr)
+print(f"transcribing (language: {language or 'auto-detect'})...", file=sys.stderr)
+kwargs = {
+    "path_or_hf_repo": model_name,
+    "initial_prompt": prompt or None,
+    "condition_on_previous_text": condition == "1",
+    "verbose": False,
+}
+if language:
+    kwargs["language"] = language
+result = mlx_whisper.transcribe(audio, **kwargs)
+print((result.get("text") or "").strip())
+"""
+
+_MLX_WHISPER_TIMED_SNIPPET = """\
+import json
+import sys
+import mlx_whisper
+
+audio, model_name, language, prompt, condition = sys.argv[1:6]
+print(f"loading mlx-whisper {model_name}...", file=sys.stderr)
+print(f"transcribing (language: {language or 'auto-detect'})...", file=sys.stderr)
+kwargs = {
+    "path_or_hf_repo": model_name,
+    "initial_prompt": prompt or None,
+    "condition_on_previous_text": condition == "1",
+    "verbose": False,
+}
+if language:
+    kwargs["language"] = language
+result = mlx_whisper.transcribe(audio, **kwargs)
+out = {
+    "language": result.get("language") or "",
+    "text": (result.get("text") or "").strip(),
+    "segments": [
+        {
+            "start": float(seg.get("start") or 0),
+            "end": float(seg.get("end") or 0),
+            "text": (seg.get("text") or "").strip(),
+        }
+        for seg in (result.get("segments") or [])
+    ],
+}
+print(json.dumps(out))
+"""
+
+_PARAKEET_SNIPPET = """\
+import json
+import sys
+from parakeet_mlx import from_pretrained
+
+audio, model_name, timed = sys.argv[1:4]
+print(f"loading parakeet {model_name}...", file=sys.stderr)
+model = from_pretrained(model_name)
+print("transcribing...", file=sys.stderr)
+result = model.transcribe(audio)
+if timed != "1":
+    print((result.text or "").strip())
+else:
+    out = {
+        "language": "",
+        "text": (result.text or "").strip(),
+        "segments": [
+            {
+                "start": float(s.start),
+                "end": float(s.end),
+                "text": (s.text or "").strip(),
+            }
+            for s in (result.sentences or [])
+        ],
+    }
+    print(json.dumps(out))
+"""
+
+
+def loop_run(text: str) -> int:
+    """Longest run of identical short consecutive sentences (Whisper silence loops)."""
+    sents = [
+        s.strip().lower()
+        for s in re.split(r"(?<=[.!?])\s+", text)
+        if s.strip()
+    ]
+    best = run = 0
+    prev = None
+    for s in sents:
+        run = run + 1 if s == prev and len(s) < 60 else 0
+        best = max(best, run)
+        prev = s
+    return best + 1
+
+
+def resolve_transcribe_engine(cli_engine: str | None) -> str:
+    if cli_engine and cli_engine != "auto":
+        return cli_engine
+    if mlx_available():
+        return "mlx-whisper"
+    return "whisper"
+
+
+def resolve_engine_model(engine: str, model: str) -> str:
+    if engine == "mlx-whisper":
+        if "/" in model:
+            return model
+        mapped = _MLX_WHISPER_MODELS.get(model)
+        if mapped:
+            return mapped
+        return f"mlx-community/whisper-{model}"
+    if engine == "parakeet-mlx":
+        if model in _MLX_WHISPER_MODELS:
+            return DEFAULT_PARAKEET_MODEL
+        return model
+    return model
+
+
+def ensure_transcribe_engine(engine: str) -> Path:
+    if engine == "mlx-whisper":
+        return ensure_mlx_whisper()
+    if engine == "parakeet-mlx":
+        return ensure_parakeet()
+    return ensure_whisper()
 
 
 def parse_whisper_timed_stdout(stdout: str) -> dict:
@@ -286,18 +428,48 @@ def format_timed_speech(payload: dict) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _run_whisper(
+def _run_stt(
     python: Path,
     path: Path,
+    engine: str,
     model: str,
     language: str | None,
     prompt: str,
     *,
     timed: bool,
+    condition_on_previous: bool = False,
 ) -> tuple[int, str]:
-    snippet = _WHISPER_TIMED_SNIPPET if timed else _WHISPER_SNIPPET
+    if engine == "parakeet-mlx":
+        proc = subprocess.run(
+            [
+                str(python),
+                "-c",
+                _PARAKEET_SNIPPET,
+                str(path),
+                model,
+                "1" if timed else "0",
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        return proc.returncode, proc.stdout
+
+    condition = "1" if condition_on_previous else "0"
+    if engine == "mlx-whisper":
+        snippet = _MLX_WHISPER_TIMED_SNIPPET if timed else _MLX_WHISPER_SNIPPET
+    else:
+        snippet = _WHISPER_TIMED_SNIPPET if timed else _WHISPER_SNIPPET
     proc = subprocess.run(
-        [str(python), "-c", snippet, str(path), model, language or "", prompt],
+        [
+            str(python),
+            "-c",
+            snippet,
+            str(path),
+            model,
+            language or "",
+            prompt,
+            condition,
+        ],
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -307,12 +479,24 @@ def _run_whisper(
 def _plain_transcribe(
     path: Path,
     python: Path,
+    engine: str,
     model: str,
     language: str | None,
     prompt: str,
     pairs: list[tuple[str, str]],
+    *,
+    condition_on_previous: bool = False,
 ) -> int:
-    rc, stdout = _run_whisper(python, path, model, language, prompt, timed=False)
+    rc, stdout = _run_stt(
+        python,
+        path,
+        engine,
+        model,
+        language,
+        prompt,
+        timed=False,
+        condition_on_previous=condition_on_previous,
+    )
     if rc != 0:
         return rc
     text, applied = apply_replacements(stdout.strip(), pairs)
@@ -326,11 +510,14 @@ def _plain_transcribe(
 def _fancy_transcribe(
     path: Path,
     python: Path,
+    engine: str,
     model: str,
     language: str | None,
     prompt: str,
     pairs: list[tuple[str, str]],
     vision_model: str,
+    *,
+    condition_on_previous: bool = False,
 ) -> int:
     if shutil.which("ffprobe") is None:
         print(
@@ -353,7 +540,16 @@ def _fancy_transcribe(
         return 1
 
     fps = calc_fps(path)
-    rc, stdout = _run_whisper(python, path, model, language, prompt, timed=True)
+    rc, stdout = _run_stt(
+        python,
+        path,
+        engine,
+        model,
+        language,
+        prompt,
+        timed=True,
+        condition_on_previous=condition_on_previous,
+    )
     if rc != 0:
         return rc
     try:
@@ -405,6 +601,8 @@ def cmd_transcribe(
     replaces: list[str] | None = None,
     flavor: str = "auto",
     vision_model: str | None = None,
+    condition_on_previous: bool = False,
+    engine: str | None = None,
 ) -> int:
     replaces = replaces or []
     if save:
@@ -437,19 +635,47 @@ def cmd_transcribe(
         )
         return 1
 
+    engine_name = resolve_transcribe_engine(engine)
+    model_name = resolve_engine_model(engine_name, model)
+    print(f"engine: {engine_name} (from {engine or 'auto'})", file=sys.stderr)
+    if model_name != model:
+        print(f"model: {model_name} (from {model})", file=sys.stderr)
+    else:
+        print(f"model: {model_name}", file=sys.stderr)
+
     resolved = resolve_flavor(flavor, path)
     print(f"flavor: {resolved} (from {flavor})", file=sys.stderr)
 
     file_hints = read_hints(HINTS_FILE)
     cli_hints = split_cli_hints(hints)
     prompt = ", ".join(file_hints + cli_hints)
+    if engine_name == "parakeet-mlx":
+        if prompt:
+            print(
+                "n0b ai transcribe: hints ignored for parakeet-mlx "
+                "(no initial_prompt)",
+                file=sys.stderr,
+            )
+            prompt = ""
+        if language:
+            print(
+                "n0b ai transcribe: --language ignored for parakeet-mlx",
+                file=sys.stderr,
+            )
+            language = None
+        if condition_on_previous:
+            print(
+                "n0b ai transcribe: --condition-on-previous ignored for parakeet-mlx",
+                file=sys.stderr,
+            )
+            condition_on_previous = False
     if prompt:
         print(
             f"hints: {prompt}\n"
             f"  ({len(file_hints)} from {HINTS_FILE}, {len(cli_hints)} from --hint)",
             file=sys.stderr,
         )
-    else:
+    elif engine_name != "parakeet-mlx":
         print(
             f"hints: none (create {HINTS_FILE}, or pass --hint, add --save to keep)",
             file=sys.stderr,
@@ -458,15 +684,32 @@ def cmd_transcribe(
     if pairs:
         print(f"replacements: {len(pairs)} pattern(s) loaded", file=sys.stderr)
     try:
-        python = ensure_whisper()
+        python = ensure_transcribe_engine(engine_name)
     except subprocess.CalledProcessError as exc:
-        print(f"n0b ai transcribe: Whisper setup failed: {exc}", file=sys.stderr)
+        print(f"n0b ai transcribe: {engine_name} setup failed: {exc}", file=sys.stderr)
         return 1
 
     if resolved == "plain":
-        return _plain_transcribe(path, python, model, language, prompt, pairs)
+        return _plain_transcribe(
+            path,
+            python,
+            engine_name,
+            model_name,
+            language,
+            prompt,
+            pairs,
+            condition_on_previous=condition_on_previous,
+        )
 
     vision = resolve_vision_model(vision_model)
     return _fancy_transcribe(
-        path, python, model, language, prompt, pairs, vision
+        path,
+        python,
+        engine_name,
+        model_name,
+        language,
+        prompt,
+        pairs,
+        vision,
+        condition_on_previous=condition_on_previous,
     )

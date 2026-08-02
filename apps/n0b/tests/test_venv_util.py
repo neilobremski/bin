@@ -12,6 +12,8 @@ from venv_util import (  # noqa: E402
     BIN_VENV,
     ensure_image,
     ensure_kokoro,
+    ensure_mlx_whisper,
+    ensure_parakeet,
     ensure_whisper,
     requirements_file,
     uninstall,
@@ -25,6 +27,7 @@ def test_venv_lives_at_repo_root():
 
 def test_requirements_files_exist():
     assert requirements_file("ai.txt").is_file()
+    assert requirements_file("ai-mlx.txt").is_file()
     assert requirements_file("dev.txt").is_file()
     assert requirements_file("b3t.txt").is_file()
 
@@ -57,3 +60,5 @@ def test_ensure_image_reuses_existing_venv(tmp_path):
 def test_ensure_functions_are_thin_wrappers():
     assert ensure_kokoro.__module__ == "venv_util"
     assert ensure_whisper.__module__ == "venv_util"
+    assert ensure_mlx_whisper.__module__ == "venv_util"
+    assert ensure_parakeet.__module__ == "venv_util"

@@ -88,6 +88,8 @@ def _torch_requirements() -> Path:
 def _group_requirements(group: str) -> list[Path]:
     if group == "ai":
         return [_torch_requirements(), requirements_file("ai.txt")]
+    if group == "ai-mlx":
+        return [requirements_file("ai-mlx.txt")]
     return [requirements_file(f"{group}.txt")]
 
 
@@ -112,6 +114,14 @@ def ensure_kokoro() -> Path:
 
 def ensure_whisper() -> Path:
     return ensure_group("ai", probe="import whisper")
+
+
+def ensure_mlx_whisper() -> Path:
+    return ensure_group("ai-mlx", probe="import mlx_whisper")
+
+
+def ensure_parakeet() -> Path:
+    return ensure_group("ai-mlx", probe="import parakeet_mlx")
 
 
 def ensure_dev() -> Path:
