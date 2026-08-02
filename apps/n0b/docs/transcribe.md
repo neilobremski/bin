@@ -6,10 +6,12 @@ allowed-tools: Bash(n0b ai transcribe *)
 
 # n0b ai transcribe
 
-Local speech-to-text via [openai-whisper](https://github.com/openai/whisper).
-No API key; the model runs on this machine. For files with a video stream,
-`--flavor auto` (default) also samples frames and asks a local Ollama vision
-model for a Surfey-style fancy narrative (synopsis, timed scenes, summary).
+Local speech-to-text. Default engine is `auto`: on Apple Silicon that picks
+`mlx-whisper`; elsewhere it uses openai-whisper (`whisper`). Override with
+`--engine`, including `parakeet-mlx` (NVIDIA Parakeet on MLX). No API key;
+models run on this machine. For files with a video stream, `--flavor auto`
+(default) also samples frames and asks a local Ollama vision model for a
+Surfey-style fancy narrative (synopsis, timed scenes, summary).
 
 Transcription goes to stdout; everything else (setup, progress) to stderr,
 so output is pipe-safe.
@@ -24,6 +26,10 @@ n0b ai transcribe clip.mp4                 # auto → fancy when video stream pr
 n0b ai transcribe clip.mp4 --flavor plain  # Whisper text only
 n0b ai transcribe memo.m4a --flavor fancy  # errors: no video stream
 
+n0b ai transcribe memo.m4a --engine mlx-whisper     # force MLX Whisper
+n0b ai transcribe memo.m4a --engine parakeet-mlx    # NVIDIA Parakeet on MLX
+n0b ai transcribe memo.m4a --engine whisper         # openai-whisper (PyTorch)
+
 n0b ai transcribe memo.m4a --hint "Pay-i" --hint "a8s, r4t"   # bias proper nouns
 n0b ai transcribe memo.m4a --language en                       # skip auto-detect
 n0b ai transcribe memo.m4a --model base                        # smaller/faster Whisper
@@ -36,12 +42,35 @@ n0b ai transcribe memo.m4a --hint "Pay-i" --save               # save, then tran
 
 n0b ai transcribe memo.m4a --replace 'Jerry => Gerry'          # annotate known mis-hearings
 n0b ai transcribe --replace 'Jerry => Gerry' --save            # add to the global replacements file
+
+n0b ai transcribe memo.m4a --condition-on-previous             # old Whisper feedback (can loop)
 ```
 
 stderr reports the flavor in effect, hints, model loading, and progress so a
 long silence is never ambiguous.
 
 Any format ffmpeg can read works: m4a, mp3, wav, aiff, ogg, mp4, ...
+
+## Engines
+
+`--engine` selects the STT backend:
+
+| Value | Behavior |
+|-------|----------|
+| `auto` (default) | `mlx-whisper` when Apple Silicon MLX is available; else `whisper` |
+| `whisper` | [openai-whisper](https://github.com/openai/whisper) (PyTorch) |
+| `mlx-whisper` | [mlx-whisper](https://pypi.org/project/mlx-whisper/) on Apple Silicon |
+| `parakeet-mlx` | [parakeet-mlx](https://github.com/senstella/parakeet-mlx) (NVIDIA Parakeet) |
+
+`parakeet-mlx` always chunks long audio (`chunk_duration=120`,
+`overlap_duration=15`) to avoid Metal OOM on hour-scale files.
+
+Short Whisper size names (`tiny`…`turbo`) map to `mlx-community/whisper-*`
+HF repos under `mlx-whisper`; unknown short names are rejected. For
+`parakeet-mlx`, Whisper short names resolve to
+`mlx-community/parakeet-tdt-0.6b-v3`; pass a full HF repo to pick another
+Parakeet checkpoint. Hints, `--language`, and `--condition-on-previous` apply
+to Whisper engines only.
 
 ## Flavor
 
@@ -107,12 +136,28 @@ stderr reports how many patterns loaded and which ones matched.
 
 `--model` takes any Whisper model name: `tiny`, `base`, `small`, `medium`,
 `large`, `turbo` (default). `turbo` is near-large accuracy at ~8x speed;
-use `base` when speed matters more than proper nouns.
+use `base` when speed matters more than proper nouns. With `mlx-whisper`,
+those names map to Hugging Face MLX repos; with `parakeet-mlx`, pass a
+Parakeet HF id (or leave the Whisper default to get the Parakeet default).
+
+## Silence-conditioning loops
+
+By default Whisper does **not** condition each window on its previous text
+(`condition_on_previous_text=False`). The library default of `True` feeds
+decoder output back into itself and can sustain repetition loops on silence
+or noise ("Thank you. Thank you. …"). Pass `--condition-on-previous` only if
+you want the old behaviour for cleaner continuous speech.
+
+This does **not** eliminate all Whisper loops — within-window token
+repetition on long noisy audio can still happen. When the output has four or
+more identical short consecutive sentences, stderr warns so you can retry
+with `--engine parakeet-mlx` (often cleaner on that class).
 
 ## First run
 
 Bootstraps `<bin>/.venv` on first use from `requirements/ai*.txt` (shared repo
-venv; torch installs once) and downloads the Whisper model to
-`~/.cache/whisper/`. One-time cost of a few GB; subsequent runs are offline
-for plain flavor. Fancy also needs a local vision model via Ollama. Requires
-`ffmpeg` (and `ffprobe` for flavor detection / fancy) on PATH.
+venv; torch installs once) and downloads the STT model. MLX engines also pull
+`requirements/ai-mlx.txt` (`mlx-whisper`, `parakeet-mlx`). One-time cost of a
+few GB; subsequent runs are offline for plain flavor. Fancy also needs a local
+vision model via Ollama. Requires `ffmpeg` (and `ffprobe` for flavor detection
+/ fancy) on PATH.

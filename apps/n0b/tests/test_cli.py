@@ -29,12 +29,18 @@ from commands.ai_transcribe_cmd import (
     calc_fps,
     cmd_transcribe,
     format_timed_speech,
+    loop_run,
     parse_whisper_timed_stdout,
     read_replacements,
+    resolve_engine_model,
     resolve_flavor,
+    resolve_transcribe_engine,
     save_replacements,
     HINTS_FILE,
     REPLACEMENTS_FILE,
+    DEFAULT_PARAKEET_MODEL,
+    _WHISPER_SNIPPET,
+    _WHISPER_TIMED_SNIPPET,
 )
 from commands.ai_ollama import (
     OllamaError,
@@ -406,14 +412,16 @@ def test_transcribe_applies_replacements(tmp_path, capsys):
     repl = tmp_path / "transcribe-replacements.txt"
     repl.write_text("Jerry => Gerry\n")
     with (
-        patch("commands.ai_transcribe_cmd.ensure_whisper", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.ensure_transcribe_engine", return_value=fake_python),
         patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
         patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", repl),
         patch("commands.ai_transcribe_cmd.subprocess.run") as run,
     ):
         run.return_value.returncode = 0
         run.return_value.stdout = "Jerry said hi.\n"
-        rc = cmd_transcribe(str(audio), [], "en", "base", flavor="plain")
+        rc = cmd_transcribe(
+            str(audio), [], "en", "base", flavor="plain", engine="whisper"
+        )
     assert rc == 0
     out, err = capsys.readouterr()
     assert out == "Jerry (possible transcribe error, might be 'Gerry') said hi.\n"
@@ -425,19 +433,182 @@ def test_transcribe_invokes_whisper_venv(tmp_path):
     audio.write_bytes(b"RIFF")
     fake_python = tmp_path / "venv" / "bin" / "python3"
     with (
-        patch("commands.ai_transcribe_cmd.ensure_whisper", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.ensure_transcribe_engine", return_value=fake_python),
         patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
         patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
         patch("commands.ai_transcribe_cmd.subprocess.run") as run,
     ):
         run.return_value.returncode = 0
         run.return_value.stdout = "hello\n"
-        rc = cmd_transcribe(str(audio), ["Pay-i"], "en", "base", flavor="plain")
+        rc = cmd_transcribe(
+            str(audio), ["Pay-i"], "en", "base", flavor="plain", engine="whisper"
+        )
         assert rc == 0
         argv = run.call_args[0][0]
         assert argv[0] == str(fake_python)
         assert argv[1] == "-c"
-        assert argv[3:] == [str(audio), "base", "en", "Pay-i"]
+        assert argv[3:] == [str(audio), "base", "en", "Pay-i", "0"]
+
+
+def test_transcribe_invokes_mlx_whisper_model_map(tmp_path):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"RIFF")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    with (
+        patch("commands.ai_transcribe_cmd.ensure_transcribe_engine", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
+        patch("commands.ai_transcribe_cmd.subprocess.run") as run,
+    ):
+        run.return_value.returncode = 0
+        run.return_value.stdout = "hello\n"
+        rc = cmd_transcribe(
+            str(audio), [], "en", "turbo", flavor="plain", engine="mlx-whisper"
+        )
+        assert rc == 0
+        argv = run.call_args[0][0]
+        assert argv[3:] == [
+            str(audio),
+            "mlx-community/whisper-large-v3-turbo",
+            "en",
+            "",
+            "0",
+        ]
+
+
+def test_transcribe_invokes_parakeet(tmp_path, capsys):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"RIFF")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    with (
+        patch("commands.ai_transcribe_cmd.ensure_transcribe_engine", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
+        patch("commands.ai_transcribe_cmd.subprocess.run") as run,
+    ):
+        run.return_value.returncode = 0
+        run.return_value.stdout = "hello from parakeet\n"
+        rc = cmd_transcribe(
+            str(audio),
+            ["Pay-i"],
+            "en",
+            "turbo",
+            flavor="plain",
+            engine="parakeet-mlx",
+            condition_on_previous=True,
+        )
+        assert rc == 0
+        argv = run.call_args[0][0]
+        assert argv[3:] == [
+            str(audio),
+            DEFAULT_PARAKEET_MODEL,
+            "0",
+            "120.0",
+            "15.0",
+        ]
+    _out, err = capsys.readouterr()
+    assert "hints ignored for parakeet-mlx" in err
+    assert "--language ignored for parakeet-mlx" in err
+    assert "--condition-on-previous ignored for parakeet-mlx" in err
+
+
+def test_transcribe_condition_on_previous_flag(tmp_path):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"RIFF")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    with (
+        patch("commands.ai_transcribe_cmd.ensure_transcribe_engine", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
+        patch("commands.ai_transcribe_cmd.subprocess.run") as run,
+    ):
+        run.return_value.returncode = 0
+        run.return_value.stdout = "hello\n"
+        rc = cmd_transcribe(
+            str(audio),
+            [],
+            "en",
+            "base",
+            flavor="plain",
+            condition_on_previous=True,
+            engine="whisper",
+        )
+        assert rc == 0
+        argv = run.call_args[0][0]
+        assert argv[3:] == [str(audio), "base", "en", "", "1"]
+
+
+def test_whisper_snippets_pass_condition_flag():
+    assert "condition_on_previous_text=condition == \"1\"" in _WHISPER_SNIPPET
+    assert "condition_on_previous_text=condition == \"1\"" in _WHISPER_TIMED_SNIPPET
+
+
+def test_loop_run_detects_repetition():
+    looped = " ".join(["Thank you."] * 16)
+    assert loop_run(looped) >= 4
+    assert loop_run("So, let's go. So, let's go. So, let's go. So, let's go.") >= 4
+    assert loop_run("Hello world. This is fine. Nothing repeats here.") < 4
+    assert loop_run("") == 1
+
+
+def test_resolve_transcribe_engine_auto():
+    with patch("commands.ai_transcribe_cmd.mlx_available", return_value=True):
+        assert resolve_transcribe_engine(None) == "mlx-whisper"
+        assert resolve_transcribe_engine("auto") == "mlx-whisper"
+    with patch("commands.ai_transcribe_cmd.mlx_available", return_value=False):
+        assert resolve_transcribe_engine("auto") == "whisper"
+    assert resolve_transcribe_engine("parakeet-mlx") == "parakeet-mlx"
+    assert resolve_transcribe_engine("whisper") == "whisper"
+
+
+def test_resolve_engine_model_maps():
+    assert resolve_engine_model("whisper", "turbo") == "turbo"
+    assert (
+        resolve_engine_model("mlx-whisper", "turbo")
+        == "mlx-community/whisper-large-v3-turbo"
+    )
+    assert (
+        resolve_engine_model("mlx-whisper", "mlx-community/whisper-tiny")
+        == "mlx-community/whisper-tiny"
+    )
+    assert resolve_engine_model("parakeet-mlx", "turbo") == DEFAULT_PARAKEET_MODEL
+    assert (
+        resolve_engine_model("parakeet-mlx", "mlx-community/parakeet-tdt-1.1b")
+        == "mlx-community/parakeet-tdt-1.1b"
+    )
+    with pytest.raises(ValueError, match="unknown mlx-whisper model"):
+        resolve_engine_model("mlx-whisper", "base.en")
+
+
+def test_warn_if_loop_emits(capsys):
+    from commands.ai_transcribe_cmd import warn_if_loop
+
+    assert warn_if_loop("Hello. World.") == 1
+    assert "possible repetition loop" not in capsys.readouterr().err
+    looped = " ".join(["Thank you."] * 5)
+    assert warn_if_loop(looped) >= 4
+    assert "possible repetition loop" in capsys.readouterr().err
+
+
+def test_transcribe_warns_on_loop(tmp_path, capsys):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"RIFF")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    looped = " ".join(["Thank you."] * 8)
+    with (
+        patch("commands.ai_transcribe_cmd.ensure_transcribe_engine", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
+        patch("commands.ai_transcribe_cmd.subprocess.run") as run,
+    ):
+        run.return_value.returncode = 0
+        run.return_value.stdout = looped + "\n"
+        rc = cmd_transcribe(
+            str(audio), [], "en", "base", flavor="plain", engine="whisper"
+        )
+    assert rc == 0
+    _out, err = capsys.readouterr()
+    assert "possible repetition loop" in err
 
 
 def test_transcribe_help():
@@ -447,6 +618,8 @@ def test_transcribe_help():
     assert "--language" in proc.stdout
     assert "--flavor" in proc.stdout
     assert "--vision-model" in proc.stdout
+    assert "--condition-on-previous" in proc.stdout
+    assert "--engine" in proc.stdout
 
 
 def test_resolve_flavor_overrides():
@@ -513,7 +686,7 @@ def test_transcribe_fancy_requires_video(tmp_path, capsys):
     audio.write_bytes(b"RIFF")
     fake_python = tmp_path / "venv" / "bin" / "python3"
     with (
-        patch("commands.ai_transcribe_cmd.ensure_whisper", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.ensure_transcribe_engine", return_value=fake_python),
         patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
         patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
         patch("commands.ai_transcribe_cmd.has_video_stream", return_value=False),
@@ -528,7 +701,7 @@ def test_transcribe_fancy_vision_model_lacks_vision(tmp_path, capsys):
     video.write_bytes(b"x")
     fake_python = tmp_path / "venv" / "bin" / "python3"
     with (
-        patch("commands.ai_transcribe_cmd.ensure_whisper", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.ensure_transcribe_engine", return_value=fake_python),
         patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
         patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
         patch("commands.ai_transcribe_cmd.has_video_stream", return_value=True),
@@ -562,7 +735,7 @@ def test_transcribe_auto_picks_fancy_for_video(tmp_path, capsys):
     frame = tmp_path / "0001.png"
     frame.write_bytes(b"\x89PNG\r\n\x1a\n")
     with (
-        patch("commands.ai_transcribe_cmd.ensure_whisper", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.ensure_transcribe_engine", return_value=fake_python),
         patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
         patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
         patch("commands.ai_transcribe_cmd.has_video_stream", return_value=True),
@@ -573,7 +746,7 @@ def test_transcribe_auto_picks_fancy_for_video(tmp_path, capsys):
             "commands.ai_transcribe_cmd.chat_with_images",
             return_value="Synopsis: a clip.",
         ) as chat,
-        patch("commands.ai_transcribe_cmd._run_whisper", return_value=(0, timed)),
+        patch("commands.ai_transcribe_cmd._run_stt", return_value=(0, timed)),
     ):
         rc = cmd_transcribe(str(video), [], "en", "base", flavor="auto")
     assert rc == 0

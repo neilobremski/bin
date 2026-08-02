@@ -346,6 +346,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--model", default="turbo", help="Whisper model (default: turbo)"
     )
     ai_transcribe.add_argument(
+        "--engine",
+        choices=("auto", "whisper", "mlx-whisper", "parakeet-mlx"),
+        default="auto",
+        help=(
+            "STT backend: auto uses mlx-whisper on Apple Silicon, else whisper "
+            "(default: auto)"
+        ),
+    )
+    ai_transcribe.add_argument(
         "--flavor",
         choices=("auto", "plain", "fancy"),
         default="auto",
@@ -377,6 +386,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--save",
         action="store_true",
         help="Append the given --hint/--replace values to their global files",
+    )
+    ai_transcribe.add_argument(
+        "--condition-on-previous",
+        action="store_true",
+        help=(
+            "Let Whisper condition each window on its prior text "
+            "(default off; on can loop on silence/noise)"
+        ),
     )
     ai_image = ai_sub.add_parser(
         "image",
@@ -536,6 +553,8 @@ def dispatch(args: argparse.Namespace) -> int:
                 replaces=args.replaces,
                 flavor=args.flavor,
                 vision_model=args.vision_model,
+                condition_on_previous=args.condition_on_previous,
+                engine=args.engine,
             )
         if args.ai_kind == "image":
             return cmd_image(

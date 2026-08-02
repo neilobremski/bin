@@ -1,6 +1,7 @@
 """Shared ~/.bin/.venv management for all apps in this repo."""
 from __future__ import annotations
 
+import platform
 import shutil
 import subprocess
 import sys
@@ -88,6 +89,8 @@ def _torch_requirements() -> Path:
 def _group_requirements(group: str) -> list[Path]:
     if group == "ai":
         return [_torch_requirements(), requirements_file("ai.txt")]
+    if group == "ai-mlx":
+        return [requirements_file("ai-mlx.txt")]
     return [requirements_file(f"{group}.txt")]
 
 
@@ -114,6 +117,14 @@ def ensure_whisper() -> Path:
     return ensure_group("ai", probe="import whisper")
 
 
+def ensure_mlx_whisper() -> Path:
+    return ensure_group("ai-mlx", probe="import mlx_whisper")
+
+
+def ensure_parakeet() -> Path:
+    return ensure_group("ai-mlx", probe="import parakeet_mlx")
+
+
 def ensure_dev() -> Path:
     return ensure_group("dev", probe="import pytest")
 
@@ -132,6 +143,8 @@ def ensure_audio(model: str = "audioldm") -> Path:
 def install_all() -> Path:
     for group in ("ai", "dev", "b3t", "audio"):
         ensure_group(group)
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        ensure_group("ai-mlx")
     return python_bin()
 
 
