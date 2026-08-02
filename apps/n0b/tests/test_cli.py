@@ -499,7 +499,13 @@ def test_transcribe_invokes_parakeet(tmp_path, capsys):
         )
         assert rc == 0
         argv = run.call_args[0][0]
-        assert argv[3:] == [str(audio), DEFAULT_PARAKEET_MODEL, "0"]
+        assert argv[3:] == [
+            str(audio),
+            DEFAULT_PARAKEET_MODEL,
+            "0",
+            "120.0",
+            "15.0",
+        ]
     _out, err = capsys.readouterr()
     assert "hints ignored for parakeet-mlx" in err
     assert "--language ignored for parakeet-mlx" in err
@@ -570,6 +576,39 @@ def test_resolve_engine_model_maps():
         resolve_engine_model("parakeet-mlx", "mlx-community/parakeet-tdt-1.1b")
         == "mlx-community/parakeet-tdt-1.1b"
     )
+    with pytest.raises(ValueError, match="unknown mlx-whisper model"):
+        resolve_engine_model("mlx-whisper", "base.en")
+
+
+def test_warn_if_loop_emits(capsys):
+    from commands.ai_transcribe_cmd import warn_if_loop
+
+    assert warn_if_loop("Hello. World.") == 1
+    assert "possible repetition loop" not in capsys.readouterr().err
+    looped = " ".join(["Thank you."] * 5)
+    assert warn_if_loop(looped) >= 4
+    assert "possible repetition loop" in capsys.readouterr().err
+
+
+def test_transcribe_warns_on_loop(tmp_path, capsys):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"RIFF")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    looped = " ".join(["Thank you."] * 8)
+    with (
+        patch("commands.ai_transcribe_cmd.ensure_transcribe_engine", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
+        patch("commands.ai_transcribe_cmd.subprocess.run") as run,
+    ):
+        run.return_value.returncode = 0
+        run.return_value.stdout = looped + "\n"
+        rc = cmd_transcribe(
+            str(audio), [], "en", "base", flavor="plain", engine="whisper"
+        )
+    assert rc == 0
+    _out, err = capsys.readouterr()
+    assert "possible repetition loop" in err
 
 
 def test_transcribe_help():

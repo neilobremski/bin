@@ -1,6 +1,7 @@
 """Shared ~/.bin/.venv management for all apps in this repo."""
 from __future__ import annotations
 
+import platform
 import shutil
 import subprocess
 import sys
@@ -142,6 +143,8 @@ def ensure_audio(model: str = "audioldm") -> Path:
 def install_all() -> Path:
     for group in ("ai", "dev", "b3t", "audio"):
         ensure_group(group)
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        ensure_group("ai-mlx")
     return python_bin()
 
 

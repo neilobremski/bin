@@ -62,3 +62,49 @@ def test_ensure_functions_are_thin_wrappers():
     assert ensure_whisper.__module__ == "venv_util"
     assert ensure_mlx_whisper.__module__ == "venv_util"
     assert ensure_parakeet.__module__ == "venv_util"
+
+
+def test_install_all_includes_ai_mlx_on_apple_silicon(tmp_path):
+    from venv_util import install_all
+
+    py = tmp_path / ".venv" / "bin" / "python3"
+    py.parent.mkdir(parents=True)
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+    groups: list[str] = []
+
+    def fake_ensure(group: str, probe: str | None = None):
+        groups.append(group)
+        return py
+
+    with (
+        patch("venv_util.BIN_VENV", tmp_path / ".venv"),
+        patch("venv_util.ensure_group", side_effect=fake_ensure),
+        patch("venv_util.platform.system", return_value="Darwin"),
+        patch("venv_util.platform.machine", return_value="arm64"),
+    ):
+        assert install_all() == py
+    assert "ai-mlx" in groups
+
+
+def test_install_all_skips_ai_mlx_off_apple(tmp_path):
+    from venv_util import install_all
+
+    py = tmp_path / ".venv" / "bin" / "python3"
+    py.parent.mkdir(parents=True)
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+    groups: list[str] = []
+
+    def fake_ensure(group: str, probe: str | None = None):
+        groups.append(group)
+        return py
+
+    with (
+        patch("venv_util.BIN_VENV", tmp_path / ".venv"),
+        patch("venv_util.ensure_group", side_effect=fake_ensure),
+        patch("venv_util.platform.system", return_value="Linux"),
+        patch("venv_util.platform.machine", return_value="x86_64"),
+    ):
+        assert install_all() == py
+    assert "ai-mlx" not in groups

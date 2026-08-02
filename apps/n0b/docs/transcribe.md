@@ -62,8 +62,12 @@ Any format ffmpeg can read works: m4a, mp3, wav, aiff, ogg, mp4, ...
 | `mlx-whisper` | [mlx-whisper](https://pypi.org/project/mlx-whisper/) on Apple Silicon |
 | `parakeet-mlx` | [parakeet-mlx](https://github.com/senstella/parakeet-mlx) (NVIDIA Parakeet) |
 
+`parakeet-mlx` always chunks long audio (`chunk_duration=120`,
+`overlap_duration=15`) to avoid Metal OOM on hour-scale files.
+
 Short Whisper size names (`tiny`…`turbo`) map to `mlx-community/whisper-*`
-HF repos under `mlx-whisper`. For `parakeet-mlx`, those short names resolve to
+HF repos under `mlx-whisper`; unknown short names are rejected. For
+`parakeet-mlx`, Whisper short names resolve to
 `mlx-community/parakeet-tdt-0.6b-v3`; pass a full HF repo to pick another
 Parakeet checkpoint. Hints, `--language`, and `--condition-on-previous` apply
 to Whisper engines only.
@@ -136,13 +140,18 @@ use `base` when speed matters more than proper nouns. With `mlx-whisper`,
 those names map to Hugging Face MLX repos; with `parakeet-mlx`, pass a
 Parakeet HF id (or leave the Whisper default to get the Parakeet default).
 
-## Silence loops
+## Silence-conditioning loops
 
 By default Whisper does **not** condition each window on its previous text
 (`condition_on_previous_text=False`). The library default of `True` feeds
 decoder output back into itself and can sustain repetition loops on silence
 or noise ("Thank you. Thank you. …"). Pass `--condition-on-previous` only if
 you want the old behaviour for cleaner continuous speech.
+
+This does **not** eliminate all Whisper loops — within-window token
+repetition on long noisy audio can still happen. When the output has four or
+more identical short consecutive sentences, stderr warns so you can retry
+with `--engine parakeet-mlx` (often cleaner on that class).
 
 ## First run
 

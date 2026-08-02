@@ -34,6 +34,9 @@ MAX_FPS = 1.0
 FRAME_SCALE = 512
 
 DEFAULT_PARAKEET_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
+PARAKEET_CHUNK_DURATION = 120.0
+PARAKEET_OVERLAP_DURATION = 15.0
+LOOP_WARN_THRESHOLD = 4
 
 _MLX_WHISPER_MODELS = {
     "tiny": "mlx-community/whisper-tiny",
@@ -175,11 +178,23 @@ import json
 import sys
 from parakeet_mlx import from_pretrained
 
-audio, model_name, timed = sys.argv[1:4]
+audio, model_name, timed, chunk_duration, overlap_duration = sys.argv[1:6]
 print(f"loading parakeet {model_name}...", file=sys.stderr)
 model = from_pretrained(model_name)
-print("transcribing...", file=sys.stderr)
-result = model.transcribe(audio)
+print(
+    f"transcribing (chunk_duration={chunk_duration}s, "
+    f"overlap={overlap_duration}s)...",
+    file=sys.stderr,
+)
+try:
+    result = model.transcribe(
+        audio,
+        chunk_duration=float(chunk_duration),
+        overlap_duration=float(overlap_duration),
+    )
+except Exception as exc:
+    print(f"n0b ai transcribe: parakeet failed: {exc}", file=sys.stderr)
+    sys.exit(1)
 if timed != "1":
     print((result.text or "").strip())
 else:
@@ -215,6 +230,17 @@ def loop_run(text: str) -> int:
     return best + 1
 
 
+def warn_if_loop(text: str, threshold: int = LOOP_WARN_THRESHOLD) -> int:
+    run = loop_run(text)
+    if run >= threshold:
+        print(
+            f"n0b ai transcribe: possible repetition loop "
+            f"(longest identical short sentence run: {run})",
+            file=sys.stderr,
+        )
+    return run
+
+
 def resolve_transcribe_engine(cli_engine: str | None) -> str:
     if cli_engine and cli_engine != "auto":
         return cli_engine
@@ -230,7 +256,11 @@ def resolve_engine_model(engine: str, model: str) -> str:
         mapped = _MLX_WHISPER_MODELS.get(model)
         if mapped:
             return mapped
-        return f"mlx-community/whisper-{model}"
+        known = ", ".join(sorted(_MLX_WHISPER_MODELS))
+        raise ValueError(
+            f"unknown mlx-whisper model {model!r}; "
+            f"use one of: {known}, or a full HF repo (org/name)"
+        )
     if engine == "parakeet-mlx":
         if model in _MLX_WHISPER_MODELS:
             return DEFAULT_PARAKEET_MODEL
@@ -448,6 +478,8 @@ def _run_stt(
                 str(path),
                 model,
                 "1" if timed else "0",
+                str(PARAKEET_CHUNK_DURATION),
+                str(PARAKEET_OVERLAP_DURATION),
             ],
             stdout=subprocess.PIPE,
             text=True,
@@ -503,6 +535,7 @@ def _plain_transcribe(
     if pairs:
         note = "; ".join(applied) if applied else "none matched"
         print(f"replacements applied: {note}", file=sys.stderr)
+    warn_if_loop(text)
     print(text)
     return 0
 
@@ -563,6 +596,7 @@ def _fancy_transcribe(
     if pairs:
         note = "; ".join(applied) if applied else "none matched"
         print(f"replacements applied: {note}", file=sys.stderr)
+    warn_if_loop((payload.get("text") or "").strip())
     if not speech.strip():
         speech = "No audio transcript available! Use images only"
 
@@ -636,7 +670,11 @@ def cmd_transcribe(
         return 1
 
     engine_name = resolve_transcribe_engine(engine)
-    model_name = resolve_engine_model(engine_name, model)
+    try:
+        model_name = resolve_engine_model(engine_name, model)
+    except ValueError as exc:
+        print(f"n0b ai transcribe: {exc}", file=sys.stderr)
+        return 2
     print(f"engine: {engine_name} (from {engine or 'auto'})", file=sys.stderr)
     if model_name != model:
         print(f"model: {model_name} (from {model})", file=sys.stderr)
