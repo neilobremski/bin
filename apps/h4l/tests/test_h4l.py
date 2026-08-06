@@ -725,6 +725,36 @@ class TestClear:
         assert "old" in removed
         assert "new" not in removed
 
+    def test_an_unreadable_timestamp_is_not_evidence_of_age(self, store):
+        # This call deletes a whole transcript. A corrupt or hand-edited
+        # meta.json used to be indistinguishable from an abandoned room.
+        store.ensure_room("keepme")
+        meta = store.load_meta("keepme")
+        meta["last_activity"] = "yesterday-ish"
+        store.save_meta("keepme", meta)
+        assert store.clear_older_than(1) == []
+        assert "keepme" in [m["slug"] for m in store.list_rooms()]
+
+    def test_a_missing_timestamp_is_not_evidence_of_age(self, store):
+        store.ensure_room("keepme")
+        meta = store.load_meta("keepme")
+        meta.pop("last_activity", None)
+        store.save_meta("keepme", meta)
+        assert store.clear_older_than(1) == []
+
+    def test_the_example_definition_sweeps_nothing(self):
+        # A chat room's whole value is its history, so the shipped wiring must
+        # not schedule a delete. This one swept every room quiet for a day,
+        # which on a low-traffic node means all of them.
+        import json
+        from pathlib import Path
+
+        spec = json.loads(
+            (Path(__file__).resolve().parents[1]
+             / "connector-a8s" / "example-definition.json").read_text()
+        )
+        assert "idle" not in spec
+
     def test_cli_clear_all(self, store, tmp_path, capsys):
         store.ensure_room("a")
         store.ensure_room("b")

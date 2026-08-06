@@ -218,10 +218,14 @@ class RoomStore:
             raw = meta.get("last_activity", "")
             try:
                 dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-                if dt.timestamp() >= cutoff:
-                    continue
             except ValueError:
-                pass
+                # An unreadable timestamp is not evidence of age. Deleting on
+                # it made a corrupt or hand-edited meta.json indistinguishable
+                # from an abandoned room, and this call deletes a whole
+                # transcript.
+                continue
+            if dt.timestamp() >= cutoff:
+                continue
             self._delete_room(slug)
             removed.append(slug)
         return removed
