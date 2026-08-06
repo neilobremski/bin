@@ -46,6 +46,22 @@ tell chatroom '/list'
 The registered agent name (`chatroom`, `hall`, etc.) becomes `--node` / `$RECIPIENT`
 and appears in notification footers.
 
+### Retention is opt-in
+
+Rooms live under the agent root and are never swept on their own. `h4l clear
+--older-than <secs>` deletes whole rooms — the transcript, not just old lines —
+so nothing runs it for you.
+
+If you do want a node to forget quiet rooms, add an `idle` block yourself and
+pick a window you can live with losing:
+
+```json
+"idle": {
+  "timeout": 2592000,
+  "invoke": ["h4l", "clear", "--root", ".", "--older-than", "2592000"]
+}
+```
+
 ## IRC-style usage
 
 Post to a channel the IRC way — no slash command needed:
