@@ -25,7 +25,7 @@ Detailed docs live in [`docs/`](docs/):
 | [research.md](docs/research.md) | `n0b ai research` | OpenAI deep research (`gpt-5.6-sol`) |
 | [secrets.md](docs/secrets.md) | `n0b secrets` | Get/set secrets — env, `~/lib`, Keychain, dotenv |
 | [ai-speak.md](docs/ai-speak.md) | `n0b ai speak` | Text-to-speech — macOS `say` or offline Kokoro |
-| [z-image.md](docs/z-image.md) | `n0b ai image` | Z-Image-Turbo text-to-image and `--ref` img2img |
+| [z-image.md](docs/z-image.md) | `n0b ai image` | Z-Image-Turbo / mistral3 text-to-image; `--ref` img2img |
 | [video.md](docs/video.md) | `n0b video` | Video utilities: last-frame, gif (Surfey-style palette) |
 | [quota.md](docs/quota.md) | `n0b quota` | Live AI tool rate limits (Antigravity / `agy`) |
 
@@ -45,7 +45,7 @@ Detailed docs live in [`docs/`](docs/):
 
 | Subcommand | Default backend | Override |
 |------------|-----------------|----------|
-| `n0b ai image` | Z-Image-Turbo (`<bin>/.venv`) | `--ref`, `--strength`, `-o`, `--install`, `--uninstall` |
+| `n0b ai image` | Z-Image-Turbo (`<bin>/.venv`) | `--model z-image` / `mistral3`, `--ref`, `--strength`, `-o`, `--install`, `--uninstall` |
 | `n0b ai video` | LTX-Video 1, LTX-2 (PyTorch), MLX-Video (Apple Silicon) | `--model ltx-2`, `--model ltx-1`, or `-2`/`-1` flags |
 | `n0b ai video` | LTX-Video 1/2, MLX on Apple Silicon | `--install`, `--install-ltx1`, `-1`, `-2` |
 | `n0b ai audio` | AudioLDM / Bark (`<bin>/.venv`) | `--model bark`, `-o`, `--install` |
@@ -76,5 +76,5 @@ source ~/bin/install.sh --skills
 ## Tests
 
 ```bash
-python3 -m pytest apps/n0b/tests/
+python3 lib/venv_exec.py dev -- -m pytest apps/n0b/tests/
 ```

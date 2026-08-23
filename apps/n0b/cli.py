@@ -21,11 +21,14 @@ from commands.video_cmd import cmd_gif, cmd_last_frame
 
 
 def _add_image_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--model", help="Backend override (default: z-image)")
+    p.add_argument(
+        "--model",
+        help="z-image, mistral3, a Hugging Face pipeline repo, or a GGUF text-encoder URL",
+    )
     p.add_argument(
         "--install",
         action="store_true",
-        help="Create venv and install PyTorch/diffusers without generating",
+        help="Create the shared runtime and install image dependencies",
     )
     p.add_argument(
         "--uninstall",
@@ -58,7 +61,9 @@ def _add_image_args(p: argparse.ArgumentParser) -> None:
         "--out",
         help="Output PNG path (default: z-image-<timestamp>.png)",
     )
-    p.add_argument("prompt", nargs="*", default=[], help="Prompt text")
+    p.add_argument(
+        "prompt", nargs="*", default=[], help="Prompt text; pass - to read from stdin"
+    )
 
 
 def _add_audio_args(p: argparse.ArgumentParser) -> None:
@@ -66,7 +71,7 @@ def _add_audio_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--install",
         action="store_true",
-        help="Install audio deps into <bin>/.venv without generating",
+        help="Install the isolated audio group without generating",
     )
     p.add_argument(
         "--uninstall",
@@ -397,19 +402,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ai_image = ai_sub.add_parser(
         "image",
-        help="Generate images locally with Z-Image-Turbo",
+        help="Generate images locally (Z-Image-Turbo or mistral3 / ERNIE-Image)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "Text-to-image with Z-Image-Turbo. Pass --ref to transform a reference "
-            "image with a prompt (img2img); only the first --ref is used."
+            "Text-to-image with Z-Image-Turbo (default) or mistral3 (ERNIE-Image-Turbo). "
+            "Pass - to read a prompt from stdin. Pass --ref to transform a reference "
+            "image with a prompt (img2img); only the first --ref is used, and only "
+            "z-image supports it. --model accepts z-image, mistral3, a Hugging Face "
+            "pipeline repo, or a GGUF text-encoder file URL."
         ),
         epilog=(
             "examples:\n"
             "  n0b ai image \"a red fox in snow\"\n"
+            "  printf 'a red fox in snow' | n0b ai image -\n"
             "  n0b ai image photo.jpg \"oil painting\" --ref photo.jpg\n"
             "  n0b ai image \"cinematic portrait\" --ref face.png --strength 0.35 -o out.png\n"
             "\n"
-            "First run auto-installs deps into <bin>/.venv (shared repo venv). "
+            "First run auto-installs deps into <bin>/.venv (shared repo runtime). "
             "Use --install to prep ahead of time; --uninstall to remove."
         ),
     )
