@@ -43,7 +43,7 @@ After uploading template and sending prompt:
 ## Download
 
 The download button is below the fold — must scroll down first.
-1. `mousewheel 3000 0` to scroll down
+1. `mousewheel 0 3000` to scroll down
 2. Wait 2s for layout to settle
 3. Re-snapshot to get fresh ref for download button
 4. Click download button (may need double-click with delay)

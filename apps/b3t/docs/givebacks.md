@@ -129,7 +129,7 @@ Unlayer editor keeps an in-memory copy of the design. If editor is open during A
 | `Meta+a` selects entire block | Use eval on specific element ref |
 | Refs change after every action | Fresh snapshot before every interaction |
 | `run-code` can crash session | Prefer built-in commands + `&&` chaining |
-| `mousewheel` args reversed | First arg = vertical despite `dx` label |
+| `mousewheel` args | Use `0 <dy>` for vertical scrolling |
 | Large payloads exceed inline eval | Use `localstorage-set` as transfer buffer |
 | API push doesn't update `raw_html` | Open editor → trivial edit → auto-save |
 | push_design verify has parsing bug | Use `push` only, skip verify |
