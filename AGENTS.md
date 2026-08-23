@@ -17,13 +17,13 @@ This file provides guidance when working with code in this repository.
 - **`apps/l9m/`, `apps/q3w/`** — local-LLM prompt CLI and its natural-language
   shell-command sibling.
 - **`docs/`** — markdown for each top-level command + symlinks for skill install.
-- **`requirements/`** — consolidated pip deps for the shared repo venv (see
+- **`requirements/`** — consolidated dependency groups for the shared repo runtime (see
   `requirements/README.md`). Per-app `requirements.txt` files point here.
-- **`.venv/`** — shared local Python virtualenv at the repo root (gitignored).
-  `lib/venv_util.py` bootstraps it on first use; `n0b ai` and other apps share
-  it so PyTorch and friends install once. Run `python3 -m pytest ...` with
-  `.venv/bin/python3` after `pip install -r requirements/dev.txt`, or use the
-  legacy `venv/` until migrated.
+- **`.venv/`** — shared Python substrate at the repo root (gitignored).
+  `runtime/` is a clean venv; `groups/<abi-platform>/` holds isolated dependency
+  groups shared by `n0b`, `b3t`, and other apps. `lib/venv_util.py` bootstraps
+  both on first use and rebuilds a broken runtime after Python/Homebrew updates.
+  Run tests through `python3 lib/venv_exec.py dev -- -m pytest ...`.
 
 ## Conventions
 
@@ -94,16 +94,16 @@ frontmatter.
 
 ```bash
 # PII unit tests
-python3 -m pytest tests/test_pii.py
+python3 lib/venv_exec.py dev -- -m pytest tests/test_pii.py
 
 # h4l tests
-python3 -m pytest apps/h4l/tests/
+python3 lib/venv_exec.py dev -- -m pytest apps/h4l/tests/
 
 # l9m + q3w tests (skip the ones needing a live model)
-python3 -m pytest apps/l9m/tests/ apps/q3w/tests/ -m "not llm"
+python3 lib/venv_exec.py dev -- -m pytest apps/l9m/tests/ apps/q3w/tests/ -m "not llm"
 
 # n0b tests
-python3 -m pytest apps/n0b/tests/
+python3 lib/venv_exec.py dev -- -m pytest apps/n0b/tests/
 ```
 
 ## Memory note

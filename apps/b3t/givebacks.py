@@ -147,7 +147,8 @@ def _fill_login():
     if submit_ref:
         session.run("click", submit_ref)
     else:
-        session.run("press", pass_ref, "Enter")
+        session.run("click", pass_ref)
+        session.run("press", "Enter")
 
     return True
 
@@ -230,7 +231,8 @@ def _handle_otp():
         session.run("click", submit_ref)
     else:
         # Submit may auto-trigger after all digits entered
-        session.run("press", pin_refs[-1], "Enter")
+        session.run("click", pin_refs[-1])
+        session.run("press", "Enter")
 
     time.sleep(3)
     return True
@@ -814,7 +816,8 @@ def cmd_screenshot(args):
 
     output_dir = getattr(args, 'dir', '.') or '.'
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.abspath(os.path.join(output_dir, f"newsletter-preview.png"))
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    output_path = os.path.abspath(os.path.join(output_dir, f"newsletter-preview-{timestamp}.png"))
 
     # Use the "View Newsletter" share page (public once sent, or preview for drafts)
     # For a cleaner view: use the messages/{id} page which shows a preview

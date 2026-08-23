@@ -1,10 +1,13 @@
 """n0b CLI tests."""
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
@@ -13,7 +16,21 @@ N0B_PY = Path(__file__).resolve().parents[1] / "n0b.py"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from commands.ai_common import merged_hints, parse_replacement, read_pair_file, save_hints
-from commands.ai_image_cmd import build_image_argv, resolve_image_ref, cmd_image
+from commands.ai_image_cmd import (
+    IMAGE_FAMILIES,
+    N0B_ROOT,
+    _IMAGE_SNIPPET,
+    build_image_argv,
+    cmd_image,
+    read_image_prompt,
+    resolve_image_model,
+    resolve_image_ref,
+)
+from commands.image_gguf import (
+    GGUF_TEXT_BACKBONE,
+    parse_hub_file,
+    text_config_from_gguf,
+)
 from commands.ai_speak_cmd import (
     apply_pronunciations,
     apply_speak_replacements,
@@ -231,6 +248,242 @@ def test_cmd_image_forwards_ref(tmp_path):
     assert argv[3] == "make it painterly"
     assert argv[5] == str(ref)
     assert argv[6] == "0.4"
+
+
+def test_read_image_prompt_reads_stdin(monkeypatch):
+    monkeypatch.setattr("sys.stdin", io.StringIO("a fox\nwith a hat"))
+    assert read_image_prompt(["-", "high detail"]) == ["a fox\nwith a hat", "high detail"]
+
+
+def test_cmd_image_reads_prompt_from_stdin(tmp_path, monkeypatch):
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    monkeypatch.setattr("sys.stdin", io.StringIO("a fox with a hat"))
+    with patch("commands.ai_image_cmd.ensure_image", return_value=fake_python), patch(
+        "commands.ai_image_cmd.subprocess.run"
+    ) as run:
+        run.return_value.returncode = 0
+        assert cmd_image(None, ["-"], [], 0.6, None) == 0
+    assert run.call_args[0][0][3] == "a fox with a hat"
+
+
+def test_resolve_image_model_accepts_hub_gguf_url():
+    url = (
+        "https://huggingface.co/owner/qwen-gguf/"
+        "blob/main/text-encoder.gguf"
+    )
+    assert resolve_image_model(url) == (url, None)
+
+
+def test_resolve_image_model_accepts_nested_hub_gguf_url():
+    url = (
+        "https://huggingface.co/owner/repo/blob/main/"
+        "encoders/text-encoder.gguf"
+    )
+    assert resolve_image_model(url) == (url, None)
+
+
+def test_resolve_image_model_accepts_mistral3_family():
+    assert resolve_image_model("mistral3") == ("mistral3", None)
+    assert resolve_image_model("z-image") == (None, None)
+
+
+def test_resolve_image_model_rejects_unknown_family():
+    model, error = resolve_image_model("flux")
+    assert model is None
+    assert error is not None and "mistral3" in error
+
+
+def test_resolve_image_model_rejects_non_gguf_hub_file():
+    model, error = resolve_image_model("https://huggingface.co/org/model/blob/main/model.bin")
+    assert model is None
+    assert error is not None and ".gguf" in error
+
+
+def test_cmd_image_forwards_hub_model(tmp_path):
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    model = "https://huggingface.co/org/model/blob/main/model.gguf"
+    with patch("commands.ai_image_cmd.ensure_image", return_value=fake_python), patch(
+        "commands.ai_image_cmd.subprocess.run"
+    ) as run:
+        run.return_value.returncode = 0
+        assert cmd_image(model, ["a fox"], [], 0.6, None) == 0
+    assert run.call_args[0][0][-1] == model
+
+
+def test_cmd_image_forwards_mistral3_family(tmp_path):
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    with patch("commands.ai_image_cmd.ensure_image", return_value=fake_python), patch(
+        "commands.ai_image_cmd.subprocess.run"
+    ) as run:
+        run.return_value.returncode = 0
+        assert cmd_image("mistral3", ["a fox"], [], 0.6, None) == 0
+    argv = run.call_args[0][0]
+    assert argv[-1] == "mistral3"
+    assert "ErnieImagePipeline" in argv[2]
+    assert IMAGE_FAMILIES["mistral3"]["repo"] in argv[2]
+
+
+def test_cmd_image_rejects_ref_for_mistral3(tmp_path):
+    ref = tmp_path / "photo.png"
+    ref.write_bytes(b"\x89PNG\r\n")
+    assert cmd_image("mistral3", ["a fox"], [str(ref)], 0.4, None) == 2
+
+
+def test_image_snippet_maps_mistral3_without_vendor_urls():
+    assert "mistral3" in IMAGE_FAMILIES
+    assert "ErnieImagePipeline" in _IMAGE_SNIPPET
+    assert "load_gguf_text_encoder" in _IMAGE_SNIPPET
+    assert str(N0B_ROOT) in _IMAGE_SNIPPET
+    assert "ponpoke" not in _IMAGE_SNIPPET
+    assert "BennyDaBall" not in _IMAGE_SNIPPET
+    assert "abliterated" not in _IMAGE_SNIPPET.lower()
+
+
+def test_parse_hub_file_keeps_nested_gguf_path():
+    repo, revision, filename = parse_hub_file(
+        "https://huggingface.co/owner/repo/blob/main/encoders/text-encoder.gguf"
+    )
+    assert repo == "owner/repo"
+    assert revision == "main"
+    assert filename == "encoders/text-encoder.gguf"
+
+
+def test_text_config_from_gguf_is_mistral_text_not_vlm(monkeypatch):
+    @dataclass
+    class MistralConfig:
+        model_type: str = "mistral"
+        hidden_size: int = 0
+        num_hidden_layers: int = 0
+        intermediate_size: int = 0
+        num_attention_heads: int = 0
+        num_key_value_heads: int = 0
+        vocab_size: int = 0
+        rms_norm_eps: float = 0.0
+
+    transformers = ModuleType("transformers")
+    transformers.MistralConfig = MistralConfig
+    transformers.Qwen3Config = MistralConfig
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+
+    config = text_config_from_gguf({
+        "model_type": "mistral3",
+        "hidden_size": 3072,
+        "num_hidden_layers": 26,
+        "intermediate_size": 9216,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "vocab_size": 131072,
+        "rms_norm_eps": 1e-5,
+        "file_type": 7,
+    })
+    assert type(config).__name__ == "MistralConfig"
+    assert config.model_type == "mistral"
+    assert config.hidden_size == 3072
+    assert config.num_hidden_layers == 26
+    assert not hasattr(config, "vision_config") or config.vision_config is None
+    assert GGUF_TEXT_BACKBONE["mistral3"] == "mistral"
+
+
+def _fake_gguf_transformers(monkeypatch, captured):
+    transformers = ModuleType("transformers")
+    gguf_utils = ModuleType("transformers.modeling_gguf_pytorch_utils")
+
+    class AutoTokenizer:
+        @classmethod
+        def from_pretrained(cls, repo_id, **kwargs):
+            captured["tokenizer_repo"] = repo_id
+            captured["tokenizer_kwargs"] = kwargs
+            return "tokenizer"
+
+    class AutoModel:
+        @classmethod
+        def from_pretrained(cls, repo_id, **kwargs):
+            captured["auto_model_repo"] = repo_id
+            return "encoder"
+
+    class MistralModel:
+        @classmethod
+        def from_pretrained(cls, repo_id, **kwargs):
+            captured["repo"] = repo_id
+            captured["config"] = kwargs["config"]
+            captured["gguf_file"] = kwargs["gguf_file"]
+            return "encoder"
+
+    class Qwen3Model(AutoModel):
+        pass
+
+    transformers.AutoModel = AutoModel
+    transformers.AutoTokenizer = AutoTokenizer
+    transformers.MistralModel = MistralModel
+    transformers.Qwen3Model = Qwen3Model
+    gguf_utils.load_gguf_checkpoint = lambda path, **kwargs: {
+        "config": {
+            "model_type": "mistral3",
+            "hidden_size": 3072,
+            "num_hidden_layers": 26,
+        }
+    }
+    gguf_utils.get_gguf_hf_weights_map = lambda *args, **kwargs: {}
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    monkeypatch.setitem(
+        sys.modules, "transformers.modeling_gguf_pytorch_utils", gguf_utils
+    )
+
+
+def test_load_gguf_text_encoder_uses_mistral_model(monkeypatch):
+    from commands import image_gguf
+
+    captured: dict = {}
+    _fake_gguf_transformers(monkeypatch, captured)
+    monkeypatch.setattr(image_gguf, "enable_gguf_arch_aliases", lambda: None)
+    monkeypatch.setattr(image_gguf, "text_config_from_gguf", lambda parsed: parsed)
+
+    encoder, tokenizer = image_gguf.load_gguf_text_encoder(
+        "owner/repo",
+        "encoders/te.gguf",
+        "main",
+        "baidu/ERNIE-Image-Turbo",
+        "bf16",
+        "/tmp/te.gguf",
+        "mistral3",
+    )
+    assert encoder == "encoder"
+    assert tokenizer == "tokenizer"
+    assert captured["gguf_file"] == "encoders/te.gguf"
+    assert captured["config"]["hidden_size"] == 3072
+    assert type(captured["config"]).__name__ != "Mistral3Config"
+
+
+def test_load_gguf_text_encoder_uses_pipeline_tokenizer(monkeypatch):
+    from commands import image_gguf
+
+    captured: dict = {}
+    _fake_gguf_transformers(monkeypatch, captured)
+    monkeypatch.setattr(image_gguf, "enable_gguf_arch_aliases", lambda: None)
+    monkeypatch.setattr(image_gguf, "text_config_from_gguf", lambda parsed: parsed)
+    monkeypatch.setattr(image_gguf, "_qwen_head_dim", lambda path: 32)
+
+    encoder, tokenizer = image_gguf.load_gguf_text_encoder(
+        "owner/quant",
+        "encoder.gguf",
+        "main",
+        "Tongyi-MAI/Z-Image-Turbo",
+        "bf16",
+        "/tmp/encoder.gguf",
+        "qwen3",
+    )
+    assert (encoder, tokenizer) == ("encoder", "tokenizer")
+    assert captured["tokenizer_repo"] == "Tongyi-MAI/Z-Image-Turbo"
+    assert captured["tokenizer_kwargs"] == {"subfolder": "tokenizer"}
 
 
 def test_cmd_image_install_only(tmp_path):

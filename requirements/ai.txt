@@ -3,7 +3,8 @@ kokoro
 soundfile
 phonemizer
 openai-whisper
-git+https://github.com/huggingface/diffusers
+git+https://github.com/huggingface/diffusers@58eb52c0803ea9af3abec60841c2a093bdf1f951
 transformers
 accelerate
 pillow
+gguf

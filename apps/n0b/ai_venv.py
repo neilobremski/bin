@@ -1,4 +1,4 @@
-"""Shared Python venv for n0b ai — re-exports repo-wide lib/venv_util."""
+"""Shared Python runtime for n0b ai — re-exports repo-wide lib/venv_util."""
 from __future__ import annotations
 
 import sys

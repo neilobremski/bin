@@ -29,7 +29,7 @@ b3t ps save --dir editions/YYYY-MM-DD/submissions --since 14
 
 1. Auto-login if needed
 2. Navigate to feed URL
-3. Scroll twice (`mousewheel 3000 0`) to lazy-load recent posts
+3. Scroll twice (`mousewheel 0 3000`) to lazy-load recent posts
 4. Click every **Read More** button to expand truncated bodies
 5. Run in-page extraction via `run-code`: each `[role="region"]` with `Posted by` → title, author, date, body text, links
 
@@ -46,7 +46,7 @@ Top-level posts have `h2` title + `Posted by Author` link. Nested headings insid
 
 ## Scrolling
 
-Feed is lazy-loaded. Two scrolls loads ~2 weeks of posts. The `mousewheel` command's first argument is vertical (despite being labeled `dx`).
+Feed is lazy-loaded. Two vertical scrolls load roughly two weeks of posts.
 
 ## Limitations
 

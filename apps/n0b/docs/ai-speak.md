@@ -102,8 +102,8 @@ IPA overrides as misaki `[word](/ipa/)` markup:
 
 ## Kokoro setup (one-time)
 
-First kokoro run installs from `requirements/ai.txt` into `<bin>/.venv` (shared
-repo venv) and downloads the model. Also needs `brew install espeak-ng` for
-unusual words.
+First kokoro run installs from `requirements/ai.txt` into the shared AI group
+under `<bin>/.venv` and downloads the model. Also needs
+`brew install espeak-ng` for unusual words.
 
 Pairs with [n0b ai transcribe](transcribe.md) and `tell <agent> --attach out.m4a`.

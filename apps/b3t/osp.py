@@ -74,7 +74,8 @@ def ensure_authenticated():
     if submit_ref:
         session.run("click", submit_ref)
     else:
-        session.run("press", pass_ref, "Enter")
+        session.run("click", pass_ref)
+        session.run("press", "Enter")
 
     time.sleep(3)
     session.save_state()

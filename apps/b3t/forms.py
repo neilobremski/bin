@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 import time
+from urllib.parse import urlparse
 
 import session
 import env
@@ -35,18 +36,30 @@ def dispatch(args):
     return 2
 
 
+FORMS_HOSTS = ("forms.office.com", "forms.microsoft.com", "forms.cloud.microsoft")
+
+
+def _is_forms_url(url):
+    hostname = (urlparse(url).hostname or "").lower()
+    return any(hostname == host or hostname.endswith(f".{host}") for host in FORMS_HOSTS)
+
+
 def ensure_authenticated():
     """Check M365 auth by navigating to Forms. Returns True if authed."""
     session.ensure_running()
 
     session.navigate("https://forms.office.com")
-    time.sleep(3)
-    url = session.current_url()
-    if url and "forms.office.com" in url and "login.microsoftonline.com" not in url:
-        return True
+    # Allow time for the SSO redirect chain to settle; login.microsoftonline.com
+    # mid-chain is not a failure until it stops moving.
+    url = None
+    for _ in range(4):
+        time.sleep(3)
+        url = session.current_url()
+        if url and _is_forms_url(url):
+            return True
 
-    print("ERROR: Not authenticated to M365.", file=sys.stderr)
-    print("Run: b3t open, log into outlook.office.com, b3t close", file=sys.stderr)
+    print(f"ERROR: Not authenticated to M365 (stuck at: {url}).", file=sys.stderr)
+    print("Run: b3t open, log into forms.office.com, b3t close", file=sys.stderr)
     return False
 
 
@@ -112,28 +125,42 @@ def cmd_download(args):
         print("ERROR: Cannot find 'Download a copy' menu item.", file=sys.stderr)
         return 1
 
+    download_start = time.time()
     session.run("click", dl_ref)
     print("Downloading...", file=sys.stderr)
-    time.sleep(6)
 
-    # Step 5: Find downloaded file
-    pw_dir = os.path.join(os.getcwd(), ".playwright-cli")
+    # Step 5: Find downloaded file. CDP-attached real Chrome saves to
+    # ~/Downloads; the playwright-cli managed browser saves to .playwright-cli/.
+    dl_dirs = [
+        os.path.join(os.getcwd(), ".playwright-cli"),
+        os.path.expanduser("~/Downloads"),
+    ]
+    deadline = time.time() + 30
     xlsx_files = []
-    if os.path.isdir(pw_dir):
-        candidates = [f for f in os.listdir(pw_dir) if f.endswith(".xlsx")]
-        if FORMS_DOWNLOAD_PREFIX:
-            candidates = [f for f in candidates if FORMS_DOWNLOAD_PREFIX in f]
-        xlsx_files = sorted(
-            candidates,
-            key=lambda f: os.path.getmtime(os.path.join(pw_dir, f)),
-            reverse=True,
-        )
+    while time.time() < deadline:
+        for d in dl_dirs:
+            if not os.path.isdir(d):
+                continue
+            candidates = [f for f in os.listdir(d) if f.endswith(".xlsx")]
+            if FORMS_DOWNLOAD_PREFIX:
+                candidates = [f for f in candidates if FORMS_DOWNLOAD_PREFIX in f]
+            candidates = [
+                os.path.join(d, f)
+                for f in candidates
+                if os.path.getmtime(os.path.join(d, f)) >= download_start - 2
+            ]
+            xlsx_files.extend(candidates)
+        if xlsx_files:
+            break
+        time.sleep(1)
+
+    xlsx_files.sort(key=os.path.getmtime, reverse=True)
 
     if not xlsx_files:
         print("ERROR: No .xlsx downloaded.", file=sys.stderr)
         return 1
 
-    src = os.path.join(pw_dir, xlsx_files[0])
+    src = xlsx_files[0]
     dst = os.path.join(edition_dir, "submissions.xlsx")
     shutil.copy2(src, dst)
     os.remove(src)

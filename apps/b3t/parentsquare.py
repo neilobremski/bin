@@ -95,7 +95,8 @@ def ensure_authenticated():
     if submit_ref:
         session.run("click", submit_ref)
     else:
-        session.run("press", pass_ref, "Enter")
+        session.run("click", pass_ref)
+        session.run("press", "Enter")
 
     time.sleep(4)
     url = session.current_url()
@@ -135,9 +136,9 @@ def _parse_json_result(stdout):
 
 def _scroll_feed():
     """Scroll lazy-loaded feed."""
-    session.run("mousewheel", "3000", "0")
+    session.run("mousewheel", "0", "3000")
     time.sleep(2)
-    session.run("mousewheel", "3000", "0")
+    session.run("mousewheel", "0", "3000")
     time.sleep(2)
 
 

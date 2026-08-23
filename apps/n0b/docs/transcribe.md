@@ -155,9 +155,10 @@ with `--engine parakeet-mlx` (often cleaner on that class).
 
 ## First run
 
-Bootstraps `<bin>/.venv` on first use from `requirements/ai*.txt` (shared repo
-venv; torch installs once) and downloads the STT model. MLX engines also pull
-`requirements/ai-mlx.txt` (`mlx-whisper`, `parakeet-mlx`). One-time cost of a
+Bootstraps the clean runtime and isolated dependency groups under `<bin>/.venv`
+on first use, then downloads the STT model. Standard Whisper shares the AI group
+(so torch installs once); MLX engines use `requirements/ai-mlx.txt` in a separate
+group (`mlx-whisper`, `parakeet-mlx`). One-time cost of a
 few GB; subsequent runs are offline for plain flavor. Fancy also needs a local
 vision model via Ollama. Requires `ffmpeg` (and `ffprobe` for flavor detection
 / fancy) on PATH.

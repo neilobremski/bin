@@ -1,10 +1,20 @@
 @echo off
 setlocal
-set "APP_DIR=%~dp0apps\b3t"
-set "VENV=%APP_DIR%\.venv"
-if not exist "%VENV%\Scripts\python.exe" (
-    echo b3t: creating venv... >&2
-    python -m venv "%VENV%"
-    "%VENV%\Scripts\pip" install -q -r "%APP_DIR%\requirements.txt"
+set "BIN_DIR=%~dp0"
+set "RUNNER=%BIN_DIR%lib\venv_exec.py"
+set "B3T=%BIN_DIR%apps\b3t\__main__.py"
+
+where python >nul 2>&1
+if %ERRORLEVEL%==0 (
+    python "%RUNNER%" b3t "%B3T%" %*
+    exit /b %ERRORLEVEL%
 )
-"%VENV%\Scripts\python.exe" "%APP_DIR%\__main__.py" %*
+
+where py >nul 2>&1
+if %ERRORLEVEL%==0 (
+    py -3 "%RUNNER%" b3t "%B3T%" %*
+    exit /b %ERRORLEVEL%
+)
+
+echo b3t: python not found on PATH >&2
+exit /b 127
