@@ -753,7 +753,8 @@ def cmd_upload(args):
         f'const box = await imgs[{target_index}].boundingBox(); '
         'return JSON.stringify(box); } } } return "none"; }'
     )
-    result = session.run("run-code", scroll_and_bbox_js, timeout=10)
+    # Frame enumeration in the Unlayer OOPIF regularly exceeds 10s
+    result = session.run("run-code", scroll_and_bbox_js, timeout=30)
     bbox = _parse_json_result(result.stdout)
 
     if not bbox or "x" not in bbox:
