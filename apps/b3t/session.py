@@ -164,8 +164,18 @@ def close_browser():
 
 
 def ensure_running():
-    """Open browser if not already running."""
+    """Open browser if not already running.
+
+    Also guards against a Chrome with zero windows: pages report
+    visibilityState "hidden", OOPIFs (e.g. the Unlayer editor) accept no
+    input, and clicks/saves silently no-op. Cycle the browser in that case.
+    """
     if not is_running():
+        return open_browser()
+    result = run("eval", "() => document.visibilityState")
+    if result.returncode == 0 and "hidden" in (result.stdout or ""):
+        print("WARN: browser window hidden (zero windows?); cycling browser...", file=sys.stderr)
+        close_browser()
         return open_browser()
     return 0
 

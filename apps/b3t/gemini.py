@@ -8,6 +8,7 @@ Usage:
 The generate command does everything: opens Gemini, uploads template, sends prompt,
 waits for generation, downloads the result. One command, one image.
 """
+import json
 import os
 import re
 import shutil
@@ -120,44 +121,39 @@ def cmd_generate(args):
 
 
 def _upload_file(filepath):
-    """Click Upload & tools -> Upload files -> upload the file."""
-    snap = session.snapshot()
-    if not snap:
-        print("ERROR: Cannot get page snapshot.", file=sys.stderr)
+    """Open the Upload & tools menu and attach the file.
+
+    Accessibility-ref clicks do not trigger this Angular menu button, so drive
+    it with locators inside run-code and catch the file chooser directly.
+    """
+    # Open the menu and click "Upload files"; the resulting file chooser is a
+    # playwright-cli modal state that ONLY its `upload` command may resolve —
+    # do not intercept the filechooser event in run-code.
+    code = """async function main(page) {
+      const btn = page.locator('button[aria-label="Upload & tools"], button:has-text("Upload & tools")').first();
+      await btn.click();
+      const item = page.locator('[role=menuitem]', { hasText: 'Upload files' }).first();
+      await item.waitFor({ state: 'visible', timeout: 5000 });
+      await item.click();
+      return 'menu-clicked';
+    }"""
+
+    result = session.run("run-code", code, timeout=30)
+    combined = (result.stdout or "") + (result.stderr or "")
+    # The click opens a file chooser, which run-code reports as a modal-state
+    # condition — that is the expected success path, not an error.
+    if "menu-clicked" not in combined and "chooser" not in combined.lower():
+        print("ERROR: Upload & tools flow failed.", file=sys.stderr)
+        if result.stderr:
+            print(result.stderr.strip()[:500], file=sys.stderr)
         return 1
 
-    # Find "Upload & tools" button
-    upload_btn = _find_ref(snap, lambda l: "Upload & tools" in l and "button" in l)
-    if not upload_btn:
-        # Fallback: look for any plus/attach button near the prompt
-        upload_btn = _find_ref(snap, lambda l: "plus" in l.lower() and "button" in l.lower())
-    if not upload_btn:
-        print("ERROR: Cannot find 'Upload & tools' button.", file=sys.stderr)
-        return 1
-
-    session.run("click", upload_btn)
-    time.sleep(1)
-
-    # Find "Upload files" menu item
-    upload_files_ref = _wait_for_ref(
-        lambda l: "Upload files" in l and "menuitem" in l.lower(),
-        "'Upload files' menu item",
-        timeout=5,
-    )
-    if not upload_files_ref:
-        # Fallback: look for file uploader button
-        snap = session.snapshot()
-        upload_files_ref = _find_ref(snap, lambda l: "upload" in l.lower() and ("file" in l.lower() or "document" in l.lower()) and "ref=" in l)
-        if not upload_files_ref:
-            print("ERROR: Cannot find 'Upload files' menu item.", file=sys.stderr)
-            return 1
-
-    # Click upload files and handle file chooser
-    result = session.run("click", upload_files_ref)
     time.sleep(0.5)
-    session.run("upload", filepath)
+    result = session.run("upload", filepath)
+    if result.returncode != 0:
+        print("ERROR: File chooser upload failed.", file=sys.stderr)
+        return 1
     time.sleep(UPLOAD_WAIT)
-
     print(f"Uploaded: {os.path.basename(filepath)}", file=sys.stderr)
     return 0
 
@@ -205,8 +201,8 @@ def _wait_for_generation():
 
 def _download_image(download_ref, output_dir):
     """Click download, wait for file, move to output_dir."""
-    # Scroll down to ensure download button is in view
-    session.run("mousewheel", "0", "2000")
+    # Scroll down to ensure download button is in view (first arg = vertical)
+    session.run("mousewheel", "2000", "0")
     time.sleep(2)
 
     # Re-snapshot after scroll to get fresh ref (element may have shifted)
@@ -221,29 +217,37 @@ def _download_image(download_ref, output_dir):
     session.run("click", download_ref)
     print("Download initiated...", file=sys.stderr)
 
-    # Wait for file to appear in .playwright-cli/
-    pw_dir = os.path.join(os.getcwd(), ".playwright-cli")
-    deadline = time.time() + 15
-    new_file = None
-    existing = set(os.listdir(pw_dir)) if os.path.isdir(pw_dir) else set()
+    # Wait for the file. CDP-attached real Chrome saves to ~/Downloads;
+    # the playwright-cli managed browser saves to .playwright-cli/.
+    watch_dirs = [
+        os.path.join(os.getcwd(), ".playwright-cli"),
+        os.path.expanduser("~/Downloads"),
+    ]
+    download_start = time.time()
+    deadline = time.time() + 30
+    src = None
 
-    while time.time() < deadline:
+    while time.time() < deadline and not src:
         time.sleep(1)
-        if os.path.isdir(pw_dir):
-            current = set(os.listdir(pw_dir))
-            new_files = [f for f in (current - existing)
-                         if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
-                         and not f.startswith("page-")]
-            if new_files:
-                new_file = new_files[0]
+        for d in watch_dirs:
+            if not os.path.isdir(d):
+                continue
+            fresh = [
+                os.path.join(d, f) for f in os.listdir(d)
+                if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+                and not f.startswith("page-")
+                and os.path.getmtime(os.path.join(d, f)) >= download_start - 2
+                and not f.endswith(".crdownload")
+            ]
+            if fresh:
+                src = max(fresh, key=os.path.getmtime)
                 break
 
-    if not new_file:
+    if not src:
         print("ERROR: Download did not complete in time.", file=sys.stderr)
         return 1
 
-    # Move to output dir
-    src = os.path.join(pw_dir, new_file)
+    new_file = os.path.basename(src)
     # Name sequentially based on existing header-option-* files
     existing_options = [f for f in os.listdir(output_dir) if f.startswith("header-option-")]
     next_num = len(existing_options) + 1

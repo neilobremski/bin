@@ -41,3 +41,26 @@
 - [x] `outlook check/read` — Folder scan + thread expansion + attachments
 - [x] `gemini generate` — Template upload + prompt + download
 - [x] Constants moved to `.env` — Source code is org-agnostic
+
+## From August 2026 production run
+- [ ] **`gb duplicate` broken twice over**: (1) the Mantine kebab menu opens on
+  mousedown and closes on mouseup, so playwright-cli `click` never leaves the
+  dropdown open — needs DOM `.click()` on `button[aria-haspopup=menu]` in the
+  target `<tr>`, ~3s wait, then DOM `.click()` on the Duplicate item in
+  `[id$=-dropdown]`; (2) `_find_kebab_for_message` measures the button before
+  table layout settles (x off by ~1000px). Workaround verified in production.
+- [x] `gb upload` bbox run-code timeout raised 10s → 30s (OOPIF frame
+  enumeration regularly exceeded 10s; cleared on retry before the fix).
+- [x] `session.ensure_running()` now cycles the browser when
+  `document.visibilityState == "hidden"` (zero-window Chrome makes the Unlayer
+  OOPIF ignore all input; bringToFront/AppleScript don't fix it).
+- [x] `gemini` upload flow rewritten for the "Upload & tools" menu (locator
+  click via run-code + CLI `upload` for the file-chooser modal); download
+  watcher now also checks ~/Downloads (CDP Chrome) with mtime filtering.
+- [x] `forms` auth check accepts forms.cloud.microsoft / forms.microsoft.com;
+  download watcher checks ~/Downloads with mtime filter + 30s poll.
+- [ ] `ol read N` silently re-reads the previous message when the reading pane
+  doesn't refresh; `ol check` ignores `--folder` and can report a stuck filter
+  ("0 messages" until the filter chip is cleared via snapshot+click).
+- [ ] `lwsd scan` returns nav chrome, not content (needs content-area scoping);
+  the news-article body doesn't render in snapshots (JS hydration).
