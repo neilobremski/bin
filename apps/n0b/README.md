@@ -50,7 +50,7 @@ Detailed docs live in [`docs/`](docs/):
 | `n0b ai video` | LTX-Video 1/2, MLX on Apple Silicon | `--install`, `--install-ltx1`, `-1`, `-2` |
 | `n0b ai audio` | AudioLDM / Bark (`<bin>/.venv`) | `--model bark`, `-o`, `--install` |
 | `n0b ai speak` | macOS `say` (auto), Kokoro offline (`<bin>/.venv`) | `--engine`, `--voice`, `-o` |
-| `n0b ai transcribe` | auto → `mlx-whisper` on Apple Silicon else Whisper; fancy → Ollama | `--engine`, `--flavor`, `--model` |
+| `n0b ai transcribe` | auto → `mlx-whisper` on Apple Silicon else `faster-whisper`; fancy → Ollama | `--engine`, `--flavor`, `--model` |
 
 ## Layout
 

@@ -7,11 +7,12 @@ allowed-tools: Bash(n0b ai transcribe *)
 # n0b ai transcribe
 
 Local speech-to-text. Default engine is `auto`: on Apple Silicon that picks
-`mlx-whisper`; elsewhere it uses openai-whisper (`whisper`). Override with
-`--engine`, including `parakeet-mlx` (NVIDIA Parakeet on MLX). No API key;
-models run on this machine. For files with a video stream, `--flavor auto`
-(default) also samples frames and asks a local Ollama vision model for a
-Surfey-style fancy narrative (synopsis, timed scenes, summary).
+`mlx-whisper`; elsewhere it picks `faster-whisper` (CTranslate2, int8, no
+torch). Override with `--engine`, including `whisper` (openai-whisper on
+PyTorch, for CUDA machines) and `parakeet-mlx` (NVIDIA Parakeet on MLX). No
+API key; models run on this machine. For files with a video stream,
+`--flavor auto` (default) also samples frames and asks a local Ollama vision
+model for a Surfey-style fancy narrative (synopsis, timed scenes, summary).
 
 Transcription goes to stdout; everything else (setup, progress) to stderr,
 so output is pipe-safe.
@@ -27,6 +28,7 @@ n0b ai transcribe clip.mp4 --flavor plain  # Whisper text only
 n0b ai transcribe memo.m4a --flavor fancy  # errors: no video stream
 
 n0b ai transcribe memo.m4a --engine mlx-whisper     # force MLX Whisper
+n0b ai transcribe memo.m4a --engine faster-whisper  # CTranslate2, int8, no torch
 n0b ai transcribe memo.m4a --engine parakeet-mlx    # NVIDIA Parakeet on MLX
 n0b ai transcribe memo.m4a --engine whisper         # openai-whisper (PyTorch)
 
@@ -57,8 +59,9 @@ Any format ffmpeg can read works: m4a, mp3, wav, aiff, ogg, mp4, ...
 
 | Value | Behavior |
 |-------|----------|
-| `auto` (default) | `mlx-whisper` when Apple Silicon MLX is available; else `whisper` |
-| `whisper` | [openai-whisper](https://github.com/openai/whisper) (PyTorch) |
+| `auto` (default) | `mlx-whisper` when Apple Silicon MLX is available; else `faster-whisper` |
+| `faster-whisper` | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2, int8; no torch, ~4x `whisper` at the same accuracy) |
+| `whisper` | [openai-whisper](https://github.com/openai/whisper) (PyTorch; CUDA machines) |
 | `mlx-whisper` | [mlx-whisper](https://pypi.org/project/mlx-whisper/) on Apple Silicon |
 | `parakeet-mlx` | [parakeet-mlx](https://github.com/senstella/parakeet-mlx) (NVIDIA Parakeet) |
 
@@ -66,11 +69,14 @@ Any format ffmpeg can read works: m4a, mp3, wav, aiff, ogg, mp4, ...
 `overlap_duration=15`) to avoid Metal OOM on hour-scale files.
 
 Short Whisper size names (`tiny`…`turbo`) map to `mlx-community/whisper-*`
-HF repos under `mlx-whisper`; unknown short names are rejected. For
+HF repos under `mlx-whisper`; unknown short names are rejected. `faster-whisper`
+takes Whisper size names directly (`tiny`, `base`, `small`, `medium`,
+`large-v2`, `large-v3`); `turbo` maps to `large-v3-turbo`, and any name
+containing `/` is passed through as a Hugging Face repo id. For
 `parakeet-mlx`, Whisper short names resolve to
 `mlx-community/parakeet-tdt-0.6b-v3`; pass a full HF repo to pick another
 Parakeet checkpoint. Hints, `--language`, and `--condition-on-previous` apply
-to Whisper engines only.
+to Whisper-family engines (`whisper`, `mlx-whisper`, `faster-whisper`) only.
 
 ## Flavor
 
@@ -137,7 +143,8 @@ stderr reports how many patterns loaded and which ones matched.
 `--model` takes any Whisper model name: `tiny`, `base`, `small`, `medium`,
 `large`, `turbo` (default). `turbo` is near-large accuracy at ~8x speed;
 use `base` when speed matters more than proper nouns. With `mlx-whisper`,
-those names map to Hugging Face MLX repos; with `parakeet-mlx`, pass a
+those names map to Hugging Face MLX repos; `faster-whisper` takes them
+directly (`turbo` → `large-v3-turbo`); with `parakeet-mlx`, pass a
 Parakeet HF id (or leave the Whisper default to get the Parakeet default).
 
 ## Silence-conditioning loops
@@ -158,7 +165,9 @@ with `--engine parakeet-mlx` (often cleaner on that class).
 Bootstraps the clean runtime and isolated dependency groups under `<bin>/.venv`
 on first use, then downloads the STT model. Standard Whisper shares the AI group
 (so torch installs once); MLX engines use `requirements/ai-mlx.txt` in a separate
-group (`mlx-whisper`, `parakeet-mlx`). One-time cost of a
-few GB; subsequent runs are offline for plain flavor. Fancy also needs a local
-vision model via Ollama. Requires `ffmpeg` (and `ffprobe` for flavor detection
-/ fancy) on PATH.
+group (`mlx-whisper`, `parakeet-mlx`); `faster-whisper` uses
+`requirements/ai-fast.txt` in its own group — pip wheels only, no torch, no
+compiler. One-time cost of a few GB for the torch-based engines, tens of MB
+for `faster-whisper`; subsequent runs are offline for plain flavor. Fancy
+also needs a local vision model via Ollama. Requires `ffmpeg` (and `ffprobe`
+for flavor detection / fancy) on PATH.

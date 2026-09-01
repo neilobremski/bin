@@ -170,6 +170,8 @@ def _group_requirements(group: str) -> list[Path]:
         return [_torch_requirements(), requirements_file("ai.txt")]
     if group == "ai-mlx":
         return [requirements_file("ai-mlx.txt")]
+    if group == "ai-fast":
+        return [requirements_file("ai-fast.txt")]
     return [requirements_file(f"{group}.txt")]
 
 
@@ -304,6 +306,10 @@ def ensure_mlx_whisper() -> Path:
     return ensure_group("ai-mlx", probe="import mlx_whisper")
 
 
+def ensure_faster_whisper() -> Path:
+    return ensure_group("ai-fast", probe="import faster_whisper")
+
+
 def ensure_parakeet() -> Path:
     return ensure_group("ai-mlx", probe="import parakeet_mlx")
 
@@ -324,7 +330,7 @@ def ensure_audio(model: str = "audioldm") -> Path:
 
 
 def install_all() -> Path:
-    for group in ("ai", "dev", "b3t", "audio"):
+    for group in ("ai", "ai-fast", "dev", "b3t", "audio"):
         ensure_group(group)
     if platform.system() == "Darwin" and platform.machine() == "arm64":
         ensure_group("ai-mlx")
