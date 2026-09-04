@@ -56,6 +56,8 @@ from commands.ai_transcribe_cmd import (
     HINTS_FILE,
     REPLACEMENTS_FILE,
     DEFAULT_PARAKEET_MODEL,
+    _FASTER_WHISPER_SNIPPET,
+    _FASTER_WHISPER_TIMED_SNIPPET,
     _WHISPER_SNIPPET,
     _WHISPER_TIMED_SNIPPET,
 )
@@ -729,6 +731,27 @@ def test_transcribe_invokes_mlx_whisper_model_map(tmp_path):
         ]
 
 
+def test_transcribe_invokes_faster_whisper_model_map(tmp_path):
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"RIFF")
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    with (
+        patch("commands.ai_transcribe_cmd.ensure_transcribe_engine", return_value=fake_python),
+        patch("commands.ai_transcribe_cmd.HINTS_FILE", tmp_path / "missing.txt"),
+        patch("commands.ai_transcribe_cmd.REPLACEMENTS_FILE", tmp_path / "missing2.txt"),
+        patch("commands.ai_transcribe_cmd.subprocess.run") as run,
+    ):
+        run.return_value.returncode = 0
+        run.return_value.stdout = "hello\n"
+        rc = cmd_transcribe(
+            str(audio), [], "en", "turbo", flavor="plain", engine="faster-whisper"
+        )
+        assert rc == 0
+        argv = run.call_args[0][0]
+        assert argv[2] == _FASTER_WHISPER_SNIPPET
+        assert argv[3:] == [str(audio), "large-v3-turbo", "en", "", "0"]
+
+
 def test_transcribe_invokes_parakeet(tmp_path, capsys):
     audio = tmp_path / "memo.wav"
     audio.write_bytes(b"RIFF")
@@ -796,6 +819,13 @@ def test_whisper_snippets_pass_condition_flag():
     assert "condition_on_previous_text=condition == \"1\"" in _WHISPER_TIMED_SNIPPET
 
 
+def test_faster_whisper_snippets_use_int8_and_condition_flag():
+    for snippet in (_FASTER_WHISPER_SNIPPET, _FASTER_WHISPER_TIMED_SNIPPET):
+        assert "from faster_whisper import WhisperModel" in snippet
+        assert 'compute_type="int8"' in snippet
+        assert "condition_on_previous_text=condition == \"1\"" in snippet
+
+
 def test_loop_run_detects_repetition():
     looped = " ".join(["Thank you."] * 16)
     assert loop_run(looped) >= 4
@@ -809,8 +839,11 @@ def test_resolve_transcribe_engine_auto():
         assert resolve_transcribe_engine(None) == "mlx-whisper"
         assert resolve_transcribe_engine("auto") == "mlx-whisper"
     with patch("commands.ai_transcribe_cmd.mlx_available", return_value=False):
-        assert resolve_transcribe_engine("auto") == "whisper"
+        assert resolve_transcribe_engine("auto") == "faster-whisper"
+        assert resolve_transcribe_engine(None) == "faster-whisper"
     assert resolve_transcribe_engine("parakeet-mlx") == "parakeet-mlx"
+    assert resolve_transcribe_engine("faster-whisper") == "faster-whisper"
+    # explicit --engine whisper stays available (e.g. CUDA machines)
     assert resolve_transcribe_engine("whisper") == "whisper"
 
 
@@ -831,6 +864,16 @@ def test_resolve_engine_model_maps():
     )
     with pytest.raises(ValueError, match="unknown mlx-whisper model"):
         resolve_engine_model("mlx-whisper", "base.en")
+
+
+def test_resolve_engine_model_faster_whisper():
+    assert resolve_engine_model("faster-whisper", "turbo") == "large-v3-turbo"
+    assert resolve_engine_model("faster-whisper", "base") == "base"
+    assert resolve_engine_model("faster-whisper", "large-v3") == "large-v3"
+    assert (
+        resolve_engine_model("faster-whisper", "org/custom-ct2-model")
+        == "org/custom-ct2-model"
+    )
 
 
 def test_warn_if_loop_emits(capsys):

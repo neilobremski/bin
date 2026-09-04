@@ -3,7 +3,16 @@ echo `# <#` >/dev/null
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# A symlink onto PATH (~/.local/bin/l9m -> repo) must resolve to the repo,
+# not to the symlink's own directory. readlink without -f, resolved in a
+# loop: macOS ships bash 3.2 and BSD readlink, and both handle this form.
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+  DIR="$(cd "$(dirname "$SELF")" && pwd)"
+  SELF="$(readlink "$SELF")"
+  case "$SELF" in /*) ;; *) SELF="$DIR/$SELF" ;; esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 exec python3 "$SCRIPT_DIR/apps/l9m/l9m.py" "$@"
 #> > $null
 

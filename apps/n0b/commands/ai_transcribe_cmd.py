@@ -1,4 +1,4 @@
-"""n0b ai transcribe — local STT (Whisper / mlx-whisper / parakeet), optional fancy video."""
+"""n0b ai transcribe — local STT (Whisper / mlx-whisper / faster-whisper / parakeet), optional fancy video."""
 from __future__ import annotations
 
 import json
@@ -9,7 +9,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from ai_venv import ensure_mlx_whisper, ensure_parakeet, ensure_whisper
+from ai_venv import (
+    ensure_faster_whisper,
+    ensure_mlx_whisper,
+    ensure_parakeet,
+    ensure_whisper,
+)
 from commands.ai_common import (
     parse_cli_pairs,
     read_hints,
@@ -173,6 +178,51 @@ out = {
 print(json.dumps(out))
 """
 
+_FASTER_WHISPER_SNIPPET = """\
+import sys
+from faster_whisper import WhisperModel
+
+audio, model_name, language, prompt, condition = sys.argv[1:6]
+print(f"loading faster-whisper {model_name}...", file=sys.stderr)
+model = WhisperModel(model_name, device="auto", compute_type="int8")
+print(f"transcribing (language: {language or 'auto-detect'})...", file=sys.stderr)
+segments, info = model.transcribe(
+    audio,
+    language=language or None,
+    initial_prompt=prompt or None,
+    condition_on_previous_text=condition == "1",
+)
+text = " ".join(seg.text.strip() for seg in segments)
+print(text.strip())
+"""
+
+_FASTER_WHISPER_TIMED_SNIPPET = """\
+import json
+import sys
+from faster_whisper import WhisperModel
+
+audio, model_name, language, prompt, condition = sys.argv[1:6]
+print(f"loading faster-whisper {model_name}...", file=sys.stderr)
+model = WhisperModel(model_name, device="auto", compute_type="int8")
+print(f"transcribing (language: {language or 'auto-detect'})...", file=sys.stderr)
+segments, info = model.transcribe(
+    audio,
+    language=language or None,
+    initial_prompt=prompt or None,
+    condition_on_previous_text=condition == "1",
+)
+seg_list = [
+    {"start": float(seg.start), "end": float(seg.end), "text": seg.text.strip()}
+    for seg in segments
+]
+out = {
+    "language": info.language or "",
+    "text": " ".join(s["text"] for s in seg_list).strip(),
+    "segments": seg_list,
+}
+print(json.dumps(out))
+"""
+
 _PARAKEET_SNIPPET = """\
 import json
 import sys
@@ -246,7 +296,7 @@ def resolve_transcribe_engine(cli_engine: str | None) -> str:
         return cli_engine
     if mlx_available():
         return "mlx-whisper"
-    return "whisper"
+    return "faster-whisper"
 
 
 def resolve_engine_model(engine: str, model: str) -> str:
@@ -265,6 +315,12 @@ def resolve_engine_model(engine: str, model: str) -> str:
         if model in _MLX_WHISPER_MODELS:
             return DEFAULT_PARAKEET_MODEL
         return model
+    if engine == "faster-whisper":
+        if "/" in model:
+            return model
+        if model == "turbo":
+            return "large-v3-turbo"
+        return model
     return model
 
 
@@ -273,6 +329,8 @@ def ensure_transcribe_engine(engine: str) -> Path:
         return ensure_mlx_whisper()
     if engine == "parakeet-mlx":
         return ensure_parakeet()
+    if engine == "faster-whisper":
+        return ensure_faster_whisper()
     return ensure_whisper()
 
 
@@ -489,6 +547,8 @@ def _run_stt(
     condition = "1" if condition_on_previous else "0"
     if engine == "mlx-whisper":
         snippet = _MLX_WHISPER_TIMED_SNIPPET if timed else _MLX_WHISPER_SNIPPET
+    elif engine == "faster-whisper":
+        snippet = _FASTER_WHISPER_TIMED_SNIPPET if timed else _FASTER_WHISPER_SNIPPET
     else:
         snippet = _WHISPER_TIMED_SNIPPET if timed else _WHISPER_SNIPPET
     proc = subprocess.run(

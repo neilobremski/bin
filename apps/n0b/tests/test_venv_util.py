@@ -18,9 +18,11 @@ from venv_util import (  # noqa: E402
     _activate_group,
     _base_python,
     _ensure_venv,
+    _group_requirements,
     _install_group,
     _requirements_digest,
     _venv_python,
+    ensure_faster_whisper,
     ensure_group,
     ensure_image,
     ensure_kokoro,
@@ -46,8 +48,15 @@ def test_runtime_and_groups_live_under_repo_venv():
 def test_requirements_files_exist():
     assert requirements_file("ai.txt").is_file()
     assert requirements_file("ai-mlx.txt").is_file()
+    assert requirements_file("ai-fast.txt").is_file()
     assert requirements_file("dev.txt").is_file()
     assert requirements_file("b3t.txt").is_file()
+
+
+def test_group_requirements_ai_fast_has_no_torch():
+    req_files = _group_requirements("ai-fast")
+    assert [f.name for f in req_files] == ["ai-fast.txt"]
+    assert "torch" not in req_files[0].read_text(encoding="utf-8")
 
 
 def test_uninstall_removes_shared_and_legacy_venvs(tmp_path):
@@ -253,6 +262,7 @@ def test_ensure_functions_are_thin_wrappers():
     assert ensure_whisper.__module__ == "venv_util"
     assert ensure_mlx_whisper.__module__ == "venv_util"
     assert ensure_parakeet.__module__ == "venv_util"
+    assert ensure_faster_whisper.__module__ == "venv_util"
 
 
 @pytest.mark.parametrize(
@@ -275,6 +285,7 @@ def test_install_all_platform_groups(tmp_path, system, machine, has_mlx):
     ):
         assert install_all() == python
     assert ("ai-mlx" in groups) is has_mlx
+    assert "ai-fast" in groups
 
 
 def test_venv_exec_uses_group_runtime(tmp_path):

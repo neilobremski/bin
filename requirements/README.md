@@ -20,6 +20,7 @@ runtime and reuses compatible groups. The bootstrap prefers a uv-managed Python
 | `ai-torch-cpu.txt` / `ai-torch-cuda.txt` | `n0b ai image`, `n0b ai transcribe` (torch picked by GPU) |
 | `ai.txt` | image generation, Kokoro speech, and standard Whisper |
 | `ai-mlx.txt` | Apple Silicon STT (`mlx-whisper`, `parakeet-mlx`) for `n0b ai transcribe` |
+| `ai-fast.txt` | `faster-whisper` (CTranslate2, int8) for `n0b ai transcribe` — no torch |
 | `dev.txt` | pytest for repo tests |
 | `b3t.txt` | `apps/b3t` |
 | `audio.txt` | `n0b ai audio` (AudioLDM, Bark) |

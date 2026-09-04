@@ -352,11 +352,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ai_transcribe.add_argument(
         "--engine",
-        choices=("auto", "whisper", "mlx-whisper", "parakeet-mlx"),
+        choices=("auto", "whisper", "mlx-whisper", "faster-whisper", "parakeet-mlx"),
         default="auto",
         help=(
-            "STT backend: auto uses mlx-whisper on Apple Silicon, else whisper "
-            "(default: auto)"
+            "STT backend: auto uses mlx-whisper on Apple Silicon, else "
+            "faster-whisper (default: auto)"
         ),
     )
     ai_transcribe.add_argument(
