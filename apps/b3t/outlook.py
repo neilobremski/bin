@@ -4,12 +4,14 @@ Usage:
     b3t outlook check                    # List Submissions folder messages
     b3t outlook check --folder Inbox     # List Inbox messages
     b3t outlook read 1                   # Read message #1 (expand full thread)
+    b3t outlook draft --file note.md     # Create an unaddressed draft in Drafts
     b3t outlook login                    # Verify M365 auth
 
 Flow:
     check: Navigate to Outlook → click folder in sidebar → parse message list
     read:  Click message → expand conversation → output all messages in thread
 """
+import json
 import os
 import re
 import sys
@@ -22,7 +24,7 @@ from constants import OUTLOOK_URL
 def dispatch(args):
     action = args.action
     if not action:
-        print("Usage: b3t outlook <login|check|read>", file=sys.stderr)
+        print("Usage: b3t outlook <login|check|read|draft>", file=sys.stderr)
         return 2
     if action == "login":
         return cmd_login(args)
@@ -30,6 +32,8 @@ def dispatch(args):
         return cmd_check(args)
     elif action == "read":
         return cmd_read(args)
+    elif action == "draft":
+        return cmd_draft(args)
     return 2
 
 
@@ -312,4 +316,121 @@ def cmd_read(args):
                 if text and len(text) > 10:
                     print(f"  {text}")
 
+    return 0
+
+
+def parse_draft_file(text):
+    """Split an email draft file into (subject, body).
+
+    The house format is a `**Subject:**` line, then a `---` rule, then the
+    body in markdown. Any `**To:**` line is ignored on purpose: these drafts
+    are created unaddressed so the editor decides who gets them.
+    """
+    subject = ""
+    m = re.search(r"^\*\*Subject:\*\*\s*(.+?)\s*$", text, re.M)
+    if m:
+        subject = m.group(1).strip()
+
+    parts = re.split(r"^---\s*$", text, maxsplit=1, flags=re.M)
+    body = parts[1] if len(parts) > 1 else text
+    body = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+
+    # Outlook's composer is rich text, not markdown. Drop the emphasis markers
+    # rather than leaving asterisks in the sent mail; the editor styles it.
+    body = re.sub(r"\*\*(.+?)\*\*", r"\1", body)
+    body = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", body)
+    body = re.sub(r"^#{1,6}\s*", "", body, flags=re.M)
+    body = re.sub(r"\n{3,}", "\n\n", body)
+    return subject, body.strip()
+
+
+def cmd_draft(args):
+    """Create an unaddressed draft email in Outlook.
+
+    Deliberately leaves To and Cc empty and never clicks Send: this command
+    exists so a draft is waiting for the editor to address, trim and send.
+    """
+    if not os.path.exists(args.file):
+        print(f"ERROR: {args.file} not found", file=sys.stderr)
+        return 1
+
+    subject, body = parse_draft_file(open(args.file).read())
+    if args.subject:
+        subject = args.subject
+    if not subject:
+        print("ERROR: no subject. Add a '**Subject:** ...' line or pass --subject.",
+              file=sys.stderr)
+        return 1
+    if not body:
+        print("ERROR: the draft body is empty.", file=sys.stderr)
+        return 1
+
+    if not _ensure_outlook():
+        return 1
+
+    print(f"Composing draft: {subject}", file=sys.stderr)
+
+    opened = session.run("--raw", "eval", """() => {
+  const b = [...document.querySelectorAll('button,[role=button]')]
+    .find(e => /^new mail$/i.test((e.getAttribute('aria-label') || e.textContent || '').trim()));
+  if (!b) return 'NO_BUTTON';
+  b.click();
+  return 'CLICKED';
+}""", timeout=20)
+    if "NO_BUTTON" in (opened.stdout or ""):
+        print("ERROR: could not find the New mail button.", file=sys.stderr)
+        return 1
+    time.sleep(5)
+
+    code = (
+        "async function main(page){"
+        "  const subj = " + json.dumps(subject) + ";"
+        "  const body = " + json.dumps(body) + ";"
+        "  const s = page.locator('input[aria-label=\"Subject\"]').first();"
+        "  await s.click(); await s.fill(subj);"
+        "  const b = page.locator('div[aria-label=\"Message body\"]').first();"
+        "  await b.click();"
+        "  await page.keyboard.insertText(body);"
+        "  await page.waitForTimeout(2000);"
+        "  return JSON.stringify(await page.evaluate(() => ({"
+        "    subj: document.querySelector('input[aria-label=\"Subject\"]')?.value || '',"
+        "    len: (document.querySelector('div[aria-label=\"Message body\"]')?.innerText || '').length,"
+        "    to: (document.querySelector('div[aria-label=\"To\"]')?.innerText || '').trim(),"
+        "    cc: (document.querySelector('div[aria-label=\"Cc\"]')?.innerText || '').trim()"
+        "  })));"
+        "}"
+    )
+    result = session.run("run-code", "--raw", code, timeout=120)
+    try:
+        info = json.loads(json.loads((result.stdout or "").strip()))
+    except (json.JSONDecodeError, ValueError):
+        print(f"ERROR: could not fill the composer: {(result.stdout or '').strip()[:200]}",
+              file=sys.stderr)
+        return 1
+
+    if info.get("to") or info.get("cc"):
+        print(f"ERROR: recipients are not empty (To={info.get('to')!r} "
+              f"Cc={info.get('cc')!r}); leaving the composer open.", file=sys.stderr)
+        return 1
+    if not info.get("len"):
+        print("ERROR: the message body did not take.", file=sys.stderr)
+        return 1
+
+    # Close, not Send. Outlook saves an unsent composer to Drafts.
+    closed = session.run("--raw", "eval", """() => {
+  const b = [...document.querySelectorAll('button')]
+    .find(e => /^close$/i.test((e.getAttribute('aria-label') || e.textContent || '').trim()));
+  if (!b) return 'NO_CLOSE';
+  b.click();
+  return 'CLOSED';
+}""", timeout=20)
+    if "NO_CLOSE" in (closed.stdout or ""):
+        print("WARNING: could not find Close. The composer is still open; "
+              "close it by hand and Outlook will save the draft.", file=sys.stderr)
+        return 1
+    time.sleep(4)
+
+    print(f"Draft saved to Drafts: \"{subject}\" ({info['len']} chars, no recipients).",
+          file=sys.stderr)
+    print("Nothing was sent. Address it and send it yourself.", file=sys.stderr)
     return 0
