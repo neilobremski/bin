@@ -22,7 +22,7 @@ def dispatch(args):
         return 1
     action = args.action
     if not action:
-        print("Usage: b3t givebacks <login|pull|build|push|open|list|duplicate|upload|screenshot>", file=sys.stderr)
+        print("Usage: b3t givebacks <login|pull|build|push|send-preview|open|list|duplicate|upload|screenshot>", file=sys.stderr)
         return 2
     if action == "login":
         return cmd_login(args)
@@ -32,6 +32,8 @@ def dispatch(args):
         return cmd_push(args)
     elif action == "build":
         return cmd_build(args)
+    elif action == "send-preview":
+        return cmd_send_preview(args)
     elif action == "open":
         return cmd_open(args)
     elif action == "list":
@@ -605,16 +607,44 @@ def _raw_html_is_current(message_id, design):
     return True, "sent HTML matches the design (%d bytes)" % msg.get("raw_len", 0)
 
 
+def _button_probe(label):
+    """JS that reports whether a clickable control with this exact label exists.
+
+    Body text is not enough to wait on: the message page paints its heading
+    before React attaches the action buttons, so a text check passes while a
+    click still finds nothing.
+    """
+    safe = label.replace("'", "\\'").lower()
+    return (
+        "() => [...document.querySelectorAll('button, a')]"
+        ".some(e => (e.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase() === '%s')" % safe
+    )
+
+
+def _open_message_page(message_id, button_label, timeout=60):
+    """Navigate to a draft's message page and wait for its buttons to attach."""
+    session.navigate(f"{GIVEBACKS_BASE}/messages/{message_id}")
+    js = _button_probe(button_label)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        result = session.run("eval", js, timeout=15)
+        if "true" in result.stdout:
+            time.sleep(1)
+            return True
+        time.sleep(3)
+    return False
+
+
 def _save_draft_in_cms(message_id, design, attempts=3):
     """Click the CMS's own Save Draft button until raw_html catches up.
 
     Opening the message page and saving is what makes GiveBacks re-render the
     email from the design. Nothing here sends anything: Save Draft only.
     """
-    url = f"{GIVEBACKS_BASE}/messages/{message_id}"
     for attempt in range(1, attempts + 1):
-        session.navigate(url)
-        time.sleep(8)
+        if not _open_message_page(message_id, "Save Draft"):
+            print("  Message page did not finish loading.", file=sys.stderr)
+            return False
         # Save Draft only. Anything that could send is explicitly excluded,
         # because the send decision belongs to the editor, never to b3t.
         js = """async () => {
@@ -714,6 +744,85 @@ def cmd_build(args):
         push_args = type("A", (), {"id": args.id, "design": out_path,
                                    "verify": False, "no_save": False})()
         return cmd_push(push_args)
+    return 0
+
+
+def cmd_send_preview(args):
+    """Send the CMS's preview email of a draft.
+
+    GiveBacks' Send Preview delivers only to the signed-in account, so this is
+    the one send b3t is allowed to perform. Send Now, which goes to the whole
+    list, stays the editor's decision and has no b3t command on purpose.
+    """
+    if not ensure_authenticated():
+        return 1
+
+    if not _open_message_page(args.id, "Send Preview"):
+        print("ERROR: message page did not load (or has no Send Preview button).", file=sys.stderr)
+        return 1
+
+    msg = _fetch_message(args.id)
+    if msg:
+        subject = msg.get("subject", "?")
+        print(f'Draft: "{subject}"', file=sys.stderr)
+        if not msg.get("raw_len"):
+            print("ERROR: this draft has no rendered HTML yet; push the design first.", file=sys.stderr)
+            return 1
+
+    # Click Send Preview and nothing that resembles a real send.
+    js = """async () => {
+  const norm = e => (e.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  const btn = [...document.querySelectorAll('button, a')].find(e => norm(e) === 'send preview');
+  if (!btn) return 'NO_BUTTON';
+  btn.click();
+  return 'CLICKED';
+}"""
+    result = session.run("eval", js, timeout=20)
+    if "NO_BUTTON" in result.stdout:
+        print("ERROR: Send Preview button not found.", file=sys.stderr)
+        return 1
+
+    time.sleep(3)
+
+    # Some CMS builds put up a confirm step. Take it only if the dialog is
+    # unambiguously about the preview.
+    js_confirm = """async () => {
+  const norm = e => (e.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  const dlg = document.querySelector('[role=dialog], .modal');
+  if (!dlg) return 'NO_DIALOG';
+  const text = norm(dlg);
+  const btn = [...dlg.querySelectorAll('button')].find(b => {
+    const t = norm(b);
+    return (t === 'send preview' || t === 'send' || t === 'confirm' || t === 'ok')
+      && !t.includes('now') && !t.includes('everyone') && !t.includes('all');
+  });
+  if (!btn) return 'DIALOG_NO_BUTTON:' + text.slice(0, 200);
+  if (!text.includes('preview')) return 'DIALOG_NOT_PREVIEW:' + text.slice(0, 200);
+  btn.click();
+  return 'CONFIRMED';
+}"""
+    confirm = session.run("eval", js_confirm, timeout=20)
+    out = confirm.stdout
+    if "DIALOG_NOT_PREVIEW" in out or "DIALOG_NO_BUTTON" in out:
+        print("A dialog appeared that this command will not click blind:", file=sys.stderr)
+        print(f"  {out.strip()[:300]}", file=sys.stderr)
+        print("Finish it by hand, then re-run if no preview arrives.", file=sys.stderr)
+        return 1
+    if "CONFIRMED" in out:
+        print("Confirmed the preview dialog.", file=sys.stderr)
+
+    time.sleep(4)
+    js_toast = """() => {
+  const t = document.body.innerText.replace(/\\s+/g, ' ');
+  const m = t.match(/[^.]*preview[^.]*\\./i);
+  return m ? m[0].trim().slice(0, 200) : '';
+}"""
+    toast = session.run("eval", js_toast, timeout=15)
+    note = toast.stdout.strip().strip('"')
+    if note and note != "":
+        print(f"CMS says: {note}", file=sys.stderr)
+
+    print("Send Preview clicked. It goes to the signed-in GiveBacks account only.", file=sys.stderr)
     return 0
 
 
