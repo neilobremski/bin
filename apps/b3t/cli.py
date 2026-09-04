@@ -52,6 +52,10 @@ def main():
     p.add_argument("--no-save", action="store_true",
                    help="Skip the editor save that regenerates raw_html (the sent HTML)")
 
+    p = gb_sub.add_parser("send-preview",
+                          help="Send the CMS preview email (goes to the signed-in account only)")
+    p.add_argument("--id", required=True, help="Message/draft UUID")
+
     p = gb_sub.add_parser("open", help="Open editor in browser")
     p.add_argument("--id", required=True, help="Message/draft UUID")
 
