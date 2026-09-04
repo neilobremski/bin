@@ -532,6 +532,24 @@ def cmd_push(args):
 
 # --------------------------------------------------------------- raw_html
 
+def _eval(js, timeout=30):
+    """Evaluate JS and return only the result value.
+
+    playwright-cli echoes the snippet it ran back on stdout, so checking raw
+    stdout for a sentinel matches the source of the check itself and is always
+    true. --raw prints the value alone.
+    """
+    result = session.run("--raw", "eval", js, timeout=timeout)
+    out = (result.stdout or "").strip()
+    if not out:
+        return ""
+    try:
+        value = json.loads(out)
+    except json.JSONDecodeError:
+        return out
+    return value if isinstance(value, str) else value
+
+
 def _fetch_message(message_id, fields="subject,raw_html"):
     """Fetch a message record. Returns a dict, or None if the fetch failed."""
     api_url = _api_url(message_id)
@@ -627,8 +645,7 @@ def _open_message_page(message_id, button_label, timeout=60):
     js = _button_probe(button_label)
     deadline = time.time() + timeout
     while time.time() < deadline:
-        result = session.run("eval", js, timeout=15)
-        if "true" in result.stdout:
+        if _eval(js, timeout=15) is True:
             time.sleep(1)
             return True
         time.sleep(3)
@@ -658,10 +675,9 @@ def _save_draft_in_cms(message_id, design, attempts=3):
   btn.click();
   return 'CLICKED';
 }"""
-        result = session.run("eval", js, timeout=20)
-        if "NO_BUTTON" in result.stdout:
-            print("  Save Draft button not found on the message page.", file=sys.stderr)
-            print(f"  Buttons seen: {result.stdout.strip()[:300]}", file=sys.stderr)
+        clicked = _eval(js, timeout=20)
+        if str(clicked).startswith("NO_BUTTON"):
+            print(f"  Save Draft button not found: {clicked}", file=sys.stderr)
             return False
         time.sleep(6)
         ok, detail = _raw_html_is_current(message_id, design)
@@ -769,60 +785,63 @@ def cmd_send_preview(args):
             print("ERROR: this draft has no rendered HTML yet; push the design first.", file=sys.stderr)
             return 1
 
-    # Click Send Preview and nothing that resembles a real send.
-    js = """async () => {
-  const norm = e => (e.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    # Two steps in the CMS: the page button opens a confirm modal, the modal's
+    # own button actually sends. Both are matched by exact label so nothing
+    # near them ("Send Now") can be hit by accident.
+    click_js = r"""() => {
+  const norm = e => (e.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
   const btn = [...document.querySelectorAll('button, a')].find(e => norm(e) === 'send preview');
   if (!btn) return 'NO_BUTTON';
   btn.click();
   return 'CLICKED';
 }"""
-    result = session.run("eval", js, timeout=20)
-    if "NO_BUTTON" in result.stdout:
+    if str(_eval(click_js, timeout=20)).startswith("NO_BUTTON"):
         print("ERROR: Send Preview button not found.", file=sys.stderr)
         return 1
 
     time.sleep(3)
 
-    # Some CMS builds put up a confirm step. Take it only if the dialog is
-    # unambiguously about the preview.
-    js_confirm = """async () => {
-  const norm = e => (e.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-  const dlg = document.querySelector('[role=dialog], .modal');
-  if (!dlg) return 'NO_DIALOG';
-  const text = norm(dlg);
-  const btn = [...dlg.querySelectorAll('button')].find(b => {
-    const t = norm(b);
-    return (t === 'send preview' || t === 'send' || t === 'confirm' || t === 'ok')
-      && !t.includes('now') && !t.includes('everyone') && !t.includes('all');
-  });
-  if (!btn) return 'DIALOG_NO_BUTTON:' + text.slice(0, 200);
-  if (!text.includes('preview')) return 'DIALOG_NOT_PREVIEW:' + text.slice(0, 200);
+    # The modal states its own recipient. Read it back rather than assuming,
+    # and refuse anything that is not clearly the self-preview.
+    confirm_js = r"""() => {
+  const norm = e => (e.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const body = [...document.querySelectorAll('.mantine-Modal-body, [role=dialog]')]
+    .find(d => /preview of your email/i.test(d.innerText || ''));
+  if (!body) return JSON.stringify({state: 'NO_MODAL'});
+  const text = (body.innerText || '').replace(/\s+/g, ' ').trim();
+  const btn = [...body.querySelectorAll('button')].find(b => norm(b) === 'send preview');
+  if (!btn) return JSON.stringify({state: 'NO_CONFIRM', text: text.slice(0, 200)});
   btn.click();
-  return 'CONFIRMED';
+  return JSON.stringify({state: 'CONFIRMED', text: text.slice(0, 200)});
 }"""
-    confirm = session.run("eval", js_confirm, timeout=20)
-    out = confirm.stdout
-    if "DIALOG_NOT_PREVIEW" in out or "DIALOG_NO_BUTTON" in out:
-        print("A dialog appeared that this command will not click blind:", file=sys.stderr)
-        print(f"  {out.strip()[:300]}", file=sys.stderr)
-        print("Finish it by hand, then re-run if no preview arrives.", file=sys.stderr)
+    raw = _eval(confirm_js, timeout=20)
+    try:
+        info = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        info = {"state": "UNPARSED", "text": str(raw)[:200]}
+
+    state = info.get("state")
+    if state == "NO_MODAL":
+        print("No confirmation modal appeared; the preview may already be on its way.",
+              file=sys.stderr)
+    elif state != "CONFIRMED":
+        print(f"Confirmation modal not in the expected shape ({state}).", file=sys.stderr)
+        print(f"  {info.get('text', '')}", file=sys.stderr)
+        print("Finish it by hand in the CMS.", file=sys.stderr)
         return 1
-    if "CONFIRMED" in out:
-        print("Confirmed the preview dialog.", file=sys.stderr)
+    else:
+        recipient = re.search(r"[\w.+-]+@[\w.-]+", info.get("text", ""))
+        where = recipient.group(0) if recipient else "the signed-in account"
+        print(f"Confirmed. The CMS says the preview goes to {where}.", file=sys.stderr)
 
     time.sleep(4)
-    js_toast = """() => {
-  const t = document.body.innerText.replace(/\\s+/g, ' ');
-  const m = t.match(/[^.]*preview[^.]*\\./i);
-  return m ? m[0].trim().slice(0, 200) : '';
-}"""
-    toast = session.run("eval", js_toast, timeout=15)
-    note = toast.stdout.strip().strip('"')
-    if note and note != "":
-        print(f"CMS says: {note}", file=sys.stderr)
+    still_open = _eval("""() => !!document.querySelector('.mantine-Modal-body')""", timeout=15)
+    if still_open is True:
+        print("WARNING: the modal is still open, so the preview may not have sent.",
+              file=sys.stderr)
+        return 1
 
-    print("Send Preview clicked. It goes to the signed-in GiveBacks account only.", file=sys.stderr)
+    print("Preview sent. It goes to the signed-in GiveBacks account only.", file=sys.stderr)
     return 0
 
 
