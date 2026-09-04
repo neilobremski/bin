@@ -496,13 +496,13 @@ def cmd_push(args):
         if ok:
             print(f"Sent HTML already current: {detail}", file=sys.stderr)
         else:
-            print(f"Sent HTML is stale ({detail}); saving in the CMS...", file=sys.stderr)
-            if _save_draft_in_cms(args.id, design):
+            print(f"Sent HTML is stale ({detail}); regenerating in the editor...", file=sys.stderr)
+            if _regenerate_sent_html(args.id, design):
                 print("Sent HTML regenerated.", file=sys.stderr)
             else:
                 print("WARNING: the design was pushed but the sent HTML did NOT catch up.",
                       file=sys.stderr)
-                print("         Open the editor, make any edit, and let it auto-save:",
+                print("         Open the editor, type a character into any text block and delete it:",
                       file=sys.stderr)
                 print(f"         b3t gb open --id {args.id}", file=sys.stderr)
                 return 1
@@ -588,8 +588,14 @@ def _plain(html):
     return " ".join(txt.split())
 
 
-def _design_fingerprints(design, limit=6):
-    """Distinctive plain-text snippets from a design, for raw_html checks."""
+def _design_blocks(design, chunk=100):
+    """Every text/heading block in a design, sliced into comparable chunks.
+
+    Two earlier versions of this were quietly useless. Sampling a few blocks
+    missed whole new sections further down; keeping only each block's first 120
+    characters missed edits made past that point, which is most edits to a long
+    paragraph. So: every block, cut into fixed-size chunks, all of them checked.
+    """
     out = []
     for row in design.get("body", {}).get("rows", []):
         for col in row.get("columns", []):
@@ -597,11 +603,12 @@ def _design_fingerprints(design, limit=6):
                 if c.get("type") not in ("heading", "text"):
                     continue
                 txt = _plain(c.get("values", {}).get("text", ""))
-                if len(txt) >= 25:
-                    out.append(txt[:45])
-                break
-        if len(out) >= limit:
-            return out
+                if len(txt) < 20:
+                    continue
+                for i in range(0, len(txt), chunk):
+                    piece = txt[i:i + chunk]
+                    if len(piece) >= 20:
+                        out.append(piece)
     return out
 
 
@@ -611,18 +618,49 @@ def _raw_html_is_current(message_id, design):
     GiveBacks stores the design (`template`) and the rendered email
     (`raw_html`) separately. An API push updates only the design, so the HTML
     that would actually go out can silently lag behind. This is that check.
+
+    The comparison runs inside the page: raw_html is tens of kilobytes and
+    shipping it back through the CLI corrupts it. Only the verdict comes back.
     """
-    marks = _design_fingerprints(design)
-    if not marks:
-        return None, "design has no text to fingerprint"
-    msg = _fetch_message(message_id)
-    if not msg:
+    blocks = _design_blocks(design)
+    if not blocks:
+        return None, "design has no text to compare"
+
+    # The marks go inline rather than through localStorage: writing storage
+    # first was disturbing the page's session, and the follow-up fetch came
+    # back without raw_html, which read as "everything is missing".
+    api_url = _api_url(message_id)
+    marks_json = json.dumps(blocks)
+    js = rf"""async () => {{
+  const marks = {marks_json};
+  const res = await fetch("{api_url}", {{credentials: "include"}});
+  const d = await res.json();
+  const raw = ((d.message || {{}}).raw_html) || "";
+  const plain = raw.replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&rsquo;|&#8217;/gi, "'")
+    .replace(/&quot;/gi, '"').replace(/&lt;/gi, "<").replace(/&gt;/gi, ">")
+    .replace(/\u00a0/g, " ").replace(/\u2019/g, "'")
+    .replace(/\s+/g, " ").trim();
+  const missing = marks.filter(m => !plain.includes(m));
+  return JSON.stringify({{len: raw.length, plain: plain.length, total: marks.length,
+                         missing: missing.length, sample: missing.slice(0, 2)}});
+}}"""
+    raw = _eval(js, timeout=45)
+    try:
+        info = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
         return None, "could not read the message back"
-    raw = _plain(msg.get("raw", ""))
-    missing = [m for m in marks if m not in raw]
-    if missing:
-        return False, "%d of %d checked blocks are not in the sent HTML yet" % (len(missing), len(marks))
-    return True, "sent HTML matches the design (%d bytes)" % msg.get("raw_len", 0)
+    if not isinstance(info, dict):
+        return None, "could not read the message back"
+    if not info.get("plain"):
+        return None, "the CMS returned no rendered HTML to compare"
+
+    if info.get("missing"):
+        sample = "; ".join(info.get("sample", []))[:120]
+        return False, "%d of %d blocks missing from the sent HTML (e.g. %s)" % (
+            info["missing"], info["total"], sample)
+    return True, "sent HTML matches the design (%d bytes, %d blocks checked)" % (
+        info.get("len", 0), info.get("total", 0))
 
 
 def _button_probe(label):
@@ -652,40 +690,85 @@ def _open_message_page(message_id, button_label, timeout=60):
     return False
 
 
-def _save_draft_in_cms(message_id, design, attempts=3):
-    """Click the CMS's own Save Draft button until raw_html catches up.
+def _wait_for_editor(timeout=60):
+    """Wait until the Unlayer iframe is present and has painted content."""
+    code = (
+        "async function main(page){"
+        "  const f = page.frames().find(x => x.url().includes('editor.unlayer.com'));"
+        "  if(!f) return 'NO_FRAME';"
+        "  const n = await f.evaluate(() => document.querySelectorAll('img, p, div').length);"
+        "  return n > 40 ? 'READY' : 'PAINTING:' + n;"
+        "}"
+    )
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        result = session.run("run-code", "--raw", code, timeout=30)
+        if "READY" in (result.stdout or ""):
+            time.sleep(2)
+            return True
+        time.sleep(3)
+    return False
 
-    Opening the message page and saving is what makes GiveBacks re-render the
-    email from the design. Nothing here sends anything: Save Draft only.
+
+def _regenerate_sent_html(message_id, design, attempts=2):
+    """Make the CMS re-render the email from the pushed design.
+
+    Save Draft on the message page does NOT do this: it persists the record and
+    leaves raw_html untouched (measured, three attempts, no change). Only the
+    Unlayer editor re-renders, and only after a real content edit sets its
+    dirty flag. So: open the editor, type a visible character into a text block
+    and delete it again, and let the auto-save fire. A net-zero edit, but the
+    editor counts it.
+
+    The editor's own "Save Changes" button is not a signal here; it stays
+    disabled because the auto-save has already run. The API is the signal.
     """
     for attempt in range(1, attempts + 1):
-        if not _open_message_page(message_id, "Save Draft"):
-            print("  Message page did not finish loading.", file=sys.stderr)
+        session.navigate(_design_url(message_id))
+        if not _wait_for_editor(timeout=60):
+            print("  Editor did not finish loading.", file=sys.stderr)
+            continue
+
+        marks = _design_blocks(design)
+        anchor = ""
+        for m in marks:
+            words = m.split()
+            if len(words) >= 5:
+                anchor = " ".join(words[:5])
+                break
+        if not anchor:
+            print("  No text block to edit.", file=sys.stderr)
             return False
-        # Save Draft only. Anything that could send is explicitly excluded,
-        # because the send decision belongs to the editor, never to b3t.
-        js = """async () => {
-  const norm = e => (e.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-  const btn = [...document.querySelectorAll('button, a')].find(e => {
-    const t = norm(e);
-    return t.includes('save draft') && !t.includes('send') && !t.includes('schedule');
-  });
-  if (!btn) return 'NO_BUTTON:' + JSON.stringify(
-    [...document.querySelectorAll('button')].map(norm).filter(Boolean).slice(0, 12));
-  btn.click();
-  return 'CLICKED';
-}"""
-        clicked = _eval(js, timeout=20)
-        if str(clicked).startswith("NO_BUTTON"):
-            print(f"  Save Draft button not found: {clicked}", file=sys.stderr)
-            return False
-        time.sleep(6)
-        ok, detail = _raw_html_is_current(message_id, design)
-        if ok:
-            print(f"  Saved: {detail}", file=sys.stderr)
-            return True
-        print(f"  Attempt {attempt}: {detail}", file=sys.stderr)
-        time.sleep(4)
+
+        code = (
+            "async function main(page){"
+            "  const f = page.frames().find(x => x.url().includes('editor.unlayer.com'));"
+            "  if(!f) return 'NO_FRAME';"
+            f"  const t = f.locator(\"text={anchor}\").first();"
+            "  await t.scrollIntoViewIfNeeded().catch(()=>{});"
+            "  await t.dblclick({force:true});"
+            "  await page.waitForTimeout(1500);"
+            "  await page.keyboard.type('x');"
+            "  await page.waitForTimeout(1200);"
+            "  await page.keyboard.press('Backspace');"
+            "  await page.waitForTimeout(3000);"
+            "  return 'EDITED';"
+            "}"
+        )
+        result = session.run("run-code", "--raw", code, timeout=90)
+        if "EDITED" not in (result.stdout or ""):
+            print(f"  Could not edit the editor content: {(result.stdout or '').strip()[:160]}",
+                  file=sys.stderr)
+            continue
+
+        # Give the auto-save a moment, then ask the API, not the button.
+        for _ in range(6):
+            time.sleep(4)
+            ok, detail = _raw_html_is_current(message_id, design)
+            if ok:
+                print(f"  Regenerated: {detail}", file=sys.stderr)
+                return True
+        print(f"  Attempt {attempt}: the editor edit did not produce a save.", file=sys.stderr)
     return False
 
 

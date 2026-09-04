@@ -116,28 +116,53 @@ the right `--index`.
 
 API push updates `template` but NOT `raw_html` (what gets emailed).
 
-**`b3t gb push` now handles this.** After a successful push it fingerprints the
-design, compares against the live `raw_html`, and if the sent HTML is stale it
-opens the message page and clicks **Save Draft** (never Send, never Schedule),
-then re-checks. It reports which of the two happened, and exits non-zero with
-the manual remedy if the HTML did not catch up. `--no-save` skips the whole
-step.
+**`b3t gb push` now handles this.** After a successful push it compares the
+design against the live `raw_html` and, if the sent HTML is stale, regenerates
+it and re-checks. It reports which happened and exits non-zero with the manual
+remedy if the HTML did not catch up. `--no-save` skips the step.
 
-Comparison normalizes entities on both sides: the design stores `&nbsp;` and
-`&rsquo;` while the rendered email carries the real characters, so a naive
-string check reports false staleness.
+**Save Draft does not re-render.** Measured: three Save Draft clicks on the
+message page left `raw_html` byte-identical. It persists the record only. Only
+the Unlayer editor re-renders, and only after a real content edit sets its
+dirty flag. So the repair opens the editor, types a visible character into a
+text block and deletes it, then waits. The editor's own "Save Changes" button
+is not a signal, it stays disabled because the auto-save already ran. The API
+is the signal.
 
-Manual fallback, if the automatic save fails:
-1. Open editor at `/messages/{uuid}/design`
-2. Click any text block to enter edit mode
-3. Type a character then delete it (net-zero edit that sets dirty flag)
-4. Wait for auto-save ("Save Changes" button becomes disabled = saved)
-5. Verify via API: `raw_html` contains expected content
+**Comparison details that matter**, each one learned by getting it wrong:
 
-**Important:** `space + backspace` does NOT trigger dirty flag. Must be a visible character.
+- Compare **every** block, not a sample. Sampling the first few passes happily
+  while a whole new section further down is missing.
+- Compare **whole** blocks, chunked, not each block's first N characters. Most
+  edits to a long paragraph land past any prefix.
+- Normalize entities on both sides. The design stores `&nbsp;` and `&rsquo;`,
+  the rendered email carries the real characters.
+- Send the marks inline in the snippet. Routing them through `localstorage-set`
+  first disturbed the page session and the follow-up fetch returned no
+  `raw_html`, which reads as "everything is missing".
 
-Note: this Unlayer build (1.468.0) exposes no `unlayer.exportHtml`, so b3t
-cannot render the HTML itself and must make the CMS do it.
+Manual fallback: open the editor, click a text block, type a character, delete
+it, wait for the auto-save, then verify via the API. `space + backspace` does
+NOT set the dirty flag; it must be a visible character.
+
+Note: this Unlayer build (1.468.0) exposes neither `unlayer.exportHtml` nor
+`unlayer.saveDesign`, so b3t cannot render or force-save the design itself and
+has to make the editor do it.
+
+## Sending a preview
+
+```bash
+b3t gb send-preview --id UUID
+```
+
+Send Preview delivers only to the signed-in account, so it is the one send b3t
+performs. Send Now goes to the whole list and deliberately has no command.
+
+It is two steps in the CMS: the page button opens a modal that names the
+recipient ("An email will be sent to you with a preview of your email"), and
+the modal's own button sends. Both are matched by exact label, the recipient is
+read back out of the modal rather than assumed, and an unexpected modal shape
+is reported rather than clicked.
 
 ## Design JSON Structure
 
@@ -184,7 +209,8 @@ Unlayer editor keeps an in-memory copy of the design. If editor is open during A
 | `run-code` can crash session | Prefer built-in commands + `&&` chaining |
 | `mousewheel` args | Use `0 <dy>` for vertical scrolling |
 | Large payloads exceed inline eval | Use `localstorage-set` as transfer buffer |
-| API push doesn't update `raw_html` | `b3t gb push` detects and fixes it; fallback is editor → trivial edit → auto-save |
+| API push doesn't update `raw_html` | `b3t gb push` detects and fixes it; Save Draft does NOT re-render, only an editor edit does |
+| `playwright-cli` echoes the snippet it ran | Checking raw stdout for a sentinel matches your own source; use `--raw` |
 | push_design verify has parsing bug | Use `push` only, skip verify |
 | Messages-list Duplicate menu item not found | Menu renders in a portal; click the row's kebab then the item by text via DOM |
 | Satisfaction survey modal covers the messages list | Dismiss before driving the list |
