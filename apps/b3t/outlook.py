@@ -382,6 +382,10 @@ def cmd_draft(args):
         return 1
     time.sleep(5)
 
+    # The body is typed, not inserted. And the composer is NOT closed until
+    # Outlook says it saved: its draft save is debounced, so closing straight
+    # after typing loses the body while keeping the subject, which is exactly
+    # what shipped an empty draft the first time.
     code = (
         "async function main(page){"
         "  const subj = " + json.dumps(subject) + ";"
@@ -390,17 +394,27 @@ def cmd_draft(args):
         "  await s.click(); await s.fill(subj);"
         "  const b = page.locator('div[aria-label=\"Message body\"]').first();"
         "  await b.click();"
-        "  await page.keyboard.insertText(body);"
-        "  await page.waitForTimeout(2000);"
-        "  return JSON.stringify(await page.evaluate(() => ({"
+        "  await page.waitForTimeout(400);"
+        "  await b.pressSequentially(body, {delay: 4});"
+        "  await page.waitForTimeout(1000);"
+        "  await s.click();"                      # blur the body so the edit commits
+        "  let saved = '';"
+        "  for (let i = 0; i < 30; i++) {"
+        "    await page.waitForTimeout(2000);"
+        "    const t = await page.evaluate(() => document.body.innerText.replace(/\\s+/g, ' '));"
+        "    const m = t.match(/draft saved at [^ ]+ ?[AP]?M?/i);"
+        "    if (m) { saved = m[0].trim(); break; }"
+        "  }"
+        "  return JSON.stringify(await page.evaluate((sv) => ({"
+        "    saved: sv,"
         "    subj: document.querySelector('input[aria-label=\"Subject\"]')?.value || '',"
         "    len: (document.querySelector('div[aria-label=\"Message body\"]')?.innerText || '').length,"
         "    to: (document.querySelector('div[aria-label=\"To\"]')?.innerText || '').trim(),"
         "    cc: (document.querySelector('div[aria-label=\"Cc\"]')?.innerText || '').trim()"
-        "  })));"
+        "  }), saved));"
         "}"
     )
-    result = session.run("run-code", "--raw", code, timeout=120)
+    result = session.run("run-code", "--raw", code, timeout=300)
     try:
         info = json.loads(json.loads((result.stdout or "").strip()))
     except (json.JSONDecodeError, ValueError):
@@ -415,8 +429,13 @@ def cmd_draft(args):
     if not info.get("len"):
         print("ERROR: the message body did not take.", file=sys.stderr)
         return 1
+    if not info.get("saved"):
+        print("ERROR: Outlook never reported the draft as saved; leaving the "
+              "composer open so nothing is lost.", file=sys.stderr)
+        return 1
+    print(f"  Outlook reports: {info['saved']}", file=sys.stderr)
 
-    # Close, not Send. Outlook saves an unsent composer to Drafts.
+    # Close, not Send.
     closed = session.run("--raw", "eval", """() => {
   const b = [...document.querySelectorAll('button')]
     .find(e => /^close$/i.test((e.getAttribute('aria-label') || e.textContent || '').trim()));
@@ -425,10 +444,42 @@ def cmd_draft(args):
   return 'CLOSED';
 }""", timeout=20)
     if "NO_CLOSE" in (closed.stdout or ""):
-        print("WARNING: could not find Close. The composer is still open; "
-              "close it by hand and Outlook will save the draft.", file=sys.stderr)
+        print("WARNING: could not find Close. The composer is still open, but the "
+              "draft is already saved.", file=sys.stderr)
+    time.sleep(5)
+
+    # Reopen it and read the body back. The save indicator alone is not proof:
+    # an earlier version of this command reported success on a draft that
+    # turned out to have no body at all.
+    verify = (
+        "async function main(page){"
+        "  const row = page.locator('[role=option]').filter({hasText: " + json.dumps(subject[:40]) + "}).first();"
+        "  if (await row.count() === 0) return JSON.stringify({found: false});"
+        "  await row.click();"
+        "  await page.waitForTimeout(5000);"
+        "  return JSON.stringify(await page.evaluate(() => ({"
+        "    found: true,"
+        "    subj: document.querySelector('input[aria-label=\"Subject\"]')?.value || '',"
+        "    len: (document.querySelector('div[aria-label=\"Message body\"]')?.innerText || '').trim().length"
+        "  })));"
+        "}"
+    )
+    _click_folder("Drafts")
+    time.sleep(3)
+    vres = session.run("run-code", "--raw", verify, timeout=120)
+    try:
+        vinfo = json.loads(json.loads((vres.stdout or "").strip()))
+    except (json.JSONDecodeError, ValueError):
+        vinfo = {}
+    if not vinfo.get("found"):
+        print("WARNING: could not find the saved draft in Drafts to verify it. "
+              "Open it and check the body before sending.", file=sys.stderr)
+    elif not vinfo.get("len"):
+        print("ERROR: the draft saved with an EMPTY BODY. Do not send it.", file=sys.stderr)
         return 1
-    time.sleep(4)
+    else:
+        print(f"  Verified after reopening: {vinfo['len']} characters of body.",
+              file=sys.stderr)
 
     print(f"Draft saved to Drafts: \"{subject}\" ({info['len']} chars, no recipients).",
           file=sys.stderr)
