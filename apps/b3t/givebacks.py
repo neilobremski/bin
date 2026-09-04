@@ -1,10 +1,12 @@
 """GiveBacks newsletter CMS commands."""
+import html as html_mod
 import json
 import os
 import re
 import sys
 import time
 
+import design as design_mod
 import env
 import session
 from constants import (
@@ -20,7 +22,7 @@ def dispatch(args):
         return 1
     action = args.action
     if not action:
-        print("Usage: b3t givebacks <login|pull|push|open|list|duplicate|upload|screenshot>", file=sys.stderr)
+        print("Usage: b3t givebacks <login|pull|build|push|open|list|duplicate|upload|screenshot>", file=sys.stderr)
         return 2
     if action == "login":
         return cmd_login(args)
@@ -28,6 +30,8 @@ def dispatch(args):
         return cmd_pull(args)
     elif action == "push":
         return cmd_push(args)
+    elif action == "build":
+        return cmd_build(args)
     elif action == "open":
         return cmd_open(args)
     elif action == "list":
@@ -393,21 +397,17 @@ def cmd_login(args):
     return 1
 
 
-def cmd_pull(args):
-    """Pull design JSON from GiveBacks API."""
-    if not ensure_authenticated():
-        return 1
-
-    api_url = _api_url(args.id)
+def _fetch_design(message_id):
+    """Pull a draft's design JSON. Returns a dict, or None on failure."""
+    api_url = _api_url(message_id)
     js = (
         f'() => fetch("{api_url}", {{credentials: "include"}})'
         f'.then(r => r.json()).then(d => d.message.template)'
     )
 
-    print(f"Pulling design for {args.id}...", file=sys.stderr)
+    print(f"Pulling design for {message_id}...", file=sys.stderr)
     result = session.run("eval", js, timeout=15)
 
-    # Parse template string from eval output
     template_str = None
     for line in result.stdout.split("\n"):
         line = line.strip()
@@ -418,11 +418,21 @@ def cmd_pull(args):
     if not template_str:
         print("ERROR: Could not parse design from response.", file=sys.stderr)
         print(result.stdout[:500], file=sys.stderr)
-        return 1
+        return None
 
     design = json.loads(template_str)
-    rows = len(design.get("body", {}).get("rows", []))
-    print(f"Got design: {rows} rows", file=sys.stderr)
+    print(f"Got design: {len(design.get('body', {}).get('rows', []))} rows", file=sys.stderr)
+    return design
+
+
+def cmd_pull(args):
+    """Pull design JSON from GiveBacks API."""
+    if not ensure_authenticated():
+        return 1
+
+    design = _fetch_design(args.id)
+    if design is None:
+        return 1
 
     output = json.dumps(design, indent=2)
     if args.output:
@@ -479,6 +489,22 @@ def cmd_push(args):
 
     print("Push successful.", file=sys.stderr)
 
+    if not getattr(args, "no_save", False):
+        ok, detail = _raw_html_is_current(args.id, design)
+        if ok:
+            print(f"Sent HTML already current: {detail}", file=sys.stderr)
+        else:
+            print(f"Sent HTML is stale ({detail}); saving in the CMS...", file=sys.stderr)
+            if _save_draft_in_cms(args.id, design):
+                print("Sent HTML regenerated.", file=sys.stderr)
+            else:
+                print("WARNING: the design was pushed but the sent HTML did NOT catch up.",
+                      file=sys.stderr)
+                print("         Open the editor, make any edit, and let it auto-save:",
+                      file=sys.stderr)
+                print(f"         b3t gb open --id {args.id}", file=sys.stderr)
+                return 1
+
     if args.verify:
         js_verify = f'''() => fetch("{api_url}", {{credentials: "include"}}).then(r => r.json()).then(d => {{
   const t = JSON.parse(d.message.template);
@@ -499,6 +525,195 @@ def cmd_push(args):
                 except json.JSONDecodeError:
                     pass
 
+    return 0
+
+
+# --------------------------------------------------------------- raw_html
+
+def _fetch_message(message_id, fields="subject,raw_html"):
+    """Fetch a message record. Returns a dict, or None if the fetch failed."""
+    api_url = _api_url(message_id)
+    js = f"""() => fetch("{api_url}", {{credentials: "include"}})
+  .then(r => r.json())
+  .then(d => {{
+    const m = d.message || {{}};
+    const h = m.raw_html || "";
+    return JSON.stringify({{subject: m.subject || "", raw_len: h.length, raw: h.slice(0, 400000)}});
+  }})"""
+    result = session.run("eval", js, timeout=30)
+    for line in result.stdout.split("\n"):
+        line = line.strip()
+        if line.startswith('"') and line.endswith('"'):
+            try:
+                return json.loads(json.loads(line))
+            except (json.JSONDecodeError, ValueError):
+                continue
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
+def _plain(html):
+    """Tags and entities out, whitespace collapsed.
+
+    The design stores `&nbsp;` and friends as entities while the rendered
+    email carries the real characters, so both sides go through this before
+    they are compared.
+    """
+    txt = re.sub(r"<[^>]+>", " ", html or "")
+    txt = html_mod.unescape(txt).replace("\u00a0", " ").replace("\u2019", "'")
+    return " ".join(txt.split())
+
+
+def _design_fingerprints(design, limit=6):
+    """Distinctive plain-text snippets from a design, for raw_html checks."""
+    out = []
+    for row in design.get("body", {}).get("rows", []):
+        for col in row.get("columns", []):
+            for c in col.get("contents", []):
+                if c.get("type") not in ("heading", "text"):
+                    continue
+                txt = _plain(c.get("values", {}).get("text", ""))
+                if len(txt) >= 25:
+                    out.append(txt[:45])
+                break
+        if len(out) >= limit:
+            return out
+    return out
+
+
+def _raw_html_is_current(message_id, design):
+    """True when the CMS's sent-HTML matches the design we just pushed.
+
+    GiveBacks stores the design (`template`) and the rendered email
+    (`raw_html`) separately. An API push updates only the design, so the HTML
+    that would actually go out can silently lag behind. This is that check.
+    """
+    marks = _design_fingerprints(design)
+    if not marks:
+        return None, "design has no text to fingerprint"
+    msg = _fetch_message(message_id)
+    if not msg:
+        return None, "could not read the message back"
+    raw = _plain(msg.get("raw", ""))
+    missing = [m for m in marks if m not in raw]
+    if missing:
+        return False, "%d of %d checked blocks are not in the sent HTML yet" % (len(missing), len(marks))
+    return True, "sent HTML matches the design (%d bytes)" % msg.get("raw_len", 0)
+
+
+def _save_draft_in_cms(message_id, design, attempts=3):
+    """Click the CMS's own Save Draft button until raw_html catches up.
+
+    Opening the message page and saving is what makes GiveBacks re-render the
+    email from the design. Nothing here sends anything: Save Draft only.
+    """
+    url = f"{GIVEBACKS_BASE}/messages/{message_id}"
+    for attempt in range(1, attempts + 1):
+        session.navigate(url)
+        time.sleep(8)
+        # Save Draft only. Anything that could send is explicitly excluded,
+        # because the send decision belongs to the editor, never to b3t.
+        js = """async () => {
+  const norm = e => (e.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  const btn = [...document.querySelectorAll('button, a')].find(e => {
+    const t = norm(e);
+    return t.includes('save draft') && !t.includes('send') && !t.includes('schedule');
+  });
+  if (!btn) return 'NO_BUTTON:' + JSON.stringify(
+    [...document.querySelectorAll('button')].map(norm).filter(Boolean).slice(0, 12));
+  btn.click();
+  return 'CLICKED';
+}"""
+        result = session.run("eval", js, timeout=20)
+        if "NO_BUTTON" in result.stdout:
+            print("  Save Draft button not found on the message page.", file=sys.stderr)
+            print(f"  Buttons seen: {result.stdout.strip()[:300]}", file=sys.stderr)
+            return False
+        time.sleep(6)
+        ok, detail = _raw_html_is_current(message_id, design)
+        if ok:
+            print(f"  Saved: {detail}", file=sys.stderr)
+            return True
+        print(f"  Attempt {attempt}: {detail}", file=sys.stderr)
+        time.sleep(4)
+    return False
+
+
+def cmd_build(args):
+    """Build a design from an edition's draft.md and optionally push it.
+
+    draft.md is the source of truth. This turns it into Unlayer design JSON,
+    borrowing the row styling from a previous edition's design so the result
+    keeps the newsletter's look without anyone hand-editing JSON.
+    """
+    edition_dir = os.path.join("editions", args.edition)
+    draft_path = os.path.join(edition_dir, "draft.md")
+    if not os.path.exists(draft_path):
+        print(f"ERROR: {draft_path} not found", file=sys.stderr)
+        return 1
+
+    wip = os.path.join(edition_dir, "wip")
+    os.makedirs(wip, exist_ok=True)
+    out_path = args.output or os.path.join(wip, "givebacks-design-new.json")
+
+    live = None
+    if args.donor:
+        if not os.path.exists(args.donor):
+            print(f"ERROR: {args.donor} not found", file=sys.stderr)
+            return 1
+        with open(args.donor) as f:
+            donor = json.load(f)
+    elif args.id:
+        if not ensure_authenticated():
+            return 1
+        donor = _fetch_design(args.id)
+        if donor is None:
+            return 1
+        live = donor
+    else:
+        print("ERROR: pass --id (pull the donor from the draft) or --donor FILE", file=sys.stderr)
+        return 1
+
+    try:
+        built = design_mod.build(open(draft_path).read(), donor,
+                                 slug=args.edition.replace("-", ""))
+    except design_mod.DesignError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    if live is not None:
+        carried, why = design_mod.carry_image_urls(built, live)
+        if why:
+            print(f"NOTE: image URLs not carried over: {why}", file=sys.stderr)
+        elif carried:
+            print(f"Carried over {carried} image URLs from the live draft.", file=sys.stderr)
+
+    with open(out_path, "w") as f:
+        json.dump(built, f, indent=1, ensure_ascii=False)
+
+    rows = len(built["body"]["rows"])
+    print(f"Built {rows} rows -> {out_path}", file=sys.stderr)
+    print(design_mod.outline(built), file=sys.stderr)
+
+    pending = design_mod.pending_uploads(built)
+    if pending:
+        print("", file=sys.stderr)
+        print("Images still to upload:", file=sys.stderr)
+        for idx, src in pending:
+            print(f"  b3t gb upload --id {args.id or 'UUID'} "
+                  f"--image {edition_dir}/{src} --index {idx}", file=sys.stderr)
+
+    if args.push:
+        if not args.id:
+            print("ERROR: --push needs --id", file=sys.stderr)
+            return 1
+        push_args = type("A", (), {"id": args.id, "design": out_path,
+                                   "verify": False, "no_save": False})()
+        return cmd_push(push_args)
     return 0
 
 
