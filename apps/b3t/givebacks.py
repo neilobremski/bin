@@ -1,10 +1,12 @@
 """GiveBacks newsletter CMS commands."""
+import html as html_mod
 import json
 import os
 import re
 import sys
 import time
 
+import design as design_mod
 import env
 import session
 from constants import (
@@ -20,7 +22,7 @@ def dispatch(args):
         return 1
     action = args.action
     if not action:
-        print("Usage: b3t givebacks <login|pull|push|open|list|duplicate|upload|screenshot>", file=sys.stderr)
+        print("Usage: b3t givebacks <login|pull|build|push|send-preview|open|list|duplicate|upload|screenshot>", file=sys.stderr)
         return 2
     if action == "login":
         return cmd_login(args)
@@ -28,6 +30,10 @@ def dispatch(args):
         return cmd_pull(args)
     elif action == "push":
         return cmd_push(args)
+    elif action == "build":
+        return cmd_build(args)
+    elif action == "send-preview":
+        return cmd_send_preview(args)
     elif action == "open":
         return cmd_open(args)
     elif action == "list":
@@ -393,21 +399,17 @@ def cmd_login(args):
     return 1
 
 
-def cmd_pull(args):
-    """Pull design JSON from GiveBacks API."""
-    if not ensure_authenticated():
-        return 1
-
-    api_url = _api_url(args.id)
+def _fetch_design(message_id):
+    """Pull a draft's design JSON. Returns a dict, or None on failure."""
+    api_url = _api_url(message_id)
     js = (
         f'() => fetch("{api_url}", {{credentials: "include"}})'
         f'.then(r => r.json()).then(d => d.message.template)'
     )
 
-    print(f"Pulling design for {args.id}...", file=sys.stderr)
+    print(f"Pulling design for {message_id}...", file=sys.stderr)
     result = session.run("eval", js, timeout=15)
 
-    # Parse template string from eval output
     template_str = None
     for line in result.stdout.split("\n"):
         line = line.strip()
@@ -418,11 +420,21 @@ def cmd_pull(args):
     if not template_str:
         print("ERROR: Could not parse design from response.", file=sys.stderr)
         print(result.stdout[:500], file=sys.stderr)
-        return 1
+        return None
 
     design = json.loads(template_str)
-    rows = len(design.get("body", {}).get("rows", []))
-    print(f"Got design: {rows} rows", file=sys.stderr)
+    print(f"Got design: {len(design.get('body', {}).get('rows', []))} rows", file=sys.stderr)
+    return design
+
+
+def cmd_pull(args):
+    """Pull design JSON from GiveBacks API."""
+    if not ensure_authenticated():
+        return 1
+
+    design = _fetch_design(args.id)
+    if design is None:
+        return 1
 
     output = json.dumps(design, indent=2)
     if args.output:
@@ -479,6 +491,22 @@ def cmd_push(args):
 
     print("Push successful.", file=sys.stderr)
 
+    if not getattr(args, "no_save", False):
+        ok, detail = _raw_html_is_current(args.id, design)
+        if ok:
+            print(f"Sent HTML already current: {detail}", file=sys.stderr)
+        else:
+            print(f"Sent HTML is stale ({detail}); regenerating in the editor...", file=sys.stderr)
+            if _regenerate_sent_html(args.id, design):
+                print("Sent HTML regenerated.", file=sys.stderr)
+            else:
+                print("WARNING: the design was pushed but the sent HTML did NOT catch up.",
+                      file=sys.stderr)
+                print("         Open the editor, type a character into any text block and delete it:",
+                      file=sys.stderr)
+                print(f"         b3t gb open --id {args.id}", file=sys.stderr)
+                return 1
+
     if args.verify:
         js_verify = f'''() => fetch("{api_url}", {{credentials: "include"}}).then(r => r.json()).then(d => {{
   const t = JSON.parse(d.message.template);
@@ -499,6 +527,404 @@ def cmd_push(args):
                 except json.JSONDecodeError:
                     pass
 
+    return 0
+
+
+# --------------------------------------------------------------- raw_html
+
+def _eval(js, timeout=30):
+    """Evaluate JS and return only the result value.
+
+    playwright-cli echoes the snippet it ran back on stdout, so checking raw
+    stdout for a sentinel matches the source of the check itself and is always
+    true. --raw prints the value alone.
+    """
+    result = session.run("--raw", "eval", js, timeout=timeout)
+    out = (result.stdout or "").strip()
+    if not out:
+        return ""
+    try:
+        value = json.loads(out)
+    except json.JSONDecodeError:
+        return out
+    return value if isinstance(value, str) else value
+
+
+def _fetch_message(message_id, fields="subject,raw_html"):
+    """Fetch a message record. Returns a dict, or None if the fetch failed."""
+    api_url = _api_url(message_id)
+    js = f"""() => fetch("{api_url}", {{credentials: "include"}})
+  .then(r => r.json())
+  .then(d => {{
+    const m = d.message || {{}};
+    const h = m.raw_html || "";
+    return JSON.stringify({{subject: m.subject || "", raw_len: h.length, raw: h.slice(0, 400000)}});
+  }})"""
+    result = session.run("eval", js, timeout=30)
+    for line in result.stdout.split("\n"):
+        line = line.strip()
+        if line.startswith('"') and line.endswith('"'):
+            try:
+                return json.loads(json.loads(line))
+            except (json.JSONDecodeError, ValueError):
+                continue
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
+def _plain(html):
+    """Tags and entities out, whitespace collapsed.
+
+    The design stores `&nbsp;` and friends as entities while the rendered
+    email carries the real characters, so both sides go through this before
+    they are compared.
+    """
+    txt = re.sub(r"<[^>]+>", " ", html or "")
+    txt = html_mod.unescape(txt).replace("\u00a0", " ").replace("\u2019", "'")
+    return " ".join(txt.split())
+
+
+def _design_blocks(design, chunk=100):
+    """Every text/heading block in a design, sliced into comparable chunks.
+
+    Two earlier versions of this were quietly useless. Sampling a few blocks
+    missed whole new sections further down; keeping only each block's first 120
+    characters missed edits made past that point, which is most edits to a long
+    paragraph. So: every block, cut into fixed-size chunks, all of them checked.
+    """
+    out = []
+    for row in design.get("body", {}).get("rows", []):
+        for col in row.get("columns", []):
+            for c in col.get("contents", []):
+                if c.get("type") not in ("heading", "text"):
+                    continue
+                txt = _plain(c.get("values", {}).get("text", ""))
+                if len(txt) < 20:
+                    continue
+                for i in range(0, len(txt), chunk):
+                    piece = txt[i:i + chunk]
+                    if len(piece) >= 20:
+                        out.append(piece)
+    return out
+
+
+def _raw_html_is_current(message_id, design):
+    """True when the CMS's sent-HTML matches the design we just pushed.
+
+    GiveBacks stores the design (`template`) and the rendered email
+    (`raw_html`) separately. An API push updates only the design, so the HTML
+    that would actually go out can silently lag behind. This is that check.
+
+    The comparison runs inside the page: raw_html is tens of kilobytes and
+    shipping it back through the CLI corrupts it. Only the verdict comes back.
+    """
+    blocks = _design_blocks(design)
+    if not blocks:
+        return None, "design has no text to compare"
+
+    # The marks go inline rather than through localStorage: writing storage
+    # first was disturbing the page's session, and the follow-up fetch came
+    # back without raw_html, which read as "everything is missing".
+    api_url = _api_url(message_id)
+    marks_json = json.dumps(blocks)
+    js = rf"""async () => {{
+  const marks = {marks_json};
+  const res = await fetch("{api_url}", {{credentials: "include"}});
+  const d = await res.json();
+  const raw = ((d.message || {{}}).raw_html) || "";
+  const plain = raw.replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&rsquo;|&#8217;/gi, "'")
+    .replace(/&quot;/gi, '"').replace(/&lt;/gi, "<").replace(/&gt;/gi, ">")
+    .replace(/\u00a0/g, " ").replace(/\u2019/g, "'")
+    .replace(/\s+/g, " ").trim();
+  const missing = marks.filter(m => !plain.includes(m));
+  return JSON.stringify({{len: raw.length, plain: plain.length, total: marks.length,
+                         missing: missing.length, sample: missing.slice(0, 2)}});
+}}"""
+    raw = _eval(js, timeout=45)
+    try:
+        info = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return None, "could not read the message back"
+    if not isinstance(info, dict):
+        return None, "could not read the message back"
+    if not info.get("plain"):
+        return None, "the CMS returned no rendered HTML to compare"
+
+    if info.get("missing"):
+        sample = "; ".join(info.get("sample", []))[:120]
+        return False, "%d of %d blocks missing from the sent HTML (e.g. %s)" % (
+            info["missing"], info["total"], sample)
+    return True, "sent HTML matches the design (%d bytes, %d blocks checked)" % (
+        info.get("len", 0), info.get("total", 0))
+
+
+def _button_probe(label):
+    """JS that reports whether a clickable control with this exact label exists.
+
+    Body text is not enough to wait on: the message page paints its heading
+    before React attaches the action buttons, so a text check passes while a
+    click still finds nothing.
+    """
+    safe = label.replace("'", "\\'").lower()
+    return (
+        "() => [...document.querySelectorAll('button, a')]"
+        ".some(e => (e.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase() === '%s')" % safe
+    )
+
+
+def _open_message_page(message_id, button_label, timeout=60):
+    """Navigate to a draft's message page and wait for its buttons to attach."""
+    session.navigate(f"{GIVEBACKS_BASE}/messages/{message_id}")
+    js = _button_probe(button_label)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _eval(js, timeout=15) is True:
+            time.sleep(1)
+            return True
+        time.sleep(3)
+    return False
+
+
+def _wait_for_editor(timeout=60):
+    """Wait until the Unlayer iframe is present and has painted content."""
+    code = (
+        "async function main(page){"
+        "  const f = page.frames().find(x => x.url().includes('editor.unlayer.com'));"
+        "  if(!f) return 'NO_FRAME';"
+        "  const n = await f.evaluate(() => document.querySelectorAll('img, p, div').length);"
+        "  return n > 40 ? 'READY' : 'PAINTING:' + n;"
+        "}"
+    )
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        result = session.run("run-code", "--raw", code, timeout=30)
+        if "READY" in (result.stdout or ""):
+            time.sleep(2)
+            return True
+        time.sleep(3)
+    return False
+
+
+def _regenerate_sent_html(message_id, design, attempts=2):
+    """Make the CMS re-render the email from the pushed design.
+
+    Save Draft on the message page does NOT do this: it persists the record and
+    leaves raw_html untouched (measured, three attempts, no change). Only the
+    Unlayer editor re-renders, and only after a real content edit sets its
+    dirty flag. So: open the editor, type a visible character into a text block
+    and delete it again, and let the auto-save fire. A net-zero edit, but the
+    editor counts it.
+
+    The editor's own "Save Changes" button is not a signal here; it stays
+    disabled because the auto-save has already run. The API is the signal.
+    """
+    for attempt in range(1, attempts + 1):
+        session.navigate(_design_url(message_id))
+        if not _wait_for_editor(timeout=60):
+            print("  Editor did not finish loading.", file=sys.stderr)
+            continue
+
+        marks = _design_blocks(design)
+        anchor = ""
+        for m in marks:
+            words = m.split()
+            if len(words) >= 5:
+                anchor = " ".join(words[:5])
+                break
+        if not anchor:
+            print("  No text block to edit.", file=sys.stderr)
+            return False
+
+        code = (
+            "async function main(page){"
+            "  const f = page.frames().find(x => x.url().includes('editor.unlayer.com'));"
+            "  if(!f) return 'NO_FRAME';"
+            f"  const t = f.locator(\"text={anchor}\").first();"
+            "  await t.scrollIntoViewIfNeeded().catch(()=>{});"
+            "  await t.dblclick({force:true});"
+            "  await page.waitForTimeout(1500);"
+            "  await page.keyboard.type('x');"
+            "  await page.waitForTimeout(1200);"
+            "  await page.keyboard.press('Backspace');"
+            "  await page.waitForTimeout(3000);"
+            "  return 'EDITED';"
+            "}"
+        )
+        result = session.run("run-code", "--raw", code, timeout=90)
+        if "EDITED" not in (result.stdout or ""):
+            print(f"  Could not edit the editor content: {(result.stdout or '').strip()[:160]}",
+                  file=sys.stderr)
+            continue
+
+        # Give the auto-save a moment, then ask the API, not the button.
+        for _ in range(6):
+            time.sleep(4)
+            ok, detail = _raw_html_is_current(message_id, design)
+            if ok:
+                print(f"  Regenerated: {detail}", file=sys.stderr)
+                return True
+        print(f"  Attempt {attempt}: the editor edit did not produce a save.", file=sys.stderr)
+    return False
+
+
+def cmd_build(args):
+    """Build a design from an edition's draft.md and optionally push it.
+
+    draft.md is the source of truth. This turns it into Unlayer design JSON,
+    borrowing the row styling from a previous edition's design so the result
+    keeps the newsletter's look without anyone hand-editing JSON.
+    """
+    edition_dir = os.path.join("editions", args.edition)
+    draft_path = os.path.join(edition_dir, "draft.md")
+    if not os.path.exists(draft_path):
+        print(f"ERROR: {draft_path} not found", file=sys.stderr)
+        return 1
+
+    wip = os.path.join(edition_dir, "wip")
+    os.makedirs(wip, exist_ok=True)
+    out_path = args.output or os.path.join(wip, "givebacks-design-new.json")
+
+    live = None
+    if args.donor:
+        if not os.path.exists(args.donor):
+            print(f"ERROR: {args.donor} not found", file=sys.stderr)
+            return 1
+        with open(args.donor) as f:
+            donor = json.load(f)
+    elif args.id:
+        if not ensure_authenticated():
+            return 1
+        donor = _fetch_design(args.id)
+        if donor is None:
+            return 1
+        live = donor
+    else:
+        print("ERROR: pass --id (pull the donor from the draft) or --donor FILE", file=sys.stderr)
+        return 1
+
+    try:
+        built = design_mod.build(open(draft_path).read(), donor,
+                                 slug=args.edition.replace("-", ""))
+    except design_mod.DesignError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    if live is not None:
+        carried, why = design_mod.carry_image_urls(built, live)
+        if why:
+            print(f"NOTE: image URLs not carried over: {why}", file=sys.stderr)
+        elif carried:
+            print(f"Carried over {carried} image URLs from the live draft.", file=sys.stderr)
+
+    with open(out_path, "w") as f:
+        json.dump(built, f, indent=1, ensure_ascii=False)
+
+    rows = len(built["body"]["rows"])
+    print(f"Built {rows} rows -> {out_path}", file=sys.stderr)
+    print(design_mod.outline(built), file=sys.stderr)
+
+    pending = design_mod.pending_uploads(built)
+    if pending:
+        print("", file=sys.stderr)
+        print("Images still to upload:", file=sys.stderr)
+        for idx, src in pending:
+            print(f"  b3t gb upload --id {args.id or 'UUID'} "
+                  f"--image {edition_dir}/{src} --index {idx}", file=sys.stderr)
+
+    if args.push:
+        if not args.id:
+            print("ERROR: --push needs --id", file=sys.stderr)
+            return 1
+        push_args = type("A", (), {"id": args.id, "design": out_path,
+                                   "verify": False, "no_save": False})()
+        return cmd_push(push_args)
+    return 0
+
+
+def cmd_send_preview(args):
+    """Send the CMS's preview email of a draft.
+
+    GiveBacks' Send Preview delivers only to the signed-in account, so this is
+    the one send b3t is allowed to perform. Send Now, which goes to the whole
+    list, stays the editor's decision and has no b3t command on purpose.
+    """
+    if not ensure_authenticated():
+        return 1
+
+    if not _open_message_page(args.id, "Send Preview"):
+        print("ERROR: message page did not load (or has no Send Preview button).", file=sys.stderr)
+        return 1
+
+    msg = _fetch_message(args.id)
+    if msg:
+        subject = msg.get("subject", "?")
+        print(f'Draft: "{subject}"', file=sys.stderr)
+        if not msg.get("raw_len"):
+            print("ERROR: this draft has no rendered HTML yet; push the design first.", file=sys.stderr)
+            return 1
+
+    # Two steps in the CMS: the page button opens a confirm modal, the modal's
+    # own button actually sends. Both are matched by exact label so nothing
+    # near them ("Send Now") can be hit by accident.
+    click_js = r"""() => {
+  const norm = e => (e.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const btn = [...document.querySelectorAll('button, a')].find(e => norm(e) === 'send preview');
+  if (!btn) return 'NO_BUTTON';
+  btn.click();
+  return 'CLICKED';
+}"""
+    if str(_eval(click_js, timeout=20)).startswith("NO_BUTTON"):
+        print("ERROR: Send Preview button not found.", file=sys.stderr)
+        return 1
+
+    time.sleep(3)
+
+    # The modal states its own recipient. Read it back rather than assuming,
+    # and refuse anything that is not clearly the self-preview.
+    confirm_js = r"""() => {
+  const norm = e => (e.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const body = [...document.querySelectorAll('.mantine-Modal-body, [role=dialog]')]
+    .find(d => /preview of your email/i.test(d.innerText || ''));
+  if (!body) return JSON.stringify({state: 'NO_MODAL'});
+  const text = (body.innerText || '').replace(/\s+/g, ' ').trim();
+  const btn = [...body.querySelectorAll('button')].find(b => norm(b) === 'send preview');
+  if (!btn) return JSON.stringify({state: 'NO_CONFIRM', text: text.slice(0, 200)});
+  btn.click();
+  return JSON.stringify({state: 'CONFIRMED', text: text.slice(0, 200)});
+}"""
+    raw = _eval(confirm_js, timeout=20)
+    try:
+        info = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        info = {"state": "UNPARSED", "text": str(raw)[:200]}
+
+    state = info.get("state")
+    if state == "NO_MODAL":
+        print("No confirmation modal appeared; the preview may already be on its way.",
+              file=sys.stderr)
+    elif state != "CONFIRMED":
+        print(f"Confirmation modal not in the expected shape ({state}).", file=sys.stderr)
+        print(f"  {info.get('text', '')}", file=sys.stderr)
+        print("Finish it by hand in the CMS.", file=sys.stderr)
+        return 1
+    else:
+        recipient = re.search(r"[\w.+-]+@[\w.-]+", info.get("text", ""))
+        where = recipient.group(0) if recipient else "the signed-in account"
+        print(f"Confirmed. The CMS says the preview goes to {where}.", file=sys.stderr)
+
+    time.sleep(4)
+    still_open = _eval("""() => !!document.querySelector('.mantine-Modal-body')""", timeout=15)
+    if still_open is True:
+        print("WARNING: the modal is still open, so the preview may not have sent.",
+              file=sys.stderr)
+        return 1
+
+    print("Preview sent. It goes to the signed-in GiveBacks account only.", file=sys.stderr)
     return 0
 
 

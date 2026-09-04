@@ -37,12 +37,12 @@ Auth: cookies from browser session. Fetch with `credentials: "include"` from a G
 ## Newsletter Lifecycle
 
 1. **Duplicate** previous edition (three-dot menu → "Duplicate")
-2. **Rename** subject via API PUT
-3. **Pull** design JSON → modify programmatically → **Push** back
-4. **Open editor** after push (loads fresh from server)
-5. **Upload images** via UI (see below)
-6. **Regen raw_html** — trivial edit in editor triggers auto-save
-7. **Send Preview** → editor reviews → **Send Now**
+2. **Rename** subject via API PUT: `b3t gb rename --id UUID --subject "..."`
+3. **Build and push** from the draft: `b3t gb build --edition YYYY-MM-DD --id UUID --push`
+   (push also regenerates `raw_html`, see below)
+4. **Upload images** into the slots `build` reported: `b3t gb upload --id UUID --image ... --index N`
+5. **Screenshot** for review: `b3t gb screenshot --id UUID --dir ...`
+6. **Send Preview** → editor reviews → **Send Now** — both are the editor's, never b3t's
 
 ## Image Upload (UI Automation)
 
@@ -75,16 +75,94 @@ Direct click on `<img>` elements fails because Unlayer's `.blockbuilder-layer-se
 - Refs change after every action — always re-snapshot
 - Use absolute file paths
 
+## Building the design from draft.md
+
+`b3t gb build` turns an edition's `draft.md` into design JSON, so nobody
+hand-edits Unlayer rows or re-derives the house formatting rules per edition.
+
+```bash
+b3t gb build --edition 2026-09-06 --id UUID            # write wip/givebacks-design-new.json
+b3t gb build --edition 2026-09-06 --id UUID --push     # ...and push it
+b3t gb build --edition 2026-09-06 --donor old.json     # style donor from a file instead
+```
+
+The draft is the source of truth. A previous edition's design is the **style
+donor**: `build` finds one row of each kind in it (h1 with the maroon band, h3,
+text, image) and clones that row's padding, colors and metadata for every new
+row. The masthead rows (logo, date band, header image + intro + At a Glance,
+website/Spanish lines) and the standing footer (Bear Paw Fund onward) are
+carried over from the donor untouched, with only the date and the intro
+rewritten from the draft.
+
+Markdown maps as: `#` to an h1 row, `###` to an h3 row, a lone `![alt](path)`
+to an image row, everything else to text rows. Tables, lists, links, bold and
+italic are converted inline.
+
+**The formatting rules it encodes** (this is what used to get forgotten):
+
+- Unlayer's `<p>` has **no bottom margin**. Consecutive paragraphs therefore
+  need an explicit `<p>&nbsp;</p>` spacer between them, or the newsletter
+  renders as a wall of text with no paragraph breaks.
+- `<ul>` brings its own top margin, so a list never gets a spacer before it,
+  and the paragraph after a list does not get one either.
+- Tables get a spacer before and after.
+
+`build --id` also carries over image URLs already uploaded to the live draft,
+so a rebuild-and-repush does not blank the header or the flyers. Slots with no
+URL yet are reported at the end as ready-to-run `b3t gb upload` commands with
+the right `--index`.
+
 ## raw_html Regeneration
 
-API push updates `template` but NOT `raw_html` (what gets emailed). To regen:
-1. Open editor at `/messages/{uuid}/design`
-2. Click any text block to enter edit mode
-3. Type a character then delete it (net-zero edit that sets dirty flag)
-4. Wait for auto-save ("Save Changes" button becomes disabled = saved)
-5. Verify via API: `raw_html` contains expected content
+API push updates `template` but NOT `raw_html` (what gets emailed).
 
-**Important:** `space + backspace` does NOT trigger dirty flag. Must be a visible character.
+**`b3t gb push` now handles this.** After a successful push it compares the
+design against the live `raw_html` and, if the sent HTML is stale, regenerates
+it and re-checks. It reports which happened and exits non-zero with the manual
+remedy if the HTML did not catch up. `--no-save` skips the step.
+
+**Save Draft does not re-render.** Measured: three Save Draft clicks on the
+message page left `raw_html` byte-identical. It persists the record only. Only
+the Unlayer editor re-renders, and only after a real content edit sets its
+dirty flag. So the repair opens the editor, types a visible character into a
+text block and deletes it, then waits. The editor's own "Save Changes" button
+is not a signal, it stays disabled because the auto-save already ran. The API
+is the signal.
+
+**Comparison details that matter**, each one learned by getting it wrong:
+
+- Compare **every** block, not a sample. Sampling the first few passes happily
+  while a whole new section further down is missing.
+- Compare **whole** blocks, chunked, not each block's first N characters. Most
+  edits to a long paragraph land past any prefix.
+- Normalize entities on both sides. The design stores `&nbsp;` and `&rsquo;`,
+  the rendered email carries the real characters.
+- Send the marks inline in the snippet. Routing them through `localstorage-set`
+  first disturbed the page session and the follow-up fetch returned no
+  `raw_html`, which reads as "everything is missing".
+
+Manual fallback: open the editor, click a text block, type a character, delete
+it, wait for the auto-save, then verify via the API. `space + backspace` does
+NOT set the dirty flag; it must be a visible character.
+
+Note: this Unlayer build (1.468.0) exposes neither `unlayer.exportHtml` nor
+`unlayer.saveDesign`, so b3t cannot render or force-save the design itself and
+has to make the editor do it.
+
+## Sending a preview
+
+```bash
+b3t gb send-preview --id UUID
+```
+
+Send Preview delivers only to the signed-in account, so it is the one send b3t
+performs. Send Now goes to the whole list and deliberately has no command.
+
+It is two steps in the CMS: the page button opens a modal that names the
+recipient ("An email will be sent to you with a preview of your email"), and
+the modal's own button sends. Both are matched by exact label, the recipient is
+read back out of the modal rather than assumed, and an unexpected modal shape
+is reported rather than clicked.
 
 ## Design JSON Structure
 
@@ -131,5 +209,8 @@ Unlayer editor keeps an in-memory copy of the design. If editor is open during A
 | `run-code` can crash session | Prefer built-in commands + `&&` chaining |
 | `mousewheel` args | Use `0 <dy>` for vertical scrolling |
 | Large payloads exceed inline eval | Use `localstorage-set` as transfer buffer |
-| API push doesn't update `raw_html` | Open editor → trivial edit → auto-save |
+| API push doesn't update `raw_html` | `b3t gb push` detects and fixes it; Save Draft does NOT re-render, only an editor edit does |
+| `playwright-cli` echoes the snippet it ran | Checking raw stdout for a sentinel matches your own source; use `--raw` |
 | push_design verify has parsing bug | Use `push` only, skip verify |
+| Messages-list Duplicate menu item not found | Menu renders in a portal; click the row's kebab then the item by text via DOM |
+| Satisfaction survey modal covers the messages list | Dismiss before driving the list |

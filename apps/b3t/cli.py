@@ -38,10 +38,23 @@ def main():
     p.add_argument("--id", required=True, help="Message/draft UUID")
     p.add_argument("-o", "--output", help="Output file (default: stdout)")
 
+    p = gb_sub.add_parser("build", help="Build design JSON from an edition's draft.md")
+    p.add_argument("--edition", required=True, help="Edition date YYYY-MM-DD")
+    p.add_argument("--id", help="Draft UUID: pull the donor design and live image URLs from it")
+    p.add_argument("--donor", help="Donor design JSON file (default: pull from --id)")
+    p.add_argument("-o", "--output", help="Output file (default: <edition>/wip/givebacks-design-new.json)")
+    p.add_argument("--push", action="store_true", help="Push the result to --id when it builds clean")
+
     p = gb_sub.add_parser("push", help="Push design JSON to API")
     p.add_argument("--id", required=True, help="Message/draft UUID")
     p.add_argument("--design", required=True, help="Design JSON file path")
     p.add_argument("--verify", action="store_true", help="Verify row count after push")
+    p.add_argument("--no-save", action="store_true",
+                   help="Skip the editor save that regenerates raw_html (the sent HTML)")
+
+    p = gb_sub.add_parser("send-preview",
+                          help="Send the CMS preview email (goes to the signed-in account only)")
+    p.add_argument("--id", required=True, help="Message/draft UUID")
 
     p = gb_sub.add_parser("open", help="Open editor in browser")
     p.add_argument("--id", required=True, help="Message/draft UUID")
