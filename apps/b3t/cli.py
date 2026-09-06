@@ -155,6 +155,10 @@ def main():
     p = ol_sub.add_parser("check", help="Check for new messages")
     p.add_argument("--folder", default="Submissions", help="Folder to check")
 
+    p = ol_sub.add_parser("draft", help="Create an unaddressed draft email in Outlook")
+    p.add_argument("--file", required=True, help="Markdown draft file (**Subject:** line, then ---, then body)")
+    p.add_argument("--subject", help="Override the subject from the file")
+
     p = ol_sub.add_parser("read", help="Read a message (expands full thread)")
     p.add_argument("number", help="Message number from check output")
     p.add_argument("--folder", default="Submissions", help="Folder containing the message")
