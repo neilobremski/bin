@@ -3,6 +3,7 @@
 ## High Priority
 
 - [ ] **`givebacks regen --id UUID`** — After API push, `raw_html` is stale. Must open editor, make trivial edit (click text block, type char, delete), wait for auto-save. Without this, sent email won't match template.
+- [ ] **`givebacks subscribe --email ADDRESS [--name NAME]`** — Add a subscriber to the GiveBacks contact list. Families email beartracks@ asking to be added ("Subscribe me") and it is hand-work every time. Should confirm the contact landed, and refuse to send any mail itself. Requested by the editor 2026-09-06.
 - [ ] **`givebacks images --id UUID`** — List all images in the editor with index + alt text + current URL. Agent needs this to know which `--index` to pass to `upload`.
 - [ ] **`givebacks delete --id UUID`** — Delete a draft via three-dot menu or API. Needed to clean up test duplicates.
 - [ ] **`edition update DATE --field value`** — Update manifest fields (status, draft_id, archive_url) as edition progresses through phases.
