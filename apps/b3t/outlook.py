@@ -115,6 +115,70 @@ def _parse_messages(snap):
     return messages
 
 
+def _sender_addresses():
+    """Map sender display name to address, read from the message list DOM.
+
+    The accessibility snapshot does not carry addresses, but each row exposes
+    one in a title attribute. Reading them here saves opening every message
+    just to find out who wrote it.
+    """
+    js = '''() => {
+  const out = [];
+  document.querySelectorAll("[title*=\'@\']").forEach(el => {
+    const addr = el.getAttribute("title");
+    let row = el;
+    for (let i = 0; i < 12 && row; i++) {
+      row = row.parentElement;
+      if (row && (row.getAttribute("role") === "option"
+                  || row.getAttribute("role") === "listitem")) break;
+    }
+    if (!row || !row.getAttribute) return;
+    const role = row.getAttribute("role");
+    if (role !== "option" && role !== "listitem") return;
+    out.push({addr: addr, row: (row.innerText || "").replace(/\\n+/g, " ").slice(0, 160)});
+  });
+  return JSON.stringify(out);
+}'''
+    result = session.run("eval", js, timeout=20)
+    for line in result.stdout.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("###") or line.startswith("```"):
+            continue
+        try:
+            parsed = line
+            if parsed.startswith('"'):
+                parsed = json.loads(parsed)
+            data = json.loads(parsed) if isinstance(parsed, str) else parsed
+            if isinstance(data, list):
+                return data
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return []
+
+
+def _attach_addresses(messages):
+    """Attach an address to each parsed message by matching its row text."""
+    rows = _sender_addresses()
+    if not rows:
+        return
+    used = set()
+    for msg in messages:
+        sender = (msg.get("text") or "").strip()[:30]
+        if not sender:
+            continue
+        for i, row in enumerate(rows):
+            if i in used:
+                continue
+            row_text = (row.get("row") or "").replace("\n", " ")
+            # Match on the leading run of the option text, which starts with
+            # the sender name; the row text contains the same name.
+            head = sender.replace("Unread ", "").split("  ")[0][:24].strip()
+            if head and head in row_text:
+                msg["address"] = row.get("addr")
+                used.add(i)
+                break
+
+
 def cmd_login(args):
     if _ensure_outlook():
         print("Outlook authenticated.", file=sys.stderr)
@@ -140,6 +204,9 @@ def cmd_check(args):
 
     messages = _parse_messages(snap)
 
+    if getattr(args, "addresses", False):
+        _attach_addresses(messages)
+
     print(f"Folder: {folder}", file=sys.stderr)
     print(f"{len(messages)} messages", file=sys.stderr)
 
@@ -147,7 +214,9 @@ def cmd_check(args):
         print(f"No messages in {folder}.")
     else:
         for i, msg in enumerate(messages, 1):
-            print(f"  {i}. {msg['text'][:120]}")
+            addr = msg.get("address")
+            suffix = f"  <{addr}>" if addr else ""
+            print(f"  {i}. {msg['text'][:120]}{suffix}")
 
     return 0
 
@@ -216,14 +285,28 @@ def cmd_read(args):
     # Structure: heading "From: X" → attachments listbox → document "Message body"
     reading_pane = []
     attachments = []
+    senders = []
+    pending_from = []
     in_body = False
     for line in snap.split("\n"):
-        # From headers mark a new message in the reading pane
-        if 'heading "From:' in line:
+        # From headers mark a new message in the reading pane. Outlook renders
+        # this as a button; it was a heading before the move to
+        # outlook.cloud.microsoft, and matching only the heading made every
+        # read come back empty.
+        if 'heading "From:' in line or 'button "From:' in line:
             in_body = False
             m = re.search(r'From: ([^"]+)"', line)
             if m:
+                pending_from.append(m.group(1))
                 reading_pane.append(f"\n--- From: {m.group(1)} ---")
+
+        # The line under a From button carries "Name<address>".
+        elif pending_from and "<" in line and ">" in line:
+            m = re.search(r'generic \[ref=\w+\]:\s*(.+?)<([^<>@\s]+@[^<>\s]+)>', line)
+            if m:
+                reading_pane[-1] = f"\n--- From: {m.group(1).strip()} <{m.group(2)}> ---"
+                senders.append(m.group(2))
+                pending_from.pop()
 
         # Attachments: options with file extension + size
         elif "option" in line.lower() and re.search(r'\.(png|jpg|jpeg|gif|pdf|docx|xlsx|zip|webp)\b', line, re.IGNORECASE):
@@ -251,7 +334,9 @@ def cmd_read(args):
                 reading_pane.append(text)
 
         # End of message body section (next heading or toolbar)
-        elif in_body and ("toolbar" in line or 'heading "From:' in line):
+        elif in_body and ("toolbar" in line
+                          or 'heading "From:' in line
+                          or 'button "From:' in line):
             in_body = False
 
     # Output thread
@@ -265,6 +350,11 @@ def cmd_read(args):
         print("\n=== Content ===")
         for line in reading_pane:
             print(line)
+
+    if senders:
+        print("\n=== Sender addresses ===")
+        for addr in dict.fromkeys(senders):
+            print(f"  {addr}")
 
     # Output attachments
     if attachments:
@@ -342,6 +432,19 @@ def parse_draft_file(text):
     body = re.sub(r"^#{1,6}\s*", "", body, flags=re.M)
     body = re.sub(r"\n{3,}", "\n\n", body)
     return subject, body.strip()
+
+
+def _release_unload_guard():
+    """Clear Outlook's unsaved-changes guard and drain any pending dialog.
+
+    Leaving a dirty composer raises a beforeunload prompt. That prompt blocks
+    every later playwright call with "does not handle the modal state", so one
+    draft per session would succeed and the rest would fail.
+    """
+    session.run("eval", "() => { window.onbeforeunload = null; return true; }",
+                timeout=15)
+    # The prompt may already be open from an earlier step.
+    session.run("dialog-accept", timeout=15)
 
 
 def cmd_draft(args):
@@ -464,6 +567,7 @@ def cmd_draft(args):
         "  })));"
         "}"
     )
+    _release_unload_guard()
     _click_folder("Drafts")
     time.sleep(3)
     vres = session.run("run-code", "--raw", verify, timeout=120)
@@ -483,5 +587,6 @@ def cmd_draft(args):
 
     print(f"Draft saved to Drafts: \"{subject}\" ({info['len']} chars, no recipients).",
           file=sys.stderr)
+    _release_unload_guard()
     print("Nothing was sent. Address it and send it yourself.", file=sys.stderr)
     return 0
