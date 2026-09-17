@@ -1345,18 +1345,44 @@ def _backer_rows(payload):
     return []
 
 
+# A lookup has three outcomes, and they must not be confused: the contact is
+# there, the contact is provably not there, or the lookup failed. Collapsing
+# the last two into None makes a transient API error look like a new address
+# and creates a duplicate contact on a live mailing list.
+LOOKUP_FAILED = object()
+
+
 def _find_backer(email):
-    """Return the existing contact for this address, or None."""
+    """Return the contact, None when provably absent, or LOOKUP_FAILED."""
     from urllib.parse import quote
     url = _backer_url(
         query=f"&search%5Bemail%5D%5Bvalue%5D={quote(email)}&join=AND&limit=10&offset=0"
     )
     js = (
-        f'() => fetch("{url}", {{credentials: "include"}})'
-        f'.then(r => r.json()).then(d => JSON.stringify(d))'
+        f'() => fetch("{url}", {{credentials: "include"}}).then(r =>'
+        f' r.text().then(t => JSON.stringify({{ok: r.ok, status: r.status, body: t}})))'
     )
-    rows = _backer_rows(_eval_json(js))
-    for row in rows:
+    envelope = _eval_json(js)
+    if not isinstance(envelope, dict) or "ok" not in envelope:
+        return LOOKUP_FAILED                      # no answer from the page
+    if not envelope.get("ok"):
+        print(f"  lookup returned HTTP {envelope.get('status')}", file=sys.stderr)
+        return LOOKUP_FAILED
+    try:
+        payload = json.loads(envelope.get("body") or "")
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return LOOKUP_FAILED
+    if isinstance(payload, dict) and payload.get("error"):
+        print(f"  lookup error: {str(payload.get('error'))[:120]}", file=sys.stderr)
+        return LOOKUP_FAILED
+    # Only a recognized result envelope proves absence.
+    if not isinstance(payload, (list, dict)):
+        return LOOKUP_FAILED
+    if isinstance(payload, dict) and not any(
+        k in payload for k in ("backers", "data", "results", "items", "email")
+    ):
+        return LOOKUP_FAILED
+    for row in _backer_rows(payload):
         if (row.get("email") or "").strip().lower() == email.strip().lower():
             return row
     return None
@@ -1390,6 +1416,11 @@ def cmd_subscribe(args):
     first, last = _split_name(getattr(args, "name", None))
 
     existing = _find_backer(email)
+    if existing is LOOKUP_FAILED:
+        print(f"ERROR: could not check whether {email} is already a contact.",
+              file=sys.stderr)
+        print("Refusing to write, to avoid creating a duplicate.", file=sys.stderr)
+        return 1
     if existing:
         status = (existing.get("communication_status") or "").lower()
         backer_id = existing.get("backer_id") or existing.get("uuid")
@@ -1416,6 +1447,10 @@ def cmd_subscribe(args):
     # Verify by reading the contact back, rather than trusting the write.
     time.sleep(2)
     check = _find_backer(email)
+    if check is LOOKUP_FAILED:
+        print(f"ERROR: wrote {email} but could not read it back to confirm.",
+              file=sys.stderr)
+        return 1
     if not check:
         print(f"ERROR: {email} not found after write.", file=sys.stderr)
         return 1
@@ -1454,7 +1489,12 @@ def _create_backer(email, first, last):
 
 
 def _set_subscribed(backer_id):
-    """Flip an existing contact back to subscribed. Tries PATCH, then PUT."""
+    """Flip an existing contact back to subscribed.
+
+    PUT is attempted only when PATCH is rejected as an unsupported verb
+    (404/405/501). Retrying a partial body after, say, a 500 risks replacing
+    a contact record with one field.
+    """
     if not backer_id:
         return False
     body = json.dumps({"communication_status": "subscribed"})
@@ -1466,8 +1506,14 @@ def _set_subscribed(backer_id):
   body: {json.dumps(body)}
 }}).then(r => r.text().then(t => JSON.stringify({{status: r.status, body: t.slice(0, 300)}})))'''
         res = _eval_json(js, timeout=30)
-        if res and res.get("status") and 200 <= int(res["status"]) < 300:
+        if not res or not res.get("status"):
+            print(f"  {method} got no response", file=sys.stderr)
+            return False
+        code = int(res["status"])
+        if 200 <= code < 300:
             return True
-        if res:
-            print(f"  {method} returned {res.get('status')}", file=sys.stderr)
+        print(f"  {method} returned {code}: {res.get('body', '')[:200]}",
+              file=sys.stderr)
+        if code not in (404, 405, 501):
+            return False              # a real rejection, not a missing verb
     return False

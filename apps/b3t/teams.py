@@ -130,13 +130,23 @@ def _scroll_to_bottom():
     session.run("run-code", code, timeout=60)
 
 
+# A scroll step must overlap the window just read, or rows in between are
+# never rendered and never seen. Step by a fraction of the measured pane
+# height rather than a fixed pixel count, which assumes a pane size.
+SCROLL_OVERLAP = 0.6
+MAX_SCROLL_STEPS = 40
+STALL_LIMIT = 3
+
+
 def _scroll_up_once():
-    """Scroll the message pane up one step to pull in older messages."""
+    """Scroll up by part of a pane height, so consecutive windows overlap."""
     code = (
         'async function main(page){'
         '  const pane = page.locator("[data-tid=chat-pane-list], [data-tid=message-pane]").first();'
+        '  let h = 600;'
+        '  try { const b = await pane.boundingBox(); if (b && b.height) h = b.height; } catch (e) {}'
         '  try { await pane.hover({timeout: 3000}); } catch (e) {}'
-        '  await page.mouse.wheel(0, -2400);'
+        f'  await page.mouse.wheel(0, -Math.round(h * {SCROLL_OVERLAP}));'
         '  await page.waitForTimeout(1500);'
         '  return "scrolled";'
         '}'
@@ -190,18 +200,32 @@ def _within_since(rows, since_days):
     cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
     kept = []
     for r in rows:
-        ts = r.get("ts")
-        if not ts:
+        when = _row_dt(r)
+        if when is None:
             kept.append(r)          # undated: keep rather than silently drop
-            continue
-        try:
-            when = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        except ValueError:
-            kept.append(r)
-            continue
-        if when >= cutoff:
+        elif when >= cutoff:
             kept.append(r)
     return kept
+
+
+def _row_dt(row):
+    """Parse a row's timestamp, or None when it has none."""
+    ts = row.get("ts")
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _msg_key(row):
+    return (row.get("chat"), row.get("author"), row.get("ts"), row.get("text"))
+
+
+def _oldest_dt(rows):
+    stamps = [d for d in (_row_dt(r) for r in rows) if d]
+    return min(stamps) if stamps else None
 
 
 def _sort_key(row):
@@ -240,8 +264,8 @@ def _gather(args):
         if not names:
             print(f"ERROR: no chat matching '{wanted}'.", file=sys.stderr)
             return None
-    rounds = 4 if since and since > 7 else 2
-    rows = []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=since)) if since else None
+    rows, partial = [], []
     for name in names:
         print(f"Reading: {name}", file=sys.stderr)
         if not _open_chat(name):
@@ -250,13 +274,38 @@ def _gather(args):
         # The list is virtualized: scrolling up unloads the newest rows, so
         # read at every step and let _dedupe merge the overlap.
         _scroll_to_bottom()
+        # Keep going until the window covers the requested period or the
+        # history runs out. A fixed number of scrolls truncates --since
+        # without saying so, which reads as "nothing was posted".
         found = _read_messages(name)
-        for _ in range(rounds):
+        seen = {_msg_key(r) for r in found}
+        stalls, complete = 0, cutoff is None
+        for _ in range(MAX_SCROLL_STEPS):
+            oldest = _oldest_dt(found)
+            if cutoff and oldest and oldest < cutoff:
+                complete = True
+                break
             _scroll_up_once()
-            found.extend(_read_messages(name))
+            fresh = [r for r in _read_messages(name) if _msg_key(r) not in seen]
+            if fresh:
+                stalls = 0
+                seen.update(_msg_key(r) for r in fresh)
+                found.extend(fresh)
+            else:
+                stalls += 1
+                if stalls >= STALL_LIMIT:
+                    complete = True          # top of the history
+                    break
         found = _dedupe(found)
-        print(f"  {len(found)} message(s)", file=sys.stderr)
+        note = "" if complete else "  (PARTIAL: scroll limit reached)"
+        print(f"  {len(found)} message(s){note}", file=sys.stderr)
+        if not complete:
+            partial.append(name)
         rows.extend(found)
+    if partial:
+        print(f"WARNING: history not fully covered for: {', '.join(partial)}",
+              file=sys.stderr)
+        print("The --since window may be incomplete.", file=sys.stderr)
     return sorted(_dedupe(_within_since(rows, since)),
                   key=lambda r: (r["chat"], _sort_key(r)))
 

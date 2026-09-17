@@ -140,13 +140,23 @@ def _scroll_to_bottom():
     session.run("run-code", code, timeout=60)
 
 
+# A scroll step must overlap the window just read, or bubbles in between are
+# never rendered and never seen. Step by a fraction of the measured pane
+# height rather than a fixed pixel count, which assumes a pane size.
+SCROLL_OVERLAP = 0.6
+MAX_SCROLL_STEPS = 40
+STALL_LIMIT = 3
+
+
 def _scroll_up_once():
-    """Scroll the open chat up one step to pull in older messages."""
+    """Scroll up by part of a pane height, so consecutive windows overlap."""
     code = (
         'async function main(page){'
         '  const pane = page.locator("#main [data-testid=conversation-panel-messages], #main").first();'
+        '  let h = 600;'
+        '  try { const b = await pane.boundingBox(); if (b && b.height) h = b.height; } catch (e) {}'
         '  try { await pane.hover({timeout: 3000}); } catch (e) {}'
-        '  await page.mouse.wheel(0, -2400);'
+        f'  await page.mouse.wheel(0, -Math.round(h * {SCROLL_OVERLAP}));'
         '  await page.waitForTimeout(1600);'
         '  return "scrolled";'
         '}'
@@ -162,8 +172,22 @@ def _read_messages(chat_name):
   bubbles.forEach(b => {
     const meta = b.getAttribute("data-pre-plain-text") || "";
     const row = b.closest("[role=row]") || b.parentElement;
-    const textEl = b.querySelector("[data-testid=selectable-text]")
-      || (row ? row.querySelector("[data-testid=selectable-text]") : null);
+    // A reply renders the quoted message inside the same bubble, above the
+    // real text. Taking the first match attributes someone else's words to
+    // the replier, so drop anything inside a quote and keep the last block.
+    const isQuoted = el => {
+      for (let e = el; e && e !== b; e = e.parentElement) {
+        const t = (e.getAttribute("data-testid") || "").toLowerCase();
+        const a = (e.getAttribute("aria-label") || "").toLowerCase();
+        if (t.includes("quoted") || a.includes("quoted")) return true;
+      }
+      return false;
+    };
+    let scope = b.querySelectorAll("[data-testid=selectable-text]").length
+      ? b : (row || b);
+    const texts = Array.from(scope.querySelectorAll("[data-testid=selectable-text]"))
+      .filter(el => !isQuoted(el));
+    const textEl = texts.length ? texts[texts.length - 1] : null;
     let body = (textEl ? textEl.innerText : b.innerText) || "";
     // The display name is the first line of the bubble when the sender is
     // not the signed-in user; data-pre-plain-text only carries the number.
@@ -207,41 +231,56 @@ def _within_since(rows, since_days):
     cutoff = datetime.now() - timedelta(days=since_days)
     kept = []
     for r in rows:
-        day = r.get("date")
-        if not day:
-            kept.append(r)
-            continue
-        try:
-            when = datetime.strptime(day, "%m/%d/%Y")
-        except ValueError:
-            kept.append(r)
-            continue
-        if when >= cutoff:
+        when = _row_dt(r)
+        if when is None:
+            kept.append(r)          # unparseable: keep rather than drop
+        elif when >= cutoff:
             kept.append(r)
     return kept
 
 
-def _sort_key(row):
-    """Chronological order. Undated rows sort last, keeping their arrival order."""
+def _row_dt(row):
+    """Parse date + time into a datetime, or None when unparseable.
+
+    The time matters: judging a message by its date alone drops everything
+    posted on the cutoff day, which for --since 1 is most of what is wanted.
+    """
     day, clock = row.get("date"), row.get("time")
     if not day:
-        return (1, datetime.max)
+        return None
     for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M"):
         try:
-            return (0, datetime.strptime(f"{day} {clock}", fmt))
+            return datetime.strptime(f"{day} {clock}", fmt)
         except ValueError:
             continue
     try:
-        return (0, datetime.strptime(day, "%m/%d/%Y"))
+        # Date with no usable time: treat as end of that day so a message is
+        # never dropped for a clock we could not read.
+        return datetime.strptime(day, "%m/%d/%Y").replace(hour=23, minute=59)
     except ValueError:
-        return (1, datetime.max)
+        return None
+
+
+def _msg_key(row):
+    return (row["chat"], row["author"], row["date"], row["time"], row["text"])
+
+
+def _oldest_dt(rows):
+    stamps = [d for d in (_row_dt(r) for r in rows) if d]
+    return min(stamps) if stamps else None
+
+
+def _sort_key(row):
+    """Chronological order. Undated rows sort last."""
+    when = _row_dt(row)
+    return (1, datetime.max) if when is None else (0, when)
 
 
 def _dedupe(rows):
     seen = set()
     out = []
     for r in rows:
-        key = (r["chat"], r["author"], r["date"], r["time"], r["text"])
+        key = _msg_key(r)
         if key in seen:
             continue
         seen.add(key)
@@ -260,8 +299,8 @@ def _gather(args):
         if not names:
             print(f"ERROR: no chat matching '{wanted}'.", file=sys.stderr)
             return None
-    rounds = 4 if since and since > 7 else 2
-    rows = []
+    cutoff = (datetime.now() - timedelta(days=since)) if since else None
+    rows, partial = [], []
     for name in names:
         print(f"Reading: {name}", file=sys.stderr)
         if not _open_chat(name):
@@ -270,13 +309,38 @@ def _gather(args):
         # The message list is virtualized: scrolling up unloads the newest
         # bubbles, so read at every step and let _dedupe merge the overlap.
         _scroll_to_bottom()
+        # Keep going until the window covers the requested period or the
+        # history runs out. A fixed number of scrolls truncates --since
+        # without saying so, which reads as "nothing was posted".
         found = _read_messages(name)
-        for _ in range(rounds):
+        seen = {_msg_key(r) for r in found}
+        stalls, complete = 0, cutoff is None
+        for _ in range(MAX_SCROLL_STEPS):
+            oldest = _oldest_dt(found)
+            if cutoff and oldest and oldest < cutoff:
+                complete = True
+                break
             _scroll_up_once()
-            found.extend(_read_messages(name))
+            fresh = [r for r in _read_messages(name) if _msg_key(r) not in seen]
+            if fresh:
+                stalls = 0
+                seen.update(_msg_key(r) for r in fresh)
+                found.extend(fresh)
+            else:
+                stalls += 1
+                if stalls >= STALL_LIMIT:
+                    complete = True          # top of the history
+                    break
         found = _dedupe(found)
-        print(f"  {len(found)} message(s)", file=sys.stderr)
+        note = "" if complete else "  (PARTIAL: scroll limit reached)"
+        print(f"  {len(found)} message(s){note}", file=sys.stderr)
+        if not complete:
+            partial.append(name)
         rows.extend(found)
+    if partial:
+        print(f"WARNING: history not fully covered for: {', '.join(partial)}",
+              file=sys.stderr)
+        print("The --since window may be incomplete.", file=sys.stderr)
     return sorted(_dedupe(_within_since(rows, since)),
                   key=lambda r: (r["chat"], _sort_key(r)))
 
