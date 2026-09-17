@@ -19,6 +19,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+import chatpane
 import session
 from constants import TEAMS_URL
 
@@ -130,28 +131,15 @@ def _scroll_to_bottom():
     session.run("run-code", code, timeout=60)
 
 
-# A scroll step must overlap the window just read, or rows in between are
-# never rendered and never seen. Step by a fraction of the measured pane
-# height rather than a fixed pixel count, which assumes a pane size.
-SCROLL_OVERLAP = 0.6
-MAX_SCROLL_STEPS = 40
-STALL_LIMIT = 3
+# The scrolling element is the viewport, not the list wrapper; the older
+# chat-pane-list / message-pane ids no longer exist in Teams.
+PANE = "[data-tid=message-pane-list-viewport], [data-tid=chat-pane-list]"
+MAX_SCROLL_STEPS = 60
 
 
-def _scroll_up_once():
-    """Scroll up by part of a pane height, so consecutive windows overlap."""
-    code = (
-        'async function main(page){'
-        '  const pane = page.locator("[data-tid=chat-pane-list], [data-tid=message-pane]").first();'
-        '  let h = 600;'
-        '  try { const b = await pane.boundingBox(); if (b && b.height) h = b.height; } catch (e) {}'
-        '  try { await pane.hover({timeout: 3000}); } catch (e) {}'
-        f'  await page.mouse.wheel(0, -Math.round(h * {SCROLL_OVERLAP}));'
-        '  await page.waitForTimeout(1500);'
-        '  return "scrolled";'
-        '}'
-    )
-    session.run("run-code", code, timeout=60)
+def _scroll_to_bottom():
+    """Pin to the newest message. Returns True only when that is proven."""
+    return chatpane.seek_bottom(PANE)
 
 
 def _read_messages(chat_name):
@@ -273,33 +261,40 @@ def _gather(args):
             continue
         # The list is virtualized: scrolling up unloads the newest rows, so
         # read at every step and let _dedupe merge the overlap.
-        _scroll_to_bottom()
-        # Keep going until the window covers the requested period or the
-        # history runs out. A fixed number of scrolls truncates --since
-        # without saying so, which reads as "nothing was posted".
+        at_newest = _scroll_to_bottom()
         found = _read_messages(name)
         seen = {_msg_key(r) for r in found}
-        stalls, complete = 0, cutoff is None
+        # Coverage is only claimed when a boundary is proven: the collected
+        # window passes the cutoff, or the pane is measurably at the top of
+        # its history. A step budget running out is not proof of either.
+        reached_cutoff = False
+        reached_top = False
         for _ in range(MAX_SCROLL_STEPS):
             oldest = _oldest_dt(found)
             if cutoff and oldest and oldest < cutoff:
-                complete = True
+                reached_cutoff = True
                 break
-            _scroll_up_once()
-            fresh = [r for r in _read_messages(name) if _msg_key(r) not in seen]
+            geo = chatpane.step_up(PANE)
+            batch = _read_messages(name)
+            fresh = [r for r in batch if _msg_key(r) not in seen]
             if fresh:
-                stalls = 0
                 seen.update(_msg_key(r) for r in fresh)
                 found.extend(fresh)
-            else:
-                stalls += 1
-                if stalls >= STALL_LIMIT:
-                    complete = True          # top of the history
-                    break
+            if chatpane.at_top(geo):
+                reached_top = True
+                break
+            if geo is None:
+                break                    # unmeasurable: coverage unknown
         found = _dedupe(found)
-        note = "" if complete else "  (PARTIAL: scroll limit reached)"
+        covered = reached_cutoff or reached_top
+        why = []
+        if not at_newest:
+            why.append("did not reach the newest message")
+        if not covered:
+            why.append("did not reach the cutoff or the top of the history")
+        note = "" if (at_newest and covered) else f"  (PARTIAL: {'; '.join(why)})"
         print(f"  {len(found)} message(s){note}", file=sys.stderr)
-        if not complete:
+        if not (at_newest and covered):
             partial.append(name)
         rows.extend(found)
     if partial:

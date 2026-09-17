@@ -1331,18 +1331,32 @@ def _eval_json(js, timeout=20):
     return None
 
 
+COLLECTION_KEYS = ("backers", "data", "results", "items")
+
+
 def _backer_rows(payload):
-    """Unwrap whichever envelope the backer service used."""
+    """Unwrap the envelope. Returns a list of rows, or None if unrecognized.
+
+    None and [] mean different things: [] is an answered query with no match,
+    None is a shape we do not understand. Only the first proves absence.
+    """
     if isinstance(payload, list):
-        return payload
+        return [r for r in payload if isinstance(r, dict)] if all(
+            isinstance(r, dict) for r in payload) else None
     if isinstance(payload, dict):
-        for key in ("backers", "data", "results", "items"):
-            val = payload.get(key)
-            if isinstance(val, list):
-                return val
-        if payload.get("email"):
+        # A single contact returned bare.
+        if isinstance(payload.get("email"), str):
             return [payload]
-    return []
+        for key in COLLECTION_KEYS:
+            if key not in payload:
+                continue
+            val = payload[key]
+            if not isinstance(val, list):
+                return None          # data:null, backers:{}, data:{email:..}
+            if not all(isinstance(r, dict) for r in val):
+                return None
+            return val
+    return None
 
 
 # A lookup has three outcomes, and they must not be confused: the contact is
@@ -1375,14 +1389,12 @@ def _find_backer(email):
     if isinstance(payload, dict) and payload.get("error"):
         print(f"  lookup error: {str(payload.get('error'))[:120]}", file=sys.stderr)
         return LOOKUP_FAILED
-    # Only a recognized result envelope proves absence.
-    if not isinstance(payload, (list, dict)):
+    # Only a recognized collection proves absence.
+    rows = _backer_rows(payload)
+    if rows is None:
+        print("  lookup returned an unrecognized response shape", file=sys.stderr)
         return LOOKUP_FAILED
-    if isinstance(payload, dict) and not any(
-        k in payload for k in ("backers", "data", "results", "items", "email")
-    ):
-        return LOOKUP_FAILED
-    for row in _backer_rows(payload):
+    for row in rows:
         if (row.get("email") or "").strip().lower() == email.strip().lower():
             return row
     return None
