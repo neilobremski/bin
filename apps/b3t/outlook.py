@@ -253,6 +253,84 @@ def cmd_check(args):
     return 0
 
 
+def parse_reading_pane(snap):
+    """Pull From headers, sender addresses, body text and attachments out of
+    a reading-pane snapshot.
+
+    Structure: heading/button "From: X" -> attachments listbox ->
+    document "Message body". Kept separate from cmd_read so the snapshot
+    shapes Outlook actually produces can be tested without a browser.
+
+    Returns (reading_pane, senders, attachments).
+    """
+    reading_pane = []
+    attachments = []
+    senders = []
+    pending_from = None      # index of the line holding the current From
+    in_body = False
+    lines = snap.split("\n")
+    for idx, line in enumerate(lines):
+        # From headers mark a new message in the reading pane. Outlook renders
+        # this as a button; it was a heading before the move to
+        # outlook.cloud.microsoft, and matching only the heading made every
+        # read come back empty.
+        if 'heading "From:' in line or 'button "From:' in line:
+            in_body = False
+            m = re.search(r'From: ([^"]+)"', line)
+            if m:
+                pending_from = idx
+                reading_pane.append(f"\n--- From: {m.group(1)} ---")
+            continue
+
+        # Only the line directly beneath a From header carries its address.
+        # Without the adjacency check, an address written in the body is
+        # mistaken for the sender and that paragraph is eaten. When the line
+        # is not an address it must fall through to the parsing below, or a
+        # header followed straight by the body swallows the body marker and
+        # the message reads as empty.
+        if pending_from is not None and idx == pending_from + 1:
+            m = re.search(r'generic \[ref=\w+\]:\s*(.+?)<([^<>@\s]+@[^<>\s]+)>', line)
+            pending_from = None
+            if m and reading_pane:
+                reading_pane[-1] = f"\n--- From: {m.group(1).strip()} <{m.group(2)}> ---"
+                senders.append(m.group(2))
+                continue
+
+        # Attachments: options with file extension + size
+        if "option" in line.lower() and re.search(r'\.(png|jpg|jpeg|gif|pdf|docx|xlsx|zip|webp)\b', line, re.IGNORECASE):
+            if re.search(r'\d+\s*(KB|MB|GB)', line):
+                m = re.search(r'\[ref=(\w+)\]', line)
+                name_match = re.search(r'option "([^"]+)"', line)
+                if m and name_match:
+                    attachments.append({"ref": m.group(1), "name": name_match.group(1)})
+
+        # "Message body" document is where the actual email content lives
+        elif 'document "Message body"' in line:
+            in_body = True
+            pending_from = None
+
+        # Collect body text from generic elements inside Message body
+        elif in_body and "generic [ref=" in line:
+            # Extract text after "generic [ref=eNNN]: " — may contain quotes
+            text_match = re.search(r'generic \[ref=\w+\]:\s*(.+)$', line)
+            if text_match:
+                text = text_match.group(1).strip().strip('"')
+                if text and "EXTERNAL EMAIL" not in text:
+                    reading_pane.append(text)
+        elif in_body and "- text:" in line:
+            text = re.sub(r'^\s*- text:\s*', '', line).strip()
+            if text and len(text) > 3:
+                reading_pane.append(text)
+
+        # End of message body section (next heading or toolbar)
+        elif in_body and ("toolbar" in line
+                          or 'heading "From:' in line
+                          or 'button "From:' in line):
+            in_body = False
+
+    return reading_pane, senders, attachments
+
+
 def cmd_read(args):
     """Read a specific message by number, expanding the full thread.
 
@@ -313,67 +391,8 @@ def cmd_read(args):
                 if text and len(text) > 10:
                     thread_msgs.append(text)
 
-    # Parse reading pane: From headers, message bodies, attachments
-    # Structure: heading "From: X" → attachments listbox → document "Message body"
-    reading_pane = []
-    attachments = []
-    senders = []
-    pending_from = None      # index of the line holding the current From
-    in_body = False
-    lines = snap.split("\n")
-    for idx, line in enumerate(lines):
-        # From headers mark a new message in the reading pane. Outlook renders
-        # this as a button; it was a heading before the move to
-        # outlook.cloud.microsoft, and matching only the heading made every
-        # read come back empty.
-        if 'heading "From:' in line or 'button "From:' in line:
-            in_body = False
-            m = re.search(r'From: ([^"]+)"', line)
-            if m:
-                pending_from = idx
-                reading_pane.append(f"\n--- From: {m.group(1)} ---")
-
-        # Only the line directly beneath a From header carries its address.
-        # Without the adjacency check, an address written in the body is
-        # mistaken for the sender and that paragraph is eaten.
-        elif pending_from is not None and idx == pending_from + 1:
-            m = re.search(r'generic \[ref=\w+\]:\s*(.+?)<([^<>@\s]+@[^<>\s]+)>', line)
-            if m and reading_pane:
-                reading_pane[-1] = f"\n--- From: {m.group(1).strip()} <{m.group(2)}> ---"
-                senders.append(m.group(2))
-            pending_from = None
-
-        # Attachments: options with file extension + size
-        elif "option" in line.lower() and re.search(r'\.(png|jpg|jpeg|gif|pdf|docx|xlsx|zip|webp)\b', line, re.IGNORECASE):
-            if re.search(r'\d+\s*(KB|MB|GB)', line):
-                m = re.search(r'\[ref=(\w+)\]', line)
-                name_match = re.search(r'option "([^"]+)"', line)
-                if m and name_match:
-                    attachments.append({"ref": m.group(1), "name": name_match.group(1)})
-
-        # "Message body" document is where the actual email content lives
-        elif 'document "Message body"' in line:
-            in_body = True
-            pending_from = None
-
-        # Collect body text from generic elements inside Message body
-        elif in_body and "generic [ref=" in line:
-            # Extract text after "generic [ref=eNNN]: " — may contain quotes
-            text_match = re.search(r'generic \[ref=\w+\]:\s*(.+)$', line)
-            if text_match:
-                text = text_match.group(1).strip().strip('"')
-                if text and "EXTERNAL EMAIL" not in text:
-                    reading_pane.append(text)
-        elif in_body and "- text:" in line:
-            text = re.sub(r'^\s*- text:\s*', '', line).strip()
-            if text and len(text) > 3:
-                reading_pane.append(text)
-
-        # End of message body section (next heading or toolbar)
-        elif in_body and ("toolbar" in line
-                          or 'heading "From:' in line
-                          or 'button "From:' in line):
-            in_body = False
+    # Parse reading pane: From headers, body text and attachments.
+    reading_pane, senders, attachments = parse_reading_pane(snap)
 
     # Output thread
     if thread_msgs:
