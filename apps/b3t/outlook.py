@@ -116,26 +116,26 @@ def _parse_messages(snap):
 
 
 def _sender_addresses():
-    """Map sender display name to address, read from the message list DOM.
+    """One address per message row, keyed by that row's own text.
 
-    The accessibility snapshot does not carry addresses, but each row exposes
-    one in a title attribute. Reading them here saves opening every message
-    just to find out who wrote it.
+    Rows are returned whole. A row carrying more than one address is marked
+    ambiguous rather than guessed at, because attaching the wrong address to
+    a sender means mailing the wrong person.
     """
     js = '''() => {
+  const rows = Array.from(document.querySelectorAll("[role=option], [role=listitem]"));
   const out = [];
-  document.querySelectorAll("[title*=\'@\']").forEach(el => {
-    const addr = el.getAttribute("title");
-    let row = el;
-    for (let i = 0; i < 12 && row; i++) {
-      row = row.parentElement;
-      if (row && (row.getAttribute("role") === "option"
-                  || row.getAttribute("role") === "listitem")) break;
-    }
-    if (!row || !row.getAttribute) return;
-    const role = row.getAttribute("role");
-    if (role !== "option" && role !== "listitem") return;
-    out.push({addr: addr, row: (row.innerText || "").replace(/\\n+/g, " ").slice(0, 160)});
+  rows.forEach((row, idx) => {
+    const titled = Array.from(row.querySelectorAll("[title]"))
+      .map(e => e.getAttribute("title"))
+      .filter(t => t && t.indexOf("@") !== -1);
+    const uniq = Array.from(new Set(titled));
+    out.push({
+      idx: idx,
+      text: (row.innerText || "").replace(/\\s+/g, " ").trim().slice(0, 200),
+      addr: uniq.length === 1 ? uniq[0] : null,
+      ambiguous: uniq.length > 1
+    });
   });
   return JSON.stringify(out);
 }'''
@@ -156,27 +156,59 @@ def _sender_addresses():
     return []
 
 
+STATUS_PREFIXES = ("unread", "read", "draft", "collapsed", "expanded")
+
+
+def _normalise(text):
+    return re.sub(r"\s+", " ", (text or "")).strip().lower()
+
+
+def _match_core(text):
+    """Strip list-state words so a row and a snapshot option can be compared.
+
+    A snapshot option reads "Unread Jane Doe Subject ...", while the rendered
+    row starts with the avatar initials. What both carry is the sender, the
+    subject and the time.
+    """
+    core = _normalise(text)
+    # _parse_messages strips this banner from the snapshot option, but the
+    # rendered row keeps it, sitting between the time and the preview.
+    core = re.sub(r"external email:\s*use caution!\s*", "", core)
+    changed = True
+    while changed:
+        changed = False
+        for word in STATUS_PREFIXES:
+            if core.startswith(word + " "):
+                core = core[len(word) + 1:]
+                changed = True
+    return core
+
+
 def _attach_addresses(messages):
-    """Attach an address to each parsed message by matching its row text."""
+    """Attach an address to a message only when the pairing is unambiguous.
+
+    A message is matched to a row only if exactly one row corresponds to it
+    and exactly one row-address exists. Anything else is left unset: a blank
+    is recoverable, a wrong address is not.
+    """
     rows = _sender_addresses()
     if not rows:
         return
-    used = set()
     for msg in messages:
-        sender = (msg.get("text") or "").strip()[:30]
-        if not sender:
+        needle = _match_core(msg.get("text"))[:50]
+        if len(needle) < 12:
+            continue                      # too little to identify a row
+        hits = [r for r in rows if needle in _match_core(r.get("text"))]
+        if len(hits) != 1:
+            continue                      # zero or ambiguous row match
+        row = hits[0]
+        if row.get("ambiguous") or not row.get("addr"):
+            continue                      # row itself is ambiguous
+        # The same row must not be claimed by two different messages.
+        if any(m.get("_row") == row["idx"] for m in messages):
             continue
-        for i, row in enumerate(rows):
-            if i in used:
-                continue
-            row_text = (row.get("row") or "").replace("\n", " ")
-            # Match on the leading run of the option text, which starts with
-            # the sender name; the row text contains the same name.
-            head = sender.replace("Unread ", "").split("  ")[0][:24].strip()
-            if head and head in row_text:
-                msg["address"] = row.get("addr")
-                used.add(i)
-                break
+        msg["address"] = row["addr"]
+        msg["_row"] = row["idx"]
 
 
 def cmd_login(args):
@@ -286,9 +318,10 @@ def cmd_read(args):
     reading_pane = []
     attachments = []
     senders = []
-    pending_from = []
+    pending_from = None      # index of the line holding the current From
     in_body = False
-    for line in snap.split("\n"):
+    lines = snap.split("\n")
+    for idx, line in enumerate(lines):
         # From headers mark a new message in the reading pane. Outlook renders
         # this as a button; it was a heading before the move to
         # outlook.cloud.microsoft, and matching only the heading made every
@@ -297,16 +330,18 @@ def cmd_read(args):
             in_body = False
             m = re.search(r'From: ([^"]+)"', line)
             if m:
-                pending_from.append(m.group(1))
+                pending_from = idx
                 reading_pane.append(f"\n--- From: {m.group(1)} ---")
 
-        # The line under a From button carries "Name<address>".
-        elif pending_from and "<" in line and ">" in line:
+        # Only the line directly beneath a From header carries its address.
+        # Without the adjacency check, an address written in the body is
+        # mistaken for the sender and that paragraph is eaten.
+        elif pending_from is not None and idx == pending_from + 1:
             m = re.search(r'generic \[ref=\w+\]:\s*(.+?)<([^<>@\s]+@[^<>\s]+)>', line)
-            if m:
+            if m and reading_pane:
                 reading_pane[-1] = f"\n--- From: {m.group(1).strip()} <{m.group(2)}> ---"
                 senders.append(m.group(2))
-                pending_from.pop()
+            pending_from = None
 
         # Attachments: options with file extension + size
         elif "option" in line.lower() and re.search(r'\.(png|jpg|jpeg|gif|pdf|docx|xlsx|zip|webp)\b', line, re.IGNORECASE):
@@ -319,6 +354,7 @@ def cmd_read(args):
         # "Message body" document is where the actual email content lives
         elif 'document "Message body"' in line:
             in_body = True
+            pending_from = None
 
         # Collect body text from generic elements inside Message body
         elif in_body and "generic [ref=" in line:
@@ -434,17 +470,29 @@ def parse_draft_file(text):
     return subject, body.strip()
 
 
-def _release_unload_guard():
-    """Clear Outlook's unsaved-changes guard and drain any pending dialog.
+def _suppress_unload_guard():
+    """Silence the unsaved-changes prompt for one intended navigation.
 
-    Leaving a dirty composer raises a beforeunload prompt. That prompt blocks
-    every later playwright call with "does not handle the modal state", so one
-    draft per session would succeed and the rest would fail.
+    Leaving a dirty composer raises a beforeunload prompt, and that prompt
+    blocks every later playwright call with "does not handle the modal
+    state", so one draft per session would succeed and the rest would fail.
+    The previous handler is kept so normal protection can be put back: this
+    is scoped to the navigation, not switched off for the session.
     """
-    session.run("eval", "() => { window.onbeforeunload = null; return true; }",
+    session.run("eval",
+                "() => { if (!('__b3tPrevUnload' in window)) "
+                "{ window.__b3tPrevUnload = window.onbeforeunload; } "
+                "window.onbeforeunload = null; return true; }",
                 timeout=15)
-    # The prompt may already be open from an earlier step.
-    session.run("dialog-accept", timeout=15)
+
+
+def _restore_unload_guard():
+    """Put the page's own unsaved-changes protection back."""
+    session.run("eval",
+                "() => { if ('__b3tPrevUnload' in window) "
+                "{ window.onbeforeunload = window.__b3tPrevUnload; "
+                "delete window.__b3tPrevUnload; } return true; }",
+                timeout=15)
 
 
 def cmd_draft(args):
@@ -567,8 +615,9 @@ def cmd_draft(args):
         "  })));"
         "}"
     )
-    _release_unload_guard()
+    _suppress_unload_guard()
     _click_folder("Drafts")
+    _restore_unload_guard()
     time.sleep(3)
     vres = session.run("run-code", "--raw", verify, timeout=120)
     try:
@@ -587,6 +636,5 @@ def cmd_draft(args):
 
     print(f"Draft saved to Drafts: \"{subject}\" ({info['len']} chars, no recipients).",
           file=sys.stderr)
-    _release_unload_guard()
     print("Nothing was sent. Address it and send it yourself.", file=sys.stderr)
     return 0
