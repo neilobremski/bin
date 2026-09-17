@@ -103,6 +103,11 @@ def main():
     p.add_argument("flyer_id", help="Flyer ID")
     p.add_argument("--json", action="store_true", help="Output as JSON")
 
+    p = gb_sub.add_parser("subscribe", help="Add a contact to the newsletter audience")
+    p.add_argument("--email", required=True, help="Subscriber email address")
+    p.add_argument("--name", help='Display name, e.g. "Jane Smith"')
+    p.add_argument("--dry-run", action="store_true", help="Report the action without writing")
+
     # -- ParentSquare --
     ps = sub.add_parser("parentsquare", aliases=["ps"], help="ParentSquare school comms")
     ps_sub = ps.add_subparsers(dest="action")
@@ -114,6 +119,36 @@ def main():
     p = ps_sub.add_parser("save", help="Save posts as submission markdown files")
     p.add_argument("--dir", required=True, help="Output directory (e.g. editions/YYYY-MM-DD/submissions)")
     p.add_argument("--since", type=int, help="Only posts from last N days")
+
+    # -- Microsoft Teams --
+    tm = sub.add_parser("teams", aliases=["tm"], help="Microsoft Teams chats and channels")
+    tm_sub = tm.add_subparsers(dest="action")
+
+    tm_sub.add_parser("login", help="Verify Teams auth")
+    tm_sub.add_parser("list", help="List available chats and channels")
+    p = tm_sub.add_parser("sweep", help="Read recent messages from chats and channels")
+    p.add_argument("--chat", help="Only this chat/channel (substring match)")
+    p.add_argument("--since", type=int, help="Only messages from last N days")
+    p.add_argument("--json", action="store_true", help="JSON output")
+    p = tm_sub.add_parser("save", help="Save swept messages as submission markdown")
+    p.add_argument("--dir", required=True, help="Output directory")
+    p.add_argument("--chat", help="Only this chat/channel (substring match)")
+    p.add_argument("--since", type=int, help="Only messages from last N days")
+
+    # -- WhatsApp Web --
+    wa = sub.add_parser("whatsapp", aliases=["wa"], help="WhatsApp Web chats")
+    wa_sub = wa.add_subparsers(dest="action")
+
+    wa_sub.add_parser("login", help="Check WhatsApp Web link status (QR needs a human)")
+    wa_sub.add_parser("list", help="List available chats")
+    p = wa_sub.add_parser("sweep", help="Read recent messages from chats")
+    p.add_argument("--chat", help="Only this chat (substring match)")
+    p.add_argument("--since", type=int, help="Only messages from last N days")
+    p.add_argument("--json", action="store_true", help="JSON output")
+    p = wa_sub.add_parser("save", help="Save swept messages as submission markdown")
+    p.add_argument("--dir", required=True, help="Output directory")
+    p.add_argument("--chat", help="Only this chat (substring match)")
+    p.add_argument("--since", type=int, help="Only messages from last N days")
 
     # -- LWSD --
     lw = sub.add_parser("lwsd", help="School and district website scanning")
@@ -230,6 +265,12 @@ def _dispatch(args):
     elif cmd in ("parentsquare", "ps"):
         import parentsquare
         return parentsquare.dispatch(args)
+    elif cmd in ("teams", "tm"):
+        import teams
+        return teams.dispatch(args)
+    elif cmd in ("whatsapp", "wa"):
+        import whatsapp
+        return whatsapp.dispatch(args)
     elif cmd == "lwsd":
         import lwsd
         return lwsd.dispatch(args)

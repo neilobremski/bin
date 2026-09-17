@@ -36,6 +36,10 @@ GIVEBACKS_API = "https://api.givebacks.com/services/communication/messages"
 GIVEBACKS_BASE = _optional("GIVEBACKS_BASE")  # e.g. https://redmondmsptsa.givebacks.com
 GIVEBACKS_LOGIN = f"{GIVEBACKS_BASE}/users/sign_in" if GIVEBACKS_BASE else ""
 GIVEBACKS_CAUSE_ID = _optional("GIVEBACKS_CAUSE_ID")  # org UUID on GiveBacks
+# Contacts live under the "backer" service. A newsletter addressed to
+# "Send to everyone" reaches every backer whose communication_status is
+# "subscribed", so subscribing is a contact write, not a list membership.
+GIVEBACKS_BACKER_API = "https://api.givebacks.com/services/backer/causes"
 
 
 # --- Microsoft 365 ---
@@ -44,6 +48,17 @@ OUTLOOK_URL = "https://outlook.office.com/mail/"
 # Org-specific (from .env)
 FORMS_URL = _optional("FORMS_URL")  # full URL to the Forms responses page
 FORMS_DOWNLOAD_PREFIX = _optional("FORMS_DOWNLOAD_PREFIX")  # optional xlsx filename filter
+
+
+# --- Microsoft Teams ---
+# Platform (same for everyone). Teams moved to teams.cloud.microsoft; the
+# older teams.microsoft.com host still redirects there.
+TEAMS_URL = "https://teams.cloud.microsoft/"
+
+
+# --- WhatsApp Web ---
+# Platform. Linking needs a QR scan from the phone, which only a human can do.
+WHATSAPP_URL = "https://web.whatsapp.com/"
 
 
 # --- PeachJar ---

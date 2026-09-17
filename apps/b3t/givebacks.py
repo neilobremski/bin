@@ -10,7 +10,8 @@ import design as design_mod
 import env
 import session
 from constants import (
-    GIVEBACKS_BASE, GIVEBACKS_API, GIVEBACKS_LOGIN, GIVEBACKS_CAUSE_ID, SESSION_NAME,
+    GIVEBACKS_BASE, GIVEBACKS_API, GIVEBACKS_LOGIN, GIVEBACKS_CAUSE_ID,
+    GIVEBACKS_BACKER_API, SESSION_NAME,
 )
 
 CAUSE_ID = GIVEBACKS_CAUSE_ID
@@ -22,7 +23,7 @@ def dispatch(args):
         return 1
     action = args.action
     if not action:
-        print("Usage: b3t givebacks <login|pull|build|push|send-preview|open|list|duplicate|upload|screenshot>", file=sys.stderr)
+        print("Usage: b3t givebacks <login|pull|build|push|send-preview|open|list|duplicate|upload|screenshot|subscribe>", file=sys.stderr)
         return 2
     if action == "login":
         return cmd_login(args)
@@ -46,6 +47,8 @@ def dispatch(args):
         return cmd_screenshot(args)
     elif action == "rename":
         return cmd_rename(args)
+    elif action == "subscribe":
+        return cmd_subscribe(args)
     return 2
 
 
@@ -1298,3 +1301,173 @@ def cmd_rename(args):
 
     print("Done.", file=sys.stderr)
     return 0
+
+
+# --- Contacts (backer service) ------------------------------------------------
+#
+# A newsletter addressed to "Send to everyone" goes to every backer whose
+# communication_status is "subscribed". There is no list to join, so a
+# subscribe request is a single contact write. This command never sends mail.
+
+def _backer_url(path="", query=""):
+    base = f"{GIVEBACKS_BACKER_API}/{CAUSE_ID}/backers{path}"
+    return f"{base}?{query}" if query else base
+
+
+def _eval_json(js, timeout=20):
+    """Evaluate a page expression that returns a JSON string. Returns the object."""
+    result = session.run("eval", js, timeout=timeout)
+    for line in result.stdout.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("###") or line.startswith("```"):
+            continue
+        try:
+            parsed = line
+            if parsed.startswith('"'):
+                parsed = json.loads(parsed)
+            return json.loads(parsed) if isinstance(parsed, str) else parsed
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _backer_rows(payload):
+    """Unwrap whichever envelope the backer service used."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("backers", "data", "results", "items"):
+            val = payload.get(key)
+            if isinstance(val, list):
+                return val
+        if payload.get("email"):
+            return [payload]
+    return []
+
+
+def _find_backer(email):
+    """Return the existing contact for this address, or None."""
+    from urllib.parse import quote
+    url = _backer_url(
+        query=f"&search%5Bemail%5D%5Bvalue%5D={quote(email)}&join=AND&limit=10&offset=0"
+    )
+    js = (
+        f'() => fetch("{url}", {{credentials: "include"}})'
+        f'.then(r => r.json()).then(d => JSON.stringify(d))'
+    )
+    rows = _backer_rows(_eval_json(js))
+    for row in rows:
+        if (row.get("email") or "").strip().lower() == email.strip().lower():
+            return row
+    return None
+
+
+def _split_name(name):
+    """Split a display name into (first, last). Last name may be empty."""
+    parts = [p for p in (name or "").strip().split() if p]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+
+
+def cmd_subscribe(args):
+    """Add a contact to the newsletter audience, or re-subscribe an existing one.
+
+    Families email the newsletter address asking to be added. This turns one
+    such request into a contact with communication_status "subscribed".
+    It writes one contact and sends nothing.
+    """
+    email = (args.email or "").strip()
+    if "@" not in email:
+        print(f"ERROR: '{email}' is not an email address.", file=sys.stderr)
+        return 2
+
+    if not ensure_authenticated():
+        return 1
+
+    first, last = _split_name(getattr(args, "name", None))
+
+    existing = _find_backer(email)
+    if existing:
+        status = (existing.get("communication_status") or "").lower()
+        backer_id = existing.get("backer_id") or existing.get("uuid")
+        shown = (existing.get("name") or "").strip() or "(no name)"
+        if status == "subscribed":
+            print(f"Already subscribed: {email}  [{shown}]")
+            return 0
+        print(f"Contact exists as '{status}', re-subscribing: {email}", file=sys.stderr)
+        if getattr(args, "dry_run", False):
+            print(f"DRY RUN: would set {email} to subscribed.")
+            return 0
+        if not _set_subscribed(backer_id):
+            print(f"ERROR: could not re-subscribe {email}.", file=sys.stderr)
+            return 1
+    else:
+        if getattr(args, "dry_run", False):
+            who = f" as '{first} {last}'".rstrip() if first else ""
+            print(f"DRY RUN: would create {email}{who} and subscribe.")
+            return 0
+        if not _create_backer(email, first, last):
+            print(f"ERROR: could not create contact for {email}.", file=sys.stderr)
+            return 1
+
+    # Verify by reading the contact back, rather than trusting the write.
+    time.sleep(2)
+    check = _find_backer(email)
+    if not check:
+        print(f"ERROR: {email} not found after write.", file=sys.stderr)
+        return 1
+    status = (check.get("communication_status") or "?").lower()
+    if status != "subscribed":
+        print(f"ERROR: {email} is '{status}', not 'subscribed'.", file=sys.stderr)
+        return 1
+    shown = (check.get("name") or "").strip() or "(no name)"
+    print(f"Subscribed: {email}  [{shown}]")
+    return 0
+
+
+def _create_backer(email, first, last):
+    """POST a new contact. Returns True when the service accepts it."""
+    body = json.dumps({
+        "email": email,
+        "first_name": first,
+        "last_name": last,
+        "communication_status": "subscribed",
+    })
+    js = f'''() => fetch("{_backer_url()}", {{
+  method: "POST",
+  credentials: "include",
+  headers: {{"Content-Type": "application/json"}},
+  body: {json.dumps(body)}
+}}).then(r => r.text().then(t => JSON.stringify({{status: r.status, body: t.slice(0, 400)}})))'''
+    res = _eval_json(js, timeout=30)
+    if not res:
+        print("ERROR: no response from the contacts API.", file=sys.stderr)
+        return False
+    code = res.get("status")
+    if code and 200 <= int(code) < 300:
+        return True
+    print(f"ERROR: create returned {code}: {res.get('body', '')[:300]}", file=sys.stderr)
+    return False
+
+
+def _set_subscribed(backer_id):
+    """Flip an existing contact back to subscribed. Tries PATCH, then PUT."""
+    if not backer_id:
+        return False
+    body = json.dumps({"communication_status": "subscribed"})
+    for method in ("PATCH", "PUT"):
+        js = f'''() => fetch("{_backer_url('/' + str(backer_id))}", {{
+  method: "{method}",
+  credentials: "include",
+  headers: {{"Content-Type": "application/json"}},
+  body: {json.dumps(body)}
+}}).then(r => r.text().then(t => JSON.stringify({{status: r.status, body: t.slice(0, 300)}})))'''
+        res = _eval_json(js, timeout=30)
+        if res and res.get("status") and 200 <= int(res["status"]) < 300:
+            return True
+        if res:
+            print(f"  {method} returned {res.get('status')}", file=sys.stderr)
+    return False

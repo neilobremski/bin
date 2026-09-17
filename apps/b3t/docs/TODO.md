@@ -3,7 +3,7 @@
 ## High Priority
 
 - [ ] **`givebacks regen --id UUID`** — After API push, `raw_html` is stale. Must open editor, make trivial edit (click text block, type char, delete), wait for auto-save. Without this, sent email won't match template.
-- [ ] **`givebacks subscribe --email ADDRESS [--name NAME]`** — Add a subscriber to the GiveBacks contact list. Families email beartracks@ asking to be added ("Subscribe me") and it is hand-work every time. Should confirm the contact landed, and refuse to send any mail itself. Requested by the editor 2026-09-06.
+- [ ] **`teams sweep` does not read channels** — Chats parse. A channel click (`General`, `PTSA Communications`) leaves the message pane empty: no `chat-pane-item`, no `time` elements, and the only other frame is an empty `about:srcdoc`. Chats carry the traffic today, so this is a gap, not a blocker. Needs the channel post DOM identified.
 - [ ] **`givebacks images --id UUID`** — List all images in the editor with index + alt text + current URL. Agent needs this to know which `--index` to pass to `upload`.
 - [ ] **`givebacks delete --id UUID`** — Delete a draft via three-dot menu or API. Needed to clean up test duplicates.
 - [ ] **`edition update DATE --field value`** — Update manifest fields (status, draft_id, archive_url) as edition progresses through phases.
@@ -40,6 +40,9 @@
 - [x] `peachjar list/get` — GraphQL queries (no browser)
 - [x] `forms download/list` — Excel download + openpyxl parse
 - [x] `outlook check/read` — Folder scan + thread expansion + attachments
+- [x] `givebacks subscribe --email ADDRESS [--name NAME] [--dry-run]` — Creates or re-subscribes a contact under the `backer` service and verifies by reading it back. Sends no mail.
+- [x] `teams list/sweep/save` — Chat sweep with author, local timestamp and body
+- [x] `whatsapp list/sweep/save` — Group chat sweep via `data-pre-plain-text`
 - [x] `gemini generate` — Template upload + prompt + download
 - [x] Constants moved to `.env` — Source code is org-agnostic
 
