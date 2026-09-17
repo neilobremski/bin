@@ -192,7 +192,9 @@ def _read_messages(chat_name):
   });
   return JSON.stringify(out);
 }'''
-    rows = _eval_json(js) or []
+    rows = _eval_json(js)
+    if rows is None:
+        return None          # extraction failed: not the same as "no rows"
     parsed = []
     for r in rows:
         m = PRE_PLAIN.match((r.get("meta") or "").strip())
@@ -209,6 +211,15 @@ def _read_messages(chat_name):
             "text": (r.get("text") or "").strip(),
         })
     return parsed
+
+
+def _read_window(chat_name, attempts=2):
+    """Read the rendered window, retrying once before calling it unreadable."""
+    for _ in range(attempts):
+        rows = _read_messages(chat_name)
+        if rows is not None:
+            return rows
+    return None
 
 
 def _within_since(rows, since_days):
@@ -295,7 +306,11 @@ def _gather(args):
         # The message list is virtualized: scrolling up unloads the newest
         # bubbles, so read at every step and let _dedupe merge the overlap.
         at_newest = _scroll_to_bottom()
-        found = _read_messages(name)
+        read_failures = 0
+        found = _read_window(name)
+        if found is None:
+            read_failures = 1
+            found = []
         seen = {_msg_key(r) for r in found}
         # Coverage is only claimed when a boundary is proven: the collected
         # window passes the cutoff, or the pane is measurably at the top of
@@ -308,7 +323,12 @@ def _gather(args):
                 reached_cutoff = True
                 break
             geo = chatpane.step_up(PANE)
-            batch = _read_messages(name)
+            batch = _read_window(name)
+            if batch is None:
+                # Reaching the top proves where the scroll ended, not that
+                # everything on the way was read. An unread window is a hole.
+                read_failures += 1
+                batch = []
             fresh = [r for r in batch if _msg_key(r) not in seen]
             if fresh:
                 seen.update(_msg_key(r) for r in fresh)
@@ -320,14 +340,17 @@ def _gather(args):
                 break                    # unmeasurable: coverage unknown
         found = _dedupe(found)
         covered = reached_cutoff or reached_top
+        whole = at_newest and covered and read_failures == 0
         why = []
         if not at_newest:
             why.append("did not reach the newest message")
         if not covered:
             why.append("did not reach the cutoff or the top of the history")
-        note = "" if (at_newest and covered) else f"  (PARTIAL: {'; '.join(why)})"
+        if read_failures:
+            why.append(f"{read_failures} window(s) could not be read")
+        note = "" if whole else f"  (PARTIAL: {'; '.join(why)})"
         print(f"  {len(found)} message(s){note}", file=sys.stderr)
-        if not (at_newest and covered):
+        if not whole:
             partial.append(name)
         rows.extend(found)
     if partial:
