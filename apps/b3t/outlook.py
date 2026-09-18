@@ -115,6 +115,102 @@ def _parse_messages(snap):
     return messages
 
 
+def _sender_addresses():
+    """One address per message row, keyed by that row's own text.
+
+    Rows are returned whole. A row carrying more than one address is marked
+    ambiguous rather than guessed at, because attaching the wrong address to
+    a sender means mailing the wrong person.
+    """
+    js = '''() => {
+  const rows = Array.from(document.querySelectorAll("[role=option], [role=listitem]"));
+  const out = [];
+  rows.forEach((row, idx) => {
+    const titled = Array.from(row.querySelectorAll("[title]"))
+      .map(e => e.getAttribute("title"))
+      .filter(t => t && t.indexOf("@") !== -1);
+    const uniq = Array.from(new Set(titled));
+    out.push({
+      idx: idx,
+      text: (row.innerText || "").replace(/\\s+/g, " ").trim().slice(0, 200),
+      addr: uniq.length === 1 ? uniq[0] : null,
+      ambiguous: uniq.length > 1
+    });
+  });
+  return JSON.stringify(out);
+}'''
+    result = session.run("eval", js, timeout=20)
+    for line in result.stdout.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("###") or line.startswith("```"):
+            continue
+        try:
+            parsed = line
+            if parsed.startswith('"'):
+                parsed = json.loads(parsed)
+            data = json.loads(parsed) if isinstance(parsed, str) else parsed
+            if isinstance(data, list):
+                return data
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return []
+
+
+STATUS_PREFIXES = ("unread", "read", "draft", "collapsed", "expanded")
+
+
+def _normalise(text):
+    return re.sub(r"\s+", " ", (text or "")).strip().lower()
+
+
+def _match_core(text):
+    """Strip list-state words so a row and a snapshot option can be compared.
+
+    A snapshot option reads "Unread Jane Doe Subject ...", while the rendered
+    row starts with the avatar initials. What both carry is the sender, the
+    subject and the time.
+    """
+    core = _normalise(text)
+    # _parse_messages strips this banner from the snapshot option, but the
+    # rendered row keeps it, sitting between the time and the preview.
+    core = re.sub(r"external email:\s*use caution!\s*", "", core)
+    changed = True
+    while changed:
+        changed = False
+        for word in STATUS_PREFIXES:
+            if core.startswith(word + " "):
+                core = core[len(word) + 1:]
+                changed = True
+    return core
+
+
+def _attach_addresses(messages):
+    """Attach an address to a message only when the pairing is unambiguous.
+
+    A message is matched to a row only if exactly one row corresponds to it
+    and exactly one row-address exists. Anything else is left unset: a blank
+    is recoverable, a wrong address is not.
+    """
+    rows = _sender_addresses()
+    if not rows:
+        return
+    for msg in messages:
+        needle = _match_core(msg.get("text"))[:50]
+        if len(needle) < 12:
+            continue                      # too little to identify a row
+        hits = [r for r in rows if needle in _match_core(r.get("text"))]
+        if len(hits) != 1:
+            continue                      # zero or ambiguous row match
+        row = hits[0]
+        if row.get("ambiguous") or not row.get("addr"):
+            continue                      # row itself is ambiguous
+        # The same row must not be claimed by two different messages.
+        if any(m.get("_row") == row["idx"] for m in messages):
+            continue
+        msg["address"] = row["addr"]
+        msg["_row"] = row["idx"]
+
+
 def cmd_login(args):
     if _ensure_outlook():
         print("Outlook authenticated.", file=sys.stderr)
@@ -140,6 +236,9 @@ def cmd_check(args):
 
     messages = _parse_messages(snap)
 
+    if getattr(args, "addresses", False):
+        _attach_addresses(messages)
+
     print(f"Folder: {folder}", file=sys.stderr)
     print(f"{len(messages)} messages", file=sys.stderr)
 
@@ -147,9 +246,89 @@ def cmd_check(args):
         print(f"No messages in {folder}.")
     else:
         for i, msg in enumerate(messages, 1):
-            print(f"  {i}. {msg['text'][:120]}")
+            addr = msg.get("address")
+            suffix = f"  <{addr}>" if addr else ""
+            print(f"  {i}. {msg['text'][:120]}{suffix}")
 
     return 0
+
+
+def parse_reading_pane(snap):
+    """Pull From headers, sender addresses, body text and attachments out of
+    a reading-pane snapshot.
+
+    Structure: heading/button "From: X" -> attachments listbox ->
+    document "Message body". Kept separate from cmd_read so the snapshot
+    shapes Outlook actually produces can be tested without a browser.
+
+    Returns (reading_pane, senders, attachments).
+    """
+    reading_pane = []
+    attachments = []
+    senders = []
+    pending_from = None      # index of the line holding the current From
+    in_body = False
+    lines = snap.split("\n")
+    for idx, line in enumerate(lines):
+        # From headers mark a new message in the reading pane. Outlook renders
+        # this as a button; it was a heading before the move to
+        # outlook.cloud.microsoft, and matching only the heading made every
+        # read come back empty.
+        if 'heading "From:' in line or 'button "From:' in line:
+            in_body = False
+            m = re.search(r'From: ([^"]+)"', line)
+            if m:
+                pending_from = idx
+                reading_pane.append(f"\n--- From: {m.group(1)} ---")
+            continue
+
+        # Only the line directly beneath a From header carries its address.
+        # Without the adjacency check, an address written in the body is
+        # mistaken for the sender and that paragraph is eaten. When the line
+        # is not an address it must fall through to the parsing below, or a
+        # header followed straight by the body swallows the body marker and
+        # the message reads as empty.
+        if pending_from is not None and idx == pending_from + 1:
+            m = re.search(r'generic \[ref=\w+\]:\s*(.+?)<([^<>@\s]+@[^<>\s]+)>', line)
+            pending_from = None
+            if m and reading_pane:
+                reading_pane[-1] = f"\n--- From: {m.group(1).strip()} <{m.group(2)}> ---"
+                senders.append(m.group(2))
+                continue
+
+        # Attachments: options with file extension + size
+        if "option" in line.lower() and re.search(r'\.(png|jpg|jpeg|gif|pdf|docx|xlsx|zip|webp)\b', line, re.IGNORECASE):
+            if re.search(r'\d+\s*(KB|MB|GB)', line):
+                m = re.search(r'\[ref=(\w+)\]', line)
+                name_match = re.search(r'option "([^"]+)"', line)
+                if m and name_match:
+                    attachments.append({"ref": m.group(1), "name": name_match.group(1)})
+
+        # "Message body" document is where the actual email content lives
+        elif 'document "Message body"' in line:
+            in_body = True
+            pending_from = None
+
+        # Collect body text from generic elements inside Message body
+        elif in_body and "generic [ref=" in line:
+            # Extract text after "generic [ref=eNNN]: " — may contain quotes
+            text_match = re.search(r'generic \[ref=\w+\]:\s*(.+)$', line)
+            if text_match:
+                text = text_match.group(1).strip().strip('"')
+                if text and "EXTERNAL EMAIL" not in text:
+                    reading_pane.append(text)
+        elif in_body and "- text:" in line:
+            text = re.sub(r'^\s*- text:\s*', '', line).strip()
+            if text and len(text) > 3:
+                reading_pane.append(text)
+
+        # End of message body section (next heading or toolbar)
+        elif in_body and ("toolbar" in line
+                          or 'heading "From:' in line
+                          or 'button "From:' in line):
+            in_body = False
+
+    return reading_pane, senders, attachments
 
 
 def cmd_read(args):
@@ -212,47 +391,8 @@ def cmd_read(args):
                 if text and len(text) > 10:
                     thread_msgs.append(text)
 
-    # Parse reading pane: From headers, message bodies, attachments
-    # Structure: heading "From: X" → attachments listbox → document "Message body"
-    reading_pane = []
-    attachments = []
-    in_body = False
-    for line in snap.split("\n"):
-        # From headers mark a new message in the reading pane
-        if 'heading "From:' in line:
-            in_body = False
-            m = re.search(r'From: ([^"]+)"', line)
-            if m:
-                reading_pane.append(f"\n--- From: {m.group(1)} ---")
-
-        # Attachments: options with file extension + size
-        elif "option" in line.lower() and re.search(r'\.(png|jpg|jpeg|gif|pdf|docx|xlsx|zip|webp)\b', line, re.IGNORECASE):
-            if re.search(r'\d+\s*(KB|MB|GB)', line):
-                m = re.search(r'\[ref=(\w+)\]', line)
-                name_match = re.search(r'option "([^"]+)"', line)
-                if m and name_match:
-                    attachments.append({"ref": m.group(1), "name": name_match.group(1)})
-
-        # "Message body" document is where the actual email content lives
-        elif 'document "Message body"' in line:
-            in_body = True
-
-        # Collect body text from generic elements inside Message body
-        elif in_body and "generic [ref=" in line:
-            # Extract text after "generic [ref=eNNN]: " — may contain quotes
-            text_match = re.search(r'generic \[ref=\w+\]:\s*(.+)$', line)
-            if text_match:
-                text = text_match.group(1).strip().strip('"')
-                if text and "EXTERNAL EMAIL" not in text:
-                    reading_pane.append(text)
-        elif in_body and "- text:" in line:
-            text = re.sub(r'^\s*- text:\s*', '', line).strip()
-            if text and len(text) > 3:
-                reading_pane.append(text)
-
-        # End of message body section (next heading or toolbar)
-        elif in_body and ("toolbar" in line or 'heading "From:' in line):
-            in_body = False
+    # Parse reading pane: From headers, body text and attachments.
+    reading_pane, senders, attachments = parse_reading_pane(snap)
 
     # Output thread
     if thread_msgs:
@@ -265,6 +405,11 @@ def cmd_read(args):
         print("\n=== Content ===")
         for line in reading_pane:
             print(line)
+
+    if senders:
+        print("\n=== Sender addresses ===")
+        for addr in dict.fromkeys(senders):
+            print(f"  {addr}")
 
     # Output attachments
     if attachments:
@@ -342,6 +487,31 @@ def parse_draft_file(text):
     body = re.sub(r"^#{1,6}\s*", "", body, flags=re.M)
     body = re.sub(r"\n{3,}", "\n\n", body)
     return subject, body.strip()
+
+
+def _suppress_unload_guard():
+    """Silence the unsaved-changes prompt for one intended navigation.
+
+    Leaving a dirty composer raises a beforeunload prompt, and that prompt
+    blocks every later playwright call with "does not handle the modal
+    state", so one draft per session would succeed and the rest would fail.
+    The previous handler is kept so normal protection can be put back: this
+    is scoped to the navigation, not switched off for the session.
+    """
+    session.run("eval",
+                "() => { if (!('__b3tPrevUnload' in window)) "
+                "{ window.__b3tPrevUnload = window.onbeforeunload; } "
+                "window.onbeforeunload = null; return true; }",
+                timeout=15)
+
+
+def _restore_unload_guard():
+    """Put the page's own unsaved-changes protection back."""
+    session.run("eval",
+                "() => { if ('__b3tPrevUnload' in window) "
+                "{ window.onbeforeunload = window.__b3tPrevUnload; "
+                "delete window.__b3tPrevUnload; } return true; }",
+                timeout=15)
 
 
 def cmd_draft(args):
@@ -464,7 +634,9 @@ def cmd_draft(args):
         "  })));"
         "}"
     )
+    _suppress_unload_guard()
     _click_folder("Drafts")
+    _restore_unload_guard()
     time.sleep(3)
     vres = session.run("run-code", "--raw", verify, timeout=120)
     try:
