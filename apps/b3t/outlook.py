@@ -201,6 +201,22 @@ def _click_folder(folder_name):
     return False
 
 
+def selected_ref(snap):
+    """The ref of the message row the reading pane is showing, if any.
+
+    The ref is extracted and returned whole. Testing `ref in line` instead
+    accepts a different row whose ref merely starts the same way: `e1` is a
+    substring of `e10`, and replying to the wrong person is not an error
+    anyone catches by reading the output.
+    """
+    for line in (snap or "").split("\n"):
+        if "[selected]" in line and "option" in line.lower():
+            m = re.search(r'\[ref=(\w+)\]', line)
+            if m:
+                return m.group(1)
+    return None
+
+
 def _parse_messages(snap):
     """Parse message options from a snapshot. Returns list of dicts."""
     messages = []
@@ -714,9 +730,8 @@ def cmd_reply(args):
     opened = None
     for _ in range(5):
         snap = session.snapshot() or ""
-        selected = [l for l in snap.split("\n") if "[selected]" in l and "option" in l]
-        pane_from = parse_reading_pane(snap)[1]
-        if selected and target["ref"] in selected[0]:
+        if selected_ref(snap) == target["ref"]:
+            pane_from = parse_reading_pane(snap)[1]
             opened = pane_from[0] if pane_from else None
             break
         time.sleep(2)

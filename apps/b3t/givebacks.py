@@ -685,7 +685,8 @@ def _raw_html_is_current(message_id, design):
     .replace(/\u00a0/g, " ").replace(/\u2019/g, "'")
     .replace(/\s+/g, " ").trim();
   const missing = marks.filter(m => !plain.includes(m));
-  const lostPictures = pictures.filter(u => !raw.includes(u));
+  const esc = u => u.replace(/&/g, "&amp;");
+  const lostPictures = pictures.filter(u => !raw.includes(u) && !raw.includes(esc(u)));
   const count = t => (raw.match(new RegExp("<" + t + "(?=[\\s/>])", "gi")) || []).length;
   return JSON.stringify({{len: raw.length, plain: plain.length, total: marks.length,
                          missing: missing.length, sample: missing.slice(0, 2),
