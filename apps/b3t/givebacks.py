@@ -10,7 +10,8 @@ import design as design_mod
 import env
 import session
 from constants import (
-    GIVEBACKS_BASE, GIVEBACKS_API, GIVEBACKS_LOGIN, GIVEBACKS_CAUSE_ID, SESSION_NAME,
+    GIVEBACKS_BASE, GIVEBACKS_API, GIVEBACKS_LOGIN, GIVEBACKS_CAUSE_ID,
+    GIVEBACKS_BACKER_API, SESSION_NAME,
 )
 
 CAUSE_ID = GIVEBACKS_CAUSE_ID
@@ -22,7 +23,7 @@ def dispatch(args):
         return 1
     action = args.action
     if not action:
-        print("Usage: b3t givebacks <login|pull|build|push|send-preview|open|list|duplicate|upload|screenshot>", file=sys.stderr)
+        print("Usage: b3t givebacks <login|pull|build|push|send-preview|open|list|duplicate|upload|screenshot|subscribe>", file=sys.stderr)
         return 2
     if action == "login":
         return cmd_login(args)
@@ -46,6 +47,8 @@ def dispatch(args):
         return cmd_screenshot(args)
     elif action == "rename":
         return cmd_rename(args)
+    elif action == "subscribe":
+        return cmd_subscribe(args)
     return 2
 
 
@@ -1298,3 +1301,231 @@ def cmd_rename(args):
 
     print("Done.", file=sys.stderr)
     return 0
+
+
+# --- Contacts (backer service) ------------------------------------------------
+#
+# A newsletter addressed to "Send to everyone" goes to every backer whose
+# communication_status is "subscribed". There is no list to join, so a
+# subscribe request is a single contact write. This command never sends mail.
+
+def _backer_url(path="", query=""):
+    base = f"{GIVEBACKS_BACKER_API}/{CAUSE_ID}/backers{path}"
+    return f"{base}?{query}" if query else base
+
+
+def _eval_json(js, timeout=20):
+    """Evaluate a page expression that returns a JSON string. Returns the object."""
+    result = session.run("eval", js, timeout=timeout)
+    for line in result.stdout.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("###") or line.startswith("```"):
+            continue
+        try:
+            parsed = line
+            if parsed.startswith('"'):
+                parsed = json.loads(parsed)
+            return json.loads(parsed) if isinstance(parsed, str) else parsed
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return None
+
+
+COLLECTION_KEYS = ("backers", "data", "results", "items")
+
+
+def _backer_rows(payload):
+    """Unwrap the envelope. Returns a list of rows, or None if unrecognized.
+
+    None and [] mean different things: [] is an answered query with no match,
+    None is a shape we do not understand. Only the first proves absence.
+    """
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)] if all(
+            isinstance(r, dict) for r in payload) else None
+    if isinstance(payload, dict):
+        # A single contact returned bare.
+        if isinstance(payload.get("email"), str):
+            return [payload]
+        for key in COLLECTION_KEYS:
+            if key not in payload:
+                continue
+            val = payload[key]
+            if not isinstance(val, list):
+                return None          # data:null, backers:{}, data:{email:..}
+            if not all(isinstance(r, dict) for r in val):
+                return None
+            return val
+    return None
+
+
+# A lookup has three outcomes, and they must not be confused: the contact is
+# there, the contact is provably not there, or the lookup failed. Collapsing
+# the last two into None makes a transient API error look like a new address
+# and creates a duplicate contact on a live mailing list.
+LOOKUP_FAILED = object()
+
+
+def _find_backer(email):
+    """Return the contact, None when provably absent, or LOOKUP_FAILED."""
+    from urllib.parse import quote
+    url = _backer_url(
+        query=f"&search%5Bemail%5D%5Bvalue%5D={quote(email)}&join=AND&limit=10&offset=0"
+    )
+    js = (
+        f'() => fetch("{url}", {{credentials: "include"}}).then(r =>'
+        f' r.text().then(t => JSON.stringify({{ok: r.ok, status: r.status, body: t}})))'
+    )
+    envelope = _eval_json(js)
+    if not isinstance(envelope, dict) or "ok" not in envelope:
+        return LOOKUP_FAILED                      # no answer from the page
+    if not envelope.get("ok"):
+        print(f"  lookup returned HTTP {envelope.get('status')}", file=sys.stderr)
+        return LOOKUP_FAILED
+    try:
+        payload = json.loads(envelope.get("body") or "")
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return LOOKUP_FAILED
+    if isinstance(payload, dict) and payload.get("error"):
+        print(f"  lookup error: {str(payload.get('error'))[:120]}", file=sys.stderr)
+        return LOOKUP_FAILED
+    # Only a recognized collection proves absence.
+    rows = _backer_rows(payload)
+    if rows is None:
+        print("  lookup returned an unrecognized response shape", file=sys.stderr)
+        return LOOKUP_FAILED
+    for row in rows:
+        if (row.get("email") or "").strip().lower() == email.strip().lower():
+            return row
+    return None
+
+
+def _split_name(name):
+    """Split a display name into (first, last). Last name may be empty."""
+    parts = [p for p in (name or "").strip().split() if p]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+
+
+def cmd_subscribe(args):
+    """Add a contact to the newsletter audience, or re-subscribe an existing one.
+
+    Families email the newsletter address asking to be added. This turns one
+    such request into a contact with communication_status "subscribed".
+    It writes one contact and sends nothing.
+    """
+    email = (args.email or "").strip()
+    if "@" not in email:
+        print(f"ERROR: '{email}' is not an email address.", file=sys.stderr)
+        return 2
+
+    if not ensure_authenticated():
+        return 1
+
+    first, last = _split_name(getattr(args, "name", None))
+
+    existing = _find_backer(email)
+    if existing is LOOKUP_FAILED:
+        print(f"ERROR: could not check whether {email} is already a contact.",
+              file=sys.stderr)
+        print("Refusing to write, to avoid creating a duplicate.", file=sys.stderr)
+        return 1
+    if existing:
+        status = (existing.get("communication_status") or "").lower()
+        backer_id = existing.get("backer_id") or existing.get("uuid")
+        shown = (existing.get("name") or "").strip() or "(no name)"
+        if status == "subscribed":
+            print(f"Already subscribed: {email}  [{shown}]")
+            return 0
+        print(f"Contact exists as '{status}', re-subscribing: {email}", file=sys.stderr)
+        if getattr(args, "dry_run", False):
+            print(f"DRY RUN: would set {email} to subscribed.")
+            return 0
+        if not _set_subscribed(backer_id):
+            print(f"ERROR: could not re-subscribe {email}.", file=sys.stderr)
+            return 1
+    else:
+        if getattr(args, "dry_run", False):
+            who = f" as '{first} {last}'".rstrip() if first else ""
+            print(f"DRY RUN: would create {email}{who} and subscribe.")
+            return 0
+        if not _create_backer(email, first, last):
+            print(f"ERROR: could not create contact for {email}.", file=sys.stderr)
+            return 1
+
+    # Verify by reading the contact back, rather than trusting the write.
+    time.sleep(2)
+    check = _find_backer(email)
+    if check is LOOKUP_FAILED:
+        print(f"ERROR: wrote {email} but could not read it back to confirm.",
+              file=sys.stderr)
+        return 1
+    if not check:
+        print(f"ERROR: {email} not found after write.", file=sys.stderr)
+        return 1
+    status = (check.get("communication_status") or "?").lower()
+    if status != "subscribed":
+        print(f"ERROR: {email} is '{status}', not 'subscribed'.", file=sys.stderr)
+        return 1
+    shown = (check.get("name") or "").strip() or "(no name)"
+    print(f"Subscribed: {email}  [{shown}]")
+    return 0
+
+
+def _create_backer(email, first, last):
+    """POST a new contact. Returns True when the service accepts it."""
+    body = json.dumps({
+        "email": email,
+        "first_name": first,
+        "last_name": last,
+        "communication_status": "subscribed",
+    })
+    js = f'''() => fetch("{_backer_url()}", {{
+  method: "POST",
+  credentials: "include",
+  headers: {{"Content-Type": "application/json"}},
+  body: {json.dumps(body)}
+}}).then(r => r.text().then(t => JSON.stringify({{status: r.status, body: t.slice(0, 400)}})))'''
+    res = _eval_json(js, timeout=30)
+    if not res:
+        print("ERROR: no response from the contacts API.", file=sys.stderr)
+        return False
+    code = res.get("status")
+    if code and 200 <= int(code) < 300:
+        return True
+    print(f"ERROR: create returned {code}: {res.get('body', '')[:300]}", file=sys.stderr)
+    return False
+
+
+def _set_subscribed(backer_id):
+    """Flip an existing contact back to subscribed.
+
+    PUT is attempted only when PATCH is rejected as an unsupported verb
+    (404/405/501). Retrying a partial body after, say, a 500 risks replacing
+    a contact record with one field.
+    """
+    if not backer_id:
+        return False
+    body = json.dumps({"communication_status": "subscribed"})
+    for method in ("PATCH", "PUT"):
+        js = f'''() => fetch("{_backer_url('/' + str(backer_id))}", {{
+  method: "{method}",
+  credentials: "include",
+  headers: {{"Content-Type": "application/json"}},
+  body: {json.dumps(body)}
+}}).then(r => r.text().then(t => JSON.stringify({{status: r.status, body: t.slice(0, 300)}})))'''
+        res = _eval_json(js, timeout=30)
+        if not res or not res.get("status"):
+            print(f"  {method} got no response", file=sys.stderr)
+            return False
+        code = int(res["status"])
+        if 200 <= code < 300:
+            return True
+        print(f"  {method} returned {code}: {res.get('body', '')[:200]}",
+              file=sys.stderr)
+        if code not in (404, 405, 501):
+            return False              # a real rejection, not a missing verb
+    return False
