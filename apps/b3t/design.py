@@ -28,6 +28,12 @@ SPACER = P.format('&nbsp;')
 INTRO_TAIL = 'As always, remember to check out our'
 TAIL_HEADING = 'Donate to the Bear Paw Fund'
 
+# `![alt](src)`, optionally wrapped in a link: `[![alt](src)](href)`.
+IMAGE_LINE = re.compile(r'^\[?!\[([^\]]*)\]\(([^)]+)\)')
+
+# S3 puts a millisecond timestamp in front of every uploaded file name.
+S3_PREFIX = re.compile(r'^\d{10,}-')
+
 
 class DesignError(Exception):
     """Raised when the draft or the donor design is not shaped as expected."""
@@ -115,10 +121,54 @@ def md_to_html(lines):
     return '\n'.join(html)
 
 
+def _is_url(source):
+    return bool(re.match(r'^https?://', source))
+
+
+def image_key(source):
+    """Identity of an image across the draft, the CMS and S3.
+
+    Uploads come back with a millisecond prefix (`1789700664407-header.jpg`),
+    so the prefix is stripped. Names are qualified with the edition slug before
+    upload, which is what keeps this edition's `header.jpg` from matching the
+    last edition's.
+    """
+    name = source.split('?')[0].rstrip('/').split('/')[-1]
+    return S3_PREFIX.sub('', name).lower()
+
+
+def _set_image(values, source, alt=None, slug=None):
+    """Point one image content at `source`.
+
+    A URL is used as it stands. A path is a local file that has to go through
+    the CMS uploader, so the slot is left empty and marked pending.
+    """
+    if _is_url(source):
+        src = values.get('src') or {}
+        src['url'] = source
+        values['src'] = src
+        values.pop('_pending_upload', None)
+        values.pop('_upload_name', None)
+    else:
+        values['src'] = {'url': '', 'width': 1200, 'height': 1200,
+                         'dynamic': False, 'autoWidth': True}
+        values['_pending_upload'] = source
+        name = image_key(source)
+        values['_upload_name'] = f'{slug}-{name}' if slug else name
+    if alt:
+        values['altText'] = alt
+    return values
+
+
 # ------------------------------------------------------------ donor design
 
 def _contents(row):
     return [c for col in row.get('columns', []) for c in col.get('contents', [])]
+
+
+def _images(design):
+    return [c for r in design['body']['rows'] for c in _contents(r)
+            if c['type'] == 'image']
 
 
 def _row_text(row):
@@ -218,12 +268,9 @@ def build(draft_md, donor_design, slug='bt'):
         _contents(r)[0]['values']['text'] = html
         return r
 
-    def image_row(source_path):
+    def image_row(source, alt=None):
         r = clone(tpl['image'])
-        v = _contents(r)[0]['values']
-        v['src'] = {'url': '', 'width': 1200, 'height': 1200,
-                    'dynamic': False, 'autoWidth': True}
-        v['_pending_upload'] = source_path
+        _set_image(_contents(r)[0]['values'], source, alt, slug)
         return r
 
     # ---- parse the draft
@@ -241,8 +288,13 @@ def build(draft_md, donor_design, slug='bt'):
         raise DesignError('draft has no "%s" line' % INTRO_TAIL)
     # the intro starts after the header image line, which is the last image
     # reference above the At a Glance block
-    img_lines = [i for i, l in enumerate(lines[:intro_end])
-                 if re.match(r'^\[?!\[', l.strip())]
+    head_images = []
+    img_lines = []
+    for i, l in enumerate(lines[:intro_end]):
+        m = IMAGE_LINE.match(l.strip())
+        if m:
+            img_lines.append(i)
+            head_images.append((m.group(1), m.group(2)))
     if not img_lines:
         raise DesignError('draft has no header image line above the intro')
     intro_start = img_lines[-1] + 1
@@ -267,7 +319,7 @@ def build(draft_md, donor_design, slug='bt'):
         buf.clear()
 
     for ln in lines[body_start:body_end]:
-        img = re.match(r'^!\[([^\]]*)\]\(([^)]+)\)\s*$', ln.strip())
+        img = IMAGE_LINE.match(ln.strip())
         if ln.startswith('# '):
             flush()
             body_rows.append(heading_row('h1', ln[2:].strip()))
@@ -276,13 +328,20 @@ def build(draft_md, donor_design, slug='bt'):
             body_rows.append(heading_row('h3', ln[4:].strip()))
         elif img:
             flush()
-            body_rows.append(image_row(img.group(2)))
+            body_rows.append(image_row(img.group(2), img.group(1)))
         else:
             buf.append(ln)
     flush()
 
     # ---- assemble
     new_head = [clone(r) for r in head]
+    slots = [c for r in new_head for c in _contents(r) if c['type'] == 'image']
+    if len(slots) != len(head_images):
+        raise DesignError(
+            'masthead has %d image slot(s) but the draft has %d image line(s) '
+            'above the intro' % (len(slots), len(head_images)))
+    for slot, (alt, src) in zip(slots, head_images):
+        _set_image(slot['values'], src, alt, slug)
     for r in new_head:
         for c in _contents(r):
             if c['type'] == 'heading' and date:
@@ -295,37 +354,47 @@ def build(draft_md, donor_design, slug='bt'):
 
 
 def carry_image_urls(design, live_design):
-    """Copy image URLs from the live draft into a freshly built design.
+    """Fill pending image slots from images the CMS already holds.
 
-    A rebuild produces empty image slots. Without this a re-push would blank
-    the header and any flyers that were already uploaded to the CMS.
+    Matching is by name, not by position: a rebuild that adds or drops an
+    article image must not hand slot 3 the picture that belongs to slot 4.
+    Names are edition-qualified (see `image_key`), so an image carries over
+    only when it is literally the same upload, never because two editions
+    both called their masthead `header.jpg`.
     """
-    live = [c for r in live_design['body']['rows'] for c in _contents(r)
-            if c['type'] == 'image']
-    new = [c for r in design['body']['rows'] for c in _contents(r)
-           if c['type'] == 'image']
-    if len(live) != len(new):
-        return 0, 'image count differs (live %d, built %d)' % (len(live), len(new))
-    carried = 0
-    for c, src in zip(new, live):
-        url = src['values'].get('src', {}).get('url', '')
+    have = {}
+    for c in _images(live_design):
+        url = c['values'].get('src', {}).get('url', '')
         if url:
-            c['values']['src'] = copy.deepcopy(src['values']['src'])
-            c['values'].pop('_pending_upload', None)
-            carried += 1
-    return carried, None
+            have.setdefault(image_key(url), []).append(c)
+
+    carried, missed = 0, []
+    for c in _images(design):
+        name = c['values'].get('_upload_name')
+        if not name:
+            continue                      # already resolved: a URL in the draft
+        hits = have.get(image_key(name))
+        if not hits:
+            missed.append(c['values'].get('_pending_upload', name))
+            continue
+        c['values']['src'] = copy.deepcopy(hits.pop(0)['values']['src'])
+        c['values'].pop('_pending_upload', None)
+        c['values'].pop('_upload_name', None)
+        carried += 1
+
+    why = None
+    if missed:
+        why = '%d image(s) not in the CMS yet: %s' % (len(missed), ', '.join(missed))
+    return carried, why
 
 
 def pending_uploads(design):
-    """Image slots still waiting on a `b3t gb upload`, in placeholder order."""
+    """Image slots still waiting on an upload: (index, source path, name)."""
     out = []
-    idx = 0
-    for row in design['body']['rows']:
-        for c in _contents(row):
-            if c['type'] == 'image':
-                if not c['values'].get('src', {}).get('url'):
-                    out.append((idx, c['values'].get('_pending_upload', '?')))
-                idx += 1
+    for idx, c in enumerate(_images(design)):
+        if not c['values'].get('src', {}).get('url'):
+            out.append((idx, c['values'].get('_pending_upload', '?'),
+                        c['values'].get('_upload_name', '')))
     return out
 
 

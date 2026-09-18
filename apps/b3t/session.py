@@ -19,13 +19,32 @@ CDP_ATTACH_BASES = (
 CHROME_STARTUP_WAIT = 60  # 60 × 0.2s = 12s
 
 
-def run(*args, timeout=30):
-    """Run playwright-cli -s=b3t with given args. Returns CompletedProcess."""
-    cmd = ["playwright-cli", f"-s={SESSION_NAME}"] + list(args)
+MODAL_STUCK = "does not handle the modal state"
+
+
+def _raw_run(cmd, timeout):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(cmd, 124, "", "Timeout")
+
+
+def run(*args, timeout=30):
+    """Run playwright-cli -s=b3t with given args. Returns CompletedProcess.
+
+    A browser dialog left standing (Outlook's "Leave site?" on a composer with
+    unsaved text is the usual one) blocks every later call with "does not
+    handle the modal state", so one stuck prompt takes down the rest of the
+    session. Dismissing it means staying on the page and losing nothing, which
+    is the safe answer for a prompt nobody asked for.
+    """
+    cmd = ["playwright-cli", f"-s={SESSION_NAME}"] + list(args)
+    result = _raw_run(cmd, timeout)
+    blob = (result.stdout or "") + (result.stderr or "")
+    if MODAL_STUCK in blob:
+        _raw_run(["playwright-cli", f"-s={SESSION_NAME}", "dialog-dismiss"], 20)
+        result = _raw_run(cmd, timeout)
+    return result
 
 
 def is_running():

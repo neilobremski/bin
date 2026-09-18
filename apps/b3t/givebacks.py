@@ -3,7 +3,9 @@ import html as html_mod
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 
 import design as design_mod
@@ -23,7 +25,7 @@ def dispatch(args):
         return 1
     action = args.action
     if not action:
-        print("Usage: b3t givebacks <login|pull|build|push|send-preview|open|list|duplicate|upload|screenshot|subscribe>", file=sys.stderr)
+        print("Usage: b3t givebacks <login|pull|build|push|send-preview|open|list|duplicate|upload|images|screenshot|subscribe>", file=sys.stderr)
         return 2
     if action == "login":
         return cmd_login(args)
@@ -43,6 +45,8 @@ def dispatch(args):
         return cmd_duplicate(args)
     elif action == "upload":
         return cmd_upload(args)
+    elif action == "images":
+        return cmd_images(args)
     elif action == "screenshot":
         return cmd_screenshot(args)
     elif action == "rename":
@@ -328,6 +332,9 @@ def _run_code_json(js, timeout=15):
     return _parse_json_result(result.stdout)
 
 
+PLACEHOLDER_IMAGE = re.compile(r'(^|/)placeholder[-\w]*\.(png|jpe?g|gif)$', re.I)
+
+
 def _get_image_src(target_index):
     """Return src URL for image slot in Unlayer iframe, or empty string."""
     js = (
@@ -338,7 +345,12 @@ def _get_image_src(target_index):
         f'return await imgs[{target_index}].getAttribute("src") || ""; }} }} }} return ""; }}'
     )
     value = _run_code_json(js, timeout=10)
-    return value if isinstance(value, str) else ""
+    value = value if isinstance(value, str) else ""
+    # An unfilled slot still renders an <img>: Unlayer's own placeholder art.
+    # That is an empty slot, not a picture somebody put there.
+    if PLACEHOLDER_IMAGE.search(value):
+        return ""
+    return value
 
 
 def _wait_for_unlayer_images(min_count=1, timeout=40):
@@ -834,10 +846,11 @@ def cmd_build(args):
     pending = design_mod.pending_uploads(built)
     if pending:
         print("", file=sys.stderr)
-        print("Images still to upload:", file=sys.stderr)
-        for idx, src in pending:
-            print(f"  b3t gb upload --id {args.id or 'UUID'} "
-                  f"--image {edition_dir}/{src} --index {idx}", file=sys.stderr)
+        print(f"{len(pending)} image(s) still to upload:", file=sys.stderr)
+        for idx, src, name in pending:
+            print(f"  [{idx}] {src} -> {name}", file=sys.stderr)
+        print(f"  b3t gb images --edition {args.edition} "
+              f"--id {args.id or 'UUID'}", file=sys.stderr)
 
     if args.push:
         if not args.id:
@@ -1129,6 +1142,15 @@ def cmd_upload(args):
         print(f"ERROR: File not found: {image_path}", file=sys.stderr)
         return 1
 
+    # Upload under the edition-qualified name the design asked for. S3 keeps the
+    # file name, so this is what lets a later rebuild tell this edition's
+    # header.jpg from the last one's.
+    upload_name = getattr(args, "name", None)
+    if upload_name and upload_name != os.path.basename(image_path):
+        staged = os.path.join(tempfile.mkdtemp(prefix="b3t-upload-"), upload_name)
+        shutil.copy2(image_path, staged)
+        image_path = staged
+
     print(f"Uploading {os.path.basename(image_path)} to editor...", file=sys.stderr)
 
     # Open editor and resize viewport for full visibility
@@ -1149,6 +1171,13 @@ def cmd_upload(args):
     # Find image elements inside the Unlayer iframe (refs start with 'f')
     target_index = getattr(args, 'index', 0) or 0
     before_src = _get_image_src(target_index)
+    if getattr(args, "expect_empty", False) and before_src:
+        # The masthead logo is image 0 and never changes. Writing a new header
+        # over it is the mistake this guard exists to stop.
+        print(f"ERROR: image slot {target_index} already holds "
+              f"{before_src.split('/')[-1]}; refusing to overwrite it.",
+              file=sys.stderr)
+        return 1
     img_refs = []
     for line in snap.split("\n"):
         if "img" in line and "[ref=f" in line:
@@ -1233,6 +1262,62 @@ def cmd_upload(args):
     return 0
 
 
+
+
+def cmd_images(args):
+    """Upload every image slot the built design is still waiting on.
+
+    `gb build` leaves a local file reference in each slot it cannot resolve.
+    This walks those slots in order and uploads each one, so nobody has to work
+    out an image index by hand and put the wrong picture in the masthead.
+    """
+    edition_dir = os.path.join("editions", args.edition)
+    design_path = args.design or os.path.join(edition_dir, "wip",
+                                              "givebacks-design-new.json")
+    if not os.path.exists(design_path):
+        print(f"ERROR: {design_path} not found", file=sys.stderr)
+        return 1
+    with open(design_path) as f:
+        built = json.load(f)
+
+    pending = design_mod.pending_uploads(built)
+    if not pending:
+        print("No images are waiting on an upload.", file=sys.stderr)
+        return 0
+
+    # What the CMS already holds. An upload that succeeded on an earlier run
+    # must not be done twice, and a slot holding something else is a mismatch
+    # between this design and the live draft, not a slot to overwrite.
+    live = _fetch_design(args.id)
+    live_urls = []
+    if live:
+        live_urls = [c['values'].get('src', {}).get('url', '')
+                     for c in design_mod._images(live)]
+
+    done = 0
+    for idx, src, name in pending:
+        path = src if os.path.isabs(src) else os.path.join(edition_dir, src)
+        if not os.path.exists(path):
+            print(f"ERROR: image slot {idx} points at {path}, which is missing.",
+                  file=sys.stderr)
+            return 1
+        held = live_urls[idx] if idx < len(live_urls) else ''
+        if held:
+            if design_mod.image_key(held) == design_mod.image_key(name):
+                print(f"[{idx}] {name}: already uploaded.", file=sys.stderr)
+                done += 1
+                continue
+            print(f"ERROR: image slot {idx} should take {name} but the live "
+                  f"draft holds {held.split('/')[-1]}.", file=sys.stderr)
+            return 1
+        print(f"[{idx}] {path} -> {name}", file=sys.stderr)
+        up = type("A", (), {"id": args.id, "image": path, "index": idx,
+                            "name": name, "expect_empty": True})()
+        if cmd_upload(up) != 0:
+            return 1
+    print(f"{len(pending) - done} image(s) uploaded, {done} already in place.",
+          file=sys.stderr)
+    return 0
 
 
 def cmd_screenshot(args):

@@ -31,3 +31,5 @@ venv/
 
 # macOS
 .DS_Store
+# Browser session state (cookies, auth)
+.playwright-cli/

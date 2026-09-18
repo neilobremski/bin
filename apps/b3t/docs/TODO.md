@@ -9,6 +9,28 @@
 - [ ] **`edition update DATE --field value`** — Update manifest fields (status, draft_id, archive_url) as edition progresses through phases.
 - [ ] **SQLite content index** — `~/.b3t-content.db` indexing all gathered content across editions/sources. Tables: `content_items`, `editions`, `sources`. Commands: `b3t index rebuild`, `b3t index query --since DATE`, `b3t index duplicates`. Eliminates rediscovery cost for cheaper agents.
 
+- [ ] **`gb subscribe` write contract** — Captured the real Add Contact form
+  2026-09-17. Three fixes needed: (1) send the wrapped `cause_backer` payload
+  with explicit `in_directory: false`, not a flat body; (2) treat an
+  "Anonymous" response as a shielded-address FAILURE and name it, instead of
+  reporting a bare 201 as success; (3) use `/contacts` and warm the app
+  through `/dashboard` first, because a wrong admin path returns an empty
+  shell that shimmers forever rather than a 404. Evidence in
+  `editions/2026-09-20/wip/subscribe-queue.md`.
+
+- [ ] **Scrapers drop link URLs** — `ps save` and `ol read` both emit link
+  TEXT and discard the href. The RMS band fundraiser came through as "Car Wash
+  Fundraiser:" with no link, and the Math Club submission lost all three of its
+  pages. Both had to be recovered by hand from the live DOM, and one of them
+  only existed inside a QR code on an image. Any submission whose value IS the
+  link is silently gutted. Emit `[text](href)` for anchors in both.
+
+- [ ] **Multi-line bold breaks the builder** — `**bold**` spanning a line break
+  in draft.md reaches the newsletter as literal asterisks, because the markdown
+  is converted one line at a time. Caught only by reading the preview email on
+  2026-09-17; the draft had to be reflowed by hand. `md_to_html` should join a
+  paragraph's lines before converting emphasis.
+
 ## Medium Priority
 
 - [ ] **`osp archive --edition DATE --html FILE`** — Has code, never tested end-to-end. Needs verification.
@@ -45,6 +67,38 @@
 - [x] `whatsapp list/sweep/save` — Group chat sweep via `data-pre-plain-text`
 - [x] `gemini generate` — Template upload + prompt + download
 - [x] Constants moved to `.env` — Source code is org-agnostic
+
+## From September 2026 production run
+
+- [x] **Masthead slots are named, not counted** — The Sep 20 edition went out
+  to preview with the new header above the date and the previous edition's
+  header below it, because `gb upload --index 0` counts images in the editor
+  and image 0 is the fixed logo. `gb build` now fills both masthead slots from
+  the draft's own image lines, in order.
+- [x] **`gb images --edition D --id UUID`** — Uploads every image the built
+  design is waiting on, in slot order, and skips ones already in the CMS.
+  Replaces working out an `--index` by hand.
+- [x] **Uploads are edition-qualified** (`20260920-header.jpg`), so a rebuild
+  can no longer carry last edition's masthead just because both files were
+  called `header.jpg`. `carry_image_urls` matches by name, not position.
+- [x] **`gb upload --expect-empty`** refuses a slot that already holds an
+  image; Unlayer's own placeholder art counts as empty.
+- [x] **`ol reply --match NAME --file body.md`** — Reply All in the original
+  thread, saved as a draft, never sent. Subscribe and unsubscribe answers
+  belong on the request they answer; `ol draft` stays for board mail only.
+- [x] **An open composer took down the next command** — Outlook's
+  unsaved-changes prompt is an event listener, so clearing `onbeforeunload`
+  does not stop it, and the standing dialog blocked every later call with
+  "does not handle the modal state". `session.run` now dismisses a stuck
+  dialog and retries once, and every folder switch leaves the composer first.
+- [x] **`ol read --dir` never downloaded anything** — it looked for a Download
+  menuitem (it is a button) and then for the file in `.playwright-cli` (it
+  lands in ~/Downloads).
+- [ ] **`ol reply` cannot answer a thread that already holds a draft** — it
+  stops rather than adding a second one. Editing the existing draft would be
+  better.
+- [ ] **Message list is virtualised** — `--match` scrolls the list to find a
+  message further down. Outlook search would be steadier than wheel events.
 
 ## From August 2026 production run
 - [ ] **`gb duplicate` broken twice over**: (1) the Mantine kebab menu opens on
