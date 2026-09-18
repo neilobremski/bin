@@ -627,6 +627,11 @@ def _design_blocks(design, chunk=100):
     return out
 
 
+def _list_tag_counts(html):
+    """How many list tags the design's own text carries."""
+    return {t: len(re.findall("<" + t, html, re.I)) for t in ("ul", "ol", "li")}
+
+
 def _raw_html_is_current(message_id, design):
     """True when the CMS's sent-HTML matches the design we just pushed.
 
@@ -640,6 +645,16 @@ def _raw_html_is_current(message_id, design):
     blocks = _design_blocks(design)
     if not blocks:
         return None, "design has no text to compare"
+
+    # Text alone does not prove the HTML matches. Rewrapping a list changes the
+    # markup and not a word of the wording, and that difference went out to a
+    # preview unnoticed. List tags come only from our own text blocks, so their
+    # counts are a structural fingerprint the renderer does not add to.
+    wanted = _list_tag_counts("".join(
+        c.get("values", {}).get("text", "")
+        for r in design.get("body", {}).get("rows", [])
+        for col in r.get("columns", []) for c in col.get("contents", [])
+        if c.get("type") == "text"))
 
     # The marks go inline rather than through localStorage: writing storage
     # first was disturbing the page's session, and the follow-up fetch came
@@ -657,8 +672,10 @@ def _raw_html_is_current(message_id, design):
     .replace(/\u00a0/g, " ").replace(/\u2019/g, "'")
     .replace(/\s+/g, " ").trim();
   const missing = marks.filter(m => !plain.includes(m));
+  const count = t => (raw.match(new RegExp("<" + t, "gi")) || []).length;
   return JSON.stringify({{len: raw.length, plain: plain.length, total: marks.length,
-                         missing: missing.length, sample: missing.slice(0, 2)}});
+                         missing: missing.length, sample: missing.slice(0, 2),
+                         tags: {{ul: count("ul"), ol: count("ol"), li: count("li")}}}});
 }}"""
     raw = _eval(js, timeout=45)
     try:
@@ -674,6 +691,13 @@ def _raw_html_is_current(message_id, design):
         sample = "; ".join(info.get("sample", []))[:120]
         return False, "%d of %d blocks missing from the sent HTML (e.g. %s)" % (
             info["missing"], info["total"], sample)
+
+    got = info.get("tags") or {}
+    off = {t: (n, got.get(t)) for t, n in wanted.items() if got.get(t) != n}
+    if off:
+        return False, "sent HTML has different markup: " + ", ".join(
+            "%d <%s> in the design, %s sent" % (n, t, sent)
+            for t, (n, sent) in sorted(off.items()))
     return True, "sent HTML matches the design (%d bytes, %d blocks checked)" % (
         info.get("len", 0), info.get("total", 0))
 

@@ -159,3 +159,17 @@ def test_last_editions_header_is_never_carried_over(built):
     assert carried == 0
     assert "header.jpg" in why
     assert images(built)[1]["values"]["src"]["url"] == ""
+
+
+def test_a_wrapped_bullet_stays_one_item():
+    """A bullet that wraps kept its tail as a stray paragraph, and any bold
+    crossing the wrap reached the newsletter as literal asterisks."""
+    html = design.md_to_html([
+        "* **Tickets are $12 each** and the band keeps",
+        "  **$9.50 of every ticket**.",
+        "* Second item.",
+    ])
+    assert html.count("<li") == 2
+    assert "<p" not in html
+    assert "**" not in html
+    assert "keeps <strong>$9.50 of every ticket</strong>." in html

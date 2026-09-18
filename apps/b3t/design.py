@@ -94,8 +94,17 @@ def md_to_html(lines):
         if ln.lstrip().startswith(('* ', '- ')):
             items = []
             while i < len(lines) and lines[i].lstrip().startswith(('* ', '- ')):
-                items.append(LI.format(inline(lines[i].lstrip()[2:].strip())))
+                text = lines[i].lstrip()[2:].strip()
                 i += 1
+                # A wrapped bullet carries on into the next line. Converting
+                # that line separately makes it its own paragraph below the
+                # list, and any **bold** crossing the wrap arrives in the
+                # newsletter as literal asterisks.
+                while (i < len(lines) and lines[i].strip()
+                       and not lines[i].lstrip().startswith(('* ', '- ', '|', '#'))):
+                    text += ' ' + lines[i].strip()
+                    i += 1
+                items.append(LI.format(inline(text)))
             blocks.append(('ul', '<ul>\n' + '\n'.join(items) + '\n</ul>'))
             continue
         if ln.lstrip().startswith('|'):
