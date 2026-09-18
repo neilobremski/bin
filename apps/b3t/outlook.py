@@ -5,6 +5,7 @@ Usage:
     b3t outlook check --folder Inbox     # List Inbox messages
     b3t outlook read 1                   # Read message #1 (expand full thread)
     b3t outlook draft --file note.md     # Create an unaddressed draft in Drafts
+    b3t outlook reply --match Uthraa --file reply.md   # Reply all, saved as a draft
     b3t outlook login                    # Verify M365 auth
 
 Flow:
@@ -24,7 +25,7 @@ from constants import OUTLOOK_URL
 def dispatch(args):
     action = args.action
     if not action:
-        print("Usage: b3t outlook <login|check|read|draft>", file=sys.stderr)
+        print("Usage: b3t outlook <login|check|read|draft|reply>", file=sys.stderr)
         return 2
     if action == "login":
         return cmd_login(args)
@@ -34,6 +35,8 @@ def dispatch(args):
         return cmd_read(args)
     elif action == "draft":
         return cmd_draft(args)
+    elif action == "reply":
+        return cmd_reply(args)
     return 2
 
 
@@ -61,22 +64,157 @@ def _find_ref(snapshot_text, test_fn):
     return None
 
 
-def _click_folder(folder_name):
-    """Click a folder in the Outlook sidebar."""
-    snap = session.snapshot()
-    if not snap:
+def _suppress_unload_guard():
+    """Silence the unsaved-changes prompt for one intended navigation.
+
+    Leaving a dirty composer raises a beforeunload prompt, and that prompt
+    blocks every later playwright call with "does not handle the modal
+    state", so one draft per session would succeed and the rest would fail.
+    The previous handler is kept so normal protection can be put back: this
+    is scoped to the navigation, not switched off for the session.
+    """
+    session.run("eval",
+                "() => { if (!('__b3tPrevUnload' in window)) "
+                "{ window.__b3tPrevUnload = window.onbeforeunload; } "
+                "window.onbeforeunload = null; return true; }",
+                timeout=15)
+
+
+def _restore_unload_guard():
+    """Put the page's own unsaved-changes protection back."""
+    session.run("eval",
+                "() => { if ('__b3tPrevUnload' in window) "
+                "{ window.onbeforeunload = window.__b3tPrevUnload; "
+                "delete window.__b3tPrevUnload; } return true; }",
+                timeout=15)
+
+
+def _eval_json(js, timeout=20):
+    """Run a page expression that returns a JSON string, and parse it.
+
+    playwright-cli hands back the value JSON-encoded, so a string result
+    arrives double-encoded. None means the call failed or returned nothing
+    usable, which callers must not read as "the page said no".
+    """
+    result = session.run("--raw", "eval", js, timeout=timeout)
+    try:
+        value = json.loads((result.stdout or "").strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return value
+    return value
+
+
+def _close_open_composer():
+    """Leave a composer that is still open, without losing what it holds.
+
+    Outlook's unsaved-changes prompt is registered as an event listener, so
+    clearing `window.onbeforeunload` does not stop it, and an open composer
+    arms that prompt for whatever the next command tries to do. A full
+    composer has a Close button, which saves. An inline reply has none, so
+    the way out is to reload the mailbox and answer the prompt with Leave.
+
+    Leave discards. So it is only taken when there is provably nothing to
+    lose: Outlook says the draft is saved, or the composer is empty. A
+    composer that is neither is left alone and reported, because the caller
+    failing is better than somebody's half-written mail disappearing.
+
+    Returns True when no composer is in the way.
+    """
+    state = _eval_json(r"""() => {
+  const b = document.querySelector('div[aria-label="Message body"][contenteditable="true"]');
+  if (!b) return JSON.stringify({open: false});
+  const btn = [...document.querySelectorAll('button')]
+    .find(e => /^close$/i.test((e.getAttribute('aria-label') || e.textContent || '').trim()));
+  const page = document.body.innerText.replace(/\s+/g, ' ');
+  const to = (document.querySelector('div[aria-label="To"]')?.innerText || '')
+    .replace(/[\u200b\s]+/g, ' ').trim();
+  return JSON.stringify({
+    open: true,
+    hasClose: !!btn,
+    saved: /draft saved at /i.test(page),
+    empty: !(b.innerText || '').trim() && !to
+  });
+}""", timeout=15)
+    if not isinstance(state, dict) or not state.get("open"):
+        return True
+
+    if state.get("hasClose"):
+        # Close saves the draft, so this needs no permission.
+        session.run("eval", """() => {
+  const b = [...document.querySelectorAll('button')]
+    .find(e => /^close$/i.test((e.getAttribute('aria-label') || e.textContent || '').trim()));
+  if (b) b.click();
+  return 'CLOSED';
+}""", timeout=15)
+        time.sleep(3)
+        return True
+
+    if not (state.get("saved") or state.get("empty")):
+        print("ERROR: a reply composer is open with unsaved text. Finish or "
+              "discard it in Outlook; b3t will not throw it away.",
+              file=sys.stderr)
         return False
 
-    # Look for treeitem with the folder name
-    ref = _find_ref(snap, lambda l: f'"{folder_name}"' in l and "treeitem" in l.lower())
-    if not ref:
-        # Fallback: look for generic with folder name inside a treeitem context
-        ref = _find_ref(snap, lambda l: folder_name in l and "treeitem" in l.lower())
+    session.run("goto", OUTLOOK_URL, timeout=60)
+    # Leave: the draft is saved, or there is nothing in it.
+    session.run("dialog-accept", timeout=20)
+    time.sleep(4)
+    return True
+
+
+def _click_folder(folder_name):
+    """Click a folder in the Outlook sidebar.
+
+    An open composer with unsaved text raises a beforeunload prompt on the way
+    out, and that prompt blocks every later playwright call with "does not
+    handle the modal state". The guard is lifted for this one navigation and
+    put straight back.
+    """
+    # Leave any open composer first: it arms the unsaved-changes prompt, and
+    # leaving it can navigate, which would make the refs found below stale.
+    if not _close_open_composer():
+        return False
+
+    # The folder tree renders after the page itself, so one snapshot taken too
+    # early reports a mailbox with no folders in it.
+    ref = None
+    for _ in range(5):
+        snap = session.snapshot()
+        if snap:
+            ref = _find_ref(snap, lambda l: f'"{folder_name}"' in l and "treeitem" in l.lower())
+            if not ref:
+                ref = _find_ref(snap, lambda l: folder_name in l and "treeitem" in l.lower())
+        if ref:
+            break
+        time.sleep(2)
     if ref:
+        _suppress_unload_guard()
         session.run("click", ref)
         time.sleep(2)
+        _restore_unload_guard()
         return True
     return False
+
+
+def selected_ref(snap):
+    """The ref of the message row the reading pane is showing, if any.
+
+    The ref is extracted and returned whole. Testing `ref in line` instead
+    accepts a different row whose ref merely starts the same way: `e1` is a
+    substring of `e10`, and replying to the wrong person is not an error
+    anyone catches by reading the output.
+    """
+    for line in (snap or "").split("\n"):
+        if "[selected]" in line and "option" in line.lower():
+            m = re.search(r'\[ref=(\w+)\]', line)
+            if m:
+                return m.group(1)
+    return None
 
 
 def _parse_messages(snap):
@@ -420,8 +558,12 @@ def cmd_read(args):
         # Download attachments if --dir specified
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
-            pw_dir = os.path.join(os.getcwd(), ".playwright-cli")
-            existing = set(os.listdir(pw_dir)) if os.path.isdir(pw_dir) else set()
+            # A download lands wherever the browser puts it: the CDP Chrome
+            # uses ~/Downloads, a playwright-launched one uses its own session
+            # directory. Watch both, or the file is reported as never arriving.
+            watch = [os.path.join(os.getcwd(), ".playwright-cli"),
+                     os.path.expanduser("~/Downloads")]
+            existing = {d: set(os.listdir(d)) for d in watch if os.path.isdir(d)}
 
             for att in attachments:
                 # Click attachment to open preview
@@ -430,28 +572,35 @@ def cmd_read(args):
 
                 # Find and click Download in the preview
                 snap2 = session.snapshot()
-                dl_ref = _find_ref(snap2, lambda l: "Download" in l and "menuitem" in l.lower())
+                # The preview's Download control is a button. It was only ever
+                # looked for as a menuitem, so --dir downloaded nothing.
+                dl_ref = _find_ref(snap2, lambda l: "Download" in l and (
+                    "button" in l.lower() or "menuitem" in l.lower()))
                 if dl_ref:
                     session.run("click", dl_ref)
                     time.sleep(3)
 
                     # Close preview
-                    close_ref = _find_ref(session.snapshot() or "", lambda l: "Close" in l and "menuitem" in l.lower())
+                    close_ref = _find_ref(session.snapshot() or "", lambda l: "Close" in l and (
+                        "button" in l.lower() or "menuitem" in l.lower()))
                     if close_ref:
                         session.run("click", close_ref)
                         time.sleep(1)
 
             # Move downloaded files to output dir
-            if os.path.isdir(pw_dir):
-                current = set(os.listdir(pw_dir))
-                new_files = [f for f in (current - existing)
-                             if not f.startswith("page-") and not f.endswith(".yml") and not f.endswith(".log")]
-                for f in new_files:
-                    src = os.path.join(pw_dir, f)
+            moved = 0
+            for d, before in existing.items():
+                for f in sorted(set(os.listdir(d)) - before):
+                    if (f.startswith("page-") or f.endswith((".yml", ".log"))
+                            or f.endswith(".crdownload") or f.startswith(".")):
+                        continue
                     dst = os.path.join(output_dir, f)
-                    shutil.move(src, dst)
+                    shutil.move(os.path.join(d, f), dst)
                     print(f"  Downloaded: {dst}", file=sys.stderr)
                     print(dst)
+                    moved += 1
+            if not moved:
+                print("  WARNING: no attachment file appeared.", file=sys.stderr)
 
     if not thread_msgs and not reading_pane:
         print("=== Raw ===")
@@ -489,29 +638,239 @@ def parse_draft_file(text):
     return subject, body.strip()
 
 
-def _suppress_unload_guard():
-    """Silence the unsaved-changes prompt for one intended navigation.
 
-    Leaving a dirty composer raises a beforeunload prompt, and that prompt
-    blocks every later playwright call with "does not handle the modal
-    state", so one draft per session would succeed and the rest would fail.
-    The previous handler is kept so normal protection can be put back: this
-    is scoped to the navigation, not switched off for the session.
+
+
+def cmd_reply(args):
+    """Draft a Reply All to a message, in its own thread, without sending.
+
+    Subscribe and unsubscribe answers belong on the request they answer: the
+    person sees their own words underneath, and the thread stays searchable
+    next time they write in. A new standalone draft loses all of that, which is
+    why this command exists and why `ol draft` is only for board mail.
+
+    Like `ol draft`, it stops at a saved draft. Nothing here clicks Send.
     """
-    session.run("eval",
-                "() => { if (!('__b3tPrevUnload' in window)) "
-                "{ window.__b3tPrevUnload = window.onbeforeunload; } "
-                "window.onbeforeunload = null; return true; }",
-                timeout=15)
+    if not os.path.exists(args.file):
+        print(f"ERROR: {args.file} not found", file=sys.stderr)
+        return 1
 
+    _, body = parse_draft_file(open(args.file).read())
+    if not body:
+        print("ERROR: the reply body is empty.", file=sys.stderr)
+        return 1
 
-def _restore_unload_guard():
-    """Put the page's own unsaved-changes protection back."""
-    session.run("eval",
-                "() => { if ('__b3tPrevUnload' in window) "
-                "{ window.onbeforeunload = window.__b3tPrevUnload; "
-                "delete window.__b3tPrevUnload; } return true; }",
-                timeout=15)
+    if not _ensure_outlook():
+        return 1
+
+    folder = getattr(args, "folder", None) or "Inbox"
+    if not _click_folder(folder):
+        print(f"ERROR: Could not find folder '{folder}' in sidebar.", file=sys.stderr)
+        return 1
+
+    snap = session.snapshot()
+    if not snap:
+        print("ERROR: Cannot get page snapshot.", file=sys.stderr)
+        return 1
+    messages = _parse_messages(snap)
+    if not messages:
+        print(f"ERROR: no messages visible in {folder}.", file=sys.stderr)
+        return 1
+
+    match = getattr(args, "match", None)
+    if match:
+        hits = [m for m in messages if match.lower() in m["text"].lower()]
+        # The message list is virtualised: a snapshot only holds the rows that
+        # are on screen, so a message further down reads as "not there".
+        for _ in range(8):
+            if hits:
+                break
+            session.run("run-code", "--raw",
+                        'async function main(page){ const l = page.locator'
+                        '("[role=listbox]").first(); const b = await '
+                        'l.boundingBox(); if (!b) return "no list"; '
+                        'await page.mouse.move(b.x + b.width / 2, '
+                        'b.y + b.height / 2); await page.mouse.wheel(0, 600); '
+                        'return "ok"; }',
+                        timeout=20)
+            time.sleep(1)
+            snap = session.snapshot() or ""
+            messages = _parse_messages(snap)
+            hits = [m for m in messages if match.lower() in m["text"].lower()]
+        if not hits:
+            print(f"ERROR: no message in {folder} matches {match!r}.", file=sys.stderr)
+            return 1
+        if len(hits) > 1:
+            # Replying to the wrong person's thread is not a recoverable
+            # mistake, so an ambiguous match stops rather than guesses.
+            print(f"ERROR: {len(hits)} messages match {match!r}:", file=sys.stderr)
+            for m in hits[:5]:
+                print(f"  {m['text'][:90]}", file=sys.stderr)
+            return 1
+        target = hits[0]
+    else:
+        n = int(getattr(args, "number", 1) or 1)
+        if n < 1 or n > len(messages):
+            print(f"ERROR: message #{n} not found. {len(messages)} visible.", file=sys.stderr)
+            return 1
+        target = messages[n - 1]
+
+    print(f"Replying to: {target['text'][:80]}", file=sys.stderr)
+    click = session.run("click", target["ref"])
+    if click.returncode != 0:
+        print(f"ERROR: could not open that message: "
+              f"{(click.stderr or click.stdout or '').strip()[:160]}", file=sys.stderr)
+        return 1
+    time.sleep(3)
+
+    # A click that lands nowhere (a stale ref, a list that re-rendered) leaves
+    # the PREVIOUS message in the reading pane, and everything below here would
+    # then reply to the wrong person. Confirm the pane is showing this one, and
+    # remember who it is from.
+    opened = None
+    for _ in range(5):
+        snap = session.snapshot() or ""
+        if selected_ref(snap) == target["ref"]:
+            pane_from = parse_reading_pane(snap)[1]
+            opened = pane_from[0] if pane_from else None
+            break
+        time.sleep(2)
+    else:
+        print("ERROR: the reading pane is not showing the message that was "
+              "asked for; refusing to reply to whatever is open.", file=sys.stderr)
+        return 1
+
+    wanted = "Reply all" if getattr(args, "all", True) else "Reply"
+    # The reading pane renders its action bar a beat after the row is selected,
+    # so a single snapshot reports no Reply all button on a message that has one.
+    ref, snap = None, ""
+    for _ in range(10):
+        snap = session.snapshot() or ""
+        ref = _find_ref(snap, lambda l, w=wanted: re.search(
+            r'button "%s"' % re.escape(w), l))
+        if ref:
+            break
+        time.sleep(2)
+    if not ref:
+        if "[Draft]" in target["text"]:
+            print("ERROR: this thread already holds a draft reply. Finish or "
+                  "discard it first; b3t will not add a second one.",
+                  file=sys.stderr)
+        else:
+            print(f"ERROR: no '{wanted}' button in the reading pane.", file=sys.stderr)
+        return 1
+    session.run("click", ref)
+    time.sleep(4)
+
+    code = (
+        "async function main(page){"
+        "  const body = " + json.dumps(body) + ";"
+        # The reading pane labels the message it is showing "Message body" as
+        # well. Only the composer's copy is editable, and picking the other one
+        # fails the fill outright.
+        "  const b = page.locator('div[aria-label=\"Message body\"][contenteditable=\"true\"]').first();"
+        "  await b.waitFor({state: 'visible', timeout: 30000});"
+        "  await page.waitForTimeout(1500);"
+        # The reply composer takes focus before it is ready to keep what is
+        # typed into it, and swallowed a whole body the first time out.
+        # Outlook finishes opening a reply by putting the caret in To, and it
+        # does that a moment AFTER the body is on screen. Keystrokes sent
+        # across that moment end up split between the two fields, and every
+        # comma in the stray half becomes a recipient chip. So: wait for focus
+        # to settle, then write the body in one operation rather than
+        # keystroke by keystroke.
+        "  const focus = async () => await page.evaluate(() =>"
+        "    (document.activeElement && document.activeElement.getAttribute('aria-label')) || '');"
+        "  let last = await focus();"
+        "  for (let i = 0; i < 15; i++) {"
+        "    await page.waitForTimeout(1000);"
+        "    const now = await focus();"
+        "    if (now === last) break;"
+        "    last = now;"
+        "  }"
+        "  await b.click();"
+        "  await page.waitForTimeout(500);"
+        "  await b.fill(body);"
+        "  await page.waitForTimeout(1500);"
+        "  const typed = (await b.innerText()).trim().length;"
+        "  if (!typed) { return JSON.stringify({focus: false}); }"
+        "  let saved = '';"
+        "  for (let i = 0; i < 30; i++) {"
+        "    await page.waitForTimeout(2000);"
+        "    const t = await page.evaluate(() => document.body.innerText.replace(/\\s+/g, ' '));"
+        "    const m = t.match(/draft saved at [^ ]+ ?[AP]?M?/i);"
+        "    if (m) { saved = m[0].trim(); break; }"
+        "  }"
+        # The recipient chips render a beat after the composer does, and an
+        # empty-looking To is a zero-width space, not an empty string.
+        "  const recipients = async () => await page.evaluate(() =>"
+        "    (document.querySelector('div[aria-label=\"To\"]')?.innerText || '')"
+        "      .replace(/[\\u200b\\s]+/g, ' ').trim());"
+        "  for (let i = 0; i < 10 && !(await recipients()); i++) {"
+        "    await page.waitForTimeout(1000);"
+        "  }"
+        "  return JSON.stringify(await page.evaluate((sv) => ({"
+        "    saved: sv,"
+        "    to: (document.querySelector('div[aria-label=\"To\"]')?.innerText || '')"
+        "          .replace(/[\\u200b\\s]+/g, ' ').trim(),"
+        "    cc: (document.querySelector('div[aria-label=\"Cc\"]')?.innerText || '').trim(),"
+        "    len: (document.querySelector('div[aria-label=\"Message body\"][contenteditable=\"true\"]')?.innerText || '').trim().length"
+        "  }), saved));"
+        "}"
+    )
+    result = session.run("run-code", "--raw", code, timeout=300)
+    try:
+        info = json.loads(json.loads((result.stdout or "").strip()))
+    except (json.JSONDecodeError, ValueError):
+        print(f"ERROR: could not fill the reply: {(result.stdout or '').strip()[:200]}",
+              file=sys.stderr)
+        return 1
+
+    # The whole point of a reply is that it is addressed. An empty To means
+    # this became an orphan draft, which is the thing being fixed here.
+    if info.get("focus") is False:
+        print("ERROR: the composer never took focus in the message body; "
+              "nothing was typed.", file=sys.stderr)
+        return 1
+    if not info.get("to"):
+        print("ERROR: the reply has no recipient; leaving the composer open.",
+              file=sys.stderr)
+        return 1
+    # A recipient is not the RIGHT recipient. The reply must be addressed to
+    # whoever sent the message that was opened.
+    if opened and opened.lower() not in info.get("to", "").lower():
+        print(f"ERROR: this reply is addressed to {info['to']!r}, not to "
+              f"{opened}, who sent the message. Leaving the composer open.",
+              file=sys.stderr)
+        return 1
+    # Prose in the recipient list means part of the body was typed into To,
+    # where every comma becomes its own chip. Compare against the body itself
+    # rather than guessing from length: names and addresses run long too.
+    flat_body = " ".join(body.split())
+    probe = flat_body[len(flat_body) // 2:][:30].strip()
+    if probe and probe in " ".join(info.get("to", "").split()):
+        print("ERROR: text from the body landed in the To field; leaving the "
+              "composer open so it can be cleared by hand.", file=sys.stderr)
+        return 1
+    if not info.get("len"):
+        print("ERROR: the reply body did not take.", file=sys.stderr)
+        return 1
+    if not info.get("saved"):
+        print("ERROR: Outlook never reported the draft as saved; leaving the "
+              "composer open so nothing is lost.", file=sys.stderr)
+        return 1
+
+    print(f"  To: {info['to']}", file=sys.stderr)
+    if info.get("cc"):
+        print(f"  Cc: {info['cc']}", file=sys.stderr)
+    print(f"  Body: {info['len']} characters", file=sys.stderr)
+    print(f"  Outlook reports: {info['saved']}", file=sys.stderr)
+
+    # Close the composer, never Send. An open composer also leaves an
+    # unsaved-changes prompt armed, which blocks the next command.
+    _close_open_composer()
+    print("Reply draft saved in the thread. It is not sent.", file=sys.stderr)
+    return 0
 
 
 def cmd_draft(args):
@@ -634,9 +993,7 @@ def cmd_draft(args):
         "  })));"
         "}"
     )
-    _suppress_unload_guard()
     _click_folder("Drafts")
-    _restore_unload_guard()
     time.sleep(3)
     vres = session.run("run-code", "--raw", verify, timeout=120)
     try:

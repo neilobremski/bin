@@ -3,7 +3,9 @@ import html as html_mod
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 
 import design as design_mod
@@ -23,7 +25,7 @@ def dispatch(args):
         return 1
     action = args.action
     if not action:
-        print("Usage: b3t givebacks <login|pull|build|push|send-preview|open|list|duplicate|upload|screenshot|subscribe>", file=sys.stderr)
+        print("Usage: b3t givebacks <login|pull|build|push|send-preview|open|list|duplicate|upload|images|screenshot|subscribe>", file=sys.stderr)
         return 2
     if action == "login":
         return cmd_login(args)
@@ -43,6 +45,8 @@ def dispatch(args):
         return cmd_duplicate(args)
     elif action == "upload":
         return cmd_upload(args)
+    elif action == "images":
+        return cmd_images(args)
     elif action == "screenshot":
         return cmd_screenshot(args)
     elif action == "rename":
@@ -328,6 +332,9 @@ def _run_code_json(js, timeout=15):
     return _parse_json_result(result.stdout)
 
 
+PLACEHOLDER_IMAGE = re.compile(r'(^|/)placeholder[-\w]*\.(png|jpe?g|gif)$', re.I)
+
+
 def _get_image_src(target_index):
     """Return src URL for image slot in Unlayer iframe, or empty string."""
     js = (
@@ -338,7 +345,12 @@ def _get_image_src(target_index):
         f'return await imgs[{target_index}].getAttribute("src") || ""; }} }} }} return ""; }}'
     )
     value = _run_code_json(js, timeout=10)
-    return value if isinstance(value, str) else ""
+    value = value if isinstance(value, str) else ""
+    # An unfilled slot still renders an <img>: Unlayer's own placeholder art.
+    # That is an empty slot, not a picture somebody put there.
+    if PLACEHOLDER_IMAGE.search(value):
+        return ""
+    return value
 
 
 def _wait_for_unlayer_images(min_count=1, timeout=40):
@@ -615,6 +627,17 @@ def _design_blocks(design, chunk=100):
     return out
 
 
+def _list_tag_counts(html):
+    """How many list tags the design's own text carries.
+
+    The tag name is bounded: an unbounded "<li" also counts every <link>, and
+    a single stylesheet link in the rendered mail would report the design as
+    stale for ever.
+    """
+    return {t: len(re.findall("<%s(?=[\\s/>])" % t, html, re.I))
+            for t in ("ul", "ol", "li")}
+
+
 def _raw_html_is_current(message_id, design):
     """True when the CMS's sent-HTML matches the design we just pushed.
 
@@ -629,13 +652,30 @@ def _raw_html_is_current(message_id, design):
     if not blocks:
         return None, "design has no text to compare"
 
+    # Text alone does not prove the HTML matches. Rewrapping a list changes the
+    # markup and not a word of the wording, and that difference went out to a
+    # preview unnoticed. List tags come only from our own text blocks, so their
+    # counts are a structural fingerprint the renderer does not add to.
+    wanted = _list_tag_counts("".join(
+        c.get("values", {}).get("text", "")
+        for r in design.get("body", {}).get("rows", [])
+        for col in r.get("columns", []) for c in col.get("contents", [])
+        if c.get("type") == "text"))
+
+    # Pictures are the other thing that changes without changing a word. An
+    # empty slot is not checked here: `send-preview` refuses those outright.
+    pictures = [c["values"]["src"]["url"] for c in design_mod._images(design)
+                if c.get("values", {}).get("src", {}).get("url")]
+
     # The marks go inline rather than through localStorage: writing storage
     # first was disturbing the page's session, and the follow-up fetch came
     # back without raw_html, which read as "everything is missing".
     api_url = _api_url(message_id)
     marks_json = json.dumps(blocks)
+    pictures_json = json.dumps(pictures)
     js = rf"""async () => {{
   const marks = {marks_json};
+  const pictures = {pictures_json};
   const res = await fetch("{api_url}", {{credentials: "include"}});
   const d = await res.json();
   const raw = ((d.message || {{}}).raw_html) || "";
@@ -645,8 +685,14 @@ def _raw_html_is_current(message_id, design):
     .replace(/\u00a0/g, " ").replace(/\u2019/g, "'")
     .replace(/\s+/g, " ").trim();
   const missing = marks.filter(m => !plain.includes(m));
+  const esc = u => u.replace(/&/g, "&amp;");
+  const lostPictures = pictures.filter(u => !raw.includes(u) && !raw.includes(esc(u)));
+  const count = t => (raw.match(new RegExp("<" + t + "(?=[\\s/>])", "gi")) || []).length;
   return JSON.stringify({{len: raw.length, plain: plain.length, total: marks.length,
-                         missing: missing.length, sample: missing.slice(0, 2)}});
+                         missing: missing.length, sample: missing.slice(0, 2),
+                         pictures: lostPictures.length,
+                         lostPicture: lostPictures[0] || "",
+                         tags: {{ul: count("ul"), ol: count("ol"), li: count("li")}}}});
 }}"""
     raw = _eval(js, timeout=45)
     try:
@@ -662,8 +708,19 @@ def _raw_html_is_current(message_id, design):
         sample = "; ".join(info.get("sample", []))[:120]
         return False, "%d of %d blocks missing from the sent HTML (e.g. %s)" % (
             info["missing"], info["total"], sample)
-    return True, "sent HTML matches the design (%d bytes, %d blocks checked)" % (
-        info.get("len", 0), info.get("total", 0))
+
+    if info.get("pictures"):
+        return False, "%d image(s) in the design are not in the sent HTML (e.g. %s)" % (
+            info["pictures"], info.get("lostPicture", "").split("/")[-1])
+
+    got = info.get("tags") or {}
+    off = {t: (n, got.get(t)) for t, n in wanted.items() if got.get(t) != n}
+    if off:
+        return False, "sent HTML has different markup: " + ", ".join(
+            "%d <%s> in the design, %s sent" % (n, t, sent)
+            for t, (n, sent) in sorted(off.items()))
+    return True, "sent HTML matches the design (%d bytes, %d blocks, %d image(s))" % (
+        info.get("len", 0), info.get("total", 0), len(pictures))
 
 
 def _button_probe(label):
@@ -834,10 +891,11 @@ def cmd_build(args):
     pending = design_mod.pending_uploads(built)
     if pending:
         print("", file=sys.stderr)
-        print("Images still to upload:", file=sys.stderr)
-        for idx, src in pending:
-            print(f"  b3t gb upload --id {args.id or 'UUID'} "
-                  f"--image {edition_dir}/{src} --index {idx}", file=sys.stderr)
+        print(f"{len(pending)} image(s) still to upload:", file=sys.stderr)
+        for idx, src, name in pending:
+            print(f"  [{idx}] {src} -> {name}", file=sys.stderr)
+        print(f"  b3t gb images --edition {args.edition} "
+              f"--id {args.id or 'UUID'}", file=sys.stderr)
 
     if args.push:
         if not args.id:
@@ -862,6 +920,20 @@ def cmd_send_preview(args):
     if not _open_message_page(args.id, "Send Preview"):
         print("ERROR: message page did not load (or has no Send Preview button).", file=sys.stderr)
         return 1
+
+    # A blank image cannot be fixed after a send, and an unfilled slot is not
+    # visible in the CMS's own draft list. Check before anything leaves.
+    live = _fetch_design(args.id)
+    if live:
+        empty = design_mod.pending_uploads(live)
+        if empty:
+            print("ERROR: %d image slot(s) in this draft are empty:" % len(empty),
+                  file=sys.stderr)
+            for idx, src, name in empty:
+                print(f"  [{idx}] {name or src}", file=sys.stderr)
+            print("Run `b3t gb images --edition DATE --id %s` first." % args.id,
+                  file=sys.stderr)
+            return 1
 
     msg = _fetch_message(args.id)
     if msg:
@@ -1129,6 +1201,15 @@ def cmd_upload(args):
         print(f"ERROR: File not found: {image_path}", file=sys.stderr)
         return 1
 
+    # Upload under the edition-qualified name the design asked for. S3 keeps the
+    # file name, so this is what lets a later rebuild tell this edition's
+    # header.jpg from the last one's.
+    upload_name = getattr(args, "name", None)
+    if upload_name and upload_name != os.path.basename(image_path):
+        staged = os.path.join(tempfile.mkdtemp(prefix="b3t-upload-"), upload_name)
+        shutil.copy2(image_path, staged)
+        image_path = staged
+
     print(f"Uploading {os.path.basename(image_path)} to editor...", file=sys.stderr)
 
     # Open editor and resize viewport for full visibility
@@ -1149,6 +1230,13 @@ def cmd_upload(args):
     # Find image elements inside the Unlayer iframe (refs start with 'f')
     target_index = getattr(args, 'index', 0) or 0
     before_src = _get_image_src(target_index)
+    if getattr(args, "expect_empty", False) and before_src:
+        # The masthead logo is image 0 and never changes. Writing a new header
+        # over it is the mistake this guard exists to stop.
+        print(f"ERROR: image slot {target_index} already holds "
+              f"{before_src.split('/')[-1]}; refusing to overwrite it.",
+              file=sys.stderr)
+        return 1
     img_refs = []
     for line in snap.split("\n"):
         if "img" in line and "[ref=f" in line:
@@ -1233,6 +1321,62 @@ def cmd_upload(args):
     return 0
 
 
+
+
+def cmd_images(args):
+    """Upload every image slot the built design is still waiting on.
+
+    `gb build` leaves a local file reference in each slot it cannot resolve.
+    This walks those slots in order and uploads each one, so nobody has to work
+    out an image index by hand and put the wrong picture in the masthead.
+    """
+    edition_dir = os.path.join("editions", args.edition)
+    design_path = args.design or os.path.join(edition_dir, "wip",
+                                              "givebacks-design-new.json")
+    if not os.path.exists(design_path):
+        print(f"ERROR: {design_path} not found", file=sys.stderr)
+        return 1
+    with open(design_path) as f:
+        built = json.load(f)
+
+    pending = design_mod.pending_uploads(built)
+    if not pending:
+        print("No images are waiting on an upload.", file=sys.stderr)
+        return 0
+
+    # What the CMS already holds. An upload that succeeded on an earlier run
+    # must not be done twice, and a slot holding something else is a mismatch
+    # between this design and the live draft, not a slot to overwrite.
+    live = _fetch_design(args.id)
+    live_urls = []
+    if live:
+        live_urls = [c['values'].get('src', {}).get('url', '')
+                     for c in design_mod._images(live)]
+
+    done = 0
+    for idx, src, name in pending:
+        path = src if os.path.isabs(src) else os.path.join(edition_dir, src)
+        if not os.path.exists(path):
+            print(f"ERROR: image slot {idx} points at {path}, which is missing.",
+                  file=sys.stderr)
+            return 1
+        held = live_urls[idx] if idx < len(live_urls) else ''
+        if held:
+            if design_mod.image_key(held) == design_mod.image_key(name):
+                print(f"[{idx}] {name}: already uploaded.", file=sys.stderr)
+                done += 1
+                continue
+            print(f"ERROR: image slot {idx} should take {name} but the live "
+                  f"draft holds {held.split('/')[-1]}.", file=sys.stderr)
+            return 1
+        print(f"[{idx}] {path} -> {name}", file=sys.stderr)
+        up = type("A", (), {"id": args.id, "image": path, "index": idx,
+                            "name": name, "expect_empty": True})()
+        if cmd_upload(up) != 0:
+            return 1
+    print(f"{len(pending) - done} image(s) uploaded, {done} already in place.",
+          file=sys.stderr)
+    return 0
 
 
 def cmd_screenshot(args):

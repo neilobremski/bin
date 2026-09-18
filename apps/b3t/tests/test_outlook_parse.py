@@ -112,3 +112,29 @@ def test_external_email_banner_is_stripped_from_the_body():
 
 def test_empty_snapshot_yields_nothing():
     assert parse_reading_pane("") == ([], [], [])
+
+
+# --------------------------------------------------- selected message row
+
+from outlook import selected_ref
+
+
+def test_selected_ref_reads_the_selected_row():
+    snap = snapshot(
+        '- option "Bonita Stone Subscribe Me" [ref=e10]',
+        '- option "Uthraa Manoharr Subscribe me pls" [selected] [ref=e11]',
+    )
+    assert selected_ref(snap) == "e11"
+
+
+def test_a_shorter_ref_is_not_a_match():
+    """`e1 in "[ref=e10]"` is true, and that reply goes to the wrong person."""
+    snap = snapshot('- option "Bonita Stone Subscribe Me" [selected] [ref=e10]')
+    assert selected_ref(snap) == "e10"
+    assert selected_ref(snap) != "e1"
+
+
+def test_no_selection_is_not_a_guess():
+    snap = snapshot('- option "Bonita Stone Subscribe Me" [ref=e10]')
+    assert selected_ref(snap) is None
+    assert selected_ref("") is None

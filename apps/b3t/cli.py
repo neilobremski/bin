@@ -68,6 +68,15 @@ def main():
     p.add_argument("--id", required=True, help="Message/draft UUID")
     p.add_argument("--image", required=True, help="Image file path to upload")
     p.add_argument("--index", type=int, default=0, help="Image placeholder index (0-based, top to bottom)")
+    p.add_argument("--name", help="Upload under this file name (edition-qualified)")
+    p.add_argument("--expect-empty", action="store_true",
+                   help="Refuse the upload if the slot already holds an image")
+
+    p = gb_sub.add_parser("images",
+                          help="Upload every image the built design is waiting on")
+    p.add_argument("--edition", required=True, help="Edition date YYYY-MM-DD")
+    p.add_argument("--id", required=True, help="Message/draft UUID")
+    p.add_argument("--design", help="Design JSON file (default: <edition>/wip/givebacks-design-new.json)")
 
     p = gb_sub.add_parser("screenshot", help="Take visual screenshot of newsletter")
     p.add_argument("--id", required=True, help="Message/draft UUID")
@@ -191,6 +200,15 @@ def main():
     p.add_argument("--folder", default="Submissions", help="Folder to check")
     p.add_argument("--addresses", action="store_true",
                    help="Also show each sender's email address")
+
+    p = ol_sub.add_parser("reply",
+                          help="Draft a Reply All in the original thread (never sends)")
+    p.add_argument("--file", required=True, help="Markdown file holding the reply body")
+    p.add_argument("--folder", default="Inbox", help="Folder holding the message")
+    p.add_argument("--match", help="Pick the message whose row text contains this")
+    p.add_argument("--number", type=int, default=1, help="Message number from `ol check`")
+    p.add_argument("--sender-only", dest="all", action="store_false",
+                   help="Reply to the sender instead of Reply All")
 
     p = ol_sub.add_parser("draft", help="Create an unaddressed draft email in Outlook")
     p.add_argument("--file", required=True, help="Markdown draft file (**Subject:** line, then ---, then body)")
