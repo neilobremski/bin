@@ -628,8 +628,14 @@ def _design_blocks(design, chunk=100):
 
 
 def _list_tag_counts(html):
-    """How many list tags the design's own text carries."""
-    return {t: len(re.findall("<" + t, html, re.I)) for t in ("ul", "ol", "li")}
+    """How many list tags the design's own text carries.
+
+    The tag name is bounded: an unbounded "<li" also counts every <link>, and
+    a single stylesheet link in the rendered mail would report the design as
+    stale for ever.
+    """
+    return {t: len(re.findall("<%s(?=[\\s/>])" % t, html, re.I))
+            for t in ("ul", "ol", "li")}
 
 
 def _raw_html_is_current(message_id, design):
@@ -656,13 +662,20 @@ def _raw_html_is_current(message_id, design):
         for col in r.get("columns", []) for c in col.get("contents", [])
         if c.get("type") == "text"))
 
+    # Pictures are the other thing that changes without changing a word. An
+    # empty slot is not checked here: `send-preview` refuses those outright.
+    pictures = [c["values"]["src"]["url"] for c in design_mod._images(design)
+                if c.get("values", {}).get("src", {}).get("url")]
+
     # The marks go inline rather than through localStorage: writing storage
     # first was disturbing the page's session, and the follow-up fetch came
     # back without raw_html, which read as "everything is missing".
     api_url = _api_url(message_id)
     marks_json = json.dumps(blocks)
+    pictures_json = json.dumps(pictures)
     js = rf"""async () => {{
   const marks = {marks_json};
+  const pictures = {pictures_json};
   const res = await fetch("{api_url}", {{credentials: "include"}});
   const d = await res.json();
   const raw = ((d.message || {{}}).raw_html) || "";
@@ -672,9 +685,12 @@ def _raw_html_is_current(message_id, design):
     .replace(/\u00a0/g, " ").replace(/\u2019/g, "'")
     .replace(/\s+/g, " ").trim();
   const missing = marks.filter(m => !plain.includes(m));
-  const count = t => (raw.match(new RegExp("<" + t, "gi")) || []).length;
+  const lostPictures = pictures.filter(u => !raw.includes(u));
+  const count = t => (raw.match(new RegExp("<" + t + "(?=[\\s/>])", "gi")) || []).length;
   return JSON.stringify({{len: raw.length, plain: plain.length, total: marks.length,
                          missing: missing.length, sample: missing.slice(0, 2),
+                         pictures: lostPictures.length,
+                         lostPicture: lostPictures[0] || "",
                          tags: {{ul: count("ul"), ol: count("ol"), li: count("li")}}}});
 }}"""
     raw = _eval(js, timeout=45)
@@ -692,14 +708,18 @@ def _raw_html_is_current(message_id, design):
         return False, "%d of %d blocks missing from the sent HTML (e.g. %s)" % (
             info["missing"], info["total"], sample)
 
+    if info.get("pictures"):
+        return False, "%d image(s) in the design are not in the sent HTML (e.g. %s)" % (
+            info["pictures"], info.get("lostPicture", "").split("/")[-1])
+
     got = info.get("tags") or {}
     off = {t: (n, got.get(t)) for t, n in wanted.items() if got.get(t) != n}
     if off:
         return False, "sent HTML has different markup: " + ", ".join(
             "%d <%s> in the design, %s sent" % (n, t, sent)
             for t, (n, sent) in sorted(off.items()))
-    return True, "sent HTML matches the design (%d bytes, %d blocks checked)" % (
-        info.get("len", 0), info.get("total", 0))
+    return True, "sent HTML matches the design (%d bytes, %d blocks, %d image(s))" % (
+        info.get("len", 0), info.get("total", 0), len(pictures))
 
 
 def _button_probe(label):
@@ -899,6 +919,20 @@ def cmd_send_preview(args):
     if not _open_message_page(args.id, "Send Preview"):
         print("ERROR: message page did not load (or has no Send Preview button).", file=sys.stderr)
         return 1
+
+    # A blank image cannot be fixed after a send, and an unfilled slot is not
+    # visible in the CMS's own draft list. Check before anything leaves.
+    live = _fetch_design(args.id)
+    if live:
+        empty = design_mod.pending_uploads(live)
+        if empty:
+            print("ERROR: %d image slot(s) in this draft are empty:" % len(empty),
+                  file=sys.stderr)
+            for idx, src, name in empty:
+                print(f"  [{idx}] {name or src}", file=sys.stderr)
+            print("Run `b3t gb images --edition DATE --id %s` first." % args.id,
+                  file=sys.stderr)
+            return 1
 
     msg = _fetch_message(args.id)
     if msg:

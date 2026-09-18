@@ -110,13 +110,70 @@ def test_theme_header_does_not_land_in_the_logo_slot(built):
 def test_an_image_already_on_the_web_needs_no_upload(built):
     assert design.pending_uploads(built) == [
         (1, "header.jpg", "20260920-header.jpg"),
-        (2, "wip/choir.png", "20260920-choir.png"),
+        (2, "wip/choir.png", "20260920-wip-choir.png"),
     ]
 
 
 def test_uploads_are_named_per_edition(built):
     assert [c["values"].get("_upload_name") for c in images(built)] == [
-        None, "20260920-header.jpg", "20260920-choir.png"]
+        None, "20260920-header.jpg", "20260920-wip-choir.png"]
+
+
+def test_two_flyers_of_the_same_name_keep_separate_identities():
+    """Both articles attach a `flyer.png`. They are not the same picture."""
+    two = DRAFT.replace("![Choir flyer](wip/choir.png)",
+                        "![Choir](wip/choir/flyer.png)\n\n![Band](wip/band/flyer.png)")
+    built = design.build(two, donor(), slug="20260920")
+    names = [c["values"].get("_upload_name") for c in images(built)]
+    assert names[2] != names[3]
+    assert names[2:] == ["20260920-wip-choir-flyer.png", "20260920-wip-band-flyer.png"]
+
+
+def test_dropping_an_article_does_not_hand_its_picture_to_another():
+    """Carlos's case: drop Choir, rebuild, and Band must not inherit its URL."""
+    two = DRAFT.replace("![Choir flyer](wip/choir.png)",
+                        "![Choir](wip/choir/flyer.png)\n\n![Band](wip/band/flyer.png)")
+    live = design.build(two, donor(), slug="20260920")
+    for c, url in zip(images(live), [
+            LOGO,
+            "https://s3/1789701662095-20260920-header.jpg",
+            "https://s3/1789701741142-20260920-wip-choir-flyer.png",
+            "https://s3/1789701766553-20260920-wip-band-flyer.png"]):
+        c["values"]["src"] = {"url": url}
+
+    without_choir = DRAFT.replace("![Choir flyer](wip/choir.png)",
+                                  "![Band](wip/band/flyer.png)")
+    rebuilt = design.build(without_choir, donor(), slug="20260920")
+    design.carry_image_urls(rebuilt, live)
+    assert images(rebuilt)[2]["values"]["src"]["url"].endswith("band-flyer.png")
+
+
+def test_one_name_for_two_files_is_refused():
+    clash = DRAFT.replace("![Choir flyer](wip/choir.png)",
+                          "![A](wip/flyer.png)\n\n![B](./wip/flyer.png)")
+    # Same file twice is fine; two different files under one name is not.
+    design.build(clash, donor(), slug="20260920")
+    clash = DRAFT.replace("![Choir flyer](wip/choir.png)",
+                          "![A](wip-flyer.png)\n\n![B](wip/flyer.png)")
+    with pytest.raises(design.DesignError) as e:
+        design.build(clash, donor(), slug="20260920")
+    assert "would upload as" in str(e.value)
+
+
+def test_the_newest_upload_wins_a_repeated_name(built):
+    """A retried upload leaves two of the same picture. Take the later one."""
+    live = copy.deepcopy(built)
+    live["body"]["rows"].append(
+        {"id": "r", "values": {}, "columns": [{"id": "c", "contents": [
+            {"id": "x", "type": "image", "values": {"src": {
+                "url": "https://s3/1700000000000-20260920-header.jpg"}}}]}]})
+    images(live)[1]["values"]["src"] = {
+        "url": "https://s3/1789701662095-20260920-header.jpg"}
+
+    carried, _ = design.carry_image_urls(built, live)
+    assert carried == 1
+    assert images(built)[1]["values"]["src"]["url"].endswith(
+        "1789701662095-20260920-header.jpg")
 
 
 def test_masthead_slot_count_must_match_the_draft():
@@ -133,7 +190,7 @@ def test_carry_matches_by_name_not_position(built):
     for c, url in zip(images(live), [
             LOGO,
             "https://s3/1789701662095-20260920-header.jpg",
-            "https://s3/1789701741142-20260920-choir.png"]):
+            "https://s3/1789701741142-20260920-wip-choir.png"]):
         c["values"]["src"] = {"url": url}
 
     extra = DRAFT.replace("![Choir flyer](wip/choir.png)",
@@ -144,8 +201,8 @@ def test_carry_matches_by_name_not_position(built):
     assert carried == 2
     urls = [c["values"]["src"]["url"] for c in images(rebuilt)]
     assert urls[1].endswith("20260920-header.jpg")
-    assert urls[3].endswith("20260920-choir.png")     # the new band image is 2
-    assert design.pending_uploads(rebuilt) == [(2, "wip/band.png", "20260920-band.png")]
+    assert urls[3].endswith("20260920-wip-choir.png")  # the new band image is 2
+    assert design.pending_uploads(rebuilt) == [(2, "wip/band.png", "20260920-wip-band.png")]
     assert "wip/band.png" in why
 
 
@@ -173,3 +230,11 @@ def test_a_wrapped_bullet_stays_one_item():
     assert "<p" not in html
     assert "**" not in html
     assert "keeps <strong>$9.50 of every ticket</strong>." in html
+
+
+def test_a_stylesheet_link_is_not_a_list_item():
+    """`<li` also matches `<link>`, which would report every send as stale."""
+    import givebacks
+    counts = givebacks._list_tag_counts(
+        '<link rel="stylesheet"><ul><li>one</li><li/></ul><LI >two')
+    assert counts == {"ul": 1, "ol": 0, "li": 3}

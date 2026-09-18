@@ -89,31 +89,82 @@ def _restore_unload_guard():
                 timeout=15)
 
 
+def _eval_json(js, timeout=20):
+    """Run a page expression that returns a JSON string, and parse it.
+
+    playwright-cli hands back the value JSON-encoded, so a string result
+    arrives double-encoded. None means the call failed or returned nothing
+    usable, which callers must not read as "the page said no".
+    """
+    result = session.run("--raw", "eval", js, timeout=timeout)
+    try:
+        value = json.loads((result.stdout or "").strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return value
+    return value
+
+
 def _close_open_composer():
-    """Leave a composer that is still open, keeping the draft it holds.
+    """Leave a composer that is still open, without losing what it holds.
 
     Outlook's unsaved-changes prompt is registered as an event listener, so
     clearing `window.onbeforeunload` does not stop it, and an open composer
     arms that prompt for whatever the next command tries to do. A full
-    composer has a Close button. An inline reply has none, so the way out is
-    to reload the mailbox: the draft is already saved, which is what makes
-    accepting the prompt safe here.
+    composer has a Close button, which saves. An inline reply has none, so
+    the way out is to reload the mailbox and answer the prompt with Leave.
+
+    Leave discards. So it is only taken when there is provably nothing to
+    lose: Outlook says the draft is saved, or the composer is empty. A
+    composer that is neither is left alone and reported, because the caller
+    failing is better than somebody's half-written mail disappearing.
+
+    Returns True when no composer is in the way.
     """
-    result = session.run("eval", """() => {
-  if (!document.querySelector('div[aria-label="Message body"][contenteditable="true"]')) return 'NONE';
+    state = _eval_json(r"""() => {
+  const b = document.querySelector('div[aria-label="Message body"][contenteditable="true"]');
+  if (!b) return JSON.stringify({open: false});
+  const btn = [...document.querySelectorAll('button')]
+    .find(e => /^close$/i.test((e.getAttribute('aria-label') || e.textContent || '').trim()));
+  const page = document.body.innerText.replace(/\s+/g, ' ');
+  const to = (document.querySelector('div[aria-label="To"]')?.innerText || '')
+    .replace(/[\u200b\s]+/g, ' ').trim();
+  return JSON.stringify({
+    open: true,
+    hasClose: !!btn,
+    saved: /draft saved at /i.test(page),
+    empty: !(b.innerText || '').trim() && !to
+  });
+}""", timeout=15)
+    if not isinstance(state, dict) or not state.get("open"):
+        return True
+
+    if state.get("hasClose"):
+        # Close saves the draft, so this needs no permission.
+        session.run("eval", """() => {
   const b = [...document.querySelectorAll('button')]
     .find(e => /^close$/i.test((e.getAttribute('aria-label') || e.textContent || '').trim()));
-  if (!b) return 'INLINE';
-  b.click();
+  if (b) b.click();
   return 'CLOSED';
 }""", timeout=15)
-    time.sleep(2)
-    if "INLINE" not in (result.stdout or ""):
-        return
+        time.sleep(3)
+        return True
+
+    if not (state.get("saved") or state.get("empty")):
+        print("ERROR: a reply composer is open with unsaved text. Finish or "
+              "discard it in Outlook; b3t will not throw it away.",
+              file=sys.stderr)
+        return False
+
     session.run("goto", OUTLOOK_URL, timeout=60)
-    # Answering the prompt with Leave: nothing is lost, the draft is saved.
+    # Leave: the draft is saved, or there is nothing in it.
     session.run("dialog-accept", timeout=20)
     time.sleep(4)
+    return True
 
 
 def _click_folder(folder_name):
@@ -126,7 +177,8 @@ def _click_folder(folder_name):
     """
     # Leave any open composer first: it arms the unsaved-changes prompt, and
     # leaving it can navigate, which would make the refs found below stale.
-    _close_open_composer()
+    if not _close_open_composer():
+        return False
 
     # The folder tree renders after the page itself, so one snapshot taken too
     # early reports a mailbox with no folders in it.
@@ -648,8 +700,30 @@ def cmd_reply(args):
         target = messages[n - 1]
 
     print(f"Replying to: {target['text'][:80]}", file=sys.stderr)
-    session.run("click", target["ref"])
+    click = session.run("click", target["ref"])
+    if click.returncode != 0:
+        print(f"ERROR: could not open that message: "
+              f"{(click.stderr or click.stdout or '').strip()[:160]}", file=sys.stderr)
+        return 1
     time.sleep(3)
+
+    # A click that lands nowhere (a stale ref, a list that re-rendered) leaves
+    # the PREVIOUS message in the reading pane, and everything below here would
+    # then reply to the wrong person. Confirm the pane is showing this one, and
+    # remember who it is from.
+    opened = None
+    for _ in range(5):
+        snap = session.snapshot() or ""
+        selected = [l for l in snap.split("\n") if "[selected]" in l and "option" in l]
+        pane_from = parse_reading_pane(snap)[1]
+        if selected and target["ref"] in selected[0]:
+            opened = pane_from[0] if pane_from else None
+            break
+        time.sleep(2)
+    else:
+        print("ERROR: the reading pane is not showing the message that was "
+              "asked for; refusing to reply to whatever is open.", file=sys.stderr)
+        return 1
 
     wanted = "Reply all" if getattr(args, "all", True) else "Reply"
     # The reading pane renders its action bar a beat after the row is selected,
@@ -745,6 +819,13 @@ def cmd_reply(args):
         return 1
     if not info.get("to"):
         print("ERROR: the reply has no recipient; leaving the composer open.",
+              file=sys.stderr)
+        return 1
+    # A recipient is not the RIGHT recipient. The reply must be addressed to
+    # whoever sent the message that was opened.
+    if opened and opened.lower() not in info.get("to", "").lower():
+        print(f"ERROR: this reply is addressed to {info['to']!r}, not to "
+              f"{opened}, who sent the message. Leaving the composer open.",
               file=sys.stderr)
         return 1
     # Prose in the recipient list means part of the body was typed into To,

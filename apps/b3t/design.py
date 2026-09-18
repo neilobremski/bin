@@ -146,6 +146,19 @@ def image_key(source):
     return S3_PREFIX.sub('', name).lower()
 
 
+def upload_name(source, slug=None):
+    """The file name a local image is uploaded under.
+
+    The whole path goes into the name, not just the file name. Two articles
+    can perfectly well both attach a `flyer.png`, and if both are called
+    `flyer.png` in the CMS then a rebuild cannot tell them apart: drop one
+    article and the other inherits its picture.
+    """
+    path = re.sub(r'^\.?/+', '', source.split('?')[0].strip())
+    name = S3_PREFIX.sub('', re.sub(r'[\\/]+', '-', path)).lower()
+    return f'{slug}-{name}' if slug else name
+
+
 def _set_image(values, source, alt=None, slug=None):
     """Point one image content at `source`.
 
@@ -162,8 +175,7 @@ def _set_image(values, source, alt=None, slug=None):
         values['src'] = {'url': '', 'width': 1200, 'height': 1200,
                          'dynamic': False, 'autoWidth': True}
         values['_pending_upload'] = source
-        name = image_key(source)
-        values['_upload_name'] = f'{slug}-{name}' if slug else name
+        values['_upload_name'] = upload_name(source, slug)
     if alt:
         values['altText'] = alt
     return values
@@ -359,6 +371,20 @@ def build(draft_md, donor_design, slug='bt'):
                 c['values']['text'] = intro_html
                 break
     design['body']['rows'] = new_head + body_rows + [clone(r) for r in tail]
+
+    # Two sources that normalise to one name would share an identity in the
+    # CMS, and a later rebuild would hand one of them the other's picture.
+    seen = {}
+    for c in _images(design):
+        name = c['values'].get('_upload_name')
+        src = c['values'].get('_pending_upload')
+        if not name:
+            continue
+        src = re.sub(r'^\.?/+', '', (src or '').strip())
+        if seen.setdefault(name, src) != src:
+            raise DesignError(
+                'two images would upload as %s: %s and %s. Rename one.'
+                % (name, seen[name], src))
     return design
 
 
@@ -386,7 +412,11 @@ def carry_image_urls(design, live_design):
         if not hits:
             missed.append(c['values'].get('_pending_upload', name))
             continue
-        c['values']['src'] = copy.deepcopy(hits.pop(0)['values']['src'])
+        # Several uploads can share a name after a retry. They are the same
+        # picture, and the S3 prefix is a timestamp, so the newest is the one
+        # the CMS is showing. Order, never position in the newsletter.
+        hits.sort(key=lambda h: h['values']['src']['url'].split('/')[-1])
+        c['values']['src'] = copy.deepcopy(hits.pop()['values']['src'])
         c['values'].pop('_pending_upload', None)
         c['values'].pop('_upload_name', None)
         carried += 1
