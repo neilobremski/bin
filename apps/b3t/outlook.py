@@ -499,10 +499,26 @@ def cmd_read(args):
         return 1
 
     target = messages[msg_num - 1]
+    # Say which row this is, so a misread shows up in the output itself.
+    print(f"=== Row {msg_num} === {target['text'][:120]}")
 
-    # Click the message to select it
-    session.run("click", target["ref"])
-    time.sleep(2)
+    # Click the message to select it. A click that lands nowhere leaves the
+    # PREVIOUS message in the reading pane, and read would print that one under
+    # this number. Confirm the pane shows the row asked for; click once more if not.
+    for attempt in range(2):
+        session.run("click", target["ref"])
+        time.sleep(2)
+        for _ in range(4):
+            if selected_ref(session.snapshot() or "") == target["ref"]:
+                break
+            time.sleep(1.5)
+        else:
+            continue
+        break
+    else:
+        print(f"ERROR: the reading pane is not showing message #{msg_num}; "
+              "refusing to print whatever is open.", file=sys.stderr)
+        return 1
 
     # Expand the conversation if collapsed
     if target["collapsed"]:
@@ -874,10 +890,11 @@ def cmd_reply(args):
 
 
 def cmd_draft(args):
-    """Create an unaddressed draft email in Outlook.
+    """Create a draft email in Outlook. Never clicks Send.
 
-    Deliberately leaves To and Cc empty and never clicks Send: this command
-    exists so a draft is waiting for the editor to address, trim and send.
+    Unaddressed by default, so a draft is waiting for the editor to address,
+    trim and send. `--to` fills the To line, and the draft is refused unless
+    To ends up holding exactly those addresses and nothing else.
     """
     if not os.path.exists(args.file):
         print(f"ERROR: {args.file} not found", file=sys.stderr)
@@ -919,9 +936,17 @@ def cmd_draft(args):
         "async function main(page){"
         "  const subj = " + json.dumps(subject) + ";"
         "  const body = " + json.dumps(body) + ";"
+        "  const to = " + json.dumps(list(getattr(args, "to", None) or [])) + ";"
         "  const s = page.locator('input[aria-label=\"Subject\"]').first();"
+        "  for (const addr of to) {"
+        "    const t = page.locator('div[aria-label=\"To\"][contenteditable=\"true\"]').first();"
+        "    await t.click(); await page.waitForTimeout(300);"
+        "    await page.keyboard.type(addr, {delay: 10}); await page.waitForTimeout(800);"
+        "    await page.keyboard.press(';'); await page.waitForTimeout(800);"
+        "  }"
         "  await s.click(); await s.fill(subj);"
-        "  const b = page.locator('div[aria-label=\"Message body\"]').first();"
+        # The reading pane is also labelled "Message body"; only the composer's is editable.
+        "  const b = page.locator('div[aria-label=\"Message body\"][contenteditable=\"true\"]').first();"
         "  await b.click();"
         "  await page.waitForTimeout(400);"
         "  await b.pressSequentially(body, {delay: 4});"
@@ -937,7 +962,7 @@ def cmd_draft(args):
         "  return JSON.stringify(await page.evaluate((sv) => ({"
         "    saved: sv,"
         "    subj: document.querySelector('input[aria-label=\"Subject\"]')?.value || '',"
-        "    len: (document.querySelector('div[aria-label=\"Message body\"]')?.innerText || '').length,"
+        "    len: (document.querySelector('div[aria-label=\"Message body\"][contenteditable=\"true\"]')?.innerText || '').length,"
         "    to: (document.querySelector('div[aria-label=\"To\"]')?.innerText || '').trim(),"
         "    cc: (document.querySelector('div[aria-label=\"Cc\"]')?.innerText || '').trim()"
         "  }), saved));"
@@ -951,10 +976,22 @@ def cmd_draft(args):
               file=sys.stderr)
         return 1
 
-    if info.get("to") or info.get("cc"):
-        print(f"ERROR: recipients are not empty (To={info.get('to')!r} "
-              f"Cc={info.get('cc')!r}); leaving the composer open.", file=sys.stderr)
+    wanted = [a.lower() for a in (getattr(args, "to", None) or [])]
+    got = info.get("to") or ""
+    found = [a.lower() for a in re.findall(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+', got)]
+    # Outlook may show a resolved recipient by display name only; accept that
+    # only when exactly one address was asked for and exactly one chip exists.
+    # The To box also holds icon glyphs and zero-width spaces between chips.
+    chips = [c for c in re.split(r'[;\n]+', got) if re.search(r'[A-Za-z0-9]', c)]
+    to_ok = (not wanted and not got) or sorted(set(found)) == sorted(set(wanted)) \
+        or (len(wanted) == 1 and not found and len(chips) == 1)
+    if info.get("cc") or not to_ok:
+        print(f"ERROR: recipients are not what was asked for (wanted To={wanted}, "
+              f"got To={got!r} Cc={info.get('cc')!r}); leaving the composer open.",
+              file=sys.stderr)
         return 1
+    if wanted:
+        print(f"  To: {got}", file=sys.stderr)
     if not info.get("len"):
         print("ERROR: the message body did not take.", file=sys.stderr)
         return 1
@@ -1010,7 +1047,9 @@ def cmd_draft(args):
         print(f"  Verified after reopening: {vinfo['len']} characters of body.",
               file=sys.stderr)
 
-    print(f"Draft saved to Drafts: \"{subject}\" ({info['len']} chars, no recipients).",
+    who = f"To: {info.get('to')}" if wanted else "no recipients"
+    print(f"Draft saved to Drafts: \"{subject}\" ({info['len']} chars, {who}).",
           file=sys.stderr)
-    print("Nothing was sent. Address it and send it yourself.", file=sys.stderr)
+    print("Nothing was sent. " + ("Review it and send it yourself." if wanted
+          else "Address it and send it yourself."), file=sys.stderr)
     return 0

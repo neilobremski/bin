@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 
+import archive
 import design as design_mod
 import env
 import session
@@ -25,7 +26,7 @@ def dispatch(args):
         return 1
     action = args.action
     if not action:
-        print("Usage: b3t givebacks <login|pull|build|push|send-preview|open|list|duplicate|upload|images|screenshot|subscribe>", file=sys.stderr)
+        print("Usage: b3t givebacks <login|pull|build|push|send-preview|archive|open|list|duplicate|upload|images|screenshot|subscribe>", file=sys.stderr)
         return 2
     if action == "login":
         return cmd_login(args)
@@ -37,6 +38,8 @@ def dispatch(args):
         return cmd_build(args)
     elif action == "send-preview":
         return cmd_send_preview(args)
+    elif action == "archive":
+        return cmd_archive(args)
     elif action == "open":
         return cmd_open(args)
     elif action == "list":
@@ -1000,6 +1003,69 @@ def cmd_send_preview(args):
         return 1
 
     print("Preview sent. It goes to the signed-in GiveBacks account only.", file=sys.stderr)
+    return 0
+
+
+def cmd_archive(args):
+    """Write the archive-page version of an edition to a file.
+
+    The source is the message's `raw_html`, the HTML Givebacks actually sends,
+    not the design JSON: the archive should show what subscribers received.
+    Nothing is published here. `b3t osp archive` puts the file on rmsptsa.org.
+    """
+    if not ensure_authenticated():
+        return 1
+
+    # The API only answers to a page on the Givebacks origin.
+    session.navigate(_design_url(args.id))
+    time.sleep(2)
+
+    msg = _fetch_message(args.id)
+    if not msg:
+        print("ERROR: could not read the message from the API.", file=sys.stderr)
+        return 1
+
+    raw, raw_len = msg.get("raw") or "", msg.get("raw_len") or 0
+    if not raw_len:
+        print("ERROR: this edition has no rendered HTML. Run `gb push --verify` "
+              "so the CMS regenerates it, then try again.", file=sys.stderr)
+        return 1
+    # `raw_len` is measured in the browser, so it counts UTF-16 units: every
+    # emoji in At a Glance counts twice there and once here. Measure the same
+    # way before calling the HTML short, or a full edition reads as truncated.
+    if len(raw.encode("utf-16-le")) // 2 < raw_len:
+        print(f"ERROR: only {len(raw)} of {raw_len} characters came back; the "
+              "archive page would be cut off.", file=sys.stderr)
+        return 1
+
+    subject = (msg.get("subject") or "").strip()
+    try:
+        body, dropped = archive.build(raw, args.edition, subject)
+        title = archive.page_title(args.edition, subject)
+        slug = archive.page_slug(args.edition)
+    except archive.ArchiveError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    out = args.out or os.path.join("editions", args.edition, "wip", "archive.html")
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    with open(out, "w") as f:
+        f.write(body)
+    # The page's title and address travel with the file, so publishing cannot
+    # get them wrong by retyping them.
+    meta = {"edition": args.edition, "subject": subject, "title": title,
+            "slug": slug, "message_id": args.id}
+    with open(out + ".meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+        f.write("\n")
+
+    kept = len(archive.rows(body))
+    print(f'Title: {title}', file=sys.stderr)
+    print(f'Page:  {slug}', file=sys.stderr)
+    print(f"Wrote {out} ({len(body):,} chars, {kept} rows; dropped "
+          f"{', '.join(dropped)}).", file=sys.stderr)
+    print("Nothing was published. Review it, then run:", file=sys.stderr)
+    print(f"  b3t osp archive --edition {args.edition} --html {out}", file=sys.stderr)
     return 0
 
 
