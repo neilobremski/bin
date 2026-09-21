@@ -20,30 +20,58 @@ CHROME_STARTUP_WAIT = 60  # 60 × 0.2s = 12s
 
 
 MODAL_STUCK = "does not handle the modal state"
+TIMEOUT_RC = 124  # `_raw_run`'s own stand-in for a `subprocess.TimeoutExpired`.
 
 
 def _raw_run(cmd, timeout):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(cmd, 124, "", "Timeout")
+        return subprocess.CompletedProcess(cmd, TIMEOUT_RC, "", "Timeout")
 
 
-def run(*args, timeout=30):
+def run(*args, timeout=30, on_dialog="dismiss", retry_on_timeout=False):
     """Run playwright-cli -s=b3t with given args. Returns CompletedProcess.
 
     A browser dialog left standing (Outlook's "Leave site?" on a composer with
     unsaved text is the usual one) blocks every later call with "does not
     handle the modal state", so one stuck prompt takes down the rest of the
-    session. Dismissing it means staying on the page and losing nothing, which
-    is the safe answer for a prompt nobody asked for.
+    session. `on_dialog="dismiss"` (the default) answers a prompt nobody asked
+    for by staying on the page, which loses nothing. A caller that is
+    intentionally leaving the page (`navigate`, OSP's `_save`) passes
+    `on_dialog="accept"` instead, to answer "leave anyway" the way a plain
+    click on the same button would have.
+
+    A dialog raised *during* this very call (a `goto` whose destination page
+    installs a `beforeunload` guard, say) does not show up as `MODAL_STUCK`:
+    playwright-cli itself hangs waiting for the navigation the dialog is
+    blocking, so our own subprocess timeout fires first and this returns
+    `TIMEOUT_RC` with stderr `"Timeout"`, never having printed anything about
+    a modal at all. Reproduced against the real CLI: the dialog is still
+    sitting there afterwards (confirmed by the *next* call, which does see
+    `MODAL_STUCK`), and accepting it lets the already-in-flight navigation
+    complete on its own. So a timeout is answered too, in case a dialog is
+    what blocked it (with no dialog, the command is a fast no-op: "can only
+    be used when there is related modal state present").
+
+    The two cases differ on retrying. `MODAL_STUCK` means the command never
+    ran, so it is safe to run it again. A timeout means it DID run, and may
+    have done its work (a click that submitted, a composer that filled), so
+    it is only re-run when the caller says that is safe with
+    `retry_on_timeout=True`, as `navigate`'s `goto` does. Everyone else gets
+    the timeout back and checks the page for themselves.
     """
     cmd = ["playwright-cli", f"-s={SESSION_NAME}"] + list(args)
     result = _raw_run(cmd, timeout)
     blob = (result.stdout or "") + (result.stderr or "")
-    if MODAL_STUCK in blob:
-        _raw_run(["playwright-cli", f"-s={SESSION_NAME}", "dialog-dismiss"], 20)
-        result = _raw_run(cmd, timeout)
+    stuck = MODAL_STUCK in blob
+    if stuck or result.returncode == TIMEOUT_RC:
+        dialog_cmd = "dialog-accept" if on_dialog == "accept" else "dialog-dismiss"
+        _raw_run(["playwright-cli", f"-s={SESSION_NAME}", dialog_cmd], 20)
+        if stuck or retry_on_timeout:
+            if on_dialog == "accept":
+                print("NOTE: accepted a stuck leave-page prompt and retried.", file=sys.stderr)
+            result = _raw_run(cmd, timeout)
     return result
 
 
@@ -199,12 +227,47 @@ def ensure_running():
     return 0
 
 
+def _url_matches(actual, requested):
+    """Loose enough for a redirect or a trailing slash, strict enough to
+    catch a `goto` that silently stayed put."""
+    if not actual:
+        return False
+    a, r = actual.rstrip('/'), requested.rstrip('/')
+    return a == r or a.startswith(r) or r.startswith(a)
+
+
 def navigate(url):
-    """Navigate to a URL."""
+    """Navigate to a URL.
+
+    The caller has decided to leave the current page, so its own "leave this
+    page?" prompt (a dirty CMS form, an open composer) should be answered
+    yes, not left standing for the next command to trip over as "does not
+    handle the modal state". `window.onbeforeunload = null` handles the
+    common case before `goto` even starts; an `addEventListener('beforeunload',
+    ...)` handler survives that assignment regardless (Outlook's own prompt is
+    registered that way, and OSP's may be too), so `goto` itself asks `run()`
+    to answer the stuck-modal retry with `dialog-accept` rather than the
+    generic dismiss.
+    """
     ensure_running()
-    result = run("goto", url)
+    before = current_url()
+
+    # Best-effort: a page with no such listener, or a call racing a
+    # navigation already in flight, failing this is not an error.
+    run("eval", "() => { window.onbeforeunload = null; return true; }")
+
+    result = run("goto", url, on_dialog="accept", retry_on_timeout=True)
     if result.returncode != 0:
         print(f"ERROR: {result.stderr}", file=sys.stderr)
+        return 1
+
+    after = current_url()
+    if after is None:
+        print(f"ERROR: could not confirm the page left for {url}", file=sys.stderr)
+        return 1
+    if after == before and not _url_matches(after, url):
+        print(f"ERROR: navigation to {url} does not look like it left the "
+              f"previous page (still at {after}).", file=sys.stderr)
         return 1
     return 0
 

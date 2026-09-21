@@ -5,11 +5,16 @@
 CMS for the PTSA website. Used for two purposes:
 1. **Scanning** for content updates (programs, calendar, club pages)
 2. **Archiving** newsletter editions as pages on the site (see also
-   `b3t gb archive`, which produces the HTML this consumes)
+   `b3t gb archive`, which produces the HTML this consumes). `gb archive
+   --edition` is now optional: omitted, the edition date is read from the
+   newsletter's own date heading and cross-checked against the Givebacks
+   send date (0-3 days apart; sends often land a day or more after the date
+   printed in the edition). Given explicitly, it is used unchanged.
 
 ## Authentication
 
-Env vars: `OURSCHOOLPAGES_USER`, `OURSCHOOLPAGES_PASS`, `OSP_BASE`, `OSP_FOLDER_ID`
+Env vars: `OURSCHOOLPAGES_USER`, `OURSCHOOLPAGES_PASS`, `OSP_BASE`, `OSP_FOLDER_ID`,
+`OSP_LISTING_PAGE_ID`
 
 Login URL: `{OSP_BASE}/Account/LogOn`
 
@@ -56,8 +61,71 @@ heading bars, colours) and older ones look like plain site content. Both work.
 
 Archive URL pattern: `{OSP_BASE}/Page/BearTracks/YYYY-MM-DD-english`
 
-The archive LISTING at `/Page/BearTracks/Archive` is a separate page and is not
-updated by this command. It has no 2026-2027 section yet.
+The archive LISTING at `/Page/BearTracks/Archive` is a separate page. It is not
+updated by this command: see `osp listing` below.
+
+**Save is verified, not assumed.** A plain `page.click('#SaveButton')` followed
+by a fixed timeout can look like it worked without having submitted anything:
+nothing after the click proves the click did anything. Seen live, the actual
+cause is OSP's own "Leave this page?" prompt, raised because the page is
+dirty and Save is itself a navigation. `_save()` (shared with `osp listing`)
+registers a one-shot `page.once('dialog', ...)` handler that accepts before
+clicking (an `addEventListener('beforeunload', ...)` handler survives
+`window.onbeforeunload = null`, so the handler is the actual fix, not the
+assignment), then waits for the navigation `#SaveButton` causes on a real
+save (to `/Home`) and reports failure (`no-nav`) when none comes. See
+`docs/session.md` for the same handling built into `session.navigate()`.
+
+### `osp listing --edition DATE [--html FILE] [--save]`
+
+Adds one edition's entry to the archive LISTING page (`/Page/BearTracks/Archive`,
+CMS page id `OSP_LISTING_PAGE_ID`, edit URL `{OSP_BASE}/PageManager/Edit/{OSP_LISTING_PAGE_ID}`).
+Fills the form and STOPS by default; `--save` publishes. `--html` defaults to
+`editions/DATE/wip/archive.html`, same file `osp archive` takes and `gb archive`
+writes; the entry's title comes from that file's `.meta.json`, and its
+highlights from `archive.highlights()` (the At a Glance list, capped at 8).
+
+Content is TinyMCE, same as `osp archive`: read with `ed.getContent()`, write
+with `ed.setContent(html); ed.save();`, passed through the same localStorage
+bridge for size.
+
+The page's structure: one `<h5>Bear Tracks Archive for YYYY-YYYY</h5>` per
+Aug-Jul school year (an edition dated 2026-08-24 is `2026-2027`; one dated
+2026-05-31 is `2025-2026`), newest year first, each followed by a `<ul>` of
+entries, newest edition first:
+
+```html
+<h5>Bear Tracks Archive for 2026-2027</h5>
+<ul>
+<li><a href="https://rmsptsa.org/Page/BearTracks/2026-09-20-english">September 20, 2026 [English]: Bear Tracks - Meet the Teachers</a>
+<ul>
+<li>Curriculum Night Sep 22</li>
+</ul>
+</li>
+</ul>
+<p>&nbsp;</p>
+```
+
+All of this (finding/creating the section, inserting in date order, the
+duplicate check) is pure-HTML logic in `archive.listing_insert()`, testable
+without a browser. It:
+- refuses (nothing computed further, nothing saved) if the edition's slug is
+  already linked anywhere on the page;
+- inserts in date order within the section, normally at the top;
+- creates a new section, immediately before the newest existing one, the
+  first time an edition from a new school year is added.
+
+`osp listing` itself additionally refuses if the archive page it would link
+is not live yet (same check `osp archive` uses to refuse creating a page that
+already exists, applied in reverse).
+
+**Before writing anything**, the current listing HTML is backed up to
+`editions/DATE/wip/listing-backup.html`, and the path is printed. With
+`--save`, after the save navigation succeeds, the PUBLIC page is re-fetched
+(cache-busted) and checked: the new slug must be linked, and the number of
+`-english"` links must have gone up by exactly one. Either check failing is a
+loud error naming the backup path: nothing is assumed to have worked just
+because the Save click did.
 
 ## Site Structure
 

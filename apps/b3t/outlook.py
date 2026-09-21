@@ -963,18 +963,48 @@ def cmd_draft(args):
         "    saved: sv,"
         "    subj: document.querySelector('input[aria-label=\"Subject\"]')?.value || '',"
         "    len: (document.querySelector('div[aria-label=\"Message body\"][contenteditable=\"true\"]')?.innerText || '').length,"
-        "    to: (document.querySelector('div[aria-label=\"To\"]')?.innerText || '').trim(),"
+        # The To box pads itself with zero-width spaces, which trim() keeps.
+        "    to: (document.querySelector('div[aria-label=\"To\"]')?.innerText || '').replace(/[\\u200b\\ufeff]/g, '').trim(),"
         # One entry per recipient chip, in order: the address Outlook resolved
-        # it to, read from the chip itself rather than guessed from visible
-        # text, or null when the chip never resolved to an address (a
-        # name-only chip Outlook could not match to a contact).
-        "    toChips: [...document.querySelectorAll("
-        "      'div[aria-label=\"To\"] [role=\"option\"], div[aria-label=\"To\"] [role=\"listitem\"]')"
-        "    ].map(el => {"
-        "      const src = el.getAttribute('title') || el.getAttribute('aria-label') || el.textContent || '';"
-        "      const m = src.match(/[\\w.+-]+@[\\w-]+(?:\\.[\\w-]+)+/);"
-        "      return m ? m[0].toLowerCase() : null;"
-        "    }),"
+        # it to, or null when the chip never resolved (a name-only chip Outlook
+        # could not match). A resolved chip shows only the display name
+        # ("Neil Obremski (Newsletter)") and carries no address in its
+        # attributes, so the address comes from the React props Outlook keeps
+        # inside the chip (`smtp`, on its hover-card target), searching the
+        # chip's own elements and never walking above the chip, so a
+        # neighbouring chip's address is never borrowed.
+        "    toChips: (() => {"
+        "      const box = document.querySelector('div[aria-label=\"To\"][contenteditable=\"true\"]');"
+        "      if (!box) return [];"
+        "      const re = /[\\w.+-]+@[\\w-]+(?:\\.[\\w-]+)+/;"
+        "      const fromProps = (el) => {"
+        "        const seen = new WeakSet();"
+        "        const find = (o, d) => {"
+        "          if (!o || typeof o !== 'object' || d > 6 || seen.has(o)) return null;"
+        "          seen.add(o);"
+        "          for (const k of Object.keys(o)) {"
+        "            if (['_owner', 'return', 'child', 'sibling', 'stateNode'].includes(k)) continue;"
+        "            let v; try { v = o[k]; } catch (e) { continue; }"
+        "            if (/^(smtp|mailboxSmtpAddress|emailAddress)$/.test(k) && typeof v === 'string' && re.test(v)) return v;"
+        "            const r = find(v, d + 1); if (r) return r;"
+        "          }"
+        "          return null;"
+        "        };"
+        "        for (const node of [el, ...el.querySelectorAll('*')]) {"
+        "          const key = Object.keys(node).find(k => k.startsWith('__reactFiber'));"
+        "          for (let f = key && node[key]; f && f.stateNode !== box; f = f.return) {"
+        "            const r = find(f.memoizedProps, 0); if (r) return r;"
+        "            if (f.stateNode === el) break;"
+        "          }"
+        "        }"
+        "        return null;"
+        "      };"
+        "      return [...box.querySelectorAll('span[draggable=\"true\"][contenteditable=\"false\"], [role=\"option\"], [role=\"listitem\"]')].map(el => {"
+        "        const m = (el.getAttribute('title') || '').match(re) || (el.getAttribute('aria-label') || '').match(re);"
+        "        const a = m ? m[0] : fromProps(el);"
+        "        return a ? a.toLowerCase() : null;"
+        "      });"
+        "    })(),"
         "    cc: (document.querySelector('div[aria-label=\"Cc\"]')?.innerText || '').trim()"
         "  }), saved));"
         "}"

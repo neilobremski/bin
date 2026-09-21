@@ -59,7 +59,9 @@ def main():
     p = gb_sub.add_parser("archive",
                           help="Write the archive-page version of an edition (publishes nothing)")
     p.add_argument("--id", required=True, help="Message/draft UUID")
-    p.add_argument("--edition", required=True, help="Edition date YYYY-MM-DD")
+    p.add_argument("--edition",
+                   help="Edition date YYYY-MM-DD (default: read from the edition's own "
+                        "date heading, cross-checked against the Givebacks send date)")
     p.add_argument("--out", "-o", help="Output file (default: editions/DATE/wip/archive.html)")
 
     p = gb_sub.add_parser("open", help="Open editor in browser")
@@ -185,6 +187,13 @@ def main():
     p.add_argument("--html", required=True,
                    help="HTML file from `b3t gb archive`")
     p.add_argument("--title", help="Page title (default: from the file's .meta.json)")
+    p.add_argument("--save", action="store_true",
+                   help="Save the page, making it public. Default: fill the form and stop")
+
+    p = osp_sub.add_parser("listing",
+                           help="Add one edition's entry to the archive listing page")
+    p.add_argument("--edition", required=True, help="Edition date YYYY-MM-DD")
+    p.add_argument("--html", help="Archive HTML file (default: editions/DATE/wip/archive.html)")
     p.add_argument("--save", action="store_true",
                    help="Save the page, making it public. Default: fill the form and stop")
 

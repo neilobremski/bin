@@ -197,3 +197,198 @@ def test_the_listing_entry_comes_from_at_a_glance():
     assert archive.highlights(EDITION) == [
         "\U0001f4da Meet the Teachers",
         "\U0001f52c Sep 22: Science Club Registration Closes"]
+
+
+# ------------------------------------------------------------ school_year
+
+def test_school_year_straddles_august():
+    assert archive.school_year("2026-08-24") == "2026-2027"
+    assert archive.school_year("2026-08-01") == "2026-2027"
+    assert archive.school_year("2026-07-31") == "2025-2026"
+    assert archive.school_year("2026-05-31") == "2025-2026"
+
+
+# ------------------------------------------------------------ heading_date
+
+def test_heading_date_reads_the_editions_own_date():
+    assert archive.heading_date(EDITION) == "2026-09-20"
+
+
+def test_heading_date_refused_without_a_heading():
+    no_date = EDITION.replace(DATE_ROW, "")
+    with pytest.raises(archive.ArchiveError) as e:
+        archive.heading_date(no_date)
+    assert "date heading" in str(e.value)
+
+
+# ------------------------------------------------------- resolve_edition_date
+
+def test_resolve_edition_date_omitted_within_window_uses_the_heading():
+    date, reason = archive.resolve_edition_date(None, "2026-05-31", "2026-06-01")
+    assert date == "2026-05-31"
+    assert "2026-06-01" in reason
+
+
+def test_resolve_edition_date_omitted_too_far_off_is_refused():
+    with pytest.raises(archive.ArchiveError) as e:
+        archive.resolve_edition_date(None, "2026-05-25", "2026-06-01")
+    assert "2026-05-25" in str(e.value)
+    assert "2026-06-01" in str(e.value)
+
+
+def test_resolve_edition_date_omitted_heading_after_the_send_is_refused():
+    """A send date can only ever be on or after its own edition's heading."""
+    with pytest.raises(archive.ArchiveError):
+        archive.resolve_edition_date(None, "2026-06-05", "2026-06-01")
+
+
+def test_resolve_edition_date_omitted_with_no_send_date_is_a_draft():
+    date, reason = archive.resolve_edition_date(None, "2026-09-20", None)
+    assert date == "2026-09-20"
+    assert "draft" in reason
+
+
+def test_resolve_edition_date_explicit_is_used_unchanged():
+    """An explicit --edition is trusted even against a wildly different
+    heading or send date; `build()` is what checks it against the heading."""
+    date, reason = archive.resolve_edition_date("2026-09-20", "2026-01-01", "2020-01-01")
+    assert date == "2026-09-20"
+    assert "explicit" in reason
+
+
+# ---------------------------------------------------------- listing_insert
+
+_ENTRY_MAY3 = (
+    '<li><a href="https://rmsptsa.org/Page/BearTracks/2026-05-03-english">'
+    'May 3, 2026 [English]: Bear Tracks - The Home Stretch</a>\n'
+    '<ul>\n<li>Staff Appreciation Week</li>\n</ul>\n</li>\n')
+
+_ENTRY_APR5 = (
+    '<li><a href="https://rmsptsa.org/Page/BearTracks/2026-04-05-english">'
+    'April 5, 2026 [English]: Bear Tracks - Science in Spring</a>\n'
+    '<ul>\n<li>Science Olympiad</li>\n</ul>\n</li>\n')
+
+_ENTRY_2025JUN = (
+    '<li><a href="https://rmsptsa.org/Page/BearTracks/2025-06-01-english">'
+    'June 1, 2025 [English]: Bear Tracks - The Last Word</a>\n'
+    '<ul>\n<li>Yearbook</li>\n</ul>\n</li>\n')
+
+LISTING = (
+    '<h5>Bear Tracks Archive for 2025-2026</h5>\n<ul>\n'
+    + _ENTRY_MAY3 + _ENTRY_APR5 +
+    '</ul>\n<p>&nbsp;</p>\n'
+    '<h5>Bear Tracks Archive for 2024-2025</h5>\n<ul>\n'
+    + _ENTRY_2025JUN +
+    '</ul>\n<p>&nbsp;</p>\n'
+)
+
+
+def _section(listing_html, year):
+    after = listing_html.split('Bear Tracks Archive for %s' % year)[1]
+    return after.split('<h5>')[0]
+
+
+def test_listing_creates_a_new_section_for_a_new_school_year():
+    out = archive.listing_insert(
+        LISTING, "2026-08-24",
+        "August 24, 2026 [English]: Bear Tracks - Welcome Back, Grizzlies!",
+        ["First day of school Aug 31"])
+    assert "2026-2027" in out
+    assert out.index("2026-2027") < out.index("2025-2026")
+    assert "2026-08-24-english" in out
+    # existing sections and entries survive untouched
+    assert _ENTRY_MAY3 in out
+    assert _ENTRY_2025JUN in out
+
+
+def test_listing_creates_the_new_section_right_before_the_newest_one():
+    out = archive.listing_insert(
+        LISTING, "2026-08-24", "Bear Tracks - Welcome Back, Grizzlies!", [])
+    assert out.index("2026-2027") < out.index("2025-2026") < out.index("2024-2025")
+
+
+def test_listing_inserts_at_the_top_of_an_existing_section():
+    out = archive.listing_insert(
+        LISTING, "2026-05-17",
+        "May 17, 2026 [English]: Bear Tracks - The Final Stretch",
+        ["Field Day"])
+    section = _section(out, "2025-2026")
+    assert section.index("2026-05-17-english") < section.index("2026-05-03-english")
+
+
+def test_listing_inserts_in_the_middle_by_date():
+    out = archive.listing_insert(
+        LISTING, "2026-04-19",
+        "April 19, 2026 [English]: Bear Tracks - Welcome Back",
+        ["Spring Break"])
+    section = _section(out, "2025-2026")
+    assert (section.index("2026-05-03-english") < section.index("2026-04-19-english")
+            < section.index("2026-04-05-english"))
+
+
+def test_listing_refuses_a_duplicate_slug():
+    with pytest.raises(archive.ArchiveError) as e:
+        archive.listing_insert(
+            LISTING, "2026-05-03",
+            "May 3, 2026 [English]: Bear Tracks - The Home Stretch (again)", [])
+    assert "already linked" in str(e.value)
+    assert "2026-05-03-english" in str(e.value)
+
+
+def test_listing_entry_html_escapes_title_and_highlights():
+    out = archive.listing_insert(
+        LISTING, "2026-08-24", "Bear Tracks - R&D Night",
+        ["<b>Big</b> News & More"])
+    assert "R&amp;D Night" in out
+    assert "&lt;b&gt;Big&lt;/b&gt; News &amp; More" in out
+    assert "<b>Big</b>" not in out
+
+
+# ---------------------------------------- listing_insert / legacy table fixture
+
+_REAL_LISTING = (Path(__file__).resolve().parent / "fixtures" / "listing_real.html").read_text()
+
+
+def test_listing_insert_survives_a_legacy_table_section():
+    """The real listing's oldest section (2024-2025) is a `<table>`, not a
+    `<ul>` -- `_section_spans`/`_section_list` must never require it to be
+    list-shaped just because some other section is being edited."""
+    out = archive.listing_insert(
+        _REAL_LISTING, "2026-10-04",
+        "October 4, 2026 [English]: Bear Tracks - Fall Forward",
+        ["Fall Fest"])
+    section = _section(out, "2026-2027")
+    assert section.index("2026-10-04-english") < section.index("2026-09-20-english")
+    # the untouched sections, including the legacy table, are byte-for-byte
+    # unchanged
+    assert _section(out, "2025-2026") == _section(_REAL_LISTING, "2025-2026")
+    legacy_before = _REAL_LISTING[_REAL_LISTING.index("<h5>Bear Tracks Archive for 2024-2025"):]
+    legacy_after = out[out.index("<h5>Bear Tracks Archive for 2024-2025"):]
+    assert legacy_before == legacy_after
+    assert "<table" in legacy_after
+
+
+def test_listing_insert_new_year_does_not_require_the_legacy_table_to_be_a_list():
+    """Creating a brand-new 2027-2028 section must not touch, or even parse,
+    any older section -- including the 2024-2025 table."""
+    out = archive.listing_insert(
+        _REAL_LISTING, "2027-08-30",
+        "August 30, 2027 [English]: Bear Tracks - A New Year",
+        ["Welcome back"])
+    assert out.index("2027-2028") < out.index("2026-2027") < out.index("2025-2026")
+    assert "2027-08-30-english" in _section(out, "2027-2028")
+    legacy_before = _REAL_LISTING[_REAL_LISTING.index("<h5>Bear Tracks Archive for 2024-2025"):]
+    legacy_after = out[out.index("<h5>Bear Tracks Archive for 2024-2025"):]
+    assert legacy_before == legacy_after
+
+
+def test_listing_2025_2026_vs_2026_2027_boundary():
+    """2026-05-31 is the tail of 2025-2026; 2026-08-24 opens 2026-2027,
+    even though both are "2026" dates."""
+    in_2025_2026 = archive.listing_insert(LISTING, "2026-05-31", "s", [])
+    assert "2025-2026" in in_2025_2026
+    assert _section(in_2025_2026, "2025-2026").index("2026-05-31-english") >= 0
+    assert "2026-2027" not in in_2025_2026
+
+    in_2026_2027 = archive.listing_insert(LISTING, "2026-08-24", "s", [])
+    assert in_2026_2027.index("2026-2027") < in_2026_2027.index("2025-2026")

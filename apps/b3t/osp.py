@@ -8,18 +8,21 @@ import time
 import archive
 import env
 import session
-from constants import OSP_BASE, OSP_LOGIN, OSP_CREATE_PAGE, OSP_SCAN_PAGES
+from constants import (OSP_BASE, OSP_LOGIN, OSP_CREATE_PAGE, OSP_SCAN_PAGES,
+                        OSP_LISTING_PAGE_ID, OSP_LISTING_EDIT, OSP_LISTING_URL)
 
 
 def dispatch(args):
     action = args.action
     if not action:
-        print("Usage: b3t osp <login|archive|scan>", file=sys.stderr)
+        print("Usage: b3t osp <login|archive|listing|scan>", file=sys.stderr)
         return 2
     if action == "login":
         return cmd_login(args)
     elif action == "archive":
         return cmd_archive(args)
+    elif action == "listing":
+        return cmd_listing(args)
     elif action == "scan":
         return cmd_scan(args)
     return 2
@@ -97,6 +100,122 @@ def cmd_login(args):
     return 1
 
 
+def _eval(js, timeout=30):
+    """Evaluate JS and return only the result value.
+
+    Mirrors `givebacks._eval`: playwright-cli's plain `eval` echoes the
+    snippet it ran back onto stdout ahead of the value, so parsing raw stdout
+    for a sentinel matches the source of the check itself. `--raw` prints the
+    value alone.
+    """
+    result = session.run("--raw", "eval", js, timeout=timeout)
+    out = (result.stdout or "").strip()
+    if not out:
+        return None
+    try:
+        value = json.loads(out)
+    except json.JSONDecodeError:
+        return out
+    return value if isinstance(value, str) else value
+
+
+def _save():
+    """Click #SaveButton and wait for the navigation it causes.
+
+    A plain `page.click('#SaveButton')` followed by a fixed timeout looked
+    like it worked and had not submitted anything: nothing after the click
+    proved the click did anything. Seen live, the actual cause: OSP raises
+    its own "Leave this page?" prompt on the way out, because the page is
+    dirty and Save is itself a navigation. `window.onbeforeunload = null`
+    handles the common case, but an `addEventListener('beforeunload', ...)`
+    handler survives that assignment (Outlook's own unsaved-changes prompt is
+    registered that way, per `outlook.py`'s `_suppress_unload_guard`; OSP's
+    may be too), so a one-shot `page.once('dialog', ...)` handler that
+    accepts is registered first, as the fix that actually reaches the prompt
+    regardless of how it is wired. `#SaveButton` then navigates to `/Home` on
+    a real save, so waiting for that navigation (and reporting when none
+    comes) is what tells a save from a silent no-op.
+
+    Returns `(ok, url, status, dialog)`. `status` is `"no-nav"` when nothing
+    navigated; `ok` is false in that case. `dialog` is `"none"` or the type
+    and text of whatever dialog was accepted along the way.
+
+    playwright-cli tracks dialogs on its own, independent of the page-level
+    `page.once('dialog', ...)` handler above, and ends the `run-code`
+    response the moment one appears -- before the script ever reaches its
+    `return`. Reproduced live: `result.stdout` comes back with only the
+    echoed script and a trailing "### Modal state" block, no `### Result`,
+    even though the page-level handler already called `d.accept()` and the
+    click's navigation already completed (confirmed by reading `page.url()`
+    straight afterwards). So a response with no match is not necessarily a
+    failed save: it can also be a successful one whose result got lost.
+    Since `page.click` cannot be safely repeated (a second real click risks a
+    duplicate submit), recovery reads the URL directly instead. That first
+    read still sees the same stuck dialog playwright-cli hasn't let go of, so
+    it goes through `session.run`, whose own stuck-modal handling (any dialog
+    command clears the CLI's bookkeeping, whether or not a real dialog is
+    still there to answer) clears it before the read is retried.
+    """
+    before = session.current_url()
+    result = session.run("run-code", r"""async function main(page) {
+  let dialog = "none";
+  page.once("dialog", d => {
+    dialog = (d.type() + ": " + d.message()).replace(/[\s|]+/g, " ").trim();
+    d.accept();
+  });
+  await page.evaluate(() => { window.onbeforeunload = null; });
+  const [r] = await Promise.all([
+    page.waitForNavigation({timeout: 20000}).catch(e => null),
+    page.click("#SaveButton"),
+  ]);
+  await page.waitForTimeout(3000);
+  return page.url() + " " + (r ? r.status() : "no-nav") + " | " + dialog;
+}""", timeout=40, on_dialog="accept")
+    m = re.search(r"(https?://\S+)\s+(\d+|no-nav)\s+\|\s+(.*)", result.stdout or "")
+    if m:
+        url, status, dialog = m.group(1), m.group(2), m.group(3).strip()
+        if dialog != "none":
+            print(f"Save's leave-page dialog was accepted: {dialog}", file=sys.stderr)
+        return status != "no-nav", url, status, dialog
+
+    session.run("eval", "() => true", on_dialog="accept")
+    time.sleep(1)
+    url = session.current_url() or ""
+    if url and before and url != before:
+        print("Save's own response was interrupted by its leave-page dialog; "
+              f"recovered by reading the URL directly (now at {url}).",
+              file=sys.stderr)
+        return True, url, "recovered", "beforeunload (interrupted response)"
+    return False, "", "no answer (%s)" % (result.stdout or "")[:200], "none"
+
+
+def _load_title(html_path, edition_date, override=None):
+    """The archive page's title, from `.meta.json` beside `html_path`.
+
+    `gb archive` leaves the page's title there. Retyping it from the date
+    alone produced "Bear Tracks - 2026-09-20", which matches no other page on
+    the site and reads as a filename in the archive listing. Returns the
+    title, or None with an error already printed.
+    """
+    heading = override
+    meta_path = html_path + ".meta.json"
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            meta = json.load(f)
+        heading = heading or meta.get("title")
+        if meta.get("edition") and meta["edition"] != edition_date:
+            print(f"ERROR: {meta_path} is for the {meta['edition']} edition, "
+                  f"not {edition_date}.", file=sys.stderr)
+            return None
+    if not heading:
+        print(f"ERROR: no title. Either generate the page with `b3t gb archive "
+              f"--edition {edition_date} --id UUID`, which writes "
+              f"{os.path.basename(meta_path)} beside the HTML, or pass --title.",
+              file=sys.stderr)
+        return None
+    return heading
+
+
 def cmd_archive(args):
     """Create archive page for an edition."""
     if not ensure_authenticated():
@@ -113,24 +232,8 @@ def cmd_archive(args):
     edition_date = args.edition
     slug = archive.page_slug(edition_date)
 
-    # `gb archive` leaves the page's title beside the HTML. Retyping it here
-    # from the date alone produced "Bear Tracks - 2026-09-20", which matches no
-    # other page on the site and reads as a filename in the archive listing.
-    heading = getattr(args, "title", None)
-    meta_path = html_path + ".meta.json"
-    if os.path.exists(meta_path):
-        with open(meta_path) as f:
-            meta = json.load(f)
-        heading = heading or meta.get("title")
-        if meta.get("edition") and meta["edition"] != edition_date:
-            print(f"ERROR: {meta_path} is for the {meta['edition']} edition, "
-                  f"not {edition_date}.", file=sys.stderr)
-            return 1
+    heading = _load_title(html_path, edition_date, getattr(args, "title", None))
     if not heading:
-        print(f"ERROR: no title. Either generate the page with `b3t gb archive "
-              f"--edition {edition_date} --id UUID`, which writes "
-              f"{os.path.basename(meta_path)} beside the HTML, or pass --title.",
-              file=sys.stderr)
         return 1
 
     # A page at this address already holds an edition. Creating a second one
@@ -207,10 +310,11 @@ def cmd_archive(args):
         print(f"URL will be: {OSP_BASE}/Page/BearTracks/{slug}")
         return 0
 
-    session.run("run-code", """async function main(page) {
-  await page.click('#SaveButton');
-  await page.waitForTimeout(5000);
-}""", timeout=90)
+    ok, save_url, status, dialog = _save()
+    if not ok:
+        print(f"ERROR: Save did not navigate away (status={status}). The page "
+              "was likely NOT saved. Check the CMS by hand.", file=sys.stderr)
+        return 1
 
     session.navigate(f"{OSP_BASE}/Page/BearTracks/{slug}")
     time.sleep(3)
@@ -221,9 +325,152 @@ def cmd_archive(args):
         return 1
 
     print(f"Published: {OSP_BASE}/Page/BearTracks/{slug}", file=sys.stderr)
-    print("The archive listing page is separate and still needs its entry.",
-          file=sys.stderr)
+    print("The archive listing page is separate and still needs its entry:", file=sys.stderr)
+    print(f"  b3t osp listing --edition {edition_date}", file=sys.stderr)
     print(f"{OSP_BASE}/Page/BearTracks/{slug}")
+    return 0
+
+
+def cmd_listing(args):
+    """Add one edition's entry to the archive LISTING page on rmsptsa.org.
+
+    The listing (`/Page/BearTracks/Archive`) is a separate page from the
+    per-edition archive page `cmd_archive` makes; this is the table of
+    contents that links to it.
+    """
+    if not OSP_LISTING_PAGE_ID:
+        print("ERROR: OSP_LISTING_PAGE_ID not set in .env", file=sys.stderr)
+        return 1
+    if not ensure_authenticated():
+        return 1
+
+    edition_date = args.edition
+    html_path = args.html or os.path.join("editions", edition_date, "wip", "archive.html")
+    if not os.path.exists(html_path):
+        print(f"ERROR: File not found: {html_path}", file=sys.stderr)
+        return 1
+    with open(html_path) as f:
+        archive_html = f.read()
+
+    title = _load_title(html_path, edition_date)
+    if not title:
+        return 1
+
+    slug = archive.page_slug(edition_date)
+    highlights = archive.highlights(archive_html, limit=8)
+
+    # An entry that links a page which is not there yet would be a dead link
+    # from the moment the listing goes live. This check has to happen before
+    # the listing editor is opened at all, not just before it is edited: once
+    # TinyMCE's content is set, the page is dirty and any navigation away from
+    # it (this one included) has to get past OSP's "Leave this page?" prompt
+    # first. `session.navigate` now answers that prompt itself, but there is
+    # nothing to answer if it is never raised in the first place.
+    session.navigate(f"{OSP_BASE}/Page/BearTracks/{slug}")
+    time.sleep(2)
+    live = session.current_url() or ""
+    if "Error404" in live or slug not in live:
+        print(f"ERROR: {OSP_BASE}/Page/BearTracks/{slug} is not live yet. Run "
+              f"`b3t osp archive --edition {edition_date} --html {html_path} "
+              "--save` first.", file=sys.stderr)
+        return 1
+
+    print(f"Editing archive listing: {OSP_LISTING_EDIT}", file=sys.stderr)
+    session.navigate(OSP_LISTING_EDIT)
+    time.sleep(3)
+
+    current = _eval("""() => {
+  const ed = (window.tinymce && (tinymce.get("Html") || tinymce.activeEditor));
+  return ed ? ed.getContent() : null;
+}""")
+    if current is None:
+        print("ERROR: could not find the TinyMCE editor on the listing page.",
+              file=sys.stderr)
+        return 1
+
+    try:
+        updated = archive.listing_insert(current, edition_date, title, highlights)
+    except archive.ArchiveError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    # Before writing anything: a copy of what was there, so a bad save or a
+    # bad verify has something to recover from.
+    backup_dir = os.path.join("editions", edition_date, "wip")
+    os.makedirs(backup_dir, exist_ok=True)
+    backup_path = os.path.join(backup_dir, "listing-backup.html")
+    with open(backup_path, "w") as f:
+        f.write(current)
+    print(f"Backup of the current listing: {backup_path}", file=sys.stderr)
+
+    before_count = current.count('-english"')
+
+    # Same localStorage bridge as cmd_archive: the listing is easily large
+    # enough to trip whatever limit makes passing HTML as a literal unsafe.
+    session.run("localstorage-set", "_b3t_listing_html", updated)
+    result = session.run("eval", """() => {
+  const html = localStorage.getItem("_b3t_listing_html");
+  if (!html) return "LISTING:no-html";
+  const ed = (window.tinymce && (tinymce.get("Html") || tinymce.activeEditor));
+  if (!ed) return "LISTING:no-tinymce";
+  ed.setContent(html);
+  ed.save();
+  return "LISTING:ok:" + (ed.getContent().match(/-english"/g) || []).length;
+}""", timeout=30)
+    session.run("localstorage-set", "_b3t_listing_html", "")
+
+    state = re.search(r"LISTING:(\w+)(?::(\d+))?", result.stdout or "")
+    if not state or state.group(1) != "ok":
+        print("ERROR: the editor did not take the HTML (%s). Nothing was saved."
+              % (state.group(1) if state else "no answer"), file=sys.stderr)
+        return 1
+
+    after_count = int(state.group(2))
+    print(f"Section: {archive.school_year(edition_date)}", file=sys.stderr)
+    print(f"Title:   {title}", file=sys.stderr)
+    print(f"Highlights: {len(highlights)}", file=sys.stderr)
+    print(f"Archive links in the editor: {before_count} -> {after_count}", file=sys.stderr)
+    if after_count != before_count + 1:
+        print(f"ERROR: expected {before_count + 1}, found {after_count}. Not "
+              f"saving. Backup: {backup_path}", file=sys.stderr)
+        return 1
+
+    if not getattr(args, "save", False):
+        print("The listing form is filled and NOT saved. Review it in the "
+              "browser and click Save, or re-run with --save.", file=sys.stderr)
+        return 0
+
+    ok, save_url, status, dialog = _save()
+    if not ok:
+        print(f"ERROR: Save did not navigate away (status={status}). The "
+              f"listing was likely NOT saved. Backup: {backup_path}",
+              file=sys.stderr)
+        return 1
+
+    # The editor's own content proves nothing about what went out: verify
+    # against the public page itself, cache-busted so a stale cached copy
+    # cannot report a false pass.
+    verify_js = """async () => {
+  const r = await fetch(%s + "?cb=" + Date.now(), {credentials: "include", cache: "no-store"});
+  const t = await r.text();
+  return JSON.stringify({has_slug: t.includes(%s),
+                          count: (t.match(/-english"/g) || []).length});
+}""" % (json.dumps(OSP_LISTING_URL), json.dumps(slug))
+    verify_raw = _eval(verify_js, timeout=20)
+    try:
+        verify = json.loads(verify_raw) if isinstance(verify_raw, str) else None
+    except (json.JSONDecodeError, TypeError):
+        verify = None
+
+    if not verify or not verify.get("has_slug") or verify.get("count") != before_count + 1:
+        print(f"ERROR: after saving, the public listing does not show the "
+              f"expected change (got {verify}). Check the CMS by hand. "
+              f"Backup: {backup_path}", file=sys.stderr)
+        return 1
+
+    print(f"Published: {slug} added to the {archive.school_year(edition_date)} "
+          "section of the archive listing.", file=sys.stderr)
+    print(OSP_LISTING_URL)
     return 0
 
 

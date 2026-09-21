@@ -90,6 +90,12 @@ OSP_FOLDER_ID = int(_osp_folder) if _osp_folder else 0
 OSP_CREATE_PAGE = f"{OSP_BASE}/PageManager/AdminCreate/{OSP_FOLDER_ID}" if OSP_BASE and OSP_FOLDER_ID else ""
 # Comma-separated name|path pairs, e.g. "Home|/,Calendar|/Event/MonthCalendar"
 OSP_SCAN_PAGES = _optional("OSP_SCAN_PAGES")
+# The CMS page id behind /Page/BearTracks/Archive, the newsletter archive
+# LISTING page (distinct from the per-edition archive pages themselves).
+_osp_listing = _optional("OSP_LISTING_PAGE_ID")
+OSP_LISTING_PAGE_ID = int(_osp_listing) if _osp_listing else 0
+OSP_LISTING_EDIT = f"{OSP_BASE}/PageManager/Edit/{OSP_LISTING_PAGE_ID}" if OSP_BASE and OSP_LISTING_PAGE_ID else ""
+OSP_LISTING_URL = f"{OSP_BASE}/Page/BearTracks/Archive" if OSP_BASE else ""
 
 
 # --- LWSD / school website ---
