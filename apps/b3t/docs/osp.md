@@ -4,7 +4,8 @@
 
 CMS for the PTSA website. Used for two purposes:
 1. **Scanning** for content updates (programs, calendar, club pages)
-2. **Archiving** newsletter editions as pages on the site
+2. **Archiving** newsletter editions as pages on the site (see also
+   `b3t gb archive`, which produces the HTML this consumes)
 
 ## Authentication
 
@@ -23,18 +24,40 @@ Scans multiple site pages for content that could be newsletter-worthy:
 
 **Calendar parsing:** Grid layout with alternating date rows (7 cells = days of week) and event rows (events positioned by column index).
 
-### `osp archive --edition DATE --html FILE`
+### `osp archive --edition DATE --html FILE [--save]`
 
-Creates an archive page for a sent newsletter edition.
+Creates the archive page for a sent edition from the file `gb archive` wrote.
+Fills the form and STOPS by default; `--save` publishes.
 
-Flow:
-1. Login if needed
-2. Navigate to `{OSP_BASE}/PageManager/AdminCreate/{OSP_FOLDER_ID}`
-3. Set page title and URL slug
-4. Paste HTML content via TinyMCE source code editor
-5. Save/publish
+Form is at `{OSP_BASE}/PageManager/AdminCreate/{OSP_FOLDER_ID}`. Fields, all
+named (do NOT hunt for them in the a11y snapshot; OSP puts each label on its
+own line above its box, and Google Translate injects 5 decoy text inputs):
+
+| Field | id | Value |
+|---|---|---|
+| Name (URL slug) | `#PageName` | `YYYY-MM-DD-english` |
+| Folder | `#PageFolderDropDown` | BearTracks = 6282 (preselected by the URL) |
+| Heading (page title) | `#PageHeading` | `September 20, 2026 [English]: Bear Tracks - Meet the Teachers` |
+| Is Hidden | `#IsHidden` | unchecked |
+| Content | `#Html` (TinyMCE) | the archive HTML |
+| Mobile content | `#MobileHtml` | empty on every existing page |
+| Save | `#SaveButton` | |
+
+Content goes in via `tinymce.get("Html").setContent(html)` then `.save()`.
+Refuses to save if the editor lost rows or the folder is not BearTracks, and
+refuses outright if a page already exists at that slug.
+
+Sign-in: `#EmailAddress`, `#Password`, submit is `form input[type=image]`.
+
+**TinyMCE rewrites what it is given.** It converts `style="width:580px"` to
+`width="580"`. Pages made in 2025 have zero `style=` attributes; content pushed
+through `setContent` keeps them, so recent pages look like the email (maroon
+heading bars, colours) and older ones look like plain site content. Both work.
 
 Archive URL pattern: `{OSP_BASE}/Page/BearTracks/YYYY-MM-DD-english`
+
+The archive LISTING at `/Page/BearTracks/Archive` is a separate page and is not
+updated by this command. It has no 2026-2027 section yet.
 
 ## Site Structure
 

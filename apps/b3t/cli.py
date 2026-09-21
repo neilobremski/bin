@@ -56,10 +56,18 @@ def main():
                           help="Send the CMS preview email (goes to the signed-in account only)")
     p.add_argument("--id", required=True, help="Message/draft UUID")
 
+    p = gb_sub.add_parser("archive",
+                          help="Write the archive-page version of an edition (publishes nothing)")
+    p.add_argument("--id", required=True, help="Message/draft UUID")
+    p.add_argument("--edition", required=True, help="Edition date YYYY-MM-DD")
+    p.add_argument("--out", "-o", help="Output file (default: editions/DATE/wip/archive.html)")
+
     p = gb_sub.add_parser("open", help="Open editor in browser")
     p.add_argument("--id", required=True, help="Message/draft UUID")
 
-    gb_sub.add_parser("list", help="List recent drafts")
+    p = gb_sub.add_parser("list", help="List recent drafts")
+    p.add_argument("--limit", type=int, default=10,
+                   help="How many to list (default 10). Raise it to reach older editions")
 
     p = gb_sub.add_parser("duplicate", help="Duplicate a newsletter (returns new draft UUID)")
     p.add_argument("--id", required=True, help="Source message UUID to duplicate")
@@ -172,9 +180,13 @@ def main():
     osp_sub.add_parser("login", help="Auto-login")
     osp_sub.add_parser("scan", help="Scan site pages for content updates")
 
-    p = osp_sub.add_parser("archive", help="Create archive page")
+    p = osp_sub.add_parser("archive", help="Fill the archive page form on rmsptsa.org")
     p.add_argument("--edition", required=True, help="Edition date YYYY-MM-DD")
-    p.add_argument("--html", required=True, help="HTML file to publish")
+    p.add_argument("--html", required=True,
+                   help="HTML file from `b3t gb archive`")
+    p.add_argument("--title", help="Page title (default: from the file's .meta.json)")
+    p.add_argument("--save", action="store_true",
+                   help="Save the page, making it public. Default: fill the form and stop")
 
     # -- Gemini --
     gm = sub.add_parser("gemini", aliases=["gm"], help="Gemini header image generation")
@@ -210,9 +222,11 @@ def main():
     p.add_argument("--sender-only", dest="all", action="store_false",
                    help="Reply to the sender instead of Reply All")
 
-    p = ol_sub.add_parser("draft", help="Create an unaddressed draft email in Outlook")
+    p = ol_sub.add_parser("draft", help="Create a draft email in Outlook (never sends)")
     p.add_argument("--file", required=True, help="Markdown draft file (**Subject:** line, then ---, then body)")
     p.add_argument("--subject", help="Override the subject from the file")
+    p.add_argument("--to", action="append", default=[],
+                   help="Address the draft to this recipient (repeatable). Default: unaddressed")
 
     p = ol_sub.add_parser("read", help="Read a message (expands full thread)")
     p.add_argument("number", help="Message number from check output")

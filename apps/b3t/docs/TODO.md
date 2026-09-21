@@ -33,7 +33,11 @@
 
 ## Medium Priority
 
-- [ ] **`osp archive --edition DATE --html FILE`** — Has code, never tested end-to-end. Needs verification.
+- [x] **`osp archive --edition DATE --html FILE`** — Tested end-to-end 2026-09-20
+  against the Sep 20 edition. Its field-finding was broken (snapshot text
+  matching, see docs/osp.md), its page title was `Bear Tracks - 2026-09-20`,
+  which matched nothing on the site, and `ensure_authenticated` could not find
+  the login fields. All three fixed; `b3t gb archive` now produces the HTML.
 - [ ] **`givebacks preview --id UUID --email ADDRESS`** — Send a test email preview via API or UI.
 - [ ] **`outlook send --draft FILE`** — Send a board review draft from a prepared markdown/HTML file.
 - [ ] **Automated link validation** — Curl all URLs in design JSON before send. Catch 404s.
@@ -122,3 +126,31 @@
   ("0 messages" until the filter chip is cleared via snapshot+click).
 - [ ] `lwsd scan` returns nav chrome, not content (needs content-area scoping);
   the news-article body doesn't render in snapshots (JS hydration).
+
+## From the 2026-09-19 inbox check
+
+- **`ol read N` prints the wrong message.** Opening Inbox auto-opens the first
+  conversation (a 3-message thread) expanded, with one sub-message's checkbox
+  ticked. From then on, `read 6` and `read 7` both printed that first thread,
+  even though the row echo named the right row and `selected_ref` matched.
+  Clicking a row by its snapshot ref did nothing; a real mouse click at the
+  row's bounding box worked. Worked around by hand with a locator +
+  `page.mouse.click`. Fix: after selecting, compare the reading pane's subject
+  heading with the row's subject and refuse on a mismatch; click rows by
+  bounding box; clear multi-select (Escape) after `_click_folder`. `ol reply`
+  uses the same click path, so check it too (it produced the right draft this
+  time: poorva@gmail.com).
+
+## Archive pages
+
+- [ ] **Back-fill the archive.** `/Page/BearTracks/Archive` stops at
+  2025-10-12. Every edition since has a message in Givebacks, so
+  `gb archive --id UUID --edition DATE` can rebuild each one. Editions sent
+  before b3t may not have `raw_html` at all; check before promising a full
+  back-fill.
+- [ ] **The archive LISTING is still manual.** It needs a 2026-2027 section,
+  and each entry pairs the page link with At a Glance lines.
+  `archive.highlights()` already returns those lines; nothing writes the
+  listing page yet.
+- [ ] **Spanish editions.** The slug says `-english` because the site archives
+  translations too. Nothing in b3t produces the Spanish version.
