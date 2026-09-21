@@ -1083,7 +1083,8 @@ def cmd_list(args):
         return 1
 
     # Must be on a GiveBacks page for fetch to include auth cookies
-    js = f'''() => fetch("https://api.givebacks.com/services/communication/messages?cause_id={CAUSE_ID}&per_page=10", {{
+    limit = max(1, int(getattr(args, "limit", None) or 10))
+    js = f'''() => fetch("https://api.givebacks.com/services/communication/messages?cause_id={CAUSE_ID}&per_page={limit}", {{
   credentials: "include"
 }}).then(r => r.json()).then(d => JSON.stringify(d.messages || d.data || d))'''
 
@@ -1100,7 +1101,7 @@ def cmd_list(args):
                 parsed = json.loads(parsed)
             data = json.loads(parsed) if isinstance(parsed, str) else parsed
             if isinstance(data, list):
-                for msg in data[:10]:
+                for msg in data[:limit]:
                     mid = msg.get("id", msg.get("uuid", "?"))
                     subj = msg.get("subject", msg.get("name", "?"))
                     status = msg.get("status", "?")

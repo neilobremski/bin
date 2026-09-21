@@ -65,7 +65,9 @@ def main():
     p = gb_sub.add_parser("open", help="Open editor in browser")
     p.add_argument("--id", required=True, help="Message/draft UUID")
 
-    gb_sub.add_parser("list", help="List recent drafts")
+    p = gb_sub.add_parser("list", help="List recent drafts")
+    p.add_argument("--limit", type=int, default=10,
+                   help="How many to list (default 10). Raise it to reach older editions")
 
     p = gb_sub.add_parser("duplicate", help="Duplicate a newsletter (returns new draft UUID)")
     p.add_argument("--id", required=True, help="Source message UUID to duplicate")
