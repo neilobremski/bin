@@ -148,9 +148,10 @@
   `gb archive --id UUID --edition DATE` can rebuild each one. Editions sent
   before b3t may not have `raw_html` at all; check before promising a full
   back-fill.
-- [ ] **The archive LISTING is still manual.** It needs a 2026-2027 section,
-  and each entry pairs the page link with At a Glance lines.
-  `archive.highlights()` already returns those lines; nothing writes the
-  listing page yet.
+- [x] **The archive LISTING is still manual.** `osp listing --edition DATE`
+  now writes it: finds or creates the school-year section, inserts in date
+  order, refuses a duplicate slug, backs up the listing before writing, and
+  (with `--save`) verifies the public page picked up the change. Pure-HTML
+  logic in `archive.listing_insert()`.
 - [ ] **Spanish editions.** The slug says `-english` because the site archives
   translations too. Nothing in b3t produces the Spanish version.

@@ -190,6 +190,13 @@ def main():
     p.add_argument("--save", action="store_true",
                    help="Save the page, making it public. Default: fill the form and stop")
 
+    p = osp_sub.add_parser("listing",
+                           help="Add one edition's entry to the archive listing page")
+    p.add_argument("--edition", required=True, help="Edition date YYYY-MM-DD")
+    p.add_argument("--html", help="Archive HTML file (default: editions/DATE/wip/archive.html)")
+    p.add_argument("--save", action="store_true",
+                   help="Save the page, making it public. Default: fill the form and stop")
+
     # -- Gemini --
     gm = sub.add_parser("gemini", aliases=["gm"], help="Gemini header image generation")
     gm_sub = gm.add_subparsers(dest="action")

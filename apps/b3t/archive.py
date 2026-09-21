@@ -16,6 +16,7 @@ edition from six months ago closely enough to notice the masthead is missing.
 """
 from __future__ import annotations
 
+import html
 import re
 from datetime import date
 
@@ -180,6 +181,17 @@ def page_slug(date):
     return '%s-english' % date
 
 
+def school_year(date):
+    """The Aug-Jul school year an edition date falls in, e.g. `2026-2027`.
+
+    An edition dated in Aug-Dec belongs to the year starting that August; one
+    dated Jan-Jul belongs to the year that started the August before.
+    """
+    long_date(date)                        # validates the shape
+    y, mo = int(date[:4]), int(date[5:7])
+    return '%d-%d' % (y, y + 1) if mo >= 8 else '%d-%d' % (y - 1, y)
+
+
 def page_title(date, subject):
     """The page title, matching every archive page already on the site."""
     subject = (subject or '').strip()
@@ -255,3 +267,131 @@ def highlights(raw_html, limit=12):
         if items:
             return items[:limit]
     return []
+
+
+# --------------------------------------------------------- archive listing
+#
+# The listing page (`/Page/BearTracks/Archive`) is a second, separate page:
+# one `<h5>Bear Tracks Archive for YYYY-YYYY</h5>` per school year, newest
+# year first, each followed by a `<ul>` of entries, newest edition first:
+#
+#   <h5>Bear Tracks Archive for 2026-2027</h5>
+#   <ul>
+#   <li><a href="https://rmsptsa.org/Page/BearTracks/2026-09-20-english">...</a>
+#   <ul>
+#   <li>...</li>
+#   </ul>
+#   </li>
+#   </ul>
+#   <p>&nbsp;</p>
+#
+# A `<ul>` here nests another `<ul>` (each entry's highlights), so finding
+# where one ends takes the same depth-counting `_row_end` uses for a row's
+# `</div>`, not a plain search for the next closing tag.
+
+_SECTION = re.compile(r'<h5>Bear Tracks Archive for (\d{4}-\d{4})</h5>')
+
+
+def _closing_tag_span(text, open_at, tag):
+    """(start, end) of the `</tag>` that closes the opening tag at `open_at`."""
+    pattern = re.compile(r'<%s\b[^>]*>|</%s\s*>' % (tag, tag), re.I)
+    depth = 0
+    for m in pattern.finditer(text, open_at):
+        if m.group(0).startswith('</'):
+            depth -= 1
+            if depth == 0:
+                return m.start(), m.end()
+        else:
+            depth += 1
+    raise ArchiveError('a <%s> never closes in the archive listing' % tag)
+
+
+def _sections(listing_html):
+    """Every school-year section, in document order (newest first).
+
+    Each entry is `(year, header_start, entries_start, entries_end)`, where
+    `entries_start:entries_end` is the section's `<ul>...</ul>` inner HTML.
+    """
+    out = []
+    for m in _SECTION.finditer(listing_html):
+        year = m.group(1)
+        ul_start = listing_html.find('<ul', m.end())
+        if ul_start == -1:
+            raise ArchiveError('the %s section has no <ul> of entries' % year)
+        entries_start = listing_html.find('>', ul_start) + 1
+        close_start, close_end = _closing_tag_span(listing_html, ul_start, 'ul')
+        out.append((year, m.start(), entries_start, close_start))
+    return out
+
+
+def _entries(section_html):
+    """Top-level `<li>...</li>` entries of a section, each with its trailing
+    newline (if any) kept, so joining the list back together reproduces the
+    section exactly."""
+    tag = re.compile(r'<li\b[^>]*>|</li\s*>', re.I)
+    depth, start, out = 0, None, []
+    for m in tag.finditer(section_html):
+        if not m.group(0).startswith('</'):
+            if depth == 0:
+                start = m.start()
+            depth += 1
+        else:
+            depth -= 1
+            if depth == 0:
+                end = m.end()
+                if section_html[end:end + 1] == '\n':
+                    end += 1
+                out.append(section_html[start:end])
+    return out
+
+
+_ENTRY_DATE = re.compile(r'Page/BearTracks/(\d{4}-\d{2}-\d{2})-english')
+
+
+def listing_insert(listing_html, date, title, highlights):
+    """Add one edition's entry to the archive listing. Returns the new HTML.
+
+    Refuses outright, computing nothing, if the edition's slug is already
+    linked anywhere in the listing. Inserts in date order within the edition's
+    school-year section (normally at the top, since editions usually arrive
+    newest first); creates the section, immediately before the newest
+    existing one, if this is the first edition of its school year.
+    """
+    slug = page_slug(date)                 # validates the date's shape
+    year = school_year(date)
+
+    href_marker = 'Page/BearTracks/%s"' % slug
+    if href_marker in listing_html:
+        raise ArchiveError(
+            '%s is already linked in the archive listing; not adding it twice'
+            % slug)
+
+    entry = ('<li><a href="https://rmsptsa.org/Page/BearTracks/%s">%s</a>\n'
+              '<ul>\n%s</ul>\n</li>\n') % (
+        slug, html.escape(title, quote=False),
+        ''.join('<li>%s</li>\n' % html.escape(h, quote=False) for h in highlights))
+
+    sections = _sections(listing_html)
+    for section_year, header_start, entries_start, entries_end in sections:
+        if section_year != year:
+            continue
+        insert_at = entries_start
+        for existing in _entries(listing_html[entries_start:entries_end]):
+            m = _ENTRY_DATE.search(existing)
+            if not m:
+                raise ArchiveError(
+                    'an existing entry in the %s section has no dated link; '
+                    'refusing to guess where the new one goes' % year)
+            if m.group(1) < date:
+                break
+            insert_at += len(existing)
+        return listing_html[:insert_at] + entry + listing_html[insert_at:]
+
+    # No section for this school year yet. New sections are always the
+    # newest one seen so far in practice (editions arrive in order), so it
+    # goes immediately before whatever section is currently first, or at
+    # the very top of the page if there are no sections at all yet.
+    new_section = ('<h5>Bear Tracks Archive for %s</h5>\n<ul>\n%s</ul>\n'
+                   '<p>&nbsp;</p>\n') % (year, entry)
+    insert_at = sections[0][1] if sections else 0
+    return listing_html[:insert_at] + new_section + listing_html[insert_at:]
