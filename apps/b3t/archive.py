@@ -70,9 +70,19 @@ def _is_image_only(row):
     return '<img' in row and not _text(row)
 
 
+# Marks that identify Givebacks' unsubscribe footer even when they live in
+# an attribute rather than in visible text, e.g.
+# `<a href="$UnsubscribeLink">Unsubscribe</a>`, where `_text()` strips the
+# tag and the href along with it and leaves only the innocuous word
+# "Unsubscribe". Checked against the raw row HTML, not the stripped text.
+UNSUBSCRIBE_MARKERS = ('$UnsubscribeLink', 'Copyright Givebacks')
+
+
 def _is_unsubscribe(row):
+    if any(marker in row for marker in UNSUBSCRIBE_MARKERS):
+        return True
     t = _text(row)
-    return '$UnsubscribeLink' in t or 'Copyright Givebacks' in t
+    return any(marker in t for marker in UNSUBSCRIBE_MARKERS)
 
 
 def date_heading(row):

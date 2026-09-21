@@ -132,6 +132,32 @@ def test_an_unsubscribe_link_further_up_is_refused():
     assert "middle" in str(e.value)
 
 
+def test_an_unsubscribe_link_hidden_in_an_href_is_also_refused():
+    """`_text()` strips tags and attributes, so a real anchor whose visible
+    text is just "Unsubscribe" and whose target lives in the `href` must be
+    caught from the raw HTML, not the stripped text."""
+    stray = EDITION.replace(ARTICLE_ROW, ARTICLE_ROW.replace(
+        "They meet",
+        '<a href="$UnsubscribeLink">Unsubscribe</a> They meet'))
+    with pytest.raises(archive.ArchiveError) as e:
+        archive.build(stray, "2026-09-20", "s")
+    assert "middle" in str(e.value)
+
+
+def test_a_footer_holding_only_an_unsubscribe_anchor_is_still_detected():
+    """The footer marker itself may be an anchor rather than plain text."""
+    anchor_footer = (
+        '<div class="u-row-container"><div class="u-row"><div class="u-col">'
+        '<table><tr><td><p><a href="$UnsubscribeLink">Unsubscribe</a><br/>'
+        'Copyright Givebacks All rights reserved.</p>'
+        '</td></tr></table></div></div></div>')
+    html = EDITION.replace(FOOTER_ROW, anchor_footer)
+    page, dropped = archive.build(html, "2026-09-20", "s")
+    assert dropped[-1] == "unsubscribe footer"
+    assert "$UnsubscribeLink" not in page
+    assert 'href="$UnsubscribeLink"' not in page
+
+
 def test_an_unsent_edition_has_nothing_to_archive():
     with pytest.raises(archive.ArchiveError) as e:
         archive.build("", "2026-09-20", "s")

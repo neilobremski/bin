@@ -964,6 +964,17 @@ def cmd_draft(args):
         "    subj: document.querySelector('input[aria-label=\"Subject\"]')?.value || '',"
         "    len: (document.querySelector('div[aria-label=\"Message body\"][contenteditable=\"true\"]')?.innerText || '').length,"
         "    to: (document.querySelector('div[aria-label=\"To\"]')?.innerText || '').trim(),"
+        # One entry per recipient chip, in order: the address Outlook resolved
+        # it to, read from the chip itself rather than guessed from visible
+        # text, or null when the chip never resolved to an address (a
+        # name-only chip Outlook could not match to a contact).
+        "    toChips: [...document.querySelectorAll("
+        "      'div[aria-label=\"To\"] [role=\"option\"], div[aria-label=\"To\"] [role=\"listitem\"]')"
+        "    ].map(el => {"
+        "      const src = el.getAttribute('title') || el.getAttribute('aria-label') || el.textContent || '';"
+        "      const m = src.match(/[\\w.+-]+@[\\w-]+(?:\\.[\\w-]+)+/);"
+        "      return m ? m[0].toLowerCase() : null;"
+        "    }),"
         "    cc: (document.querySelector('div[aria-label=\"Cc\"]')?.innerText || '').trim()"
         "  }), saved));"
         "}"
@@ -978,13 +989,20 @@ def cmd_draft(args):
 
     wanted = [a.lower() for a in (getattr(args, "to", None) or [])]
     got = info.get("to") or ""
-    found = [a.lower() for a in re.findall(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+', got)]
-    # Outlook may show a resolved recipient by display name only; accept that
-    # only when exactly one address was asked for and exactly one chip exists.
-    # The To box also holds icon glyphs and zero-width spaces between chips.
-    chips = [c for c in re.split(r'[;\n]+', got) if re.search(r'[A-Za-z0-9]', c)]
-    to_ok = (not wanted and not got) or sorted(set(found)) == sorted(set(wanted)) \
-        or (len(wanted) == 1 and not found and len(chips) == 1)
+    # Every recipient chip must resolve to a real address before the draft is
+    # accepted: a name-only chip ("Bob Jones") that Outlook never matched to
+    # an address is not evidence the draft reached anyone in particular, so
+    # it fails the check rather than being read as a lucky match. `toChips`
+    # holds one entry per chip (None for an unresolved one); an empty To box
+    # produces an empty list, never a list holding a lone None.
+    chips = info.get("toChips") or []
+    resolved = [c.lower() if c else None for c in chips]
+    if not wanted:
+        # Strict: nothing was asked for, so nothing may have landed in To.
+        to_ok = not got and not resolved
+    else:
+        to_ok = (bool(resolved) and None not in resolved
+                 and sorted(resolved) == sorted(wanted))
     if info.get("cc") or not to_ok:
         print(f"ERROR: recipients are not what was asked for (wanted To={wanted}, "
               f"got To={got!r} Cc={info.get('cc')!r}); leaving the composer open.",
