@@ -197,3 +197,51 @@ def test_the_listing_entry_comes_from_at_a_glance():
     assert archive.highlights(EDITION) == [
         "\U0001f4da Meet the Teachers",
         "\U0001f52c Sep 22: Science Club Registration Closes"]
+
+
+# ------------------------------------------------------------ heading_date
+
+def test_heading_date_reads_the_editions_own_date():
+    assert archive.heading_date(EDITION) == "2026-09-20"
+
+
+def test_heading_date_refused_without_a_heading():
+    no_date = EDITION.replace(DATE_ROW, "")
+    with pytest.raises(archive.ArchiveError) as e:
+        archive.heading_date(no_date)
+    assert "date heading" in str(e.value)
+
+
+# ------------------------------------------------------- resolve_edition_date
+
+def test_resolve_edition_date_omitted_within_window_uses_the_heading():
+    date, reason = archive.resolve_edition_date(None, "2026-05-31", "2026-06-01")
+    assert date == "2026-05-31"
+    assert "2026-06-01" in reason
+
+
+def test_resolve_edition_date_omitted_too_far_off_is_refused():
+    with pytest.raises(archive.ArchiveError) as e:
+        archive.resolve_edition_date(None, "2026-05-25", "2026-06-01")
+    assert "2026-05-25" in str(e.value)
+    assert "2026-06-01" in str(e.value)
+
+
+def test_resolve_edition_date_omitted_heading_after_the_send_is_refused():
+    """A send date can only ever be on or after its own edition's heading."""
+    with pytest.raises(archive.ArchiveError):
+        archive.resolve_edition_date(None, "2026-06-05", "2026-06-01")
+
+
+def test_resolve_edition_date_omitted_with_no_send_date_is_a_draft():
+    date, reason = archive.resolve_edition_date(None, "2026-09-20", None)
+    assert date == "2026-09-20"
+    assert "draft" in reason
+
+
+def test_resolve_edition_date_explicit_is_used_unchanged():
+    """An explicit --edition is trusted even against a wildly different
+    heading or send date; `build()` is what checks it against the heading."""
+    date, reason = archive.resolve_edition_date("2026-09-20", "2026-01-01", "2020-01-01")
+    assert date == "2026-09-20"
+    assert "explicit" in reason

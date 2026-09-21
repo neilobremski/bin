@@ -59,7 +59,9 @@ def main():
     p = gb_sub.add_parser("archive",
                           help="Write the archive-page version of an edition (publishes nothing)")
     p.add_argument("--id", required=True, help="Message/draft UUID")
-    p.add_argument("--edition", required=True, help="Edition date YYYY-MM-DD")
+    p.add_argument("--edition",
+                   help="Edition date YYYY-MM-DD (default: read from the edition's own "
+                        "date heading, cross-checked against the Givebacks send date)")
     p.add_argument("--out", "-o", help="Output file (default: editions/DATE/wip/archive.html)")
 
     p = gb_sub.add_parser("open", help="Open editor in browser")

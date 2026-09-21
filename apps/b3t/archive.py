@@ -17,6 +17,7 @@ edition from six months ago closely enough to notice the masthead is missing.
 from __future__ import annotations
 
 import re
+from datetime import date
 
 ROW_OPEN = '<div class="u-row-container"'
 
@@ -24,6 +25,11 @@ ROW_OPEN = '<div class="u-row-container"'
 DATE_HEADING = re.compile(
     r'^(January|February|March|April|May|June|July|August|September|October'
     r'|November|December)\s+\d{1,2},\s+\d{4}$')
+
+# Same shape, captured, for reading a heading back into y/m/d.
+_LONG_DATE = re.compile(
+    r'^(January|February|March|April|May|June|July|August|September|October'
+    r'|November|December)\s+(\d{1,2}),\s+(\d{4})$')
 
 MONTHS = ["January", "February", "March", "April", "May", "June", "July",
           "August", "September", "October", "November", "December"]
@@ -100,6 +106,72 @@ def long_date(date):
     if not 1 <= mo <= 12:
         raise ArchiveError('edition date has no such month: %r' % date)
     return '%s %d, %d' % (MONTHS[mo - 1], d, y)
+
+
+def short_date(text):
+    """`September 20, 2026` (as the site writes it) back to `2026-09-20`."""
+    m = _LONG_DATE.match((text or '').strip())
+    if not m:
+        raise ArchiveError('not a date heading: %r' % text)
+    month, day, year = m.group(1), int(m.group(2)), int(m.group(3))
+    return '%04d-%02d-%02d' % (year, MONTHS.index(month) + 1, day)
+
+
+def heading_date(raw_html):
+    """The edition's own date, read from its date-heading row.
+
+    Skips the masthead logo row if the first row is one, the same as
+    `build()`, but otherwise reads without validating the rest of the
+    edition's shape: this is for finding out what `--edition` should be
+    before anything else about the HTML is checked.
+    """
+    body = rows(raw_html)
+    if not body:
+        raise ArchiveError('found no rows; that is not an edition')
+    if _is_image_only(body[0]):
+        body = body[1:]
+    if not body:
+        raise ArchiveError('no rows after the masthead; that is not an edition')
+    heading = date_heading(body[0])
+    if not heading:
+        raise ArchiveError('the second row is not a date heading (it reads %r)'
+                           % _text(body[0])[:60])
+    return short_date(heading)
+
+
+def _date_obj(text):
+    m = re.match(r'^(\d{4})-(\d{2})-(\d{2})', (text or '').strip())
+    if not m:
+        raise ArchiveError('date must be YYYY-MM-DD, got %r' % text)
+    return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def resolve_edition_date(explicit, heading, send_date=None):
+    """Pick the edition date for `gb archive`, and say why.
+
+    An explicit `--edition` is used unchanged, whatever the heading or send
+    date say (`build()` still checks it against the heading and refuses a
+    mismatch there, unchanged). Omitted, the heading is trusted as the
+    edition date, but only when it is close enough before the send to
+    plausibly be the same edition: Givebacks' send date is often a day or
+    more after the date the newsletter itself is dated (a Sunday-night send
+    for a Monday edition, say), so the window is 0-3 days. No send date at
+    all means the item is still a draft, accepted outright since there is
+    nothing yet to cross-check against.
+
+    Returns `(date, reason)`.
+    """
+    if explicit:
+        return explicit, 'explicit --edition'
+    if not send_date:
+        return heading, 'no send date on this item (draft); using the heading date as-is'
+    delta = (_date_obj(send_date) - _date_obj(heading)).days
+    if 0 <= delta <= 3:
+        return heading, 'heading is %d day(s) before the %s send' % (delta, send_date)
+    raise ArchiveError(
+        'the heading says %s but Givebacks sent it %s (%d days apart, outside '
+        'the 0-3 day window this trusts). Pass --edition explicitly.'
+        % (heading, send_date, delta))
 
 
 def page_slug(date):

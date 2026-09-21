@@ -576,7 +576,8 @@ def _fetch_message(message_id, fields="subject,raw_html"):
   .then(d => {{
     const m = d.message || {{}};
     const h = m.raw_html || "";
-    return JSON.stringify({{subject: m.subject || "", raw_len: h.length, raw: h.slice(0, 400000)}});
+    return JSON.stringify({{subject: m.subject || "", raw_len: h.length, raw: h.slice(0, 400000),
+                            sent_at: m.sent_at || ""}});
   }})"""
     result = session.run("eval", js, timeout=30)
     for line in result.stdout.split("\n"):
@@ -1039,21 +1040,43 @@ def cmd_archive(args):
         return 1
 
     subject = (msg.get("subject") or "").strip()
+
+    # `--edition` used to be required, and a mismatch against the edition's
+    # own heading was (and still is) refused. GiveBacks' send date is often a
+    # day or more after that heading (a Sunday-night send for a Monday
+    # edition), so omitting `--edition` reads the heading and cross-checks it
+    # against the send date rather than requiring the caller to retype it.
+    explicit_edition = getattr(args, "edition", None)
+    heading = None
+    if not explicit_edition:
+        try:
+            heading = archive.heading_date(raw)
+        except archive.ArchiveError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+    send_date = (msg.get("sent_at") or "")[:10] or None
     try:
-        body, dropped = archive.build(raw, args.edition, subject)
-        title = archive.page_title(args.edition, subject)
-        slug = archive.page_slug(args.edition)
+        edition_date, reason = archive.resolve_edition_date(explicit_edition, heading, send_date)
+    except archive.ArchiveError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    print(f"Using edition date {edition_date} ({reason}).", file=sys.stderr)
+
+    try:
+        body, dropped = archive.build(raw, edition_date, subject)
+        title = archive.page_title(edition_date, subject)
+        slug = archive.page_slug(edition_date)
     except archive.ArchiveError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
-    out = args.out or os.path.join("editions", args.edition, "wip", "archive.html")
+    out = args.out or os.path.join("editions", edition_date, "wip", "archive.html")
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     with open(out, "w") as f:
         f.write(body)
     # The page's title and address travel with the file, so publishing cannot
     # get them wrong by retyping them.
-    meta = {"edition": args.edition, "subject": subject, "title": title,
+    meta = {"edition": edition_date, "subject": subject, "title": title,
             "slug": slug, "message_id": args.id}
     with open(out + ".meta.json", "w") as f:
         json.dump(meta, f, indent=2)
@@ -1065,7 +1088,7 @@ def cmd_archive(args):
     print(f"Wrote {out} ({len(body):,} chars, {kept} rows; dropped "
           f"{', '.join(dropped)}).", file=sys.stderr)
     print("Nothing was published. Review it, then run:", file=sys.stderr)
-    print(f"  b3t osp archive --edition {args.edition} --html {out}", file=sys.stderr)
+    print(f"  b3t osp archive --edition {edition_date} --html {out}", file=sys.stderr)
     return 0
 
 

@@ -5,7 +5,11 @@
 CMS for the PTSA website. Used for two purposes:
 1. **Scanning** for content updates (programs, calendar, club pages)
 2. **Archiving** newsletter editions as pages on the site (see also
-   `b3t gb archive`, which produces the HTML this consumes)
+   `b3t gb archive`, which produces the HTML this consumes). `gb archive
+   --edition` is now optional: omitted, the edition date is read from the
+   newsletter's own date heading and cross-checked against the Givebacks
+   send date (0-3 days apart; sends often land a day or more after the date
+   printed in the edition). Given explicitly, it is used unchanged.
 
 ## Authentication
 
