@@ -139,7 +139,24 @@ def _save():
     Returns `(ok, url, status, dialog)`. `status` is `"no-nav"` when nothing
     navigated; `ok` is false in that case. `dialog` is `"none"` or the type
     and text of whatever dialog was accepted along the way.
+
+    playwright-cli tracks dialogs on its own, independent of the page-level
+    `page.once('dialog', ...)` handler above, and ends the `run-code`
+    response the moment one appears -- before the script ever reaches its
+    `return`. Reproduced live: `result.stdout` comes back with only the
+    echoed script and a trailing "### Modal state" block, no `### Result`,
+    even though the page-level handler already called `d.accept()` and the
+    click's navigation already completed (confirmed by reading `page.url()`
+    straight afterwards). So a response with no match is not necessarily a
+    failed save: it can also be a successful one whose result got lost.
+    Since `page.click` cannot be safely repeated (a second real click risks a
+    duplicate submit), recovery reads the URL directly instead. That first
+    read still sees the same stuck dialog playwright-cli hasn't let go of, so
+    it goes through `session.run`, whose own stuck-modal handling (any dialog
+    command clears the CLI's bookkeeping, whether or not a real dialog is
+    still there to answer) clears it before the read is retried.
     """
+    before = session.current_url()
     result = session.run("run-code", r"""async function main(page) {
   let dialog = "none";
   page.once("dialog", d => {
@@ -155,12 +172,21 @@ def _save():
   return page.url() + " " + (r ? r.status() : "no-nav") + " | " + dialog;
 }""", timeout=40, on_dialog="accept")
     m = re.search(r"(https?://\S+)\s+(\d+|no-nav)\s+\|\s+(.*)", result.stdout or "")
-    if not m:
-        return False, "", "no answer (%s)" % (result.stdout or "")[:200], "none"
-    url, status, dialog = m.group(1), m.group(2), m.group(3).strip()
-    if dialog != "none":
-        print(f"Save's leave-page dialog was accepted: {dialog}", file=sys.stderr)
-    return status != "no-nav", url, status, dialog
+    if m:
+        url, status, dialog = m.group(1), m.group(2), m.group(3).strip()
+        if dialog != "none":
+            print(f"Save's leave-page dialog was accepted: {dialog}", file=sys.stderr)
+        return status != "no-nav", url, status, dialog
+
+    session.run("eval", "() => true", on_dialog="accept")
+    time.sleep(1)
+    url = session.current_url() or ""
+    if url and before and url != before:
+        print("Save's own response was interrupted by its leave-page dialog; "
+              f"recovered by reading the URL directly (now at {url}).",
+              file=sys.stderr)
+        return True, url, "recovered", "beforeunload (interrupted response)"
+    return False, "", "no answer (%s)" % (result.stdout or "")[:200], "none"
 
 
 def _load_title(html_path, edition_date, override=None):

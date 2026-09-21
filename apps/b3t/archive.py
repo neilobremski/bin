@@ -306,22 +306,37 @@ def _closing_tag_span(text, open_at, tag):
     raise ArchiveError('a <%s> never closes in the archive listing' % tag)
 
 
-def _sections(listing_html):
-    """Every school-year section, in document order (newest first).
+def _section_spans(listing_html):
+    """Every school-year section's boundary, in document order (newest first).
 
-    Each entry is `(year, header_start, entries_start, entries_end)`, where
-    `entries_start:entries_end` is the section's `<ul>...</ul>` inner HTML.
+    Each entry is `(year, header_start, section_end)`, where `section_end` is
+    the start of the next section's `<h5>` header, or the end of the document
+    for the last one. This only locates headers; it says nothing about what a
+    section's body looks like, because the real listing has a legacy
+    2024-2025 section that is a `<table>` rather than a `<ul>`, and every
+    section but the one being touched must be left alone rather than parsed.
     """
+    matches = list(_SECTION.finditer(listing_html))
     out = []
-    for m in _SECTION.finditer(listing_html):
-        year = m.group(1)
-        ul_start = listing_html.find('<ul', m.end())
-        if ul_start == -1:
-            raise ArchiveError('the %s section has no <ul> of entries' % year)
-        entries_start = listing_html.find('>', ul_start) + 1
-        close_start, close_end = _closing_tag_span(listing_html, ul_start, 'ul')
-        out.append((year, m.start(), entries_start, close_start))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(listing_html)
+        out.append((m.group(1), m.start(), end))
     return out
+
+
+def _section_list(listing_html, year, header_start, section_end):
+    """The `(entries_start, entries_end)` span of one section's `<ul>...</ul>`.
+
+    Searched only within `header_start:section_end`, that section's own
+    boundary, so a differently-shaped section elsewhere in the document (the
+    legacy table) is never inspected, let alone required to be list-shaped.
+    """
+    ul_start = listing_html.find('<ul', header_start, section_end)
+    if ul_start == -1:
+        raise ArchiveError('the %s section has no <ul> of entries' % year)
+    entries_start = listing_html.find('>', ul_start) + 1
+    close_start, close_end = _closing_tag_span(listing_html, ul_start, 'ul')
+    return entries_start, close_start
 
 
 def _entries(section_html):
@@ -371,10 +386,12 @@ def listing_insert(listing_html, date, title, highlights):
         slug, html.escape(title, quote=False),
         ''.join('<li>%s</li>\n' % html.escape(h, quote=False) for h in highlights))
 
-    sections = _sections(listing_html)
-    for section_year, header_start, entries_start, entries_end in sections:
+    sections = _section_spans(listing_html)
+    for section_year, header_start, section_end in sections:
         if section_year != year:
             continue
+        entries_start, entries_end = _section_list(
+            listing_html, year, header_start, section_end)
         insert_at = entries_start
         for existing in _entries(listing_html[entries_start:entries_end]):
             m = _ENTRY_DATE.search(existing)

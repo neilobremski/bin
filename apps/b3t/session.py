@@ -20,13 +20,14 @@ CHROME_STARTUP_WAIT = 60  # 60 × 0.2s = 12s
 
 
 MODAL_STUCK = "does not handle the modal state"
+TIMEOUT_RC = 124  # `_raw_run`'s own stand-in for a `subprocess.TimeoutExpired`.
 
 
 def _raw_run(cmd, timeout):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(cmd, 124, "", "Timeout")
+        return subprocess.CompletedProcess(cmd, TIMEOUT_RC, "", "Timeout")
 
 
 def run(*args, timeout=30, on_dialog="dismiss"):
@@ -40,11 +41,25 @@ def run(*args, timeout=30, on_dialog="dismiss"):
     intentionally leaving the page (`navigate`, OSP's `_save`) passes
     `on_dialog="accept"` instead, to answer "leave anyway" the way a plain
     click on the same button would have.
+
+    A dialog raised *during* this very call (a `goto` whose destination page
+    installs a `beforeunload` guard, say) does not show up as `MODAL_STUCK`:
+    playwright-cli itself hangs waiting for the navigation the dialog is
+    blocking, so our own subprocess timeout fires first and this returns
+    `TIMEOUT_RC` with stderr `"Timeout"`, never having printed anything about
+    a modal at all. Reproduced against the real CLI: the dialog is still
+    sitting there afterwards (confirmed by the *next* call, which does see
+    `MODAL_STUCK`), and accepting it lets the already-in-flight navigation
+    complete on its own. So a timeout is treated the same as the explicit
+    error: answer the dialog, then retry. If the timeout had nothing to do
+    with a dialog, the dialog command is a fast, harmless no-op ("can only be
+    used when there is related modal state present") and the retry simply
+    reproduces the single attempt this used to make.
     """
     cmd = ["playwright-cli", f"-s={SESSION_NAME}"] + list(args)
     result = _raw_run(cmd, timeout)
     blob = (result.stdout or "") + (result.stderr or "")
-    if MODAL_STUCK in blob:
+    if MODAL_STUCK in blob or result.returncode == TIMEOUT_RC:
         dialog_cmd = "dialog-accept" if on_dialog == "accept" else "dialog-dismiss"
         _raw_run(["playwright-cli", f"-s={SESSION_NAME}", dialog_cmd], 20)
         if on_dialog == "accept":

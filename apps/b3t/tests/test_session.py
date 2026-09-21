@@ -87,6 +87,69 @@ def test_navigate_with_no_stuck_prompt_never_touches_a_dialog(monkeypatch, capsy
     assert "leave-page prompt" not in capsys.readouterr().err
 
 
+def _fake_raw_run_timeout_then_landed():
+    """A `_raw_run` stand-in for the *real* CLI's behavior when a dialog is
+    raised freshly, during the `goto` itself (confirmed live against the
+    installed playwright-cli, per PR #361's review): the first `goto` does
+    not return the `MODAL_STUCK` error at all -- it hangs until our own
+    subprocess timeout kills it, giving returncode 124 and stderr "Timeout".
+    The dialog is left standing (the next `eval` would see `MODAL_STUCK`);
+    accepting it lets the already-in-flight navigation land on its own, so
+    the retried `goto` finds itself already there.
+    """
+    calls = []
+    state = {"goto_attempts": 0, "accepted": False}
+
+    def fake(cmd, timeout):
+        calls.append(list(cmd))
+        tail = cmd[-2:]
+        if tail == ["eval", "() => true"]:
+            return _cp(cmd, 0, '"true"')
+        if tail == ["eval", "() => document.visibilityState"]:
+            return _cp(cmd, 0, '"visible"')
+        if cmd[-1] == "() => { window.onbeforeunload = null; return true; }":
+            return _cp(cmd, 0, '"true"')
+        if tail == ["eval", "() => window.location.href"]:
+            landed = state["goto_attempts"] >= 1 and state["accepted"]
+            url = "https://rmsptsa.org/Home" if landed else "https://rmsptsa.org/PageManager/Edit/25371"
+            return _cp(cmd, 0, '"%s"' % url)
+        if cmd[-2] == "goto":
+            state["goto_attempts"] += 1
+            if state["goto_attempts"] == 1:
+                # The real CLI: no MODAL_STUCK text, just a timeout.
+                return _cp(cmd, 124, "", "Timeout")
+            return _cp(cmd, 0, "")
+        if cmd[-1] == "dialog-accept":
+            state["accepted"] = True
+            return _cp(cmd, 0, "")
+        if cmd[-1] == "dialog-dismiss":
+            return _cp(cmd, 0, "")
+        return _cp(cmd, 0, "")
+
+    return fake, calls
+
+
+def test_navigate_accepts_a_dialog_raised_during_goto_itself(monkeypatch, capsys):
+    """The real bug this PR is fixing: a dialog raised *during* the `goto`
+    call makes it time out (124/"Timeout") rather than fail with the
+    already-stuck-modal error, so the old code never answered it and the
+    next command silently dismissed it by default, leaving the browser on
+    the original page. `navigate` must recognize the timeout as the dialog
+    signal too, accept it, and confirm the navigation actually landed."""
+    fake, calls = _fake_raw_run_timeout_then_landed()
+    monkeypatch.setattr(session, "_raw_run", fake)
+
+    rc = session.navigate("https://rmsptsa.org/Home")
+
+    assert rc == 0
+    dialog_cmds = [c[-1] for c in calls if c[-1] in ("dialog-accept", "dialog-dismiss")]
+    assert dialog_cmds == ["dialog-accept"], (
+        "a timed-out goto must be answered with accept, not silently left "
+        "for the next call to dismiss")
+    goto_cmds = [c for c in calls if c[-2] == "goto"]
+    assert len(goto_cmds) == 2, "goto must be retried once after the accept"
+
+
 def test_run_default_still_dismisses_an_unrelated_stuck_dialog(monkeypatch):
     """`run()`'s own default (no caller opted into `on_dialog="accept"`) is
     unchanged: a prompt nobody asked for is dismissed, not accepted."""

@@ -344,6 +344,44 @@ def test_listing_entry_html_escapes_title_and_highlights():
     assert "<b>Big</b>" not in out
 
 
+# ---------------------------------------- listing_insert / legacy table fixture
+
+_REAL_LISTING = (Path(__file__).resolve().parent / "fixtures" / "listing_real.html").read_text()
+
+
+def test_listing_insert_survives_a_legacy_table_section():
+    """The real listing's oldest section (2024-2025) is a `<table>`, not a
+    `<ul>` -- `_section_spans`/`_section_list` must never require it to be
+    list-shaped just because some other section is being edited."""
+    out = archive.listing_insert(
+        _REAL_LISTING, "2026-10-04",
+        "October 4, 2026 [English]: Bear Tracks - Fall Forward",
+        ["Fall Fest"])
+    section = _section(out, "2026-2027")
+    assert section.index("2026-10-04-english") < section.index("2026-09-20-english")
+    # the untouched sections, including the legacy table, are byte-for-byte
+    # unchanged
+    assert _section(out, "2025-2026") == _section(_REAL_LISTING, "2025-2026")
+    legacy_before = _REAL_LISTING[_REAL_LISTING.index("<h5>Bear Tracks Archive for 2024-2025"):]
+    legacy_after = out[out.index("<h5>Bear Tracks Archive for 2024-2025"):]
+    assert legacy_before == legacy_after
+    assert "<table" in legacy_after
+
+
+def test_listing_insert_new_year_does_not_require_the_legacy_table_to_be_a_list():
+    """Creating a brand-new 2027-2028 section must not touch, or even parse,
+    any older section -- including the 2024-2025 table."""
+    out = archive.listing_insert(
+        _REAL_LISTING, "2027-08-30",
+        "August 30, 2027 [English]: Bear Tracks - A New Year",
+        ["Welcome back"])
+    assert out.index("2027-2028") < out.index("2026-2027") < out.index("2025-2026")
+    assert "2027-08-30-english" in _section(out, "2027-2028")
+    legacy_before = _REAL_LISTING[_REAL_LISTING.index("<h5>Bear Tracks Archive for 2024-2025"):]
+    legacy_after = out[out.index("<h5>Bear Tracks Archive for 2024-2025"):]
+    assert legacy_before == legacy_after
+
+
 def test_listing_2025_2026_vs_2026_2027_boundary():
     """2026-05-31 is the tail of 2025-2026; 2026-08-24 opens 2026-2027,
     even though both are "2026" dates."""
