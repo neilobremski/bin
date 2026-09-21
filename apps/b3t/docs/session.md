@@ -41,6 +41,32 @@ Wait for Chrome to finish writing profile before returning.
 | `B3T_SESSION` | `b3t` | playwright-cli session name |
 | `B3T_CHROME_PROFILE` | `~/.b3t-chrome-profile` | Chrome user data dir |
 
+## Dialogs and "Leave this page?" prompts
+
+A browser dialog left standing (a page's own unsaved-changes prompt, most
+often) blocks every later `playwright-cli` call with "does not handle the
+modal state" (`session.MODAL_STUCK`), so one stuck prompt takes down the rest
+of the session if nothing answers it.
+
+`run(..., on_dialog="dismiss")` (the default) answers a prompt nobody asked
+for by staying on the page: safe when the caller was not trying to leave.
+`run(..., on_dialog="accept")` is for a caller that *is* intentionally
+leaving (`navigate`, OSP's `_save`) and wants "leave anyway" answered yes,
+the way a plain click through the prompt would have. Either way `run()`
+retries the original command once after answering.
+
+`navigate(url)` uses `on_dialog="accept"`: it also clears
+`window.onbeforeunload` on the page before calling `goto` (best-effort; an
+`addEventListener('beforeunload', ...)` handler, which Outlook's own prompt
+uses, survives that assignment, hence the retry-on-accept as the real
+fallback), and afterwards confirms the page's URL actually changed (or
+matches the target) before calling it a success.
+
+`outlook.py` has its own, older version of this same problem
+(`_suppress_unload_guard`/`_restore_unload_guard`, `_close_open_composer`),
+left as-is here: it is already verified live and does more than a generic
+navigation helper can (deciding whether a composer is safe to discard).
+
 ## Tab Management
 
 Commands: `tab-new URL`, `tab-close`, `tab-select N`
