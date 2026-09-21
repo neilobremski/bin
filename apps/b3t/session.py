@@ -30,7 +30,7 @@ def _raw_run(cmd, timeout):
         return subprocess.CompletedProcess(cmd, TIMEOUT_RC, "", "Timeout")
 
 
-def run(*args, timeout=30, on_dialog="dismiss"):
+def run(*args, timeout=30, on_dialog="dismiss", retry_on_timeout=False):
     """Run playwright-cli -s=b3t with given args. Returns CompletedProcess.
 
     A browser dialog left standing (Outlook's "Leave site?" on a composer with
@@ -50,21 +50,28 @@ def run(*args, timeout=30, on_dialog="dismiss"):
     a modal at all. Reproduced against the real CLI: the dialog is still
     sitting there afterwards (confirmed by the *next* call, which does see
     `MODAL_STUCK`), and accepting it lets the already-in-flight navigation
-    complete on its own. So a timeout is treated the same as the explicit
-    error: answer the dialog, then retry. If the timeout had nothing to do
-    with a dialog, the dialog command is a fast, harmless no-op ("can only be
-    used when there is related modal state present") and the retry simply
-    reproduces the single attempt this used to make.
+    complete on its own. So a timeout is answered too, in case a dialog is
+    what blocked it (with no dialog, the command is a fast no-op: "can only
+    be used when there is related modal state present").
+
+    The two cases differ on retrying. `MODAL_STUCK` means the command never
+    ran, so it is safe to run it again. A timeout means it DID run, and may
+    have done its work (a click that submitted, a composer that filled), so
+    it is only re-run when the caller says that is safe with
+    `retry_on_timeout=True`, as `navigate`'s `goto` does. Everyone else gets
+    the timeout back and checks the page for themselves.
     """
     cmd = ["playwright-cli", f"-s={SESSION_NAME}"] + list(args)
     result = _raw_run(cmd, timeout)
     blob = (result.stdout or "") + (result.stderr or "")
-    if MODAL_STUCK in blob or result.returncode == TIMEOUT_RC:
+    stuck = MODAL_STUCK in blob
+    if stuck or result.returncode == TIMEOUT_RC:
         dialog_cmd = "dialog-accept" if on_dialog == "accept" else "dialog-dismiss"
         _raw_run(["playwright-cli", f"-s={SESSION_NAME}", dialog_cmd], 20)
-        if on_dialog == "accept":
-            print("NOTE: accepted a stuck leave-page prompt and retried.", file=sys.stderr)
-        result = _raw_run(cmd, timeout)
+        if stuck or retry_on_timeout:
+            if on_dialog == "accept":
+                print("NOTE: accepted a stuck leave-page prompt and retried.", file=sys.stderr)
+            result = _raw_run(cmd, timeout)
     return result
 
 
@@ -249,7 +256,7 @@ def navigate(url):
     # navigation already in flight, failing this is not an error.
     run("eval", "() => { window.onbeforeunload = null; return true; }")
 
-    result = run("goto", url, on_dialog="accept")
+    result = run("goto", url, on_dialog="accept", retry_on_timeout=True)
     if result.returncode != 0:
         print(f"ERROR: {result.stderr}", file=sys.stderr)
         return 1

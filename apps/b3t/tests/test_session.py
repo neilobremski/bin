@@ -171,3 +171,26 @@ def test_run_default_still_dismisses_an_unrelated_stuck_dialog(monkeypatch):
     assert result.returncode == 0
     dialog_cmds = [c[-1] for c in calls if c[-1] in ("dialog-accept", "dialog-dismiss")]
     assert dialog_cmds == ["dialog-dismiss"]
+
+
+def test_a_timed_out_command_is_not_run_twice(monkeypatch):
+    """A timeout means the command ran and may have done its work (a Save
+    click that submitted, a composer that filled), so `run()` answers any
+    dialog but does not run it again unless the caller opted in with
+    `retry_on_timeout=True` (only `navigate`'s idempotent `goto` does)."""
+    calls = []
+
+    def fake(cmd, timeout):
+        calls.append(list(cmd))
+        if cmd[-2] == "run-code":
+            return _cp(cmd, 124, "", "Timeout")
+        return _cp(cmd, 0, "")
+
+    monkeypatch.setattr(session, "_raw_run", fake)
+
+    result = session.run("run-code", "async function main(page) {}")
+
+    assert result.returncode == 124
+    assert [c for c in calls if c[-2] == "run-code"] == [calls[0]], (
+        "a timed-out command must not be re-run")
+    assert calls[1][-1] == "dialog-dismiss", "any dialog is still answered"
