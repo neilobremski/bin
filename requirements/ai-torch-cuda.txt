@@ -1,3 +1,8 @@
---index-url https://download.pytorch.org/whl/cu118
-torch
-torchvision
+# venv_util installs this file and ai.txt in ONE pip invocation, and a pip index
+# directive applies to the whole invocation. --index-url replaced PyPI outright,
+# so every ai.txt package resolved to nothing ("no matching distribution for
+# spacy<4"). --extra-index-url keeps PyPI; the pins are what then hold torch on
+# this index, since cu118 builds stop at 2.7.1 and PyPI carries newer wheels.
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.7.1+cu118
+torchvision==0.22.1+cu118
