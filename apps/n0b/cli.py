@@ -16,7 +16,7 @@ from commands.json_cmd import cmd_json
 from commands.mqtt_cmd import cmd_pub, cmd_sub
 from commands.ports_cmd import cmd_free, cmd_listen
 from commands.quota_cmd import cmd_quota
-from commands.secrets_cmd import cmd_get, cmd_set
+from commands.secrets_cmd import cmd_get, cmd_set, cmd_trace
 from commands.video_cmd import cmd_gif, cmd_last_frame
 
 
@@ -154,6 +154,8 @@ def build_parser() -> argparse.ArgumentParser:
     secrets_where.add_argument(
         "--env-file", help="Upsert a NAME=value line in a dotenv file"
     )
+    secrets_trace = secrets_sub.add_parser("trace", help="Show where a secret is found")
+    secrets_trace.add_argument("name", help="Environment variable name")
 
     mqtt_p = sub.add_parser("mqtt", help="MQTT via mosquitto clients")
     mqtt_sub = mqtt_p.add_subparsers(dest="mqtt_cmd", required=True)
@@ -522,6 +524,8 @@ def dispatch(args: argparse.Namespace) -> int:
                 keychain=args.keychain,
                 env_file=args.env_file,
             )
+        if args.secrets_cmd == "trace":
+            return cmd_trace(args.name)
     if group == "mqtt":
         rest = args.args
         if rest[:1] == ["--"]:
