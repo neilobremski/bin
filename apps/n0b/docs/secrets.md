@@ -47,7 +47,8 @@ would return, and notes whether the secret is pinned.
 ## Resolution order
 
 1. If the secret is **not pinned**: env → file → keychain.
-2. If the secret is **pinned**: file → keychain → env (env is a fallback).
+2. If the secret is **pinned to file**: file → keychain → env.
+3. If the secret is **pinned to keychain**: keychain → file → env.
 
 - **Code:** `apps/n0b/commands/secrets_cmd.py`
 - Other n0b commands (e.g. `n0b ai research`) resolve their keys through
