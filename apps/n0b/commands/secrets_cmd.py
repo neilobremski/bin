@@ -13,31 +13,27 @@ def _lib_path(name: str, base_dir: str | None = None) -> Path:
     return base / file_name
 
 
-def _pins_path() -> Path:
-    return Path.home() / "lib" / ".secret-pins"
+def _pin_path(name: str) -> Path:
+    return Path.home() / "lib" / ".pins" / name
 
 
-def _pinned_names() -> set[str]:
-    path = _pins_path()
+def _read_pin(name: str) -> str | None:
+    path = _pin_path(name)
     if not path.is_file():
-        return set()
-    return {line.strip() for line in path.read_text().splitlines() if line.strip()}
+        return None
+    return path.read_text().strip() or None
 
 
 def _is_pinned(name: str) -> bool:
-    return name in _pinned_names()
+    return _read_pin(name) is not None
 
 
-def _pin(name: str) -> None:
-    names = _pinned_names()
-    if name in names:
-        return
-    names.add(name)
-    path = _pins_path()
+def _pin(name: str, backend: str) -> None:
+    path = _pin_path(name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch(mode=0o600, exist_ok=True)
     path.chmod(0o600)
-    path.write_text("\n".join(sorted(names)) + "\n")
+    path.write_text(backend + "\n")
 
 
 def _keychain_get(name: str) -> str | None:
@@ -54,27 +50,41 @@ def _keychain_get(name: str) -> str | None:
 
 
 def resolve(name: str) -> str | None:
-    pinned = _is_pinned(name)
-    if not pinned:
+    pin = _read_pin(name)
+    if pin == "keychain":
+        kc = _keychain_get(name)
+        if kc:
+            return kc
+        path = _lib_path(name)
+        if path.is_file():
+            return path.read_text().replace("\n", "")
         val = os.environ.get(name)
         if val:
             return val
+        return None
+    if pin == "file":
+        path = _lib_path(name)
+        if path.is_file():
+            return path.read_text().replace("\n", "")
+        kc = _keychain_get(name)
+        if kc:
+            return kc
+        val = os.environ.get(name)
+        if val:
+            return val
+        return None
+    val = os.environ.get(name)
+    if val:
+        return val
     path = _lib_path(name)
     if path.is_file():
         return path.read_text().replace("\n", "")
-    kc = _keychain_get(name)
-    if kc:
-        return kc
-    if pinned:
-        val = os.environ.get(name)
-        if val:
-            return val
-    return None
+    return _keychain_get(name)
 
 
 def resolve_trace(name: str) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
-    pinned = _is_pinned(name)
+    pin = _read_pin(name)
     env_val = os.environ.get(name)
     if env_val:
         results.append({"source": "env", "value": env_val})
@@ -85,11 +95,28 @@ def resolve_trace(name: str) -> list[dict[str, str]]:
     if kc:
         results.append({"source": "keychain", "value": kc})
     selected = None
-    if pinned:
+    if pin == "keychain":
         for r in results:
-            if r["source"] != "env":
+            if r["source"] == "keychain":
+                selected = "keychain"
+                break
+        if selected is None:
+            for r in results:
+                if r["source"] != "env":
+                    selected = r["source"]
+                    break
+        if selected is None and env_val:
+            selected = "env"
+    elif pin == "file":
+        for r in results:
+            if r["source"] not in ("env", "keychain"):
                 selected = r["source"]
                 break
+        if selected is None:
+            for r in results:
+                if r["source"] != "env":
+                    selected = r["source"]
+                    break
         if selected is None and env_val:
             selected = "env"
     else:
@@ -114,16 +141,15 @@ def cmd_get(name: str) -> int:
 
 def cmd_trace(name: str) -> int:
     results = resolve_trace(name)
-    pinned = _is_pinned(name)
+    pin = _read_pin(name)
     if not results:
         print(
             f"error: {name} not found (env, {_lib_path(name)}, or keychain)",
             file=sys.stderr,
         )
         return 1
-    if pinned:
-        print(f"  [{name} is pinned — file/keychain checked before env]",
-              file=sys.stderr)
+    if pin:
+        print(f"  [{name} is pinned to {pin}]", file=sys.stderr)
     for r in results:
         marker = " <-- selected" if r["selected"] else ""
         masked = r["value"][:4] + "..." if len(r["value"]) > 4 else r["value"]
@@ -171,7 +197,7 @@ def cmd_set(
             msg = proc.stderr.strip() or "security add-generic-password failed"
             print(f"error: {msg}", file=sys.stderr)
             return 1
-        _pin(name)
+        _pin(name, "keychain")
         print(f"set {name} in keychain (pinned)", file=sys.stderr)
         return 0
 
@@ -192,6 +218,6 @@ def cmd_set(
     path = _lib_path(name, base_dir)
     _write_private(path, value + "\n")
     if not base_dir:
-        _pin(name)
+        _pin(name, "file")
     print(f"set {name} in {path}{' (pinned)' if not base_dir else ''}", file=sys.stderr)
     return 0

@@ -11,7 +11,9 @@ then `~/lib/<name-lower-dashes>.txt`, then the macOS Keychain.
 
 When a secret is explicitly **set** (via `n0b secrets set`), it is *pinned*:
 subsequent `get` calls return the set value even if a matching environment
-variable exists. The pin list lives at `~/lib/.secret-pins`.
+variable exists. Each pin is a file under `~/lib/.pins/<NAME>` recording
+which backend was selected (`file` or `keychain`), so `get` knows exactly
+where to look first.
 
 ## Usage
 

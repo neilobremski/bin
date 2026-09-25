@@ -68,7 +68,7 @@ from commands.ai_ollama import (
 )
 from commands.ai_audio_cmd import cmd_audio  # noqa: E402
 from commands.ai_video_cmd import cmd_video, parse_video_args  # noqa: E402
-from commands.secrets_cmd import cmd_set, cmd_trace, resolve, resolve_trace, _is_pinned, _pins_path  # noqa: E402
+from commands.secrets_cmd import cmd_set, cmd_trace, resolve, resolve_trace, _is_pinned, _read_pin  # noqa: E402
 from commands.video_cmd import cmd_gif, cmd_last_frame, resolve_gif_settings  # noqa: E402
 from cli import parse_audio_argv, parse_image_argv  # noqa: E402
 
@@ -161,7 +161,8 @@ def test_secrets_set_env_file_upsert(tmp_path):
     assert env_file.read_text() == "OTHER=1\nMY_KEY=new\n"
 
 
-def test_secrets_set_keychain_invokes_security():
+def test_secrets_set_keychain_invokes_security(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
     with patch("commands.secrets_cmd.subprocess.run") as run, \
             patch("commands.secrets_cmd.sys.platform", "darwin"):
         run.return_value.returncode = 0
@@ -169,6 +170,7 @@ def test_secrets_set_keychain_invokes_security():
         argv = run.call_args[0][0]
         assert argv[:2] == ["security", "add-generic-password"]
         assert "KC_KEY" in argv and "v" in argv
+        assert _read_pin("KC_KEY") == "keychain"
 
 
 def test_secrets_get_keychain_fallback(monkeypatch, tmp_path):
@@ -248,6 +250,36 @@ def test_secrets_trace_missing():
     proc = run_n0b("secrets", "trace", "N0B_NONEXISTENT_SECRET_XYZ")
     assert proc.returncode == 1
     assert "not found" in proc.stderr
+
+
+def test_secrets_keychain_pin_overrides_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("KC_SHADOW_KEY", raising=False)
+    assert cmd_set("KC_SHADOW_KEY", "file-old") == 0
+    assert _read_pin("KC_SHADOW_KEY") == "file"
+    assert resolve("KC_SHADOW_KEY") == "file-old"
+    with patch("commands.secrets_cmd.subprocess.run") as run, \
+            patch("commands.secrets_cmd.sys.platform", "darwin"):
+        run.return_value.returncode = 0
+        assert cmd_set("KC_SHADOW_KEY", "kc-new", keychain=True) == 0
+    assert _read_pin("KC_SHADOW_KEY") == "keychain"
+    with patch("commands.secrets_cmd.subprocess.run") as run, \
+            patch("commands.secrets_cmd.sys.platform", "darwin"):
+        run.return_value.returncode = 0
+        run.return_value.stdout = "kc-new\n"
+        assert resolve("KC_SHADOW_KEY") == "kc-new"
+
+
+def test_secrets_concurrent_pins(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CONC_A", "env-a")
+    monkeypatch.setenv("CONC_B", "env-b")
+    assert cmd_set("CONC_A", "set-a") == 0
+    assert cmd_set("CONC_B", "set-b") == 0
+    assert _read_pin("CONC_A") == "file"
+    assert _read_pin("CONC_B") == "file"
+    assert resolve("CONC_A") == "set-a"
+    assert resolve("CONC_B") == "set-b"
 
 
 def test_ai_research_requires_prompt():
