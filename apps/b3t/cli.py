@@ -134,10 +134,16 @@ def main():
     ps_sub.add_parser("login", help="Auto-login")
     p = ps_sub.add_parser("scan", help="Scan feed posts with full bodies")
     p.add_argument("--json", action="store_true", help="JSON output")
-    p.add_argument("--since", type=int, help="Only posts from last N days")
+    p.add_argument("--since", type=int,
+                   help="Only posts from last N days (walks feed pages back to N days)")
+    p.add_argument("--max-pages", type=int, default=5,
+                   help="Feed pages to walk at most with --since (default 5)")
     p = ps_sub.add_parser("save", help="Save posts as submission markdown files")
     p.add_argument("--dir", required=True, help="Output directory (e.g. editions/YYYY-MM-DD/submissions)")
-    p.add_argument("--since", type=int, help="Only posts from last N days")
+    p.add_argument("--since", type=int,
+                   help="Only posts from last N days (walks feed pages back to N days)")
+    p.add_argument("--max-pages", type=int, default=5,
+                   help="Feed pages to walk at most with --since (default 5)")
 
     # -- Microsoft Teams --
     tm = sub.add_parser("teams", aliases=["tm"], help="Microsoft Teams chats and channels")
