@@ -7,6 +7,7 @@ import time
 
 import archive
 import env
+import ospscan
 import session
 from constants import (OSP_BASE, OSP_LOGIN, OSP_CREATE_PAGE, OSP_SCAN_PAGES,
                         OSP_LISTING_PAGE_ID, OSP_LISTING_EDIT, OSP_LISTING_URL)
@@ -474,205 +475,47 @@ def cmd_listing(args):
     return 0
 
 
-def _parse_page_content(snap):
-    """Extract headings, text, and links from a standard page snapshot."""
-    lines = []
-    for line in snap.split("\n"):
-        if "heading" in line.lower() and "level" in line:
-            m = re.search(r'heading "([^"]+)"', line)
-            if m:
-                text = m.group(1).strip()
-                if text and len(text) > 3 and "Sign in" not in text:
-                    lines.append(f"# {text}")
-        elif "- text:" in line:
-            text = re.sub(r'^\s*- text:\s*', '', line).strip()
-            if text and len(text) > 20:
-                lines.append(text)
-        elif "link" in line.lower() and "/url:" not in line:
-            m = re.search(r'link "([^"]+)"', line)
-            if m:
-                text = m.group(1).strip()
-                if text and len(text) > 10 and "Powered by" not in text:
-                    lines.append(f"[link] {text}")
-
-    seen = set()
-    unique = []
-    for l in lines:
-        if l not in seen:
-            seen.add(l)
-            unique.append(l)
-    return "\n".join(unique[:30])
-
-
-def _parse_calendar(snap):
-    """Extract calendar events from month view.
-
-    Structure: alternating date rows and event rows.
-    Date row: 7 cells with day numbers (Sun-Sat), e.g. "May 31 Jun 1 2 3 4 5 6"
-    Event row: 7 cells, most empty, event text in the column matching its day.
-    """
-    lines = snap.split("\n")
-    events = []
-    current_month = ""
-
-    # Get month/year
-    for line in lines:
-        if "generic [ref=" in line:
-            m = re.search(r':\s*((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})', line)
-            if m:
-                current_month = m.group(1).strip()
-                break
-
-    # Parse rows — track date rows and map column positions to dates
-    current_dates = []  # 7 dates for current week (Sun-Sat)
-    for line in lines:
-        # Date row: row text contains the day numbers
-        row_match = re.search(r'row "(.+?)" \[ref=', line)
-        if row_match:
-            row_text = row_match.group(1)
-            # Check if this is a date row (contains mostly numbers)
-            parts = row_text.split()
-            dates_in_row = []
-            i = 0
-            while i < len(parts):
-                # Handle "Jun 1" or "Jul 1" style
-                if re.match(r'^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$', parts[i]) and i + 1 < len(parts):
-                    dates_in_row.append(f"{parts[i]} {parts[i+1]}")
-                    i += 2
-                elif re.match(r'^\d{1,2}$', parts[i]):
-                    dates_in_row.append(parts[i])
-                    i += 1
-                else:
-                    # Not a date row — it's an event row
-                    break
-            if len(dates_in_row) == 7:
-                current_dates = dates_in_row
-            continue
-
-        # Event cells within event rows — find non-empty cells by position
-        cell_match = re.search(r'cell "([^"]+)"', line)
-        if cell_match and current_dates:
-            cell_text = cell_match.group(1)
-            # Skip if it's just a date number
-            if re.match(r'^(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+)?\d{1,2}$', cell_text):
-                continue
-            # This is an event — figure out which column it's in
-            # Count preceding empty cells + this cell to determine column
-            # Since we can't easily get column from snapshot, use a different approach:
-            # The event row has the event name in its row header text
-            # Just pair it with the date row above and find which column has content
-            # For simplicity, count cell occurrences in this event row
-            events.append(cell_text)
-
-    # Better approach: parse event rows by matching column position
-    # Re-parse using row-level logic
-    events_with_dates = []
-    current_dates = []
-    in_event_row = False
-    col_idx = 0
-
-    for line in lines:
-        row_match = re.search(r'row "(.*?)" \[ref=', line)
-        if row_match:
-            row_text = row_match.group(1)
-            # Check if date row
-            parts = row_text.split()
-            dates_in_row = []
-            i = 0
-            while i < len(parts):
-                if re.match(r'^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$', parts[i]) and i + 1 < len(parts):
-                    dates_in_row.append(f"{parts[i]} {parts[i+1]}")
-                    i += 2
-                elif re.match(r'^\d{1,2}$', parts[i]):
-                    dates_in_row.append(parts[i])
-                    i += 1
-                else:
-                    break
-            if len(dates_in_row) == 7:
-                current_dates = dates_in_row
-                in_event_row = False
-            else:
-                # Event row
-                in_event_row = True
-                col_idx = 0
-            continue
-
-        if in_event_row and "cell" in line:
-            cell_match = re.search(r'cell "([^"]*)"', line)
-            if cell_match:
-                cell_text = cell_match.group(1)
-                if cell_text and not re.match(r'^\d{1,2}$', cell_text):
-                    # Found an event
-                    date_label = current_dates[col_idx] if col_idx < len(current_dates) else "?"
-                    events_with_dates.append(f"  {date_label}: {cell_text}")
-            # Empty cell match (no text)
-            elif re.search(r'cell \[ref=', line):
-                pass
-            col_idx += 1
-
-    header = f"Month: {current_month}" if current_month else "Calendar Events"
-    if events_with_dates:
-        return header + "\n" + "\n".join(events_with_dates)
-    return header + "\n  (no events)"
-
-
-def _scan_pages():
-    """Parse OSP_SCAN_PAGES env: 'Name|/path,Name2|/path2'. Defaults to home only."""
-    if OSP_SCAN_PAGES:
-        pages = []
-        for part in OSP_SCAN_PAGES.split(","):
-            part = part.strip()
-            if "|" in part:
-                name, path = part.split("|", 1)
-                pages.append((name.strip(), path.strip()))
-            elif part:
-                pages.append((part, part if part.startswith("/") else f"/{part}"))
-        if pages:
-            return pages
-    return [("Home", "/")]
-
-
 def cmd_scan(args):
-    """Scan configured site pages for content updates. No auth needed."""
+    """Scan the public site's pages for content updates. Read-only, no auth.
+
+    Plain HTTP, not the browser: the pages are public and server-rendered, so
+    a scan neither needs nor disturbs the shared browser session. Every page
+    reports its title and a hash of its text; with `--state FILE` the hashes
+    are kept between runs and each page is marked new, CHANGED or unchanged.
+    """
     if not OSP_BASE:
         print("ERROR: OSP_BASE must be set in .env", file=sys.stderr)
         return 1
 
-    session.ensure_running()
-    scan_pages = _scan_pages()
+    pages = ospscan.scan_pages(OSP_SCAN_PAGES)
+    print(f"Scanning {OSP_BASE} ({len(pages)} pages)...", file=sys.stderr)
+    results = [ospscan.scan_page(OSP_BASE, name, path) for name, path in pages]
+    ospscan.compare(results, getattr(args, "state", None))
 
-    print(f"Scanning {OSP_BASE} ({len(scan_pages)} pages)...", file=sys.stderr)
-    results = []
+    failed = [r for r in results if r["error"]]
+    if getattr(args, "json", False):
+        print(json.dumps(results, indent=2))
+    else:
+        limit = getattr(args, "lines", 40)
+        for r in results:
+            print(f"\n{'=' * 60}")
+            print(f"PAGE: {r['page']}")
+            print(f"URL: {r['url']}")
+            if r["error"]:
+                print(f"ERROR: {r['error']}")
+                continue
+            status = f"  [{r['status']}]" if r.get("status") else ""
+            print(f"TITLE: {r['title']}")
+            print(f"HASH: {r['hash']} ({len(r['lines'])} lines){status}")
+            print("-" * 60)
+            shown = r["lines"] if not limit else r["lines"][:limit]
+            print("\n".join(shown) if shown else "(empty or no text content)")
+            if len(shown) < len(r["lines"]):
+                print(f"... {len(r['lines']) - len(shown)} more lines "
+                      "(--lines 0 shows all)")
 
-    for name, path in scan_pages:
-        url = f"{OSP_BASE}{path}"
-        session.navigate(url)
-        time.sleep(2)
-
-        snap = session.snapshot()
-        if not snap:
-            results.append({"page": name, "url": url, "content": "[ERROR: no snapshot]"})
-            continue
-
-        # Calendar pages need special parsing
-        if name == "Calendar":
-            content = _parse_calendar(snap)
-        else:
-            content = _parse_page_content(snap)
-
-        results.append({"page": name, "url": url, "content": content})
-
-    # Output
-    for r in results:
-        print(f"\n{'='*60}")
-        print(f"PAGE: {r['page']}")
-        print(f"URL: {r['url']}")
-        print(f"{'─'*60}")
-        if r["content"]:
-            print(r["content"])
-        else:
-            print("(empty or no text content)")
-
-    print(f"\n{'='*60}", file=sys.stderr)
-    print(f"Scanned {len(results)} pages.", file=sys.stderr)
-    return 0
+    print(f"\n{'=' * 60}", file=sys.stderr)
+    print(f"Scanned {len(results)} pages, {len(failed)} failed.", file=sys.stderr)
+    for r in failed:
+        print(f"  FAILED {r['page']}: {r['error']}", file=sys.stderr)
+    return 1 if failed else 0

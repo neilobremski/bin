@@ -143,6 +143,22 @@
   uses the same click path, so check it too (it produced the right draft this
   time: poorva@gmail.com).
 
+## From the 2026-10-01 production run
+
+- [x] **OneDrive dataless files uploaded as 0 bytes** — uploads are staged by
+  reading the bytes (`staging.py`) and refused if the read is empty or short.
+- [x] **`gb images` aborted on one missing file** — now skips, carries on,
+  summarises, and exits 1 on any skip or failure.
+- [x] **`ps scan/save` read page 1 only, and 6 of its 10 posts** — `--since`
+  walks `?page=N` (capped by `--max-pages`, PARTIAL when hit); quoted titles,
+  escaped quotes and byline-less district posts now parse; feed URLs and
+  links are captured.
+- [x] **`ol check` listed only rendered rows** — see "Message list is
+  virtualised" above.
+- [x] **`osp scan` read only the home page** — now the program, volunteer,
+  meetings and board pages plus two month calendars, over plain HTTP, with a
+  per-page hash and `--state` change marking.
+
 ## Archive pages
 
 - [ ] **Back-fill the archive.** `/Page/BearTracks/Archive` stops at

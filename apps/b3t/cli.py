@@ -186,7 +186,13 @@ def main():
     osp_sub = osp.add_subparsers(dest="action")
 
     osp_sub.add_parser("login", help="Auto-login")
-    osp_sub.add_parser("scan", help="Scan site pages for content updates")
+    p = osp_sub.add_parser("scan", help="Scan site pages for content updates (plain HTTP, read-only)")
+    p.add_argument("--json", action="store_true", help="JSON output")
+    p.add_argument("--lines", type=int, default=40,
+                   help="Text lines to print per page (0 = all; default 40)")
+    p.add_argument("--state",
+                   help="JSON file of page hashes from the last scan; marks each "
+                        "page new/CHANGED/unchanged and is then updated")
 
     p = osp_sub.add_parser("archive", help="Fill the archive page form on rmsptsa.org")
     p.add_argument("--edition", required=True, help="Edition date YYYY-MM-DD")
