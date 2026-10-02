@@ -1445,30 +1445,57 @@ def cmd_images(args):
         live_urls = [c['values'].get('src', {}).get('url', '')
                      for c in design_mod._images(live)]
 
-    done = 0
+    return _upload_pending(pending, live_urls, edition_dir, args.id)
+
+
+def _upload_pending(pending, live_urls, edition_dir, message_id, upload=None):
+    """Upload each pending slot, carrying on past any slot that cannot be done.
+
+    One missing file used to stop the whole run: on 2026-10-01 the header was
+    not on disk yet, so the band flyer in the next slot never went up either.
+    Every slot is now tried, and each one that is skipped or fails is named in
+    the summary. Any skip or failure still makes the exit code non-zero, so a
+    partial run cannot pass for a finished one.
+    """
+    upload = upload or cmd_upload
+    uploaded, in_place, skipped, failed = [], [], [], []
     for idx, src, name in pending:
         path = src if os.path.isabs(src) else os.path.join(edition_dir, src)
         if not os.path.exists(path):
-            print(f"ERROR: image slot {idx} points at {path}, which is missing.",
-                  file=sys.stderr)
-            return 1
+            print(f"WARNING: image slot {idx} points at {path}, which is "
+                  "missing; skipping it.", file=sys.stderr)
+            skipped.append((idx, name, f"{path} is missing"))
+            continue
         held = live_urls[idx] if idx < len(live_urls) else ''
         if held:
             if design_mod.image_key(held) == design_mod.image_key(name):
                 print(f"[{idx}] {name}: already uploaded.", file=sys.stderr)
-                done += 1
+                in_place.append(idx)
                 continue
-            print(f"ERROR: image slot {idx} should take {name} but the live "
-                  f"draft holds {held.split('/')[-1]}.", file=sys.stderr)
-            return 1
+            # A slot holding something else is a mismatch between this design
+            # and the live draft, not a slot to overwrite.
+            print(f"WARNING: image slot {idx} should take {name} but the live "
+                  f"draft holds {held.split('/')[-1]}; skipping it.",
+                  file=sys.stderr)
+            skipped.append((idx, name, f"live draft holds {held.split('/')[-1]}"))
+            continue
         print(f"[{idx}] {path} -> {name}", file=sys.stderr)
-        up = type("A", (), {"id": args.id, "image": path, "index": idx,
+        up = type("A", (), {"id": message_id, "image": path, "index": idx,
                             "name": name, "expect_empty": True})()
-        if cmd_upload(up) != 0:
-            return 1
-    print(f"{len(pending) - done} image(s) uploaded, {done} already in place.",
-          file=sys.stderr)
-    return 0
+        if upload(up) != 0:
+            print(f"WARNING: image slot {idx} ({name}) failed to upload; "
+                  "carrying on with the rest.", file=sys.stderr)
+            failed.append((idx, name, "upload failed"))
+            continue
+        uploaded.append(idx)
+
+    print(f"{len(uploaded)} image(s) uploaded, {len(in_place)} already in place, "
+          f"{len(skipped)} skipped, {len(failed)} failed.", file=sys.stderr)
+    for idx, name, why in skipped:
+        print(f"  SKIPPED [{idx}] {name}: {why}", file=sys.stderr)
+    for idx, name, why in failed:
+        print(f"  FAILED  [{idx}] {name}: {why}", file=sys.stderr)
+    return 1 if (skipped or failed) else 0
 
 
 def cmd_screenshot(args):
