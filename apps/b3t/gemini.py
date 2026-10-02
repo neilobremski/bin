@@ -16,6 +16,7 @@ import sys
 import time
 
 import session
+import staging
 from constants import GEMINI_URL
 
 # Timeouts (seconds)
@@ -126,6 +127,15 @@ def _upload_file(filepath):
     Accessibility-ref clicks do not trigger this Angular menu button, so drive
     it with locators inside run-code and catch the file chooser directly.
     """
+    # Hand the chooser a staged copy: a cloud-only OneDrive template reads as
+    # 0 bytes to the browser (see staging.py). Staged before the chooser opens,
+    # so a refusal does not leave a file chooser standing.
+    try:
+        staged, _ = staging.stage(filepath)
+    except (staging.StageError, OSError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
     # Open the menu and click "Upload files"; the resulting file chooser is a
     # playwright-cli modal state that ONLY its `upload` command may resolve —
     # do not intercept the filechooser event in run-code.
@@ -149,7 +159,7 @@ def _upload_file(filepath):
         return 1
 
     time.sleep(0.5)
-    result = session.run("upload", filepath)
+    result = session.run("upload", staged)
     if result.returncode != 0:
         print("ERROR: File chooser upload failed.", file=sys.stderr)
         return 1

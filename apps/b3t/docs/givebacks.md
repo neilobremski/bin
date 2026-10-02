@@ -68,6 +68,7 @@ Direct click on `<img>` elements fails because Unlayer's `.blockbuilder-layer-se
 4. Click center coordinates: `page.mouse.click(cx, cy)` — hits overlay, selects block
 5. Snapshot → find `button "Upload Image"` ref in right panel
 6. Chain: `click {upload_ref} && upload "/absolute/path/to/file"`
+   (always a staged temp copy, never the original: see below)
 
 **Key constraints:**
 - `scrollIntoViewIfNeeded()` required for images below the fold

@@ -3,15 +3,14 @@ import html as html_mod
 import json
 import os
 import re
-import shutil
 import sys
-import tempfile
 import time
 
 import archive
 import design as design_mod
 import env
 import session
+import staging
 from constants import (
     GIVEBACKS_BASE, GIVEBACKS_API, GIVEBACKS_LOGIN, GIVEBACKS_CAUSE_ID,
     GIVEBACKS_BACKER_API, SESSION_NAME,
@@ -1293,12 +1292,15 @@ def cmd_upload(args):
 
     # Upload under the edition-qualified name the design asked for. S3 keeps the
     # file name, so this is what lets a later rebuild tell this edition's
-    # header.jpg from the last one's.
-    upload_name = getattr(args, "name", None)
-    if upload_name and upload_name != os.path.basename(image_path):
-        staged = os.path.join(tempfile.mkdtemp(prefix="b3t-upload-"), upload_name)
-        shutil.copy2(image_path, staged)
-        image_path = staged
+    # header.jpg from the last one's. Always staged, even under its own name:
+    # a cloud-only OneDrive file reads as 0 bytes to anything but a Python
+    # read, the browser's file chooser included (see staging.py).
+    try:
+        image_path, image_bytes = staging.stage(
+            image_path, getattr(args, "name", None))
+    except (staging.StageError, OSError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
 
     print(f"Uploading {os.path.basename(image_path)} to editor...", file=sys.stderr)
 
@@ -1391,7 +1393,7 @@ def cmd_upload(args):
         f'playwright-cli -s={SESSION_NAME} click {upload_ref} && '
         f'playwright-cli -s={SESSION_NAME} upload "{image_path}"'
     )
-    file_mb = os.path.getsize(image_path) / (1024 * 1024)
+    file_mb = image_bytes / (1024 * 1024)
     upload_timeout = max(60, int(30 + file_mb * 10))
     result = sp.run(shell_cmd, shell=True, capture_output=True, text=True, timeout=upload_timeout)
     if result.returncode != 0:
