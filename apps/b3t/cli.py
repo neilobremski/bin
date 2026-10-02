@@ -227,6 +227,9 @@ def main():
     p.add_argument("--folder", default="Submissions", help="Folder to check")
     p.add_argument("--addresses", action="store_true",
                    help="Also show each sender's email address")
+    p.add_argument("--limit", type=int, default=50,
+                   help="Scroll the list until this many rows are read (0 = whole "
+                        "folder; default 50)")
 
     p = ol_sub.add_parser("reply",
                           help="Draft a Reply All in the original thread (never sends)")

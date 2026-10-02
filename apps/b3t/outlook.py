@@ -253,6 +253,122 @@ def _parse_messages(snap):
     return messages
 
 
+# How far `ol check` walks the virtualised message list. Outlook renders only
+# the rows near the viewport (6 of 19 Inbox rows on 2026-10-01), so the list
+# is scrolled and every screen's rows are merged.
+LIST_LIMIT = 50
+LIST_MAX_STEPS = 40
+LIST_STALE_STEPS = 3
+
+
+def _scroll_message_list(to_top=False):
+    """Scroll the message list one screen down (or back to the top).
+
+    Wheels over the list, the way `ol reply --match` already does, then
+    measures the element that actually scrolls (the listbox, an ancestor or
+    a descendant) so the caller can tell the end of the folder from a step
+    that did nothing. Returns {top, h, c}, or None when it cannot measure.
+    """
+    code = (
+        "async function main(page){"
+        "  const lb = page.locator('[role=listbox]').first();"
+        "  const measure = (root, toTop) => {"
+        "    const ok = (e) => e && e.scrollHeight > e.clientHeight + 40 &&"
+        "      /(auto|scroll)/.test(getComputedStyle(e).overflowY);"
+        "    let el = root; while (el && !ok(el)) el = el.parentElement;"
+        "    if (!el) el = Array.from(root.querySelectorAll('*')).find(ok);"
+        "    if (!el) el = root;   /* nothing scrolls: the list fits */"
+        "    if (toTop) el.scrollTop = 0;"
+        "    return {top: el.scrollTop, h: el.scrollHeight, c: el.clientHeight};"
+        "  };"
+        "  try {"
+        f"    const g = await lb.evaluate(measure, {'true' if to_top else 'false'});"
+        f"    if (!{'true' if to_top else 'false'}) {{"
+        "      const b = await lb.boundingBox();"
+        "      if (b) { await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);"
+        "        await page.mouse.wheel(0, g && g.c ? Math.round(g.c * 0.8) : 600); }"
+        "    }"
+        "    await page.waitForTimeout(1200);"
+        "    return JSON.stringify(await lb.evaluate(measure, false));"
+        "  } catch (e) { return JSON.stringify(null); }"
+        "}"
+    )
+    res = session.run("run-code", "--raw", code, timeout=30)
+    raw = (res.stdout or "").strip()
+    for candidate in (raw, raw.strip('"')):
+        try:
+            g = json.loads(candidate)
+            if isinstance(g, str):
+                g = json.loads(g)
+            return g if isinstance(g, dict) else None
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _at_bottom(geo):
+    return bool(geo) and geo["top"] + geo["c"] >= geo["h"] - 40
+
+
+def collect_messages(limit=LIST_LIMIT, max_steps=LIST_MAX_STEPS,
+                     snapshot=None, scroll=None, on_new=None):
+    """Every message row in the open folder, scrolling the virtualised list.
+
+    Rows are merged across screens by their sender/subject/time/preview text
+    (status words such as "Unread" stripped), the one identity a snapshot
+    row keeps between renders; its ref is not. A row's ref is the one from
+    the last snapshot that showed it, so the row that completes `limit` is
+    always clickable as it stands.
+
+    Returns (messages, why) where `why` is "end" (scrolled to the bottom
+    and nothing new appeared), "limit" (`limit` rows reached, more may
+    follow), "stalled" (scrolling stopped yielding rows but the bottom was
+    never measured) or "steps" (the scroll budget ran out first: partial).
+    `limit` 0 or None means no limit.
+    """
+    snapshot = snapshot or session.snapshot
+    scroll = scroll or _scroll_message_list
+    seen, ordered = {}, []
+    stale, at_end = 0, False
+    for step in range(max_steps + 1):
+        new = []
+        for msg in _parse_messages(snapshot() or ""):
+            key = _match_core(msg["text"])
+            if key in seen:
+                seen[key]["ref"] = msg["ref"]
+                continue
+            seen[key] = msg
+            ordered.append(msg)
+            new.append(msg)
+            if limit and len(ordered) >= limit:
+                break
+        if new and on_new:
+            on_new(new)
+        if limit and len(ordered) >= limit:
+            return ordered, "limit"
+        if at_end and not new:
+            return ordered, "end"
+        stale = 0 if new else stale + 1
+        if stale >= LIST_STALE_STEPS:
+            # Scrolling stopped producing rows but the bottom was never
+            # measured: probably the end, not proven to be.
+            return ordered, "stalled"
+        if step == max_steps:
+            break
+        at_end = _at_bottom(scroll())
+    return ordered, "steps"
+
+
+def _pick_row(n, folder):
+    """Row `n` (1-based) of the open folder, scrolling as far as it takes."""
+    messages, _ = collect_messages(limit=n)
+    if n < 1 or n > len(messages):
+        print(f"ERROR: message #{n} not found. {len(messages)} messages in "
+              f"{folder}.", file=sys.stderr)
+        return None
+    return messages[n - 1]
+
+
 def _sender_addresses():
     """One address per message row, keyed by that row's own text.
 
@@ -367,18 +483,25 @@ def cmd_check(args):
         print(f"ERROR: Could not find folder '{folder}' in sidebar.", file=sys.stderr)
         return 1
 
-    snap = session.snapshot()
-    if not snap:
-        print("ERROR: Cannot get page snapshot.", file=sys.stderr)
-        return 1
-
-    messages = _parse_messages(snap)
-
-    if getattr(args, "addresses", False):
-        _attach_addresses(messages)
+    # Addresses are read from the rendered rows, so each screen's new rows are
+    # matched while they are still on screen.
+    on_new = _attach_addresses if getattr(args, "addresses", False) else None
+    limit = getattr(args, "limit", LIST_LIMIT)
+    _scroll_message_list(to_top=True)
+    messages, why = collect_messages(limit=limit, on_new=on_new)
 
     print(f"Folder: {folder}", file=sys.stderr)
-    print(f"{len(messages)} messages", file=sys.stderr)
+    if why == "end":
+        print(f"{len(messages)} messages (whole folder)", file=sys.stderr)
+    elif why == "limit":
+        print(f"{len(messages)} messages (stopped at --limit {limit}; there may "
+              "be more below)", file=sys.stderr)
+    elif why == "stalled":
+        print(f"{len(messages)} messages (scrolling stopped finding new rows; "
+              "could not confirm the end of the folder)", file=sys.stderr)
+    else:
+        print(f"{len(messages)} messages. PARTIAL: the list was still giving "
+              f"new rows after {LIST_MAX_STEPS} scroll steps.", file=sys.stderr)
 
     if not messages:
         print(f"No messages in {folder}.")
@@ -488,17 +611,12 @@ def cmd_read(args):
     msg_num = int(args.number) if hasattr(args, "number") and args.number else 1
     output_dir = args.dir if hasattr(args, "dir") and args.dir else None
 
-    snap = session.snapshot()
-    if not snap:
-        print("ERROR: Cannot get page snapshot.", file=sys.stderr)
+    # Numbers come from `ol check`, which walks the whole list, so a row
+    # further down than the screen shows must be scrolled to, not refused.
+    _scroll_message_list(to_top=True)
+    target = _pick_row(msg_num, folder)
+    if not target:
         return 1
-
-    messages = _parse_messages(snap)
-    if msg_num < 1 or msg_num > len(messages):
-        print(f"ERROR: Message #{msg_num} not found. {len(messages)} messages visible.", file=sys.stderr)
-        return 1
-
-    target = messages[msg_num - 1]
     # Say which row this is, so a misread shows up in the output itself.
     print(f"=== Row {msg_num} === {target['text'][:120]}")
 
@@ -726,10 +844,9 @@ def cmd_reply(args):
         target = hits[0]
     else:
         n = int(getattr(args, "number", 1) or 1)
-        if n < 1 or n > len(messages):
-            print(f"ERROR: message #{n} not found. {len(messages)} visible.", file=sys.stderr)
+        target = _pick_row(n, folder)
+        if not target:
             return 1
-        target = messages[n - 1]
 
     print(f"Replying to: {target['text'][:80]}", file=sys.stderr)
     click = session.run("click", target["ref"])

@@ -14,7 +14,7 @@ Auth check: navigate to Outlook URL → if redirected to `login.microsoftonline.
 
 ## Commands
 
-### `outlook check --folder NAME`
+### `outlook check --folder NAME [--limit N] [--addresses]`
 
 Lists messages in a folder. Default folder: "Submissions".
 
@@ -22,7 +22,21 @@ Flow:
 1. Navigate to Outlook
 2. Click folder treeitem in sidebar
 3. Parse `option` elements from `listbox "Message list"`
-4. Output: message number, subject, sender preview
+4. Scroll the list a screen at a time and merge each screen's rows
+5. Output: message number, subject, sender preview, and how the read ended
+
+**The list is virtualised.** Outlook renders only the rows near the viewport
+(a 2026-10-01 snapshot of a 19-row Inbox held 6). `collect_messages` wheels
+the list down, merges rows by their own text (sender, subject, time, preview,
+with "Unread"/"Collapsed" stripped; a snapshot ref does not survive a
+re-render), and stops at `--limit` rows (default 50, `0` = no limit), at the
+measured bottom of the list ("whole folder"), when scrolling stops yielding
+rows without the bottom being measured ("could not confirm the end"), or at
+the 40-step budget ("PARTIAL"). Two rows with identical text would merge into
+one; with the time in the text this has not been seen.
+
+`ol read N` and `ol reply --number N` use the same walk, so a number from
+`ol check` beyond the first screen is scrolled to rather than refused.
 
 ### `outlook read N --dir PATH`
 

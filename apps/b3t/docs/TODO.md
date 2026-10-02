@@ -101,8 +101,10 @@
 - [ ] **`ol reply` cannot answer a thread that already holds a draft** — it
   stops rather than adding a second one. Editing the existing draft would be
   better.
-- [ ] **Message list is virtualised** — `--match` scrolls the list to find a
-  message further down. Outlook search would be steadier than wheel events.
+- [x] **Message list is virtualised** — `ol check` now scrolls and merges
+  screens (`collect_messages`, `--limit`), and `ol read N` / `ol reply
+  --number N` scroll to row N. `--match` still has its own scroll loop;
+  Outlook search would be steadier than wheel events for either.
 
 ## From August 2026 production run
 - [ ] **`gb duplicate` broken twice over**: (1) the Mantine kebab menu opens on
