@@ -86,9 +86,10 @@ Direct click on `<img>` elements fails because Unlayer's `.blockbuilder-layer-se
   upload that fails is recorded, and the run carries on. The summary names
   every skipped/failed slot and the exit code is 1 if there were any.
 
-## Building the design from draft.md
+## Building the design from newsletter.md
 
-`b3t gb build` turns an edition's `draft.md` into design JSON, so nobody
+`b3t gb build` turns an edition's `newsletter.md` (`draft.md` in
+older editions) into design JSON, so nobody
 hand-edits Unlayer rows or re-derives the house formatting rules per edition.
 
 ```bash

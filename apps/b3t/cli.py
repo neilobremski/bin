@@ -38,7 +38,7 @@ def main():
     p.add_argument("--id", required=True, help="Message/draft UUID")
     p.add_argument("-o", "--output", help="Output file (default: stdout)")
 
-    p = gb_sub.add_parser("build", help="Build design JSON from an edition's draft.md")
+    p = gb_sub.add_parser("build", help="Build design JSON from an edition's newsletter.md")
     p.add_argument("--edition", required=True, help="Edition date YYYY-MM-DD")
     p.add_argument("--id", help="Draft UUID: pull the donor design and live image URLs from it")
     p.add_argument("--donor", help="Donor design JSON file (default: pull from --id)")

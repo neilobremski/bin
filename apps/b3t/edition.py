@@ -19,6 +19,25 @@ def dispatch(args):
     return 2
 
 
+SOURCE_NAME = "newsletter.md"
+LEGACY_SOURCE_NAME = "draft.md"
+
+
+def source_path(edition_dir):
+    """Return the edition's markdown source: newsletter.md, else legacy draft.md.
+
+    Older editions kept the working copy in draft.md and renamed it to
+    newsletter.md after the send. Newer ones use newsletter.md from the start,
+    so nothing is renamed. A missing file resolves to newsletter.md so errors
+    name the current file.
+    """
+    for name in (SOURCE_NAME, LEGACY_SOURCE_NAME):
+        p = os.path.join(edition_dir, name)
+        if os.path.exists(p):
+            return p
+    return os.path.join(edition_dir, SOURCE_NAME)
+
+
 def _editions_dir():
     return os.path.join(os.getcwd(), "editions")
 
@@ -63,8 +82,8 @@ def cmd_create(args):
     os.makedirs(os.path.join(edition_dir, "submissions"), exist_ok=True)
     os.makedirs(os.path.join(edition_dir, "wip"), exist_ok=True)
 
-    # Create draft.md
-    with open(os.path.join(edition_dir, "draft.md"), "w") as f:
+    # Create newsletter.md
+    with open(os.path.join(edition_dir, SOURCE_NAME), "w") as f:
         f.write(f"# Bear Tracks - {title}\n\n")
         f.write(f"Edition: {edition_date}\n\n")
 
