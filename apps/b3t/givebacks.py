@@ -10,6 +10,7 @@ import time
 
 import archive
 import design as design_mod
+import edition as edition_mod
 import env
 import session
 from constants import (
@@ -837,14 +838,15 @@ def _regenerate_sent_html(message_id, design, attempts=2):
 
 
 def cmd_build(args):
-    """Build a design from an edition's draft.md and optionally push it.
+    """Build a design from an edition's newsletter.md and optionally push it.
 
-    draft.md is the source of truth. This turns it into Unlayer design JSON,
-    borrowing the row styling from a previous edition's design so the result
-    keeps the newsletter's look without anyone hand-editing JSON.
+    newsletter.md (draft.md in older editions) is the source of truth. This
+    turns it into Unlayer design JSON, borrowing the row styling from a
+    previous edition's design so the result keeps the newsletter's look
+    without anyone hand-editing JSON.
     """
     edition_dir = os.path.join("editions", args.edition)
-    draft_path = os.path.join(edition_dir, "draft.md")
+    draft_path = edition_mod.source_path(edition_dir)
     if not os.path.exists(draft_path):
         print(f"ERROR: {draft_path} not found", file=sys.stderr)
         return 1

@@ -1,9 +1,10 @@
-"""Build a GiveBacks (Unlayer) design from an edition's draft.md.
+"""Build a GiveBacks (Unlayer) design from an edition's newsletter.md.
 
-The newsletter's source of truth is `editions/YYYY-MM-DD/draft.md`. This module
-turns that markdown into the Unlayer design JSON the GiveBacks CMS stores,
-reusing a previous edition's design as the style donor so every row keeps the
-padding, colors and metadata the template already carries.
+The newsletter's source of truth is `editions/YYYY-MM-DD/newsletter.md`
+(`draft.md` in older editions). This module turns that markdown into the
+Unlayer design JSON the GiveBacks CMS stores, reusing a previous edition's
+design as the style donor so every row keeps the padding, colors and metadata
+the template already carries.
 
 Three house conventions live here so nobody has to remember them per edition:
 
@@ -259,9 +260,9 @@ class _Ids:
 
 
 def build(draft_md, donor_design, slug='bt'):
-    """Return a new design dict: donor styling, draft.md content.
+    """Return a new design dict: donor styling, newsletter.md content.
 
-    draft_md      text of editions/YYYY-MM-DD/draft.md
+    draft_md      text of editions/YYYY-MM-DD/newsletter.md
     donor_design  parsed design JSON from a previous edition
     """
     design = copy.deepcopy(donor_design)
