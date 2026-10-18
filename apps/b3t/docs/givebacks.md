@@ -68,12 +68,23 @@ Direct click on `<img>` elements fails because Unlayer's `.blockbuilder-layer-se
 4. Click center coordinates: `page.mouse.click(cx, cy)` — hits overlay, selects block
 5. Snapshot → find `button "Upload Image"` ref in right panel
 6. Chain: `click {upload_ref} && upload "/absolute/path/to/file"`
+   (always a staged temp copy, never the original: see below)
 
 **Key constraints:**
 - `scrollIntoViewIfNeeded()` required for images below the fold
 - Click and upload MUST be chained (`&&`) — file chooser is only pending briefly
 - Refs change after every action — always re-snapshot
 - Use absolute file paths
+- **Uploads are staged by their bytes** (`staging.py`). A cloud-only
+  ("dataless") OneDrive file lists at full size, but `shutil.copy2` and
+  shell `cat` produced 0 bytes from one on 2026-10-01 and Givebacks took the
+  empty image. `gb upload` (and `gemini`'s template upload) now read the
+  file with Python, write a temp copy, and refuse with a named error when
+  the read is empty or shorter than `os.path.getsize` says.
+- **`gb images` does not stop at one bad slot.** A missing file or a slot the
+  live draft already fills with something else is skipped with a WARNING, an
+  upload that fails is recorded, and the run carries on. The summary names
+  every skipped/failed slot and the exit code is 1 if there were any.
 
 ## Building the design from draft.md
 

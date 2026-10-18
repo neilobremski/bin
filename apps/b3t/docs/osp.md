@@ -20,14 +20,35 @@ Login URL: `{OSP_BASE}/Account/LogOn`
 
 ## Commands
 
-### `osp scan`
+### `osp scan [--json] [--lines N] [--state FILE]`
 
-Scans multiple site pages for content that could be newsletter-worthy:
-- Home, Programs, Volunteer, Calendar
-- Club pages (Drama, Science, Math, Quiz Bowl, Spelling Bee)
-- About, Spirit Gear, Reflections
+Read-only, plain HTTP (`ospscan.py`): the public pages are server-rendered
+and need no sign-in, so the scan never touches the shared browser.
 
-**Calendar parsing:** Grid layout with alternating date rows (7 cells = days of week) and event rows (events positioned by column index).
+Default pages: Home, Programs (`/Program`), Reflections, Quiz Bowl, Math
+Club, Science Team, Spelling Bee, Drama (`/Page/Programs/*`), Volunteer,
+Meetings, Board of Directors (`/Page/PTSA/*`), plus this month's and next
+month's calendar (`/Event/MonthCalendar/YYYY/M`). `OSP_SCAN_PAGES`
+(`Name|/path,...`) replaces the list; the two calendars are added unless it
+names a calendar itself. Before 2026-10-01 the scan read only `/`.
+
+Per page: `TITLE` (the `<title>`), `HASH` (12 hex of sha256 over the page's
+text lines), then the text: everything between `#PageContainerDiv` and
+`#CustomFooterContainerDiv`, one block per line, each box's
+`data-HeaderText` as a `## ` line, links as `text (url)`. `--lines`
+(default 40, `0` = all) only limits what is printed, not what is hashed.
+
+`--state FILE` keeps `{url: hash}` between runs and marks each page `new`,
+`CHANGED` or `unchanged`. A page OSP does not have redirects to
+`/Home/Error404` with a 200; that is reported as a failure, and any failure
+makes the exit code 1.
+
+**Calendar parsing:** every event in the month grid carries a hover callout
+(`CalloutMiddleDiv`: title, `Date:`, optional `Time:`/`Where:`, an
+`/Event/ICS/N` link). Events are read from those, one line each
+(`Date Time: Title @ Where`), de-duplicated by ICS id since a multi-day
+event is drawn in every day's cell. The home page's calendar box is read
+the same way.
 
 ### `osp archive --edition DATE --html FILE [--save]`
 

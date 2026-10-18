@@ -134,10 +134,16 @@ def main():
     ps_sub.add_parser("login", help="Auto-login")
     p = ps_sub.add_parser("scan", help="Scan feed posts with full bodies")
     p.add_argument("--json", action="store_true", help="JSON output")
-    p.add_argument("--since", type=int, help="Only posts from last N days")
+    p.add_argument("--since", type=int,
+                   help="Only posts from last N days (walks feed pages back to N days)")
+    p.add_argument("--max-pages", type=int, default=5,
+                   help="Feed pages to walk at most with --since (default 5)")
     p = ps_sub.add_parser("save", help="Save posts as submission markdown files")
     p.add_argument("--dir", required=True, help="Output directory (e.g. editions/YYYY-MM-DD/submissions)")
-    p.add_argument("--since", type=int, help="Only posts from last N days")
+    p.add_argument("--since", type=int,
+                   help="Only posts from last N days (walks feed pages back to N days)")
+    p.add_argument("--max-pages", type=int, default=5,
+                   help="Feed pages to walk at most with --since (default 5)")
 
     # -- Microsoft Teams --
     tm = sub.add_parser("teams", aliases=["tm"], help="Microsoft Teams chats and channels")
@@ -180,7 +186,13 @@ def main():
     osp_sub = osp.add_subparsers(dest="action")
 
     osp_sub.add_parser("login", help="Auto-login")
-    osp_sub.add_parser("scan", help="Scan site pages for content updates")
+    p = osp_sub.add_parser("scan", help="Scan site pages for content updates (plain HTTP, read-only)")
+    p.add_argument("--json", action="store_true", help="JSON output")
+    p.add_argument("--lines", type=int, default=40,
+                   help="Text lines to print per page (0 = all; default 40)")
+    p.add_argument("--state",
+                   help="JSON file of page hashes from the last scan; marks each "
+                        "page new/CHANGED/unchanged and is then updated")
 
     p = osp_sub.add_parser("archive", help="Fill the archive page form on rmsptsa.org")
     p.add_argument("--edition", required=True, help="Edition date YYYY-MM-DD")
@@ -221,6 +233,9 @@ def main():
     p.add_argument("--folder", default="Submissions", help="Folder to check")
     p.add_argument("--addresses", action="store_true",
                    help="Also show each sender's email address")
+    p.add_argument("--limit", type=int, default=50,
+                   help="Scroll the list until this many rows are read (0 = whole "
+                        "folder; default 50)")
 
     p = ol_sub.add_parser("reply",
                           help="Draft a Reply All in the original thread (never sends)")
