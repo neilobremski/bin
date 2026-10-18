@@ -259,6 +259,9 @@ def _parse_messages(snap):
 LIST_LIMIT = 50
 LIST_MAX_STEPS = 40
 LIST_STALE_STEPS = 3
+# A screen whose snapshot fails is read again, without scrolling, this many
+# times in all before the walk stops.
+LIST_SNAPSHOT_TRIES = 3
 
 
 def _scroll_message_list(to_top=False):
@@ -323,8 +326,9 @@ def collect_messages(limit=LIST_LIMIT, max_steps=LIST_MAX_STEPS,
     Returns (messages, why) where `why` is "end" (scrolled to the bottom
     and nothing new appeared), "limit" (`limit` rows reached, more may
     follow), "stalled" (scrolling stopped yielding rows but the bottom was
-    never measured) or "steps" (the scroll budget ran out first: partial).
-    `limit` 0 or None means no limit.
+    never measured), "steps" (the scroll budget ran out first: partial) or
+    "error" (a screen could not be read: partial, and nothing past it was
+    read). `limit` 0 or None means no limit.
     """
     snapshot = snapshot or session.snapshot
     scroll = scroll or _scroll_message_list
@@ -332,7 +336,17 @@ def collect_messages(limit=LIST_LIMIT, max_steps=LIST_MAX_STEPS,
     stale, at_end = 0, False
     for step in range(max_steps + 1):
         new = []
-        for msg in _parse_messages(snapshot() or ""):
+        snap = None
+        for _ in range(LIST_SNAPSHOT_TRIES):
+            snap = snapshot()
+            if snap is not None:
+                break
+        if snap is None:
+            # Scrolling past an unread screen would drop its rows, yet the
+            # walk could still end as "end", and every row number after the
+            # gap would be off. Stop here instead.
+            return ordered, "error"
+        for msg in _parse_messages(snap):
             key = _match_core(msg["text"])
             if key in seen:
                 seen[key]["ref"] = msg["ref"]
@@ -359,12 +373,35 @@ def collect_messages(limit=LIST_LIMIT, max_steps=LIST_MAX_STEPS,
     return ordered, "steps"
 
 
-def _pick_row(n, folder):
-    """Row `n` (1-based) of the open folder, scrolling as far as it takes."""
-    messages, _ = collect_messages(limit=n)
+def _reset_list_to_top(scroll=None):
+    """Scroll the message list to the top. False if that cannot be confirmed.
+
+    The list keeps its scroll position between commands (`ol check` leaves
+    it at the bottom), and reselecting the open folder does not reset it, so
+    anything that counts rows must start here.
+    """
+    geo = (scroll or _scroll_message_list)(to_top=True)
+    if not geo or geo.get("top") != 0:
+        print("ERROR: could not scroll the message list back to the top, so "
+              "message numbers cannot be trusted.", file=sys.stderr)
+        return False
+    return True
+
+
+def _pick_row(n, folder, scroll=None):
+    """Row `n` (1-based) of the open folder, counted from the top as `ol check`
+    counts, scrolling as far as it takes."""
+    if not _reset_list_to_top(scroll):
+        return None
+    messages, why = collect_messages(limit=n, scroll=scroll)
     if n < 1 or n > len(messages):
-        print(f"ERROR: message #{n} not found. {len(messages)} messages in "
-              f"{folder}.", file=sys.stderr)
+        if why == "error":
+            print(f"ERROR: could not read the message list past row "
+                  f"{len(messages)}, so message #{n} cannot be found.",
+                  file=sys.stderr)
+        else:
+            print(f"ERROR: message #{n} not found. {len(messages)} messages in "
+                  f"{folder}.", file=sys.stderr)
         return None
     return messages[n - 1]
 
@@ -487,7 +524,8 @@ def cmd_check(args):
     # matched while they are still on screen.
     on_new = _attach_addresses if getattr(args, "addresses", False) else None
     limit = getattr(args, "limit", LIST_LIMIT)
-    _scroll_message_list(to_top=True)
+    if not _reset_list_to_top():
+        return 1
     messages, why = collect_messages(limit=limit, on_new=on_new)
 
     print(f"Folder: {folder}", file=sys.stderr)
@@ -499,6 +537,10 @@ def cmd_check(args):
     elif why == "stalled":
         print(f"{len(messages)} messages (scrolling stopped finding new rows; "
               "could not confirm the end of the folder)", file=sys.stderr)
+    elif why == "error":
+        print(f"{len(messages)} messages. PARTIAL: the message list could not "
+              f"be read after row {len(messages)}; nothing past it was read.",
+              file=sys.stderr)
     else:
         print(f"{len(messages)} messages. PARTIAL: the list was still giving "
               f"new rows after {LIST_MAX_STEPS} scroll steps.", file=sys.stderr)
@@ -511,7 +553,7 @@ def cmd_check(args):
             suffix = f"  <{addr}>" if addr else ""
             print(f"  {i}. {msg['text'][:120]}{suffix}")
 
-    return 0
+    return 1 if why == "error" else 0
 
 
 def parse_reading_pane(snap):
@@ -613,7 +655,6 @@ def cmd_read(args):
 
     # Numbers come from `ol check`, which walks the whole list, so a row
     # further down than the screen shows must be scrolled to, not refused.
-    _scroll_message_list(to_top=True)
     target = _pick_row(msg_num, folder)
     if not target:
         return 1

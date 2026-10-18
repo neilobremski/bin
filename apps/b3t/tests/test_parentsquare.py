@@ -224,3 +224,53 @@ def test_a_post_seen_on_two_pages_is_kept_once():
     fetch, _ = _pages({1: [(1, 1), (2, 2)], 2: [(2, 2), (3, 40)]})
     posts, _ = ps.walk_pages(fetch, since_days=30)
     assert [p["feed_url"][-1] for p in posts] == ["1", "2", "3"]
+
+
+def _second_page_fails(times):
+    """Page 1 advertises page 2; page 2's snapshot fails `times` times."""
+    page1 = feed(post("Recent post", 101, "1 day ago", "A B"), page=1, last_page=2)
+    page2 = feed(post("Second post", 102, "2 days ago", "A B"), page=2, last_page=2)
+    calls, left = [], [times]
+
+    def fetch(page):
+        calls.append(page)
+        if page == 2 and left[0] > 0:
+            left[0] -= 1
+            return None
+        return page1 if page == 1 else page2
+    return fetch, calls
+
+
+def test_an_unreadable_page_is_partial_not_the_end_of_the_feed(capsys):
+    fetch, calls = _second_page_fails(times=2)
+    posts, partial = ps.walk_pages(fetch, since_days=14)
+    assert partial and len(posts) == 1 and calls == [1, 2, 2]
+    assert "PARTIAL" in capsys.readouterr().err
+
+
+def test_a_page_that_fails_once_is_fetched_again():
+    fetch, calls = _second_page_fails(times=1)
+    posts, partial = ps.walk_pages(fetch, since_days=14)
+    assert not partial and len(posts) == 2 and calls == [1, 2, 2]
+
+
+def test_scan_exits_nonzero_on_a_partial_walk(monkeypatch, capsys):
+    import json
+    from types import SimpleNamespace
+    fetch, _ = _second_page_fails(times=2)
+    monkeypatch.setattr(ps, "ensure_authenticated", lambda: True)
+    monkeypatch.setattr(ps, "_fetch_page", fetch)
+    rc = ps.cmd_scan(SimpleNamespace(since=14, max_pages=5, json=True))
+    out = capsys.readouterr()
+    assert rc == 1 and len(json.loads(out.out)) == 1 and "PARTIAL" in out.err
+
+
+def test_scan_of_a_healthy_feed_exits_zero(monkeypatch, capsys):
+    import json
+    from types import SimpleNamespace
+    fetch, _ = _second_page_fails(times=0)
+    monkeypatch.setattr(ps, "ensure_authenticated", lambda: True)
+    monkeypatch.setattr(ps, "_fetch_page", fetch)
+    rc = ps.cmd_scan(SimpleNamespace(since=14, max_pages=5, json=True))
+    out = capsys.readouterr()
+    assert rc == 0 and len(json.loads(out.out)) == 2 and "PARTIAL" not in out.err

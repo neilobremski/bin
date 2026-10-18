@@ -12,6 +12,9 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -111,3 +114,130 @@ def test_status_words_do_not_split_one_row_in_two():
     msgs, why = outlook.collect_messages(limit=0, snapshot=lambda: next(shots),
                                          scroll=lambda: next(geos))
     assert len(msgs) == 3 and why == "end"
+
+
+def _senders(msgs):
+    return [int(re.search(r"Sender (\d+)", m["text"]).group(1)) for m in msgs]
+
+
+def _failing_at(fake, top, times=None):
+    """fake.snapshot, but None while the list sits at `top` (`times` times, or always)."""
+    left = [times]
+
+    def snap():
+        if fake.top == top and (left[0] is None or left[0] > 0):
+            if left[0] is not None:
+                left[0] -= 1
+            return None
+        return fake.snapshot()
+    return snap
+
+
+def _with_top(fake):
+    """fake.scroll that also takes `to_top`, as _scroll_message_list does."""
+    def scroll(to_top=False):
+        if to_top:
+            fake.top = 0
+            return {"top": 0, "h": fake.total * 10, "c": fake.window * 10}
+        return fake.scroll()
+    return scroll
+
+
+def test_a_failed_snapshot_is_read_again_without_scrolling():
+    fake = FakeList()
+    msgs, why = outlook.collect_messages(limit=0, snapshot=_failing_at(fake, 0, times=1),
+                                         scroll=fake.scroll)
+    assert why == "end" and _senders(msgs) == list(range(1, 20))
+
+
+@pytest.mark.parametrize("top,read", [(0, 0), (6, 9), (13, 18)])
+def test_a_screen_that_cannot_be_read_stops_the_walk(top, read):
+    """First, middle and last screens: no gap is skipped, nothing claims the end."""
+    fake = FakeList()
+    msgs, why = outlook.collect_messages(limit=0, snapshot=_failing_at(fake, top),
+                                         scroll=fake.scroll)
+    assert why == "error"
+    assert _senders(msgs) == list(range(1, read + 1))
+    assert fake.top == top                     # did not scroll past it
+
+
+def test_an_empty_folder_ends_cleanly():
+    fake = FakeList(total=0)
+    msgs, why = outlook.collect_messages(limit=0, snapshot=fake.snapshot,
+                                         scroll=fake.scroll)
+    assert msgs == [] and why == "end"
+
+
+def test_pick_row_counts_from_the_top_after_check_left_the_list_scrolled(monkeypatch):
+    fake = FakeList()
+    outlook.collect_messages(limit=0, snapshot=fake.snapshot, scroll=fake.scroll)
+    assert fake.top == 13                      # where `ol check` leaves it
+    monkeypatch.setattr(outlook.session, "snapshot", fake.snapshot)
+    target = outlook._pick_row(1, "Inbox", scroll=_with_top(fake))
+    assert _senders([target]) == [1]
+
+
+def test_pick_row_refuses_when_the_top_cannot_be_confirmed(monkeypatch, capsys):
+    fake = FakeList()
+    monkeypatch.setattr(outlook.session, "snapshot", fake.snapshot)
+    assert outlook._pick_row(1, "Inbox", scroll=lambda to_top=False: None) is None
+    assert "top" in capsys.readouterr().err
+
+
+def test_pick_row_will_not_number_across_an_unread_screen(monkeypatch, capsys):
+    fake = FakeList()
+    monkeypatch.setattr(outlook.session, "snapshot", _failing_at(fake, 6))
+    assert outlook._pick_row(12, "Inbox", scroll=_with_top(fake)) is None
+    assert "could not read" in capsys.readouterr().err
+
+
+class _StopAtClick(Exception):
+    pass
+
+
+def _commands(monkeypatch, fake, snapshot=None):
+    """Patch the browser seams so cmd_check / cmd_reply run on the fake list."""
+    clicked = []
+
+    def run(*args, **kwargs):
+        if args[0] == "click":
+            clicked.append(args[1])
+            raise _StopAtClick
+        raise AssertionError(f"unexpected browser call {args}")
+
+    monkeypatch.setattr(outlook, "_ensure_outlook", lambda: True)
+    monkeypatch.setattr(outlook, "_click_folder", lambda folder: True)
+    monkeypatch.setattr(outlook, "_scroll_message_list", _with_top(fake))
+    monkeypatch.setattr(outlook.session, "snapshot", snapshot or fake.snapshot)
+    monkeypatch.setattr(outlook.session, "run", run)
+    return clicked
+
+
+def test_check_then_numbered_reply_opens_the_numbered_row(monkeypatch, tmp_path):
+    """The folder click keeps the viewport `ol check` left; reply --number 1 must
+    still open row 1, not whatever row is on screen."""
+    fake = FakeList()
+    clicked = _commands(monkeypatch, fake)
+    assert outlook.cmd_check(SimpleNamespace(folder="Inbox", addresses=False, limit=0)) == 0
+    assert fake.top == 13
+    body = tmp_path / "reply.md"
+    body.write_text("Subject: Reply\n\nSynthetic reply.\n")
+    with pytest.raises(_StopAtClick):
+        outlook.cmd_reply(SimpleNamespace(file=str(body), folder="Inbox", number=1, match=None))
+    assert re.match(r"e1r\d+$", clicked[0])
+
+
+def test_check_retries_a_failed_first_snapshot(monkeypatch, capsys):
+    fake = FakeList()
+    _commands(monkeypatch, fake, snapshot=_failing_at(fake, 0, times=1))
+    assert outlook.cmd_check(SimpleNamespace(folder="Inbox", addresses=False, limit=0)) == 0
+    out = capsys.readouterr()
+    assert "19 messages (whole folder)" in out.err and "Sender 1 " in out.out
+
+
+def test_check_reports_an_unreadable_screen_as_partial(monkeypatch, capsys):
+    fake = FakeList()
+    _commands(monkeypatch, fake, snapshot=_failing_at(fake, 0))
+    assert outlook.cmd_check(SimpleNamespace(folder="Inbox", addresses=False, limit=0)) == 1
+    err = capsys.readouterr().err
+    assert "PARTIAL" in err and "whole folder" not in err

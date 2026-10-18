@@ -407,13 +407,20 @@ def walk_pages(fetch_page, since_days=None, max_pages=MAX_PAGES):
 
     Without `since_days` only page 1 is read, as before. With it, pages are
     read until one ends with a post older than the cutoff, or the feed runs
-    out. Hitting `max_pages` first is reported as partial: a scan that
-    quietly stopped short reads as "nothing else was posted".
+    out. Hitting `max_pages` first, or a page that cannot be read (`fetch_page`
+    returns None, twice), is reported as partial: a scan that quietly stopped
+    short reads as "nothing else was posted".
     """
     posts, seen = [], set()
     page = 1
     while True:
-        snap = fetch_page(page) or ""
+        snap = fetch_page(page)
+        if snap is None:
+            snap = fetch_page(page)
+        if snap is None:
+            print(f"PARTIAL: could not read page {page} of the feed; posts on "
+                  "it and any later pages are missing.", file=sys.stderr)
+            return posts, True
         found = _parse_feed_bodies(snap)
         print(f"Page {page}: {len(found)} posts", file=sys.stderr)
         for post in found:
@@ -437,7 +444,8 @@ def walk_pages(fetch_page, since_days=None, max_pages=MAX_PAGES):
 
 
 def _fetch_page(page):
-    """Load feed page `page` in the browser, expand it, and snapshot it."""
+    """Load feed page `page` in the browser, expand it, and snapshot it.
+    None if the snapshot fails, which is not the same as an empty page."""
     url = PARENTSQUARE_FEED if page == 1 else f"{PARENTSQUARE_FEED}?page={page}"
     # `"feeds" in url` also matches ?page=3 from an earlier walk, which would
     # make page 1 read some other page.
@@ -446,7 +454,7 @@ def _fetch_page(page):
         time.sleep(3)
     _scroll_feed()
     _expand_all_read_more()
-    return session.snapshot() or ""
+    return session.snapshot()
 
 
 def _days_ago_from_date(date_str):
@@ -468,10 +476,11 @@ def _filter_since(posts, since_days):
 
 
 def _collect(args):
+    """(posts, partial) for the scan/save arguments."""
     since_days = getattr(args, "since", None)
     max_pages = getattr(args, "max_pages", None) or MAX_PAGES
-    posts, _ = walk_pages(_fetch_page, since_days, max_pages)
-    return _filter_since(posts, since_days)
+    posts, partial = walk_pages(_fetch_page, since_days, max_pages)
+    return _filter_since(posts, since_days), partial
 
 
 def _slugify(title):
@@ -526,13 +535,17 @@ def cmd_scan(args):
     if not ensure_authenticated():
         return 1
 
-    posts = _collect(args)
+    posts, partial = _collect(args)
+    # A partial read still prints what it has, then exits 1 so a gather
+    # cannot mistake it for the whole feed.
+    rc = 1 if partial else 0
 
-    print(f"{len(posts)} posts found", file=sys.stderr)
+    print(f"{len(posts)} posts found" + (" (PARTIAL, see above)" if partial else ""),
+          file=sys.stderr)
 
     if getattr(args, "json", False):
         print(json.dumps(posts, indent=2))
-        return 0
+        return rc
 
     for i, post in enumerate(posts, 1):
         meta = post.get("date", "")
@@ -550,7 +563,7 @@ def cmd_scan(args):
             print(preview)
         else:
             print("(no body text captured)")
-    return 0
+    return rc
 
 
 def cmd_save(args):
@@ -559,7 +572,7 @@ def cmd_save(args):
         return 1
 
     out_dir = os.path.abspath(args.dir)
-    posts = _collect(args)
+    posts, partial = _collect(args)
 
     os.makedirs(out_dir, exist_ok=True)
     written = 0
@@ -570,6 +583,7 @@ def cmd_save(args):
         written += 1
         print(path)
 
-    print(f"Wrote {written} files to {out_dir}", file=sys.stderr)
+    print(f"Wrote {written} files to {out_dir}"
+          + (" (PARTIAL, see above)" if partial else ""), file=sys.stderr)
     session.save_state()
-    return 0
+    return 1 if partial else 0
