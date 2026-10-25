@@ -14,7 +14,7 @@ import session
 import staging
 from constants import (
     GIVEBACKS_BASE, GIVEBACKS_API, GIVEBACKS_LOGIN, GIVEBACKS_CAUSE_ID,
-    GIVEBACKS_BACKER_API, SESSION_NAME,
+    GIVEBACKS_BACKER_API, SESSION_NAME, OUTLOOK_URL,
 )
 
 CAUSE_ID = GIVEBACKS_CAUSE_ID
@@ -199,7 +199,7 @@ def _handle_otp():
     time.sleep(5)
 
     # Open Outlook in a new tab to retrieve the code
-    session.run("tab-new", "https://outlook.office.com/mail/")
+    session.run("tab-new", OUTLOOK_URL)
     time.sleep(5)
 
     # Get the OTP from the most recent GiveBacks email

@@ -194,3 +194,25 @@ def test_a_timed_out_command_is_not_run_twice(monkeypatch):
     assert [c for c in calls if c[-2] == "run-code"] == [calls[0]], (
         "a timed-out command must not be re-run")
     assert calls[1][-1] == "dialog-dismiss", "any dialog is still answered"
+
+
+def test_navigate_to_outlook_while_already_there_is_not_a_failed_goto(monkeypatch, capsys):
+    """Outlook lives at outlook.cloud.microsoft; outlook.office.com redirects
+    there. With the old host in OUTLOOK_URL, a second `ol` command (the page
+    already on Outlook) landed on the same URL it started from, and navigate()
+    called that a goto that never left. OUTLOOK_URL must name the host the
+    browser actually ends up on."""
+    from constants import OUTLOOK_URL
+    here = "https://outlook.cloud.microsoft/mail/"
+
+    def fake(cmd, timeout):
+        if cmd[-2:] == ["eval", "() => window.location.href"]:
+            return _cp(cmd, 0, '"%s"' % here)
+        if cmd[-2:] == ["eval", "() => document.visibilityState"]:
+            return _cp(cmd, 0, '"visible"')
+        return _cp(cmd, 0, '"true"' if cmd[-2] == "eval" else "")
+
+    monkeypatch.setattr(session, "_raw_run", fake)
+
+    assert session.navigate(OUTLOOK_URL) == 0
+    assert "does not look like it left" not in capsys.readouterr().err

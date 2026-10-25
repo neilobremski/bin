@@ -49,7 +49,7 @@ def _ensure_outlook():
     url = session.current_url()
     if url and "login.microsoftonline.com" in url:
         print("ERROR: Not authenticated to M365.", file=sys.stderr)
-        print("Run: b3t open, log into outlook.office.com, b3t close", file=sys.stderr)
+        print("Run: b3t open, log into Outlook, b3t close", file=sys.stderr)
         return False
     return True
 
