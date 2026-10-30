@@ -44,7 +44,10 @@ GIVEBACKS_BACKER_API = "https://api.givebacks.com/services/backer/causes"
 
 # --- Microsoft 365 ---
 # Platform (same for everyone)
-OUTLOOK_URL = "https://outlook.office.com/mail/"
+# outlook.office.com now redirects here. Navigating to the old host while
+# already on this one lands on the same URL, which navigate() takes for a
+# goto that never left, so every `ol` command failed (2026-10-24).
+OUTLOOK_URL = "https://outlook.cloud.microsoft/mail/"
 # Org-specific (from .env)
 FORMS_URL = _optional("FORMS_URL")  # full URL to the Forms responses page
 FORMS_DOWNLOAD_PREFIX = _optional("FORMS_DOWNLOAD_PREFIX")  # optional xlsx filename filter

@@ -8,7 +8,7 @@ Email client for newsletter submissions. Content arrives in a dedicated "Submiss
 
 Env vars: `OUTLOOK_USER`, `OUTLOOK_PASS`
 
-URL: `https://outlook.office.com/mail/`
+URL: `https://outlook.cloud.microsoft/mail/` (outlook.office.com redirects here)
 
 Auth check: navigate to Outlook URL → if redirected to `login.microsoftonline.com`, not authenticated.
 
@@ -68,7 +68,7 @@ Downloaded files land in `.playwright-cli/` (not `~/Downloads`). The `--dir` fla
 ## Tab Management (OTP Flow)
 
 For GiveBacks OTP retrieval:
-1. `tab-new "https://outlook.office.com/mail/"` — open Outlook in new tab
+1. `tab-new "https://outlook.cloud.microsoft/mail/"` — open Outlook in new tab
 2. Scan message list for "passcode" or "givebacks" keywords
 3. Click message → extract 6-digit code from body
 4. `tab-close` → `tab-select 0` — return to GiveBacks tab
