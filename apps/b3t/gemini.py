@@ -142,7 +142,10 @@ def _upload_file(filepath):
     code = """async function main(page) {
       const btn = page.locator('button[aria-label="Upload & tools"], button:has-text("Upload & tools")').first();
       await btn.click();
-      const item = page.locator('[role=menuitem]', { hasText: 'Upload files' }).first();
+      // By accessible name: Gemini (Oct 2026) also renders an unnamed menuitem
+      // holding the text "Upload files" that never becomes visible, and a
+      // text match picks that one first.
+      const item = page.getByRole('menuitem', { name: /^Upload files/ }).first();
       await item.waitFor({ state: 'visible', timeout: 5000 });
       await item.click();
       return 'menu-clicked';
