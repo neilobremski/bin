@@ -1,0 +1,10 @@
+  - menu [ref=f219e724]:
+    - menuitem [ref=f219e725] [cursor=pointer]:
+      - generic [ref=f219e729]: View Newsletter
+    - menuitem [ref=f219e730] [cursor=pointer]:
+      - generic [ref=f219e735]: Duplicate
+    - menuitem [ref=f219e736] [cursor=pointer]:
+      - generic [ref=f219e743]: Copy Share Link
+    - separator [ref=f219e744]
+    - menuitem [ref=f219e745] [cursor=pointer]:
+      - generic [ref=f219e749]: Archive

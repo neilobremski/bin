@@ -1144,12 +1144,11 @@ def cmd_duplicate(args):
     """Duplicate a newsletter. Returns new draft UUID on stdout.
 
     Flow:
-    1. Navigate to /messages
-    2. Find the row matching --id
-    3. Click its three-dot menu button
-    4. Click "Duplicate" menuitem
-    5. Wait for page to reload with new draft
-    6. Find the "(Copy)" entry via API and return its UUID
+    1. Look up the source subject through the API
+    2. Navigate to /messages and find that subject's row
+    3. Click its three-dot menu button, then "Duplicate"
+    4. GiveBacks opens the copy at /messages/<new uuid>; read the id there,
+       or fall back to the newest "(Copy)" draft in the API listing
     """
     if not ensure_authenticated():
         return 1
@@ -1157,47 +1156,50 @@ def cmd_duplicate(args):
     source_id = args.id
     print(f"Duplicating {source_id}...", file=sys.stderr)
 
-    # Navigate to messages list
+    subject = _message_subject(source_id)
+    if not subject:
+        print(f"ERROR: Cannot read the subject of {source_id} from the API.",
+              file=sys.stderr)
+        return 1
+
     session.navigate(f"{GIVEBACKS_BASE}/messages?search%5Bdeleted%5D%5Bvalue%5D=false")
     time.sleep(3)
-
-    # Find the row containing this message and its kebab menu button
     snap = session.snapshot()
     if not snap:
         print("ERROR: Cannot snapshot messages page.", file=sys.stderr)
         return 1
 
-    # Rows have format: row "Subject ..." [ref=eNNN]
-    # Each row's last cell contains a button (the kebab menu)
-    # We need to find the row that matches our source subject, then click its button
-    kebab_ref = _find_kebab_for_message(snap, source_id)
-
+    kebab_ref = kebab_ref_for_subject(snap, subject)
     if not kebab_ref:
-        print(f"ERROR: Cannot find message row for {source_id}.", file=sys.stderr)
+        print(f"ERROR: Cannot find message row for {source_id} "
+              f"(subject {subject!r}).", file=sys.stderr)
         return 1
 
-    # Click the three-dot menu
     session.run("click", kebab_ref)
     time.sleep(1)
 
-    # Snapshot to find "Duplicate" menuitem
-    snap = session.snapshot()
-    dup_ref = _find_ref(snap, lambda l: 'menuitem' in l.lower() and 'Duplicate' in l)
+    dup_ref = duplicate_menuitem_ref(session.snapshot() or "")
     if not dup_ref:
         print("ERROR: Cannot find Duplicate menuitem.", file=sys.stderr)
         session.run("press", "Escape")
         return 1
 
     session.run("click", dup_ref)
-    time.sleep(4)
 
-    # The duplicate creates a new draft. Find it via API (it'll have "(Copy)" in subject)
-    js = f'''() => fetch("https://api.givebacks.com/services/communication/messages?cause_id={CAUSE_ID}&per_page=5&search%5Bstatus%5D%5Bvalue%5D=draft", {{
+    # GiveBacks opens the new copy in the editor. Its URL is the surest
+    # answer; the API listing is the fallback.
+    new_id = None
+    for _ in range(10):
+        time.sleep(1.5)
+        new_id = new_draft_id_from_url(_eval("() => location.href"), source_id)
+        if new_id:
+            break
+    if not new_id:
+        js = f'''() => fetch("https://api.givebacks.com/services/communication/messages?cause_id={CAUSE_ID}&per_page=5", {{
   credentials: "include"
 }}).then(r => r.json()).then(d => JSON.stringify(d.messages || d.data || d))'''
-
-    result = session.run("eval", js, timeout=15)
-    new_id = _parse_newest_draft(result.stdout)
+        result = session.run("eval", js, timeout=15)
+        new_id = pick_copy_draft(_parse_message_list(result.stdout), source_id, subject)
 
     if not new_id:
         print("ERROR: Could not find new draft after duplicate.", file=sys.stderr)
@@ -1208,68 +1210,127 @@ def cmd_duplicate(args):
     return 0
 
 
-def _find_kebab_for_message(snap, message_id):
-    """Find the kebab menu button ref for a message row.
-
-    Strategy: the message list is a table. Each row's last cell has a button.
-    We match by checking if the row text or the message subject corresponds to
-    our target. Since we know the UUID, we can also check by fetching the list
-    and matching subjects. But simpler: we rely on row order matching list order.
-    """
-    lines = snap.split("\n")
-    # Find the row that could contain our message by subject/ID
-    # We'll look for any row and its kebab button
-    # The API list gives us subjects — match by subject from the --id arg?
-    # Actually, let's just get the subject from the API first
+def _message_subject(message_id):
+    """The subject of a message, from the API; "" if it cannot be read."""
     js = f'''() => fetch("https://api.givebacks.com/services/communication/messages/{message_id}?cause_id={CAUSE_ID}", {{
   credentials: "include"
-}}).then(r => r.json()).then(d => d.message ? d.message.subject : "NOT_FOUND")'''
+}}).then(r => r.json()).then(d => d.message ? d.message.subject : "")'''
+    value = _eval(js, timeout=15)
+    return value.strip() if isinstance(value, str) else ""
 
-    result = session.run("eval", js, timeout=15)
-    subject = ""
-    for line in result.stdout.split("\n"):
-        line = line.strip().strip('"')
-        if line and line != "NOT_FOUND" and "Bear Tracks" in line:
-            subject = line
-            break
 
-    if not subject:
-        return None
+_ROW_RE = re.compile(r'^\s*- row\b')
+_REF_RE = re.compile(r'\[ref=(\w+)\]')
 
-    # Now find the row with this subject in the snapshot
-    in_target_row = False
-    for line in lines:
-        if f'cell "{subject}"' in line:
-            in_target_row = True
-            continue
-        if in_target_row:
-            # Look for the button in subsequent cells of this row
-            if "button" in line and "ref=" in line and "cursor=pointer" in line:
-                m = re.search(r'\[ref=(\w+)\]', line)
-                if m:
-                    return m.group(1)
-            # If we hit the next row, stop
-            if 'row "' in line:
-                break
 
+def _cell_text(line):
+    """The text of a snapshot `cell` line, or None if the line is not a cell.
+
+    playwright-cli has printed cells two ways: `cell "Subject" [ref=e1]` and,
+    since late 2026, `cell [ref=e1]: Subject`. In the second form YAML quotes
+    text that contains a colon or similar: `cell [ref=e1]: "Extra: Slice"`.
+    """
+    m = re.match(r'^\s*- cell "((?:[^"\\]|\\.)*)"', line)
+    if m:
+        return m.group(1).replace('\\"', '"')
+    m = re.match(r'^\s*- cell \[ref=\w+\][^:]*:\s*(.*?)\s*$', line)
+    if m:
+        text = m.group(1)
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+            text = text[1:-1].replace('\\"', '"') if text[0] == '"' else text[1:-1].replace("''", "'")
+        return text
     return None
 
 
-def _parse_newest_draft(stdout):
-    """Parse the newest draft UUID from messages API response."""
-    for line in stdout.split("\n"):
+def kebab_ref_for_subject(snap, subject):
+    """Ref of the three-dot menu button in the message row titled `subject`.
+
+    The subject cell must match exactly, so "Let's Get Social" does not pick
+    "Let's Get Social (Copy)". The button is the first clickable button after
+    that cell and before the next row.
+    """
+    in_row = False
+    for line in (snap or "").split("\n"):
+        if in_row:
+            if _ROW_RE.match(line):
+                break
+            if "button" in line and "cursor=pointer" in line:
+                m = _REF_RE.search(line)
+                if m:
+                    return m.group(1)
+            continue
+        if _cell_text(line) == subject:
+            in_row = True
+    return None
+
+
+def duplicate_menuitem_ref(snap):
+    """Ref of the open menu's "Duplicate" item.
+
+    The label used to sit on the menuitem line itself; now it is a child
+    `generic` one level down, so the item line alone says nothing.
+    """
+    lines = (snap or "").split("\n")
+    for i, line in enumerate(lines):
+        if "menuitem" not in line:
+            continue
+        m = _REF_RE.search(line)
+        if not m:
+            continue
+        if "Duplicate" in line:
+            return m.group(1)
+        indent = len(line) - len(line.lstrip())
+        for child in lines[i + 1:]:
+            if not child.strip():
+                continue
+            if len(child) - len(child.lstrip()) <= indent:
+                break
+            if re.search(r'\bDuplicate\b', child):
+                return m.group(1)
+    return None
+
+
+_UUID_RE = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+
+
+def new_draft_id_from_url(url, source_id):
+    """The message id in a /messages/<uuid> URL, unless it is the source."""
+    m = re.search(r'/messages/(' + _UUID_RE + r')', url or "", re.I)
+    if m and m.group(1).lower() != (source_id or "").lower():
+        return m.group(1)
+    return None
+
+
+def _parse_message_list(stdout):
+    """The list of message dicts in an eval's output, or []."""
+    for line in (stdout or "").split("\n"):
         line = line.strip()
         if not line:
             continue
         try:
-            parsed = line
-            if parsed.startswith('"'):
-                parsed = json.loads(parsed)
+            parsed = json.loads(line) if line.startswith('"') else line
             data = json.loads(parsed) if isinstance(parsed, str) else parsed
-            if isinstance(data, list) and data:
-                return data[0].get("id", data[0].get("uuid"))
         except (json.JSONDecodeError, TypeError, ValueError):
             continue
+        if isinstance(data, list):
+            return data
+    return []
+
+
+def pick_copy_draft(messages, source_id, subject):
+    """Id of the newest draft named "<subject> (Copy)" that is not the source.
+
+    The listing is newest first. A plain "newest draft" is not enough: an
+    older unsent draft (Summer Send-Off sat there all autumn) would win
+    whenever the copy is slow to appear.
+    """
+    want = f"{subject} (Copy)"
+    for msg in messages or []:
+        mid = msg.get("id") or msg.get("uuid")
+        if not mid or mid == source_id:
+            continue
+        if msg.get("status") == "draft" and msg.get("subject") == want:
+            return mid
     return None
 
 
