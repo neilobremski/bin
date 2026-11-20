@@ -28,6 +28,7 @@ from venv_util import (  # noqa: E402
     ensure_kokoro,
     ensure_mlx_whisper,
     ensure_parakeet,
+    ensure_pocket_tts,
     ensure_whisper,
     group_dir,
     install_all,
@@ -49,8 +50,17 @@ def test_requirements_files_exist():
     assert requirements_file("ai.txt").is_file()
     assert requirements_file("ai-mlx.txt").is_file()
     assert requirements_file("ai-fast.txt").is_file()
+    assert requirements_file("pocket-tts.txt").is_file()
     assert requirements_file("dev.txt").is_file()
     assert requirements_file("b3t.txt").is_file()
+
+
+def test_group_requirements_pocket_tts_includes_torch():
+    req_files = _group_requirements("pocket-tts")
+    names = [f.name for f in req_files]
+    assert names[-1] == "pocket-tts.txt"
+    assert names[0] in ("ai-torch-cpu.txt", "ai-torch-cuda.txt")
+    assert ensure_pocket_tts.__module__ == "venv_util"
 
 
 def test_group_requirements_ai_fast_has_no_torch():

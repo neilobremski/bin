@@ -24,7 +24,7 @@ Detailed docs live in [`docs/`](docs/):
 | [ltx-video.md](docs/ltx-video.md) | `n0b ai video` | LTX-Video generation, models, setup guide |
 | [research.md](docs/research.md) | `n0b ai research` | OpenAI deep research (`gpt-5.6-sol`) |
 | [secrets.md](docs/secrets.md) | `n0b secrets` | Get/set secrets — env, `~/lib`, Keychain, dotenv |
-| [ai-speak.md](docs/ai-speak.md) | `n0b ai speak` | Text-to-speech — macOS `say` or offline Kokoro |
+| [ai-speak.md](docs/ai-speak.md) | `n0b ai speak` | Text-to-speech — local (`say`, Kokoro, Pocket TTS) and `n0b secrets` cloud vendors |
 | [z-image.md](docs/z-image.md) | `n0b ai image` | Z-Image-Turbo / mistral3 text-to-image; `--ref` img2img |
 | [video.md](docs/video.md) | `n0b video` | Video utilities: last-frame, gif (Surfey-style palette) |
 | [quota.md](docs/quota.md) | `n0b quota` | Live AI tool rate limits (Antigravity / `agy`) |
@@ -49,7 +49,7 @@ Detailed docs live in [`docs/`](docs/):
 | `n0b ai video` | LTX-Video 1, LTX-2 (PyTorch), MLX-Video (Apple Silicon) | `--model ltx-2`, `--model ltx-1`, or `-2`/`-1` flags |
 | `n0b ai video` | LTX-Video 1/2, MLX on Apple Silicon | `--install`, `--install-ltx1`, `-1`, `-2` |
 | `n0b ai audio` | AudioLDM / Bark (`<bin>/.venv`) | `--model bark`, `-o`, `--install` |
-| `n0b ai speak` | macOS `say` (auto), Kokoro offline (`<bin>/.venv`) | `--engine`, `--voice`, `-o` |
+| `n0b ai speak` | macOS `say` (auto), Kokoro / Pocket TTS (`<bin>/.venv`), OpenAI / ElevenLabs / Cartesia (`n0b secrets`) | `--engine`/`--vendor`, `--model`, `--voice`, `-o` |
 | `n0b ai transcribe` | auto → `mlx-whisper` on Apple Silicon else `faster-whisper`; fancy → Ollama | `--engine`, `--flavor`, `--model` |
 
 ## Layout

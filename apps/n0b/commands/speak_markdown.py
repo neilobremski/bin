@@ -303,3 +303,19 @@ def render_kokoro_pieces(
             pieces.append(KokoroPiece(text, speed, trailing))
     return [p for p in pieces if p.text.strip() or p.silence_after > 0]
 
+
+def render_block_pieces(
+    blocks: list[SpeakBlock],
+    *,
+    base_speed: float = 1.0,
+) -> list[KokoroPiece]:
+    pieces: list[KokoroPiece] = []
+    for block in blocks:
+        text = "".join(span.text for span in block.spans).strip()
+        if not text:
+            continue
+        if block.pause_before > 0:
+            pieces.append(KokoroPiece("", base_speed, block.pause_before))
+        pieces.append(KokoroPiece(text, base_speed, 0.0))
+    return pieces
+
