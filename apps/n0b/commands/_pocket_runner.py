@@ -1,8 +1,10 @@
 """Subprocess entry point for local Kyutai Pocket TTS synthesis."""
 from __future__ import annotations
 
+from array import array
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -33,6 +35,8 @@ from commands.speak_voices import (  # noqa: E402
 SAMPLE_RATE = 24000
 MAX_CHUNK_CHARS = 300
 MAX_CHUNK_SECONDS = 60
+MIN_SPEED = 0.25
+MAX_SPEED = 4.0
 THREADS = 2
 
 
@@ -176,6 +180,79 @@ def synth_chunk(model, state, text: str) -> bytes:
     return (audio * 32767.0).round().to(torch.int16).numpy().astype("<i2").tobytes()
 
 
+def scale_pcm16_tempo(
+    pcm: bytes, speed: float, rate: int = SAMPLE_RATE
+) -> bytes:
+    """Pitch-preserving Hann overlap-add time-scale modification for 16-bit LE mono PCM."""
+    if abs(speed - 1.0) <= 1e-3 or len(pcm) < 4:
+        return pcm
+    samples = array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    if sys.byteorder != "little":
+        samples.byteswap()
+    n_in = len(samples)
+    n_out = max(1, int(round(n_in / speed)))
+    if n_out == n_in:
+        return pcm
+
+    frame_len = max(64, int(round(rate * 0.020)))
+    if frame_len % 2:
+        frame_len += 1
+    hop_s = frame_len // 2
+
+    if n_in < frame_len or n_out < frame_len:
+        out_short = array(
+            "h",
+            (
+                samples[min(n_in - 1, int(i * (n_in - 1) / max(1, n_out - 1)))]
+                for i in range(n_out)
+            ),
+        )
+        if sys.byteorder != "little":
+            out_short.byteswap()
+        return out_short.tobytes()
+
+    window = [
+        0.5 * (1.0 - math.cos(2.0 * math.pi * k / frame_len))
+        for k in range(frame_len)
+    ]
+    acc = [0.0] * (n_out + frame_len)
+    norm = [0.0] * (n_out + frame_len)
+    out_pos = 0
+    while out_pos < n_out:
+        in_pos = min(max(0, int(round(out_pos * speed))), n_in - frame_len)
+        for k in range(frame_len):
+            w = window[k]
+            acc[out_pos + k] += samples[in_pos + k] * w
+            norm[out_pos + k] += w
+        out_pos += hop_s
+
+    out = array("h", [0] * n_out)
+    for i in range(n_out):
+        w = norm[i]
+        val = acc[i] / w if w > 1e-6 else float(samples[min(n_in - 1, int(i * speed))])
+        ival = int(round(val))
+        out[i] = -32768 if ival < -32768 else (32767 if ival > 32767 else ival)
+    if sys.byteorder != "little":
+        out.byteswap()
+    return out.tobytes()
+
+
+def _resolve_piece_speed(raw_speed: object, warned: set[float]) -> float:
+    speed = float(raw_speed if raw_speed is not None else 1.0)
+    if not math.isfinite(speed) or speed <= 0:
+        raise ValueError(f"invalid speed {raw_speed!r} (must be positive)")
+    clamped = max(MIN_SPEED, min(MAX_SPEED, round(speed, 3)))
+    if abs(clamped - speed) > 1e-3 and speed not in warned:
+        warned.add(speed)
+        print(
+            f"n0b ai speak: clamping pocket speed {speed:g} to {clamped:g} "
+            f"(supported: {MIN_SPEED:g}–{MAX_SPEED:g})",
+            file=sys.stderr,
+        )
+    return clamped
+
+
 def main(argv: list[str]) -> int:
     manifest_path, out_path, voice_id = argv[:3]
     if voice_id not in POCKET_BY_ID:
@@ -184,6 +261,16 @@ def main(argv: list[str]) -> int:
         )
         return 2
     pieces = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    warned_speeds: set[float] = set()
+    try:
+        piece_speeds = [
+            _resolve_piece_speed(p.get("speed", 1.0), warned_speeds)
+            for p in pieces
+        ]
+    except (TypeError, ValueError) as exc:
+        print(f"n0b ai speak: {exc}", file=sys.stderr)
+        return 2
+
     os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
     hf_home = Path(
         os.environ.get("HF_HOME") or (Path.home() / ".cache" / "huggingface")
@@ -200,12 +287,15 @@ def main(argv: list[str]) -> int:
         )
         state = model.get_state_for_audio_prompt(emb_path)
         pcm_parts: list[bytes] = []
-        for i, piece in enumerate(pieces):
+        for i, (piece, speed) in enumerate(zip(pieces, piece_speeds)):
             text = (piece.get("text") or "").strip()
             silence_after = float(piece.get("silence_after", 0.0))
             if text:
                 for j, sub in enumerate(chunk_text(text, MAX_CHUNK_CHARS)):
-                    pcm_parts.append(synth_chunk(model, state, sub))
+                    raw_pcm = synth_chunk(model, state, sub)
+                    pcm_parts.append(
+                        scale_pcm16_tempo(raw_pcm, speed, SAMPLE_RATE)
+                    )
                     print(f"  piece {i + 1}.{j + 1}", file=sys.stderr)
             if silence_after > 0:
                 frames = max(0, int(round(SAMPLE_RATE * silence_after)))

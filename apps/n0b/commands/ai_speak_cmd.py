@@ -210,14 +210,38 @@ def save_sticky_voice(voice: str, voice_file: Path | None = None) -> int:
 
 
 def resolve_voice_details(
-    cli_voice: str | None, engine: str
+    cli_voice: str | None,
+    engine: str,
+    *,
+    sticky_engine: str | None = None,
 ) -> VoiceResolution:
     if cli_voice is not None:
         return resolve_for_engine(cli_voice, engine, "cli")
     sticky = read_sticky_voice()
     if sticky:
-        return resolve_for_engine(sticky, engine, str(SPEAK_VOICE_FILE))
+        saved_engine = (
+            read_sticky_engine() if sticky_engine is None else sticky_engine
+        )
+        single_saved = len([e for e in sticky.split(",") if e.strip()]) == 1
+        saved_vendor = parse_voice_prefix(sticky)
+        allow_saved_custom = single_saved and (
+            saved_engine == engine or saved_vendor == engine
+        )
+        return resolve_for_engine(
+            sticky,
+            engine,
+            str(SPEAK_VOICE_FILE),
+            allow_custom=allow_saved_custom,
+        )
     return resolve_for_engine(None, engine, "")
+
+
+def parse_voice_prefix(spec: str) -> str | None:
+    parts = [e.strip() for e in spec.split(",") if e.strip()]
+    if len(parts) != 1 or ":" not in parts[0]:
+        return None
+    head = parts[0].split(":", 1)[0].strip().lower()
+    return head if head in ENGINES else None
 
 
 def resolve_speak_voice(cli_voice: str | None, engine: str) -> tuple[str | None, str]:
@@ -599,7 +623,9 @@ def _select_engine_and_voice(
                 sticky_voice or "", str(SPEAK_VOICE_FILE), fallback
             )
     chosen_engine = resolve_speak_engine(engine)
-    return resolve_voice_details(voice, chosen_engine)
+    return resolve_voice_details(
+        voice, chosen_engine, sticky_engine=sticky_engine
+    )
 
 
 def cmd_speak(
@@ -644,6 +670,10 @@ def cmd_speak(
             return 2
         if not source:
             return 0
+
+    if speed <= 0:
+        print("n0b ai speak: --speed must be positive", file=sys.stderr)
+        return 2
 
     selection = _select_engine_and_voice(engine, voice)
     engine_name = selection.engine

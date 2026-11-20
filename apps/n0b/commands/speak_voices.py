@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -32,6 +33,9 @@ POCKET_TOKENIZER_BYTES = 245020
 POCKET_TOKENIZER_SHA256 = "f498428e1eafee50492f7be13dc9bfafcfc12e508cd0eb1b01c92ecd5d8c6687"
 
 KOKORO_VOICE_ID_RE = re.compile(r"^[abdefhpijzm][fm]_[a-z0-9_]+$")
+SAY_VOICE_LINE_RE = re.compile(
+    r"^(.+?)\s+[a-z]{2,3}(?:[-_][A-Za-z0-9]+)+\s*(?:#.*)?$"
+)
 GENERIC_GENDERS = {"male": "male", "female": "female"}
 
 
@@ -135,6 +139,67 @@ CARTESIA_CATALOG: tuple[Voice, ...] = (
     Voice("228fca29-3a0a-435c-8728-5cb483251068", "Kiefer", gender="male", aliases=("kiefer",)),
 )
 
+SAY_BUILTIN_CATALOG: tuple[Voice, ...] = tuple(
+    Voice(name, name)
+    for name in (
+        "Samantha",
+        "Alex",
+        "Daniel",
+        "Karen",
+        "Moira",
+        "Rishi",
+        "Tessa",
+        "Veena",
+        "Fred",
+        "Victoria",
+        "Albert",
+        "Alice",
+        "Alva",
+        "Amelie",
+        "Anna",
+        "Carmit",
+        "Damayanti",
+        "Diego",
+        "Eddy",
+        "Ellen",
+        "Fiona",
+        "Flo",
+        "Grandma",
+        "Grandpa",
+        "Ioana",
+        "Joana",
+        "Jorge",
+        "Juan",
+        "Kanya",
+        "Kyoko",
+        "Laura",
+        "Lekha",
+        "Luca",
+        "Luciana",
+        "Majed",
+        "Mariska",
+        "Mei-Jia",
+        "Melina",
+        "Milena",
+        "Monica",
+        "Nora",
+        "Paulina",
+        "Reed",
+        "Rocko",
+        "Sandy",
+        "Satu",
+        "Shelley",
+        "Sinji",
+        "Thomas",
+        "Tingting",
+        "Xander",
+        "Yelda",
+        "Yuna",
+        "Zosia",
+        "Zuzana",
+    )
+)
+
 CATALOGS: dict[str, tuple[Voice, ...]] = {
     "pocket": POCKET_CATALOG,
     "kokoro": KOKORO_CATALOG,
@@ -152,6 +217,47 @@ DEFAULT_VOICES: dict[str, str] = {
 }
 
 POCKET_BY_ID: dict[str, Voice] = {v.id: v for v in POCKET_CATALOG}
+
+
+def parse_say_voice_list(output: str) -> tuple[Voice, ...]:
+    voices: list[Voice] = []
+    seen: set[str] = set()
+    for line in output.splitlines():
+        m = SAY_VOICE_LINE_RE.match(line.rstrip())
+        if not m:
+            continue
+        full_name = m.group(1).strip()
+        if not full_name or full_name in seen:
+            continue
+        seen.add(full_name)
+        base = full_name.split("(", 1)[0].strip()
+        aliases = (base,) if base and base != full_name else ()
+        voices.append(Voice(full_name, full_name, aliases=aliases))
+    return tuple(voices)
+
+
+def installed_say_voices(
+    *,
+    which: Callable[[str], str | None] | None = None,
+) -> tuple[Voice, ...]:
+    which_fn = which or shutil.which
+    say_bin = which_fn("say")
+    if not say_bin:
+        return SAY_BUILTIN_CATALOG
+    try:
+        proc = subprocess.run(
+            [say_bin, "-v", "?"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return SAY_BUILTIN_CATALOG
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return SAY_BUILTIN_CATALOG
+    parsed = parse_say_voice_list(proc.stdout)
+    return parsed if parsed else SAY_BUILTIN_CATALOG
 
 
 def pocket_cache_path(hf_home: Path, revision: str, name: str) -> Path:
@@ -263,6 +369,10 @@ def resolve_for_engine(
     spec: str | None,
     engine: str,
     source: str,
+    *,
+    allow_custom: bool | None = None,
+    which: Callable[[str], str | None] | None = None,
+    say_voices: tuple[Voice, ...] | None = None,
 ) -> VoiceResolution:
     default_id = DEFAULT_VOICES.get(engine)
     if spec is None or not spec.strip():
@@ -279,23 +389,33 @@ def resolve_for_engine(
         how = "blend" if len(raw_entries) > 1 else "exact"
         return VoiceResolution(engine, joined, source, how, joined)
 
+    if allow_custom is None:
+        single_vendor = (
+            parse_voice_entry(raw_entries[0])[0] if len(raw_entries) == 1 else None
+        )
+        allow_custom = len(raw_entries) == 1 and (
+            source == "cli" or single_vendor == engine
+        )
+
     missed: list[str] = []
-    catalog = CATALOGS.get(engine, ())
+    catalog = (
+        (say_voices if say_voices is not None else installed_say_voices(which=which))
+        if engine == "say"
+        else CATALOGS.get(engine, ())
+    )
 
     for raw in raw_entries:
         entry_vendor, query = parse_voice_entry(raw)
         if entry_vendor is not None and entry_vendor != engine:
             missed.append(raw)
             continue
-        if engine == "say":
-            if not query:
-                return VoiceResolution("say", None, source, "default", raw, tuple(missed))
-            if KOKORO_VOICE_ID_RE.match(query) or normal_voice_key(query) in GENERIC_GENDERS:
-                missed.append(raw)
-                continue
-            return VoiceResolution("say", query, source, "passthrough", raw, tuple(missed))
         if not query:
-            return VoiceResolution(engine, default_id, source, "default", raw, tuple(missed))
+            return VoiceResolution(
+                engine, default_id, source, "default", raw, tuple(missed)
+            )
+        if engine == "say" and KOKORO_VOICE_ID_RE.match(query):
+            missed.append(raw)
+            continue
         if engine == "kokoro" and KOKORO_VOICE_ID_RE.fullmatch(query):
             return VoiceResolution("kokoro", query, source, "exact", raw, tuple(missed))
         found = match_catalog_voice(query, catalog)
@@ -305,8 +425,7 @@ def resolve_for_engine(
             )
         if (
             engine in OPEN_VOICE_ENGINES
-            and len(raw_entries) == 1
-            and source == "cli"
+            and allow_custom
             and normal_voice_key(query) not in GENERIC_GENDERS
             and not KOKORO_VOICE_ID_RE.match(query)
         ):
@@ -314,7 +433,9 @@ def resolve_for_engine(
         missed.append(raw)
 
     fallback_src = "system default" if engine == "say" else "built-in default"
-    return VoiceResolution(engine, default_id, fallback_src, "default", "", tuple(missed))
+    return VoiceResolution(
+        engine, default_id, fallback_src, "default", "", tuple(missed)
+    )
 
 
 def resolve_vendor_preference_list(
@@ -322,10 +443,13 @@ def resolve_vendor_preference_list(
     source: str,
     fallback_engine: str,
     *,
+    allow_custom: bool | None = None,
     secret_resolver: Callable[[str], str | None] | None = None,
     which: Callable[[str], str | None] | None = None,
+    say_voices: tuple[Voice, ...] | None = None,
 ) -> VoiceResolution:
     raw_entries = [e.strip() for e in spec.split(",") if e.strip()]
+    single_stack = len(raw_entries) == 1
     missed: list[str] = []
     for raw in raw_entries:
         entry_vendor, query = parse_voice_entry(raw)
@@ -336,10 +460,18 @@ def resolve_vendor_preference_list(
         if not ok:
             missed.append(raw)
             continue
+        entry_allow_custom = (
+            allow_custom
+            if allow_custom is not None
+            else (single_stack and (source == "cli" or entry_vendor == target_engine))
+        )
         single = resolve_for_engine(
             f"{target_engine}:{query}" if entry_vendor else query,
             target_engine,
             source,
+            allow_custom=entry_allow_custom,
+            which=which,
+            say_voices=say_voices,
         )
         if single.how != "default" or not query:
             return VoiceResolution(

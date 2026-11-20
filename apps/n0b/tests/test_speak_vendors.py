@@ -742,3 +742,170 @@ def test_pocket_runner_verifies_pinned_checksums(tmp_path, monkeypatch):
     _pocket_runner.ensure_verified_assets(hf_home, "alba")
     assert downloads == [voice.pocket_embedding]
     assert emb_path.read_bytes() == b"embed!"
+
+
+def test_cli_double_dash_preserves_literal_flags_and_prevents_settings_mutation():
+    import cli as cli_mod
+
+    with patch.object(cli_mod, "cmd_speak", return_value=0) as dispatch:
+        assert cli_main(["ai", "speak", "--", "--vendor", "openai", "hello"]) == 0
+        args, kwargs = dispatch.call_args
+        assert args[0] == ["--vendor", "openai", "hello"]
+        assert kwargs["engine"] is None
+
+        assert cli_main(["ai", "speak", "--", "--save", "--voice", "cedar"]) == 0
+        args, kwargs = dispatch.call_args
+        assert args[0] == ["--save", "--voice", "cedar"]
+        assert kwargs["save"] is False
+        assert args[2] is None
+
+        assert cli_main(["ai", "speak", "--", "--help"]) == 0
+        args, _kwargs = dispatch.call_args
+        assert args[0] == ["--help"]
+
+        assert (
+            cli_main(["ai", "speak", "notes.md", "--vendor", "pocket", "-o", "out.wav"])
+            == 0
+        )
+        args, kwargs = dispatch.call_args
+        assert args[0] == ["notes.md"]
+        assert kwargs["engine"] == "pocket"
+        assert args[1] == "out.wav"
+
+
+def test_multi_entry_stack_does_not_treat_missing_preset_as_custom_id():
+    res = resolve_vendor_preference_list(
+        "openai:Ember, pocket:Male",
+        "cli",
+        "kokoro",
+        secret_resolver=lambda _: "sk-test",
+        which=lambda _: None,
+    )
+    assert (res.engine, res.voice, res.how) == ("pocket", "charles", "gender")
+    assert res.missed == ("openai:Ember",)
+
+    el = resolve_vendor_preference_list(
+        "elevenlabs:MissingVoice, elevenlabs:Male",
+        "cli",
+        "kokoro",
+        secret_resolver=lambda _: "xi-test",
+        which=lambda _: None,
+    )
+    assert (el.engine, el.voice, el.how) == (
+        "elevenlabs",
+        "JBFqnCBsd6RMkjVDRZzb",
+        "gender",
+    )
+    assert el.missed == ("elevenlabs:MissingVoice",)
+
+    single_custom = resolve_vendor_preference_list(
+        "openai:voice_custom42",
+        "cli",
+        "kokoro",
+        secret_resolver=lambda _: "sk-test",
+        which=lambda _: None,
+    )
+    assert (single_custom.engine, single_custom.voice, single_custom.how) == (
+        "openai",
+        "voice_custom42",
+        "custom",
+    )
+
+
+def test_say_resolves_against_installed_voices_and_falls_through_stack():
+    from commands.speak_voices import parse_say_voice_list
+
+    sample_say_out = (
+        "Ava (Premium)       en_US    # Hello, my name is Ava.\n"
+        "Samantha            en_US    # Hello, my name is Samantha.\n"
+        "Daniel              en_GB    # Hello, my name is Daniel.\n"
+    )
+    say_catalog = parse_say_voice_list(sample_say_out)
+    assert [v.id for v in say_catalog] == ["Ava (Premium)", "Samantha", "Daniel"]
+
+    res = resolve_for_engine(
+        "DefinitelyMissingVoice, Samantha",
+        "say",
+        "cli",
+        say_voices=say_catalog,
+    )
+    assert res.voice == "Samantha"
+    assert res.how == "exact"
+    assert res.missed == ("DefinitelyMissingVoice",)
+
+    alias_match = resolve_for_engine("Ava", "say", "cli", say_voices=say_catalog)
+    assert alias_match.voice == "Ava (Premium)"
+
+    cross = resolve_vendor_preference_list(
+        "say:DefinitelyMissingVoice, pocket:Male",
+        "cli",
+        "say",
+        secret_resolver=lambda _: None,
+        which=lambda _: "/usr/bin/say",
+        say_voices=say_catalog,
+    )
+    assert (cross.engine, cross.voice) == ("pocket", "charles")
+    assert cross.missed == ("say:DefinitelyMissingVoice",)
+
+
+def test_saved_custom_voice_replays_on_matching_saved_vendor_only(tmp_path):
+    from commands import ai_speak_cmd as speak_mod
+
+    voice_file = tmp_path / "speak-voice.txt"
+    engine_file = tmp_path / "speak-engine.txt"
+    with (
+        patch.object(speak_mod, "SPEAK_VOICE_FILE", voice_file),
+        patch.object(speak_mod, "SPEAK_ENGINE_FILE", engine_file),
+        patch.object(speak_mod, "vendor_available", return_value=(True, "")),
+    ):
+        assert (
+            cli_main(
+                ["ai", "speak", "--vendor", "openai", "-v", "voice_custom42", "--save"]
+            )
+            == 0
+        )
+        first = speak_mod._select_engine_and_voice("openai", "voice_custom42")
+        later = speak_mod._select_engine_and_voice(None, None)
+        explicit_same = speak_mod._select_engine_and_voice("openai", None)
+        foreign_vendor = speak_mod._select_engine_and_voice("elevenlabs", None)
+
+    assert first.voice == "voice_custom42"
+    assert (later.engine, later.voice) == ("openai", "voice_custom42")
+    assert (explicit_same.engine, explicit_same.voice) == ("openai", "voice_custom42")
+    assert (foreign_vendor.engine, foreign_vendor.voice) == (
+        "elevenlabs",
+        "21m00Tcm4TlvDq8ikWAM",
+    )
+
+
+def test_pocket_runner_applies_speed_tempo_scaling(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    model = SimpleNamespace(get_state_for_audio_prompt=lambda _: "state")
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    monkeypatch.setattr(_pocket_runner, "ensure_verified_assets", lambda *a: None)
+    monkeypatch.setattr(_pocket_runner, "load_pocket_model", lambda *a: model)
+    monkeypatch.setattr(
+        _pocket_runner, "synth_chunk", lambda *a: b"\x10\x02" * 2400
+    )
+
+    frames_by_speed: dict[float, int] = {}
+    for speed in (0.75, 1.0, 1.5):
+        manifest = tmp_path / f"m-{speed}.json"
+        out_wav = tmp_path / f"p-{speed}.wav"
+        manifest.write_text(
+            json.dumps([{"text": "Hello.", "speed": speed, "silence_after": 0.1}]),
+            encoding="utf-8",
+        )
+        assert _pocket_runner.main([str(manifest), str(out_wav), "alba"]) == 0
+        with wave.open(str(out_wav), "rb") as w:
+            assert (w.getnchannels(), w.getsampwidth(), w.getframerate()) == (
+                1,
+                2,
+                24000,
+            )
+            frames_by_speed[speed] = w.getnframes()
+
+    assert frames_by_speed[1.0] == 2400 + 2400
+    assert frames_by_speed[1.5] == 1600 + 2400
+    assert frames_by_speed[0.75] == 3200 + 2400

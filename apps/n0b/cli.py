@@ -212,6 +212,11 @@ def parse_audio_argv(argv: list[str]) -> argparse.Namespace:
 def parse_speak_argv(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="n0b ai speak", add_help=False)
     _add_speak_args(p)
+    if "--" in argv:
+        idx = argv.index("--")
+        ns = p.parse_intermixed_args(argv[:idx])
+        ns.text = list(ns.text) + list(argv[idx + 1 :])
+        return ns
     return p.parse_intermixed_args(argv)
 
 
@@ -674,7 +679,13 @@ def _inject_bare_fanout_default(argv: list[str]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if len(argv) >= 2 and argv[0] == "ai" and "-h" not in argv and "--help" not in argv:
+    pre_delim = argv[: argv.index("--")] if "--" in argv else argv
+    if (
+        len(argv) >= 2
+        and argv[0] == "ai"
+        and "-h" not in pre_delim
+        and "--help" not in pre_delim
+    ):
         if argv[1] == "image":
             a = parse_image_argv(argv[2:])
             return cmd_image(
