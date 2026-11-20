@@ -168,6 +168,8 @@ def _torch_requirements() -> Path:
 def _group_requirements(group: str) -> list[Path]:
     if group == "ai":
         return [_torch_requirements(), requirements_file("ai.txt")]
+    if group == "pocket-tts":
+        return [_torch_requirements(), requirements_file("pocket-tts.txt")]
     if group == "ai-mlx":
         return [requirements_file("ai-mlx.txt")]
     if group == "ai-fast":
@@ -296,6 +298,13 @@ def ensure_image() -> Path:
 
 def ensure_kokoro() -> Path:
     return ensure_group("ai", probe="import kokoro, soundfile")
+
+
+def ensure_pocket_tts() -> Path:
+    return ensure_group(
+        "pocket-tts",
+        probe="import huggingface_hub, pocket_tts, torch, yaml",
+    )
 
 
 def ensure_whisper() -> Path:

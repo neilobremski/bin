@@ -82,6 +82,115 @@ def _add_audio_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("prompt", nargs="*", default=[], help="Prompt text")
 
 
+def _add_speak_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "text",
+        nargs="*",
+        default=[],
+        help="Inline text, file path, - for stdin, or omit to read stdin",
+    )
+    p.add_argument(
+        "-o",
+        "--out",
+        help="Write audio file (.wav, .m4a, or .mp3; .aiff with say)",
+    )
+    p.add_argument(
+        "-v",
+        "--voice",
+        help=(
+            "Voice name or ordered fallback list (e.g. 'Ember, Male' or "
+            "'openai:marin, pocket:alba, af_heart'). Default reads "
+            "~/.config/n0b/speak-voice.txt"
+        ),
+    )
+    p.add_argument(
+        "--engine",
+        "--vendor",
+        choices=("auto", "say", "kokoro", "pocket", "openai", "elevenlabs", "cartesia"),
+        default=None,
+        dest="engine",
+        help=(
+            "TTS vendor/engine: auto prefers say on macOS else kokoro; "
+            "cloud vendors read keys from n0b secrets"
+        ),
+    )
+    p.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Vendor model override (openai: gpt-realtime-2.1-mini; "
+            "elevenlabs: eleven_flash_v2_5; cartesia: sonic-3.6)"
+        ),
+    )
+    p.add_argument(
+        "--speed", type=float, default=1.0, help="Speech speed multiplier"
+    )
+    p.add_argument(
+        "--raw", action="store_true", help="Skip markdown-to-prose cleanup"
+    )
+    p.add_argument(
+        "--flat",
+        action="store_true",
+        help="Force single-pass speakable() cleanup (no section pauses)",
+    )
+    p.add_argument(
+        "--pause-major",
+        type=float,
+        default=2.0,
+        metavar="SEC",
+        help="Silence before H1/H2 sections in seconds (default: 2.0)",
+    )
+    p.add_argument(
+        "--pause-minor",
+        type=float,
+        default=1.0,
+        metavar="SEC",
+        help="Silence before H3–H6 sections in seconds (default: 1.0)",
+    )
+    p.add_argument(
+        "--pause-para",
+        type=float,
+        default=0.4,
+        metavar="SEC",
+        help="Silence between paragraphs in seconds (default: 0.4)",
+    )
+    p.add_argument(
+        "--no-emphasis",
+        action="store_true",
+        help="Disable bold/code emphasis (speed/slnc tweaks)",
+    )
+    p.add_argument(
+        "--replace",
+        action="append",
+        default=[],
+        dest="replaces",
+        metavar="'TEXT => SPOKEN'",
+        help=(
+            "Regex + spoken form applied before synthesis. Merged with "
+            "~/.config/n0b/speak-replacements.txt"
+        ),
+    )
+    p.add_argument(
+        "--pronounce",
+        action="append",
+        default=[],
+        dest="pronounces",
+        metavar="'WORD => IPA'",
+        help=(
+            "Regex + misaki IPA phonemes; matches become [word](/ipa/). "
+            "Merged with ~/.config/n0b/speak-pronunciations.txt"
+        ),
+    )
+    p.add_argument(
+        "--save",
+        action="store_true",
+        help=(
+            "Append --replace/--pronounce to their global files and/or "
+            "persist --voice / --engine as the system default"
+        ),
+    )
+
+
 def _parse_intermixed(p: argparse.ArgumentParser, argv: list[str]) -> argparse.Namespace:
     if argv[:1] == ["--"]:
         argv = argv[1:]
@@ -98,6 +207,12 @@ def parse_audio_argv(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="n0b ai audio", add_help=False)
     _add_audio_args(p)
     return _parse_intermixed(p, argv)
+
+
+def parse_speak_argv(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="n0b ai speak", add_help=False)
+    _add_speak_args(p)
+    return p.parse_intermixed_args(argv)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -216,9 +331,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Read text aloud or save speech to a file",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "Text-to-speech for arguments, a file, or stdin. On macOS the "
-            "default engine is the built-in say(1) voice; use --engine kokoro "
-            "for fully offline neural synthesis."
+            "Text-to-speech for arguments, a file, or stdin. Supports local "
+            "engines (macOS say, Kokoro, Pocket TTS) and secret-gated cloud "
+            "vendors (OpenAI Realtime, ElevenLabs, Cartesia)."
         ),
         epilog=(
             "examples:\n"
@@ -227,6 +342,9 @@ def build_parser() -> argparse.ArgumentParser:
             "  n0b ai speak notes.md -o notes.m4a    save file (no playback)\n"
             "  n0b ai speak -v Samantha \"hi\" --save sticky macOS voice\n"
             "  n0b ai speak doc.md --engine kokoro -o out.wav  offline/file\n"
+            "  n0b ai speak doc.md --vendor pocket -v \"Ember, Male\" -o out.wav\n"
+            "  n0b ai speak doc.md --vendor openai -v marin -o out.wav\n"
+            "  n0b ai speak doc.md -v \"openai:marin, pocket:alba, af_heart\"\n"
             "  n0b ai speak notes.md --pause-major 1.5 --pause-minor 0.8\n"
             "  n0b ai speak --replace '\\ba8s\\b => A eight S' --save\n"
             "\n"
@@ -237,97 +355,7 @@ def build_parser() -> argparse.ArgumentParser:
             "for tell --attach). See apps/n0b/docs/ai-speak.md."
         ),
     )
-    ai_speak.add_argument(
-        "text",
-        nargs=argparse.REMAINDER,
-        help="Inline text, file path, - for stdin, or omit to read stdin",
-    )
-    ai_speak.add_argument(
-        "-o",
-        "--out",
-        help="Write audio file (.m4a/.aiff with say; .wav/.m4a with kokoro)",
-    )
-    ai_speak.add_argument(
-        "-v",
-        "--voice",
-        help=(
-            "Voice name: macOS voice for say (e.g. Samantha), Kokoro id for "
-            "kokoro (e.g. af_nicole). Default reads ~/.config/n0b/speak-voice.txt"
-        ),
-    )
-    ai_speak.add_argument(
-        "--engine",
-        choices=("auto", "say", "kokoro"),
-        default="auto",
-        help="TTS backend: auto prefers say on macOS, else kokoro (default: auto)",
-    )
-    ai_speak.add_argument(
-        "--speed", type=float, default=1.0, help="Speech speed multiplier"
-    )
-    ai_speak.add_argument(
-        "--raw", action="store_true", help="Skip markdown-to-prose cleanup"
-    )
-    ai_speak.add_argument(
-        "--flat",
-        action="store_true",
-        help="Force single-pass speakable() cleanup (no section pauses)",
-    )
-    ai_speak.add_argument(
-        "--pause-major",
-        type=float,
-        default=2.0,
-        metavar="SEC",
-        help="Silence before H1/H2 sections in seconds (default: 2.0)",
-    )
-    ai_speak.add_argument(
-        "--pause-minor",
-        type=float,
-        default=1.0,
-        metavar="SEC",
-        help="Silence before H3–H6 sections in seconds (default: 1.0)",
-    )
-    ai_speak.add_argument(
-        "--pause-para",
-        type=float,
-        default=0.4,
-        metavar="SEC",
-        help="Silence between paragraphs in seconds (default: 0.4)",
-    )
-    ai_speak.add_argument(
-        "--no-emphasis",
-        action="store_true",
-        help="Disable bold/code emphasis (speed/slnc tweaks)",
-    )
-    ai_speak.add_argument(
-        "--replace",
-        action="append",
-        default=[],
-        dest="replaces",
-        metavar="'TEXT => SPOKEN'",
-        help=(
-            "Regex + spoken form applied before synthesis. Merged with "
-            "~/.config/n0b/speak-replacements.txt"
-        ),
-    )
-    ai_speak.add_argument(
-        "--pronounce",
-        action="append",
-        default=[],
-        dest="pronounces",
-        metavar="'WORD => IPA'",
-        help=(
-            "Regex + misaki IPA phonemes; matches become [word](/ipa/). "
-            "Merged with ~/.config/n0b/speak-pronunciations.txt"
-        ),
-    )
-    ai_speak.add_argument(
-        "--save",
-        action="store_true",
-        help=(
-            "Append --replace/--pronounce to their global files and/or "
-            "persist --voice as the system default"
-        ),
-    )
+    _add_speak_args(ai_speak)
     ai_transcribe = ai_sub.add_parser(
         "transcribe",
         help="Transcribe audio/video locally (Whisper; fancy video via Ollama vision)",
@@ -555,6 +583,7 @@ def dispatch(args: argparse.Namespace) -> int:
                 pause_minor=args.pause_minor,
                 pause_para=args.pause_para,
                 emphasis=not args.no_emphasis,
+                model=args.model,
             )
         if args.ai_kind == "transcribe":
             return cmd_transcribe(
@@ -670,6 +699,25 @@ def main(argv: list[str] | None = None) -> int:
             if a.out:
                 rest.extend(["-o", a.out])
             return cmd_audio(a.model, rest)
+        if argv[1] == "speak":
+            a = parse_speak_argv(argv[2:])
+            return cmd_speak(
+                a.text,
+                a.out,
+                a.voice,
+                a.speed,
+                raw=a.raw,
+                flat=a.flat,
+                replaces=a.replaces,
+                pronounces=a.pronounces,
+                save=a.save,
+                engine=a.engine,
+                pause_major=a.pause_major,
+                pause_minor=a.pause_minor,
+                pause_para=a.pause_para,
+                emphasis=not a.no_emphasis,
+                model=a.model,
+            )
     if len(argv) >= 2 and argv[0] == "ai" and argv[1] == "research":
         argv = _inject_bare_fanout_default(argv)
     parser = build_parser()
