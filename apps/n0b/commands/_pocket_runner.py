@@ -180,10 +180,62 @@ def synth_chunk(model, state, text: str) -> bytes:
     return (audio * 32767.0).round().to(torch.int16).numpy().astype("<i2").tobytes()
 
 
+def _best_wsola_offset(
+    samples: array,
+    energy_prefix: list[int],
+    ref_pos: int,
+    ideal_pos: int,
+    corr_len: int,
+    delta: int,
+    max_start: int,
+) -> int:
+    """Find candidate start near `ideal_pos` maximally phase-aligned with `ref_pos`."""
+    lo = max(0, ideal_pos - delta)
+    hi = min(max_start, ideal_pos + delta)
+    if lo >= hi:
+        return max(0, min(max_start, ideal_pos))
+
+    ref_energy = energy_prefix[ref_pos + corr_len] - energy_prefix[ref_pos]
+    if ref_energy <= 0:
+        return max(0, min(max_start, ideal_pos))
+
+    def score_at(cand: int, stride: int) -> float:
+        cand_energy = energy_prefix[cand + corr_len] - energy_prefix[cand]
+        if cand_energy <= 0:
+            return -2.0
+        dot = 0
+        for i in range(0, corr_len, stride):
+            dot += samples[ref_pos + i] * samples[cand + i]
+        norm = math.sqrt(float(ref_energy) * float(cand_energy))
+        corr = (dot * stride) / norm if norm > 0.0 else 0.0
+        return corr - 1e-4 * (abs(cand - ideal_pos) / max(1, delta))
+
+    coarse_scores: list[tuple[float, int]] = []
+    for cand in range(lo, hi + 1, 2):
+        coarse_scores.append((score_at(cand, 4), cand))
+    coarse_scores.sort(reverse=True)
+
+    best_pos = max(0, min(max_start, ideal_pos))
+    best_score = -1e9
+    checked: set[int] = set()
+    for _coarse_val, peak in coarse_scores[:4]:
+        r_lo = max(lo, peak - 4)
+        r_hi = min(hi, peak + 4)
+        for cand in range(r_lo, r_hi + 1):
+            if cand in checked:
+                continue
+            checked.add(cand)
+            sc = score_at(cand, 1)
+            if sc > best_score:
+                best_score = sc
+                best_pos = cand
+    return best_pos
+
+
 def scale_pcm16_tempo(
     pcm: bytes, speed: float, rate: int = SAMPLE_RATE
 ) -> bytes:
-    """Pitch-preserving Hann overlap-add time-scale modification for 16-bit LE mono PCM."""
+    """Pitch-preserving WSOLA time-scale modification for 16-bit LE mono PCM."""
     if abs(speed - 1.0) <= 1e-3 or len(pcm) < 4:
         return pcm
     samples = array("h")
@@ -195,12 +247,13 @@ def scale_pcm16_tempo(
     if n_out == n_in:
         return pcm
 
-    frame_len = max(64, int(round(rate * 0.020)))
+    frame_len = max(128, int(round(rate * 0.040)))
     if frame_len % 2:
         frame_len += 1
     hop_s = frame_len // 2
+    delta = max(32, int(round(rate * 0.015)))
 
-    if n_in < frame_len or n_out < frame_len:
+    if n_in < frame_len * 2 or n_out < frame_len:
         out_short = array(
             "h",
             (
@@ -212,18 +265,40 @@ def scale_pcm16_tempo(
             out_short.byteswap()
         return out_short.tobytes()
 
+    energy_prefix = [0] * (n_in + 1)
+    running = 0
+    for idx, val in enumerate(samples):
+        running += val * val
+        energy_prefix[idx + 1] = running
+
     window = [
         0.5 * (1.0 - math.cos(2.0 * math.pi * k / frame_len))
         for k in range(frame_len)
     ]
+    max_start = n_in - frame_len
     acc = [0.0] * (n_out + frame_len)
     norm = [0.0] * (n_out + frame_len)
+
+    chosen_pos = 0
     out_pos = 0
     while out_pos < n_out:
-        in_pos = min(max(0, int(round(out_pos * speed))), n_in - frame_len)
+        if out_pos == 0:
+            chosen_pos = 0
+        else:
+            ideal_pos = int(round(out_pos * speed))
+            ref_pos = min(max(0, chosen_pos + hop_s), max_start)
+            chosen_pos = _best_wsola_offset(
+                samples,
+                energy_prefix,
+                ref_pos=ref_pos,
+                ideal_pos=ideal_pos,
+                corr_len=hop_s,
+                delta=delta,
+                max_start=max_start,
+            )
         for k in range(frame_len):
             w = window[k]
-            acc[out_pos + k] += samples[in_pos + k] * w
+            acc[out_pos + k] += samples[chosen_pos + k] * w
             norm[out_pos + k] += w
         out_pos += hop_s
 

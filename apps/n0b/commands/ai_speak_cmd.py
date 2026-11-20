@@ -219,14 +219,8 @@ def resolve_voice_details(
         return resolve_for_engine(cli_voice, engine, "cli")
     sticky = read_sticky_voice()
     if sticky:
-        saved_engine = (
-            read_sticky_engine() if sticky_engine is None else sticky_engine
-        )
-        single_saved = len([e for e in sticky.split(",") if e.strip()]) == 1
         saved_vendor = parse_voice_prefix(sticky)
-        allow_saved_custom = single_saved and (
-            saved_engine == engine or saved_vendor == engine
-        )
+        allow_saved_custom = saved_vendor == engine
         return resolve_for_engine(
             sticky,
             engine,
@@ -655,11 +649,19 @@ def cmd_speak(
         if parse_cli_pairs(pronounces, "n0b ai speak"):
             save_pair_file(pronounces, SPEAK_PRONUNCIATIONS_FILE, "n0b ai speak")
             saved = True
-        if voice is not None:
-            save_sticky_voice(voice)
-            saved = True
         if engine is not None:
-            if save_sticky_engine(engine) == 0:
+            if save_sticky_engine(engine) != 0:
+                return 2
+            saved = True
+        if voice is not None:
+            voice_to_save = voice.strip()
+            single_entry = len([e for e in voice_to_save.split(",") if e.strip()]) == 1
+            if single_entry and parse_voice_prefix(voice_to_save) is None:
+                target_engine = resolve_speak_engine(engine)
+                probe = resolve_for_engine(voice_to_save, target_engine, "cli")
+                if probe.how == "custom" and probe.voice:
+                    voice_to_save = f"{target_engine}:{probe.voice}"
+            if save_sticky_voice(voice_to_save) == 0:
                 saved = True
         if not saved:
             print(

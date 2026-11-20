@@ -877,6 +877,26 @@ def test_saved_custom_voice_replays_on_matching_saved_vendor_only(tmp_path):
         "21m00Tcm4TlvDq8ikWAM",
     )
 
+    with (
+        patch.object(speak_mod, "SPEAK_VOICE_FILE", voice_file),
+        patch.object(speak_mod, "SPEAK_ENGINE_FILE", engine_file),
+        patch.object(speak_mod, "vendor_available", return_value=(True, "")),
+    ):
+        assert cli_main(["ai", "speak", "--vendor", "elevenlabs", "--save"]) == 0
+        switched = speak_mod._select_engine_and_voice(None, None)
+        assert (switched.engine, switched.voice, switched.how) == (
+            "elevenlabs",
+            "21m00Tcm4TlvDq8ikWAM",
+            "default",
+        )
+        assert cli_main(["ai", "speak", "--vendor", "openai", "--save"]) == 0
+        restored = speak_mod._select_engine_and_voice(None, None)
+        assert (restored.engine, restored.voice, restored.how) == (
+            "openai",
+            "voice_custom42",
+            "custom",
+        )
+
 
 def test_pocket_runner_applies_speed_tempo_scaling(tmp_path, monkeypatch):
     from types import SimpleNamespace
@@ -909,3 +929,54 @@ def test_pocket_runner_applies_speed_tempo_scaling(tmp_path, monkeypatch):
     assert frames_by_speed[1.0] == 2400 + 2400
     assert frames_by_speed[1.5] == 1600 + 2400
     assert frames_by_speed[0.75] == 3200 + 2400
+
+
+def test_wsola_tempo_scaling_preserves_pitch_without_sidebands():
+    from array import array
+    import cmath
+    import math
+
+    rate = 24000
+    tone = array(
+        "h",
+        (round(12000 * math.sin(2.0 * math.pi * 100.0 * i / rate)) for i in range(rate)),
+    )
+    if sys.byteorder != "little":
+        tone.byteswap()
+
+    def amp(samples: array, freq: float) -> float:
+        step = cmath.exp(-2j * math.pi * freq / rate)
+        phase = 1.0 + 0.0j
+        total = 0.0 + 0.0j
+        for val in samples:
+            total += val * phase
+            phase *= step
+        return 2.0 * abs(total) / len(samples)
+
+    for speed, expected_frames in ((1.0, 24000), (0.75, 32000), (1.5, 16000)):
+        out = array("h")
+        out.frombytes(_pocket_runner.scale_pcm16_tempo(tone.tobytes(), speed, rate))
+        if sys.byteorder != "little":
+            out.byteswap()
+        assert len(out) == expected_frames
+        seg = out[2400:12000]
+        assert amp(seg, 100.0) > 11800.0
+        for spurious in (50.0, 75.0, 150.0):
+            assert amp(seg, spurious) < 50.0
+
+    # Non-commensurate frequency (137 Hz) also retains fundamental pitch.
+    tone137 = array(
+        "h",
+        (round(12000 * math.sin(2.0 * math.pi * 137.0 * i / rate)) for i in range(rate)),
+    )
+    if sys.byteorder != "little":
+        tone137.byteswap()
+    for speed in (0.75, 1.5):
+        out = array("h")
+        out.frombytes(_pocket_runner.scale_pcm16_tempo(tone137.tobytes(), speed, rate))
+        if sys.byteorder != "little":
+            out.byteswap()
+        seg = out[2400:12000]
+        assert amp(seg, 137.0) > 11000.0
+        assert amp(seg, 137.0 * speed) < 300.0
+        assert amp(seg, 137.0 / speed) < 300.0
